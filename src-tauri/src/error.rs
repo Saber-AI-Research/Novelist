@@ -1,4 +1,5 @@
 use serde::Serialize;
+use specta::datatype::{DataType, Primitive};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -22,5 +23,11 @@ impl Serialize for AppError {
         S: serde::Serializer,
     {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl specta::Type for AppError {
+    fn definition(_types: &mut specta::Types) -> DataType {
+        DataType::Primitive(Primitive::str)
     }
 }

@@ -24,7 +24,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tauri-specta = { version = "=2.0.0-rc.24", features = ["typescript"] }
-specta = { version = "=2.0.0-rc.24", features = ["function", "derive"] }
+specta = { version = "=2.0.0-rc.24", features = ["function", "derive", "tokio"] }
 specta-typescript = "0.0.11"
 
 [dev-dependencies]
