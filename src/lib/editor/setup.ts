@@ -48,8 +48,8 @@ const novelistTheme = EditorView.theme({
   },
 });
 
-export function createEditorExtensions(): Extension[] {
-  return [
+export function createEditorExtensions(options?: { wysiwyg?: boolean }): Extension[] {
+  const exts: Extension[] = [
     lineNumbers(),
     highlightActiveLine(),
     history(),
@@ -60,7 +60,6 @@ export function createEditorExtensions(): Extension[] {
     markdown({ base: markdownLanguage }),
     imeComposingField,
     imeGuardPlugin,
-    wysiwygPlugin,
     EditorView.lineWrapping,
     novelistTheme,
     keymap.of([
@@ -69,6 +68,12 @@ export function createEditorExtensions(): Extension[] {
       ...searchKeymap,
     ]),
   ];
+
+  if (options?.wysiwyg !== false) {
+    exts.push(wysiwygPlugin);
+  }
+
+  return exts;
 }
 
 export function createEditorState(doc: string, extensions: Extension[]): EditorState {
