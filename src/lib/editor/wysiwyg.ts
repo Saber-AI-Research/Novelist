@@ -1,6 +1,7 @@
 import { ViewPlugin, Decoration, type DecorationSet, EditorView, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
 import { type EditorState, type Range } from '@codemirror/state';
+import { imeComposingField } from './ime-guard';
 
 /**
  * Check if any cursor/selection head falls within the given range.
@@ -335,19 +336,44 @@ function handleInlineMarkup(
 
 /**
  * The WYSIWYG ViewPlugin. Rebuilds decorations on doc change, selection
- * change, or viewport change.
+ * change, or viewport change. Skips rebuilds during IME composition and
+ * debounces selection-only updates by 50ms for smooth cursor transitions.
  */
-export const wysiwygPlugin = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet;
-    constructor(view: EditorView) {
-      this.decorations = buildDecorations(view);
-    }
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
+class WysiwygPluginClass {
+  decorations: DecorationSet;
+  private pendingUpdate: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(view: EditorView) {
+    this.decorations = buildDecorations(view);
+  }
+
+  update(update: ViewUpdate) {
+    if (update.state.field(imeComposingField, false)) return;
+
+    if (update.docChanged || update.viewportChanged) {
+      this.clearPending();
+      this.decorations = buildDecorations(update.view);
+    } else if (update.selectionSet) {
+      this.clearPending();
+      this.pendingUpdate = setTimeout(() => {
         this.decorations = buildDecorations(update.view);
-      }
+        update.view.requestMeasure();
+      }, 50);
     }
-  },
-  { decorations: (v) => v.decorations },
-);
+  }
+
+  clearPending() {
+    if (this.pendingUpdate) {
+      clearTimeout(this.pendingUpdate);
+      this.pendingUpdate = null;
+    }
+  }
+
+  destroy() {
+    this.clearPending();
+  }
+}
+
+export const wysiwygPlugin = ViewPlugin.fromClass(WysiwygPluginClass, {
+  decorations: (v) => v.decorations,
+});

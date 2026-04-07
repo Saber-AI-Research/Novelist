@@ -5,6 +5,7 @@ import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching } from '@codemirror/language';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { wysiwygPlugin } from './wysiwyg';
+import { imeComposingField, imeGuardPlugin } from './ime-guard';
 import './wysiwyg.css';
 
 const novelistTheme = EditorView.theme({
@@ -57,6 +58,8 @@ export function createEditorExtensions(): Extension[] {
     highlightSelectionMatches(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
     markdown({ base: markdownLanguage }),
+    imeComposingField,
+    imeGuardPlugin,
     wysiwygPlugin,
     EditorView.lineWrapping,
     novelistTheme,
