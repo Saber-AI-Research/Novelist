@@ -4,6 +4,8 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching } from '@codemirror/language';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+import { wysiwygPlugin } from './wysiwyg';
+import './wysiwyg.css';
 
 const novelistTheme = EditorView.theme({
   '&': {
@@ -55,6 +57,7 @@ export function createEditorExtensions(): Extension[] {
     highlightSelectionMatches(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
     markdown({ base: markdownLanguage }),
+    wysiwygPlugin,
     EditorView.lineWrapping,
     novelistTheme,
     keymap.of([
