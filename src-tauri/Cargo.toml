@@ -1,0 +1,33 @@
+[package]
+name = "novelist"
+version = "0.1.0"
+description = "A desktop writing app for novelists"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "novelist_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tauri-specta = { version = "=2.0.0-rc.24", features = ["typescript"] }
+specta = { version = "=2.0.0-rc.24", features = ["function", "derive", "tokio"] }
+specta-typescript = "0.0.11"
+notify = { version = "7", features = ["macos_fsevent"] }
+blake3 = "1"
+
+[dev-dependencies]
+tempfile = "3"
