@@ -16,6 +16,11 @@ export const commands = {
 	writing?: WritingConfig,
 } | null, string>(__TAURI_INVOKE("detect_project", { dirPath })),
 	readProjectConfig: (dirPath: string) => typedError<ProjectConfig, string>(__TAURI_INVOKE("read_project_config", { dirPath })),
+	startFileWatcher: (dirPath: string) => typedError<null, string>(__TAURI_INVOKE("start_file_watcher", { dirPath })),
+	stopFileWatcher: () => typedError<null, string>(__TAURI_INVOKE("stop_file_watcher")),
+	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
+	unregisterOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("unregister_open_file", { path })),
+	registerWriteIgnore: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_write_ignore", { path })),
 };
 
 /* Types */

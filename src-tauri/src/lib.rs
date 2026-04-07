@@ -1,11 +1,16 @@
 mod commands;
 mod error;
 mod models;
+mod services;
 
 pub use error::AppError;
 
 use commands::file::{list_directory, read_file, write_file};
 use commands::project::{detect_project, read_project_config};
+use services::file_watcher::{
+    register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
+    unregister_open_file, FileWatcherState,
+};
 use tauri_specta::{collect_commands, Builder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,6 +28,11 @@ pub fn run() {
         list_directory,
         detect_project,
         read_project_config,
+        start_file_watcher,
+        stop_file_watcher,
+        register_open_file,
+        unregister_open_file,
+        register_write_ignore,
     ]);
 
     #[cfg(debug_assertions)]
@@ -37,6 +47,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(FileWatcherState::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
