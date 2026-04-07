@@ -1,29 +1,48 @@
 <script lang="ts">
-  let greetMsg = $state("");
-  let name = $state("");
+  import Sidebar from '$lib/components/Sidebar.svelte';
+  import Editor from '$lib/components/Editor.svelte';
+  import TabBar from '$lib/components/TabBar.svelte';
+  import StatusBar from '$lib/components/StatusBar.svelte';
+  import { uiStore } from '$lib/stores/ui.svelte';
+  import { tabsStore } from '$lib/stores/tabs.svelte';
 
-  async function greet() {
-    greetMsg = `Hello, ${name}! Welcome to Novelist.`;
+  let wordCount = $state(0);
+  let cursorLine = $state(1);
+  let cursorCol = $state(1);
+
+  function handleKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+      e.preventDefault();
+      uiStore.toggleSidebar();
+    }
   }
 </script>
 
-<main class="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
-  <h1 class="text-4xl font-bold mb-8">Novelist</h1>
+<svelte:window onkeydown={handleKeydown} />
 
-  <form class="flex gap-2 mb-4" onsubmit={(e) => { e.preventDefault(); greet(); }}>
-    <input
-      class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-white"
-      id="greet-input"
-      placeholder="Enter a name..."
-      bind:value={name}
-    />
-    <button
-      class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium"
-      type="submit"
-    >
-      Greet
-    </button>
-  </form>
+<div class="flex h-full w-full">
+  {#if uiStore.sidebarVisible}
+    <div class="shrink-0" style="width: {uiStore.sidebarWidth}px; border-right: 1px solid var(--novelist-border);">
+      <Sidebar />
+    </div>
+  {/if}
 
-  <p class="text-lg">{greetMsg}</p>
-</main>
+  <div class="flex flex-col flex-1 min-w-0">
+    <TabBar />
+
+    <div class="flex-1 min-h-0 overflow-hidden">
+      {#if tabsStore.activeTab}
+        <Editor bind:wordCount bind:cursorLine bind:cursorCol />
+      {:else}
+        <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-secondary);">
+          <div class="text-center">
+            <p class="text-lg mb-2">Novelist</p>
+            <p class="text-sm">Open a folder to get started (Ctrl+B to toggle sidebar)</p>
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <StatusBar {wordCount} {cursorLine} {cursorCol} />
+  </div>
+</div>
