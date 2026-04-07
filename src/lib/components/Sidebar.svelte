@@ -24,6 +24,9 @@
     const dirPath = selected as string;
     projectStore.isLoading = true;
 
+    // Stop watching previous project before opening new one
+    await commands.stopFileWatcher();
+
     const configResult = await commands.detectProject(dirPath);
     const config = configResult.status === 'ok' ? configResult.data : null;
 
@@ -32,6 +35,12 @@
 
     projectStore.setProject(dirPath, config, files);
     tabsStore.closeAll();
+
+    // Start watching new project directory
+    const watchResult = await commands.startFileWatcher(dirPath);
+    if (watchResult.status !== 'ok') {
+      console.error('Failed to start file watcher:', watchResult.error);
+    }
   }
 
   async function openFile(entry: FileEntry) {
@@ -40,6 +49,11 @@
     const result = await commands.readFile(entry.path);
     if (result.status === 'ok') {
       tabsStore.openTab(entry.path, result.data);
+      // Register file for change detection
+      const regResult = await commands.registerOpenFile(entry.path);
+      if (regResult.status !== 'ok') {
+        console.error('Failed to register open file:', regResult.error);
+      }
     } else {
       console.error('Failed to read file:', result.error);
     }
