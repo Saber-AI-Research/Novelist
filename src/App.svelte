@@ -45,6 +45,10 @@
   let paletteOpen = $state(false);
   let exportDialogOpen = $state(false);
 
+  // Recent projects cache for Cmd+Number switching (Notion-style)
+  import type { RecentProject } from '$lib/ipc/commands';
+  let recentProjects = $state<RecentProject[]>([]);
+
   // Dynamic window title
   $effect(() => {
     const tab = tabsStore.activeTab;
@@ -60,6 +64,11 @@
 
   // Conflict dialog state
   let conflictFilePath = $state<string | null>(null);
+
+  async function refreshRecentProjects() {
+    const result = await commands.getRecentProjects();
+    if (result.status === 'ok') recentProjects = result.data;
+  }
 
   async function openProjectFromPath(dirPath: string) {
     projectStore.isLoading = true;
@@ -83,6 +92,9 @@
     if (watchResult.status !== 'ok') {
       console.error('Failed to start file watcher:', watchResult.error);
     }
+
+    // Refresh recent projects cache
+    await refreshRecentProjects();
   }
 
   async function handleOpenDirectory() {
@@ -195,6 +207,19 @@
       handleGoToLine();
       return;
     }
+    // Cmd+1~9: switch to recent project (Notion-style)
+    if (mod && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+      const idx = parseInt(e.key) - 1;
+      if (idx < recentProjects.length) {
+        const target = recentProjects[idx];
+        // Don't switch if already on this project
+        if (target.path !== projectStore.dirPath) {
+          e.preventDefault();
+          openProjectFromPath(target.path);
+        }
+      }
+      return;
+    }
   }
 
   function handleGoToLine() {
@@ -230,6 +255,9 @@
   }
 
   onMount(async () => {
+    // Load recent projects for Cmd+Number switching
+    await refreshRecentProjects();
+
     commandRegistry.register({ id: 'toggle-sidebar', label: 'Toggle Sidebar', shortcut: 'Cmd+B', handler: () => uiStore.toggleSidebar() });
     commandRegistry.register({ id: 'toggle-outline', label: 'Toggle Outline', shortcut: 'Cmd+Shift+O', handler: () => uiStore.toggleOutline() });
     commandRegistry.register({ id: 'toggle-zen', label: 'Toggle Zen Mode', shortcut: 'F11', handler: () => uiStore.toggleZen() });

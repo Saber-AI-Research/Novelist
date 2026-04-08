@@ -1,9 +1,45 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import { commands } from '$lib/ipc/commands';
-  import type { FileEntry } from '$lib/ipc/commands';
+  import type { FileEntry, RecentProject } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+
+  // --- Project switcher popup (Notion-style) ---
+  let switcherOpen = $state(false);
+  let recentProjects = $state<RecentProject[]>([]);
+
+  async function toggleSwitcher() {
+    if (switcherOpen) {
+      switcherOpen = false;
+      return;
+    }
+    // Load fresh recent projects list
+    const result = await commands.getRecentProjects();
+    if (result.status === 'ok') recentProjects = result.data;
+    switcherOpen = true;
+  }
+
+  async function switchToProject(path: string) {
+    switcherOpen = false;
+    if (path === projectStore.dirPath) return;
+    await openProjectFromPath(path);
+  }
+
+  async function openProjectFromPath(dirPath: string) {
+    projectStore.isLoading = true;
+    await commands.stopFileWatcher();
+    const configResult = await commands.detectProject(dirPath);
+    const config = configResult.status === 'ok' ? configResult.data : null;
+    const filesResult = await commands.listDirectory(dirPath);
+    const files = filesResult.status === 'ok' ? filesResult.data : [];
+    projectStore.setProject(dirPath, config, files);
+    tabsStore.closeAll();
+    const name = config?.project?.name || dirPath.split('/').pop() || 'Untitled';
+    commands.addRecentProject(dirPath, name);
+    const watchResult = await commands.startFileWatcher(dirPath);
+    if (watchResult.status !== 'ok') console.error('Failed to start file watcher:', watchResult.error);
+  }
 
   const textExtensions = ['.md', '.markdown', '.txt'];
 
@@ -238,8 +274,8 @@
   }
 </script>
 
-<!-- Close context menu on click anywhere -->
-<svelte:window onclick={closeContextMenu} />
+<!-- Close context menu and project switcher on click anywhere -->
+<svelte:window onclick={() => { closeContextMenu(); switcherOpen = false; }} />
 
 <aside class="sidebar">
   <!-- Project header -->
@@ -310,13 +346,37 @@
       {/each}
     </div>
 
-    <!-- Bottom bar: project switch -->
-    <div class="sidebar-bottom">
-      <button class="sidebar-switch-btn" onclick={openDirectory} title="Switch Project">
+    <!-- Bottom bar: Notion-style project switcher -->
+    <div class="sidebar-bottom" style="position: relative;">
+      <button class="sidebar-switch-btn" onclick={toggleSwitcher} title="Switch Project (Cmd+1~9)">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h4l2 2h6v7H2z"/></svg>
         <span>{projectStore.dirPath?.split('/').pop() ?? 'Project'}</span>
-        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: auto; opacity: 0.5;"><path d="M4 6l4 4 4-4"/></svg>
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: auto; opacity: 0.5;"><path d="{switcherOpen ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4'}"/></svg>
       </button>
+
+      {#if switcherOpen}
+        <div class="project-switcher">
+          <div class="project-switcher-header">Projects</div>
+          {#each recentProjects.slice(0, 9) as project, i}
+            <button
+              class="project-switcher-item"
+              class:project-switcher-item-active={project.path === projectStore.dirPath}
+              onclick={() => switchToProject(project.path)}
+            >
+              <span class="project-switcher-num">{i + 1}</span>
+              <span class="project-switcher-name">{project.name}</span>
+              {#if project.path === projectStore.dirPath}
+                <span class="project-switcher-check">&#x2713;</span>
+              {/if}
+            </button>
+          {/each}
+          <div class="project-switcher-divider"></div>
+          <button class="project-switcher-item" onclick={() => { switcherOpen = false; openDirectory(); }}>
+            <span class="project-switcher-num">+</span>
+            <span class="project-switcher-name">Open Folder...</span>
+          </button>
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="sidebar-empty">
@@ -567,5 +627,86 @@
   .sidebar-switch-btn:hover {
     background: var(--novelist-sidebar-hover);
     color: var(--novelist-text);
+  }
+
+  /* Notion-style project switcher popup */
+  .project-switcher {
+    position: absolute;
+    bottom: 100%;
+    left: 8px;
+    right: 8px;
+    margin-bottom: 4px;
+    padding: 4px;
+    border-radius: 8px;
+    background: var(--novelist-bg);
+    border: 1px solid var(--novelist-border);
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.12);
+    z-index: 40;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+
+  .project-switcher-header {
+    padding: 6px 10px 4px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--novelist-text-tertiary, var(--novelist-text-secondary));
+  }
+
+  .project-switcher-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--novelist-text);
+    font-size: 0.78rem;
+    text-align: left;
+    cursor: pointer;
+    transition: background 80ms;
+  }
+  .project-switcher-item:hover {
+    background: var(--novelist-sidebar-hover);
+  }
+  .project-switcher-item-active {
+    background: var(--novelist-sidebar-active);
+  }
+
+  .project-switcher-num {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: var(--novelist-bg-tertiary);
+    color: var(--novelist-text-secondary);
+    font-size: 0.68rem;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .project-switcher-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-switcher-check {
+    margin-left: auto;
+    color: var(--novelist-accent);
+    font-size: 0.78rem;
+    flex-shrink: 0;
+  }
+
+  .project-switcher-divider {
+    height: 1px;
+    margin: 4px 8px;
+    background: var(--novelist-border-subtle, var(--novelist-border));
   }
 </style>
