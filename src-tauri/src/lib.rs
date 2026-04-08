@@ -6,7 +6,9 @@ mod services;
 pub use error::AppError;
 
 use commands::export::{check_pandoc, export_project};
-use commands::file::{list_directory, read_file, write_file};
+use commands::file::{
+    create_directory, create_file, delete_item, list_directory, read_file, rename_item, write_file,
+};
 use commands::plugin::{
     get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin, set_plugin_document_state,
     unload_plugin,
@@ -18,6 +20,10 @@ use services::file_watcher::{
     unregister_open_file, FileWatcherState,
 };
 use services::plugin_host::sandbox::PluginHostState;
+use services::rope_document::{
+    rope_apply_edit, rope_close, rope_get_lines, rope_line_to_char, rope_open, rope_save,
+    RopeDocumentState,
+};
 use tauri_specta::{collect_commands, Builder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,6 +39,10 @@ pub fn run() {
         read_file,
         write_file,
         list_directory,
+        create_file,
+        create_directory,
+        rename_item,
+        delete_item,
         check_pandoc,
         export_project,
         detect_project,
@@ -50,6 +60,12 @@ pub fn run() {
         get_plugin_commands,
         invoke_plugin_command,
         set_plugin_document_state,
+        rope_open,
+        rope_get_lines,
+        rope_apply_edit,
+        rope_save,
+        rope_close,
+        rope_line_to_char,
     ]);
 
     #[cfg(debug_assertions)]
@@ -66,6 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(FileWatcherState::new())
         .manage(PluginHostState::new())
+        .manage(RopeDocumentState::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);

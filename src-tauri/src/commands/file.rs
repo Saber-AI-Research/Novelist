@@ -16,6 +16,10 @@ pub async fn read_file(path: String) -> Result<String, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn write_file(path: String, content: String) -> Result<(), AppError> {
+    tracing::info!(
+        "[write_file] path={}, content_bytes={}, content_lines={}",
+        path, content.len(), content.lines().count()
+    );
     let temp_path = format!("{}.novelist-tmp", path);
     tokio::fs::write(&temp_path, &content).await?;
     tokio::fs::rename(&temp_path, &path).await?;
@@ -61,6 +65,70 @@ pub async fn list_directory(path: String) -> Result<Vec<FileEntry>, AppError> {
     });
 
     Ok(entries)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_file(parent_dir: String, filename: String) -> Result<String, AppError> {
+    let file_path = Path::new(&parent_dir).join(&filename);
+    if file_path.exists() {
+        return Err(AppError::Custom(format!(
+            "File already exists: {}",
+            file_path.display()
+        )));
+    }
+    tokio::fs::write(&file_path, "").await?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_directory(parent_dir: String, name: String) -> Result<String, AppError> {
+    let dir_path = Path::new(&parent_dir).join(&name);
+    if dir_path.exists() {
+        return Err(AppError::Custom(format!(
+            "Directory already exists: {}",
+            dir_path.display()
+        )));
+    }
+    tokio::fs::create_dir(&dir_path).await?;
+    Ok(dir_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_item(old_path: String, new_name: String) -> Result<String, AppError> {
+    let old = Path::new(&old_path);
+    if !old.exists() {
+        return Err(AppError::FileNotFound(old_path));
+    }
+    let new_path = old
+        .parent()
+        .ok_or_else(|| AppError::Custom("Cannot determine parent directory".to_string()))?
+        .join(&new_name);
+    if new_path.exists() {
+        return Err(AppError::Custom(format!(
+            "Already exists: {}",
+            new_path.display()
+        )));
+    }
+    tokio::fs::rename(&old, &new_path).await?;
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_item(path: String) -> Result<(), AppError> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(AppError::FileNotFound(path));
+    }
+    if p.is_dir() {
+        tokio::fs::remove_dir_all(&path).await?;
+    } else {
+        tokio::fs::remove_file(&path).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -117,5 +185,35 @@ mod tests {
         assert!(entries[0].is_dir);
         assert_eq!(entries[1].name, "a.md");
         assert_eq!(entries[2].name, "b.md");
+    }
+}
+
+#[cfg(test)]
+mod large_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn test_read_large_file_150k_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("large.md");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for i in 1..=150000 {
+                writeln!(f, "Line {} of 150000", i).unwrap();
+            }
+        }
+        let file_size = std::fs::metadata(&path).unwrap().len();
+        println!("File size: {} bytes ({:.1} MB)", file_size, file_size as f64 / 1e6);
+
+        let content = read_file(path.to_string_lossy().to_string()).await.unwrap();
+        let line_count = content.lines().count();
+        println!("Read {} lines, {} bytes", line_count, content.len());
+        assert_eq!(line_count, 150000, "Line count mismatch: expected 150000, got {}", line_count);
+
+        let last_line = content.lines().last().unwrap();
+        assert_eq!(last_line, "Line 150000 of 150000", "Last line wrong: {}", last_line);
+        println!("Last line: {}", last_line);
+        println!("✓ readFile returns all 150000 lines");
     }
 }

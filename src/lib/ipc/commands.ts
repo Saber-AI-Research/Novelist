@@ -12,6 +12,10 @@ export const commands = {
 	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[]) => typedError<string, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs })),
 	writeFile: (path: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_file", { path, content })),
 	listDirectory: (path: string) => typedError<FileEntry[], string>(__TAURI_INVOKE("list_directory", { path })),
+	createFile: (parentDir: string, filename: string) => typedError<string, string>(__TAURI_INVOKE("create_file", { parentDir, filename })),
+	createDirectory: (parentDir: string, name: string) => typedError<string, string>(__TAURI_INVOKE("create_directory", { parentDir, name })),
+	renameItem: (oldPath: string, newName: string) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName })),
+	deleteItem: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { path })),
 	detectProject: (dirPath: string) => typedError<{
 	project: ProjectMeta,
 	outline?: OutlineConfig,
@@ -37,6 +41,13 @@ export const commands = {
 	invokePluginCommand: (pluginId: string, commandId: string) => typedError<PluginReplacementResult[], string>(__TAURI_INVOKE("invoke_plugin_command", { pluginId, commandId })),
 	// Update the document state that plugins can read.
 	setPluginDocumentState: (content: string, selectionFrom: number, selectionTo: number, wordCount: number) => typedError<null, string>(__TAURI_INVOKE("set_plugin_document_state", { content, selectionFrom, selectionTo, wordCount })),
+	// Rope document commands for large file viewport editing
+	ropeOpen: (path: string) => typedError<RopeDocumentMeta, string>(__TAURI_INVOKE("rope_open", { path })),
+	ropeGetLines: (fileId: string, startLine: number, endLine: number) => typedError<ViewportContent, string>(__TAURI_INVOKE("rope_get_lines", { fileId, startLine, endLine })),
+	ropeApplyEdit: (fileId: string, fromChar: number, toChar: number, insert: string) => typedError<number, string>(__TAURI_INVOKE("rope_apply_edit", { fileId, fromChar, toChar, insert })),
+	ropeSave: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_save", { fileId })),
+	ropeClose: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_close", { fileId })),
+	ropeLineToChar: (fileId: string, line: number) => typedError<number, string>(__TAURI_INVOKE("rope_line_to_char", { fileId, line })),
 };
 
 /* Types */
@@ -92,6 +103,19 @@ export type RegisteredCommandInfo = {
 	plugin_id: string,
 	command_id: string,
 	label: string,
+};
+
+export type RopeDocumentMeta = {
+	file_id: string,
+	total_lines: number,
+	total_bytes: number,
+};
+
+export type ViewportContent = {
+	text: string,
+	start_line: number,
+	end_line: number,
+	total_lines: number,
 };
 
 export type WritingConfig = {
