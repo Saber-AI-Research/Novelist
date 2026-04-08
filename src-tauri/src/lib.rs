@@ -5,6 +5,7 @@ mod services;
 
 pub use error::AppError;
 
+use commands::export::{check_pandoc, export_project};
 use commands::file::{list_directory, read_file, write_file};
 use commands::plugin::{
     get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin, set_plugin_document_state,
@@ -32,6 +33,8 @@ pub fn run() {
         read_file,
         write_file,
         list_directory,
+        check_pandoc,
+        export_project,
         detect_project,
         read_project_config,
         start_file_watcher,

@@ -10,6 +10,7 @@
   import Outline from '$lib/components/Outline.svelte';
   import ZenMode from '$lib/components/ZenMode.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import ExportDialog from '$lib/components/ExportDialog.svelte';
   import Welcome from '$lib/components/Welcome.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
@@ -39,6 +40,7 @@
   let activeEditorRef = $derived(tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef);
 
   let paletteOpen = $state(false);
+  let exportDialogOpen = $state(false);
 
   // Conflict dialog state
   let conflictFilePath = $state<string | null>(null);
@@ -134,6 +136,7 @@
     commandRegistry.register({ id: 'toggle-zen', label: 'Toggle Zen Mode', shortcut: 'F11', handler: () => uiStore.toggleZen() });
     commandRegistry.register({ id: 'command-palette', label: 'Command Palette', shortcut: 'Ctrl+Shift+P', handler: () => { paletteOpen = !paletteOpen; } });
     commandRegistry.register({ id: 'toggle-split', label: 'Toggle Split View', shortcut: 'Ctrl+\\', handler: () => tabsStore.toggleSplit() });
+    commandRegistry.register({ id: 'export-project', label: 'Export Project', handler: () => { exportDialogOpen = true; } });
 
     const unlisten = await listen<{ path: string }>('file-changed', async (event) => {
       const { path } = event.payload;
@@ -272,4 +275,8 @@
 
 {#if paletteOpen}
   <CommandPalette onClose={() => { paletteOpen = false; }} />
+{/if}
+
+{#if exportDialogOpen}
+  <ExportDialog onClose={() => { exportDialogOpen = false; }} />
 {/if}

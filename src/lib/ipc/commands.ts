@@ -8,6 +8,8 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	readFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_file", { path })),
+	checkPandoc: () => typedError<PandocStatus, string>(__TAURI_INVOKE("check_pandoc")),
+	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[]) => typedError<string, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs })),
 	writeFile: (path: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_file", { path, content })),
 	listDirectory: (path: string) => typedError<FileEntry[], string>(__TAURI_INVOKE("list_directory", { path })),
 	detectProject: (dirPath: string) => typedError<{
@@ -38,6 +40,11 @@ export const commands = {
 };
 
 /* Types */
+export type PandocStatus = {
+	available: boolean,
+	version: string | null,
+};
+
 export type FileEntry = {
 	name: string,
 	path: string,
