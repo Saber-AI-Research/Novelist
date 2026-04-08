@@ -36,6 +36,10 @@
     projectStore.setProject(dirPath, config, files);
     tabsStore.closeAll();
 
+    // Track as recent project
+    const name = config?.project?.name || dirPath.split('/').pop() || 'Untitled';
+    commands.addRecentProject(dirPath, name);
+
     // Start watching new project directory
     const watchResult = await commands.startFileWatcher(dirPath);
     if (watchResult.status !== 'ok') {

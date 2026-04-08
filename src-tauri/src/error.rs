@@ -9,6 +9,8 @@ pub enum AppError {
     TomlParse(#[from] toml::de::Error),
     #[error("TOML serialize error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("File not found: {0}")]
     FileNotFound(String),
     #[error("Not a directory: {0}")]

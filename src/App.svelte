@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { open } from '@tauri-apps/plugin-dialog';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import TabBar from '$lib/components/TabBar.svelte';
@@ -9,7 +10,9 @@
   import Outline from '$lib/components/Outline.svelte';
   import ZenMode from '$lib/components/ZenMode.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import Welcome from '$lib/components/Welcome.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
   import { commandRegistry } from '$lib/stores/commands.svelte';
@@ -24,6 +27,40 @@
 
   // Conflict dialog state
   let conflictFilePath = $state<string | null>(null);
+
+  async function openProjectFromPath(dirPath: string) {
+    projectStore.isLoading = true;
+    await commands.stopFileWatcher();
+
+    const configResult = await commands.detectProject(dirPath);
+    const config = configResult.status === 'ok' ? configResult.data : null;
+
+    const filesResult = await commands.listDirectory(dirPath);
+    const files = filesResult.status === 'ok' ? filesResult.data : [];
+
+    projectStore.setProject(dirPath, config, files);
+    tabsStore.closeAll();
+
+    // Track as recent project
+    const name = config?.project?.name || dirPath.split('/').pop() || 'Untitled';
+    commands.addRecentProject(dirPath, name);
+
+    // Start watching
+    const watchResult = await commands.startFileWatcher(dirPath);
+    if (watchResult.status !== 'ok') {
+      console.error('Failed to start file watcher:', watchResult.error);
+    }
+  }
+
+  async function handleOpenDirectory() {
+    const selected = await open({ directory: true, multiple: false });
+    if (!selected) return;
+    await openProjectFromPath(selected as string);
+  }
+
+  async function handleOpenRecent(path: string) {
+    await openProjectFromPath(path);
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
@@ -102,7 +139,9 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if uiStore.zenMode}
+{#if !projectStore.isOpen}
+  <Welcome onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} />
+{:else if uiStore.zenMode}
   <ZenMode {wordCount}>
     <div class="flex-1 min-h-0 overflow-hidden w-full">
       {#if tabsStore.activeTab}

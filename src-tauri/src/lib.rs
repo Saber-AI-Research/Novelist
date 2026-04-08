@@ -7,6 +7,7 @@ pub use error::AppError;
 
 use commands::file::{list_directory, read_file, write_file};
 use commands::project::{detect_project, read_project_config};
+use commands::recent::{add_recent_project, get_recent_projects};
 use services::file_watcher::{
     register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
     unregister_open_file, FileWatcherState,
@@ -33,6 +34,8 @@ pub fn run() {
         register_open_file,
         unregister_open_file,
         register_write_ignore,
+        get_recent_projects,
+        add_recent_project,
     ]);
 
     #[cfg(debug_assertions)]
