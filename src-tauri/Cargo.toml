@@ -1,6 +1,6 @@
 [package]
 name = "novelist"
-version = "0.0.2"
+version = "0.0.3"
 description = "A desktop writing app for novelists"
 authors = ["Chivier Humber"]
 edition = "2021"
