@@ -4,9 +4,60 @@
   interface Props {
     headings: HeadingItem[];
     onNavigate: (from: number) => void;
+    onMoveSection?: (sourceFrom: number, targetFrom: number) => void;
   }
 
-  let { headings, onNavigate }: Props = $props();
+  let { headings, onNavigate, onMoveSection }: Props = $props();
+
+  let dragSourceIndex = $state<number | null>(null);
+  let dragOverIndex = $state<number | null>(null);
+
+  function handleDragStart(e: DragEvent, index: number) {
+    dragSourceIndex = index;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(index));
+    }
+  }
+
+  function handleDragOver(e: DragEvent, index: number) {
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
+    if (dragSourceIndex !== null && index !== dragSourceIndex) {
+      dragOverIndex = index;
+    }
+  }
+
+  function handleDragEnter(e: DragEvent, index: number) {
+    e.preventDefault();
+    if (dragSourceIndex !== null && index !== dragSourceIndex) {
+      dragOverIndex = index;
+    }
+  }
+
+  function handleDragLeave(e: DragEvent) {
+    // Only clear if leaving the list item entirely
+    const related = e.relatedTarget as HTMLElement | null;
+    if (!related || !e.currentTarget || !(e.currentTarget as HTMLElement).contains(related)) {
+      dragOverIndex = null;
+    }
+  }
+
+  function handleDrop(e: DragEvent, index: number) {
+    e.preventDefault();
+    if (dragSourceIndex !== null && dragSourceIndex !== index && onMoveSection) {
+      onMoveSection(headings[dragSourceIndex].from, headings[index].from);
+    }
+    dragSourceIndex = null;
+    dragOverIndex = null;
+  }
+
+  function handleDragEnd() {
+    dragSourceIndex = null;
+    dragOverIndex = null;
+  }
 </script>
 
 <div class="outline-panel">
@@ -18,10 +69,21 @@
     <div class="outline-empty">No headings found</div>
   {:else}
     <ul class="outline-list">
-      {#each headings as heading}
-        <li>
+      {#each headings as heading, i}
+        <li
+          class:drag-over={dragOverIndex === i && dragSourceIndex !== i}
+          draggable={onMoveSection != null ? "true" : "false"}
+          ondragstart={(e) => handleDragStart(e, i)}
+          ondragover={(e) => handleDragOver(e, i)}
+          ondragenter={(e) => handleDragEnter(e, i)}
+          ondragleave={(e) => handleDragLeave(e)}
+          ondrop={(e) => handleDrop(e, i)}
+          ondragend={handleDragEnd}
+          role="listitem"
+        >
           <button
             class="outline-item"
+            class:dragging={dragSourceIndex === i}
             style="padding-left: {8 + (heading.level - 1) * 16}px"
             onclick={() => onNavigate(heading.from)}
           >
@@ -75,6 +137,12 @@
   .outline-list li {
     margin: 0;
     padding: 0;
+    border-top: 2px solid transparent;
+    transition: border-color 100ms ease;
+  }
+
+  .outline-list li.drag-over {
+    border-top: 2px solid var(--novelist-accent, #4a9eff);
   }
 
   .outline-item {
@@ -92,7 +160,11 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: background 100ms ease;
+    transition: background 100ms ease, opacity 150ms ease;
+  }
+
+  .outline-item.dragging {
+    opacity: 0.5;
   }
 
   .outline-item:hover {

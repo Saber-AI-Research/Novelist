@@ -32,6 +32,16 @@
    The :root defaults above serve as the Light theme fallback.
    Theme JS applies overrides on load, including for "system" mode. */
 
+/* Smooth theme transitions */
+:root {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+body, .sidebar, .sidebar-header, .sidebar-item, .sidebar-files, .sidebar-bottom,
+button, input, select, textarea, .welcome-root, .welcome-card, .welcome-header,
+.context-menu, .project-switcher, aside, [class*="panel"], [class*="dialog"] {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
 html, body, #app {
   height: 100%;
   margin: 0;

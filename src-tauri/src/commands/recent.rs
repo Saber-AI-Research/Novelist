@@ -27,6 +27,21 @@ pub async fn get_recent_projects() -> Result<Vec<RecentProject>, AppError> {
     }
     let content = tokio::fs::read_to_string(&path).await?;
     let projects: Vec<RecentProject> = serde_json::from_str(&content).unwrap_or_default();
+
+    // Filter out projects whose directories no longer exist
+    let before_len = projects.len();
+    let projects: Vec<RecentProject> = projects
+        .into_iter()
+        .filter(|p| std::path::Path::new(&p.path).exists())
+        .collect();
+
+    // If any were removed, persist the cleaned list back to disk
+    if projects.len() != before_len {
+        if let Ok(json) = serde_json::to_string_pretty(&projects) {
+            let _ = tokio::fs::write(&path, json).await;
+        }
+    }
+
     Ok(projects)
 }
 
@@ -148,5 +163,43 @@ mod tests {
             projects.iter().filter(|p| p.path == "/project/10").count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_filter_nonexistent_paths() {
+        use std::path::Path;
+        use tempfile::TempDir;
+
+        // Create a temp dir that actually exists
+        let existing_dir = TempDir::new().unwrap();
+        let existing_path = existing_dir.path().to_string_lossy().to_string();
+
+        let projects = vec![
+            RecentProject {
+                path: existing_path.clone(),
+                name: "Exists".to_string(),
+                last_opened: "100".to_string(),
+            },
+            RecentProject {
+                path: "/nonexistent/path/that/should/not/exist".to_string(),
+                name: "Gone".to_string(),
+                last_opened: "200".to_string(),
+            },
+            RecentProject {
+                path: "/another/missing/project".to_string(),
+                name: "Also Gone".to_string(),
+                last_opened: "300".to_string(),
+            },
+        ];
+
+        // Apply the same filtering logic used by get_recent_projects
+        let filtered: Vec<RecentProject> = projects
+            .into_iter()
+            .filter(|p| Path::new(&p.path).exists())
+            .collect();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Exists");
+        assert_eq!(filtered[0].path, existing_path);
     }
 }

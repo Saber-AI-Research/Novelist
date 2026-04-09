@@ -219,9 +219,7 @@ pub async fn start_file_watcher(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn stop_file_watcher(
-    state: tauri::State<'_, FileWatcherState>,
-) -> Result<(), AppError> {
+pub async fn stop_file_watcher(state: tauri::State<'_, FileWatcherState>) -> Result<(), AppError> {
     let mut guard = state
         .inner
         .lock()

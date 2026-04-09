@@ -7,6 +7,7 @@ interface EditorSettings {
   fontSize: number;
   lineHeight: number;
   maxWidth: number;
+  autoSaveMinutes: number;
 }
 
 const defaultSettings: EditorSettings = {
@@ -14,6 +15,7 @@ const defaultSettings: EditorSettings = {
   fontSize: 16,
   lineHeight: 1.8,
   maxWidth: 720,
+  autoSaveMinutes: 5,
 };
 
 function loadSettings(): EditorSettings {
@@ -32,6 +34,8 @@ class UiStore {
   sidebarVisible = $state(true);
   outlineVisible = $state(false);
   draftVisible = $state(false);
+  snapshotVisible = $state(false);
+  statsVisible = $state(false);
   sidebarWidth = $state(240);
   zenMode = $state(false);
   settingsOpen = $state(false);
@@ -44,6 +48,8 @@ class UiStore {
   toggleSidebar() { this.sidebarVisible = !this.sidebarVisible; }
   toggleOutline() { this.outlineVisible = !this.outlineVisible; }
   toggleDraft() { this.draftVisible = !this.draftVisible; }
+  toggleSnapshot() { this.snapshotVisible = !this.snapshotVisible; }
+  toggleStats() { this.statsVisible = !this.statsVisible; }
   toggleZen() { this.zenMode = !this.zenMode; }
   toggleSettings() { this.settingsOpen = !this.settingsOpen; }
 

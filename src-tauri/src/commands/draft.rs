@@ -52,10 +52,7 @@ pub async fn write_draft_note(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_draft_note(
-    project_dir: String,
-    file_path: String,
-) -> Result<(), AppError> {
+pub async fn delete_draft_note(project_dir: String, file_path: String) -> Result<(), AppError> {
     let path = draft_path(&project_dir, &file_path)?;
     if path.exists() {
         tokio::fs::remove_file(&path).await?;
@@ -65,10 +62,7 @@ pub async fn delete_draft_note(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn has_draft_note(
-    project_dir: String,
-    file_path: String,
-) -> Result<bool, AppError> {
+pub async fn has_draft_note(project_dir: String, file_path: String) -> Result<bool, AppError> {
     let path = draft_path(&project_dir, &file_path)?;
     Ok(path.exists())
 }
@@ -76,7 +70,6 @@ pub async fn has_draft_note(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -91,10 +84,7 @@ mod tests {
     #[test]
     fn test_draft_path_nested_file() {
         let p = draft_path("/project", "/project/chapters/ch1.md").unwrap();
-        assert_eq!(
-            p,
-            Path::new("/project/.novelist/drafts/ch1.md.draft.md")
-        );
+        assert_eq!(p, Path::new("/project/.novelist/drafts/ch1.md.draft.md"));
     }
 
     #[tokio::test]
@@ -153,7 +143,9 @@ mod tests {
             .unwrap();
         assert!(has_draft_note(project.clone(), file.clone()).await.unwrap());
 
-        delete_draft_note(project.clone(), file.clone()).await.unwrap();
+        delete_draft_note(project.clone(), file.clone())
+            .await
+            .unwrap();
         assert!(!has_draft_note(project, file).await.unwrap());
     }
 

@@ -15,6 +15,10 @@ pub enum AppError {
     FileNotFound(String),
     #[error("Not a directory: {0}")]
     NotADirectory(String),
+    #[error("Path not allowed: {0}")]
+    PathNotAllowed(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
     #[error("{0}")]
     Custom(String),
 }

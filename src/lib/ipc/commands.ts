@@ -64,9 +64,38 @@ export const commands = {
 	writeDraftNote: (projectDir: string, filePath: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_draft_note", { projectDir, filePath, content })),
 	deleteDraftNote: (projectDir: string, filePath: string) => typedError<null, string>(__TAURI_INVOKE("delete_draft_note", { projectDir, filePath })),
 	hasDraftNote: (projectDir: string, filePath: string) => typedError<boolean, string>(__TAURI_INVOKE("has_draft_note", { projectDir, filePath })),
+	searchInProject: (dirPath: string, query: string) => typedError<SearchMatch[], string>(__TAURI_INVOKE("search_in_project", { dirPath, query })),
+	createSnapshot: (projectDir: string, name: string) => typedError<SnapshotMeta, string>(__TAURI_INVOKE("create_snapshot", { projectDir, name })),
+	listSnapshots: (projectDir: string) => typedError<SnapshotMeta[], string>(__TAURI_INVOKE("list_snapshots", { projectDir })),
+	restoreSnapshot: (projectDir: string, snapshotId: string) => typedError<null, string>(__TAURI_INVOKE("restore_snapshot", { projectDir, snapshotId })),
+	deleteSnapshot: (projectDir: string, snapshotId: string) => typedError<null, string>(__TAURI_INVOKE("delete_snapshot", { projectDir, snapshotId })),
+	recordWritingStats: (projectDir: string, wordDelta: number, minutes: number) => typedError<null, string>(__TAURI_INVOKE("record_writing_stats", { projectDir, wordDelta, minutes })),
+	getWritingStats: (projectDir: string, chapters: ChapterStatsInput[]) => typedError<WritingStatsOverview, string>(__TAURI_INVOKE("get_writing_stats", { projectDir, chapters })),
+	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
+	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
+	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
+	testSyncConnection: (webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { webdavUrl, username, password })),
 };
 
 /* Types */
+export type ChapterStats = {
+	file_name: string,
+	file_path: string,
+	word_count: number,
+};
+
+export type ChapterStatsInput = {
+	file_name: string,
+	file_path: string,
+	word_count: number,
+};
+
+export type DailyStats = {
+	date: string,
+	words_written: number,
+	time_minutes: number,
+};
+
 export type FileEntry = {
 	name: string,
 	path: string,
@@ -127,6 +156,47 @@ export type RopeDocumentMeta = {
 	total_bytes: number,
 };
 
+export type SearchMatch = {
+	file_path: string,
+	file_name: string,
+	line_number: number,
+	line_text: string,
+	match_start: number,
+	match_end: number,
+};
+
+export type SnapshotMeta = {
+	id: string,
+	name: string,
+	timestamp: number,
+	file_count: number,
+	total_bytes: number,
+};
+
+export type SyncConfig = {
+	enabled: boolean,
+	webdav_url: string,
+	username: string,
+	password: string,
+	interval_minutes: number,
+};
+
+export type SyncConfigMasked = {
+	enabled: boolean,
+	webdav_url: string,
+	username: string,
+	password: string,
+	interval_minutes: number,
+};
+
+export type SyncStatus = {
+	last_sync: string | null,
+	files_uploaded: number,
+	files_downloaded: number,
+	errors: string[],
+	in_progress: boolean,
+};
+
 export type ViewportContent = {
 	// The text content for the requested line range
 	text: string,
@@ -141,6 +211,15 @@ export type ViewportContent = {
 export type WritingConfig = {
 	daily_goal?: number,
 	auto_save_minutes?: number,
+};
+
+export type WritingStatsOverview = {
+	daily: DailyStats[],
+	total_words: number,
+	chapters: ChapterStats[],
+	streak_days: number,
+	today_words: number,
+	today_minutes: number,
 };
 
 /* Tauri Specta runtime */

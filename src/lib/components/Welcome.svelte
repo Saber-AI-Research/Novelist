@@ -19,13 +19,23 @@
   });
 
   function displayPath(path: string): string {
-    const home = '/home/';
+    const home = '/Users/';
     if (path.startsWith(home)) {
       const rest = path.slice(home.length);
       const slashIdx = rest.indexOf('/');
       if (slashIdx !== -1) {
         return '~' + rest.slice(slashIdx);
       }
+      return '~';
+    }
+    const homeLinux = '/home/';
+    if (path.startsWith(homeLinux)) {
+      const rest = path.slice(homeLinux.length);
+      const slashIdx = rest.indexOf('/');
+      if (slashIdx !== -1) {
+        return '~' + rest.slice(slashIdx);
+      }
+      return '~';
     }
     return path;
   }

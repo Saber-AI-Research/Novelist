@@ -1,38 +1,78 @@
 use crate::error::AppError;
 use crate::models::file_state::FileEntry;
+use serde::Serialize;
+use std::path::PathBuf;
+
+#[cfg(test)]
 use std::path::Path;
+use walkdir::WalkDir;
+
+fn validate_path(path: &str) -> Result<PathBuf, AppError> {
+    let p = PathBuf::from(path);
+    if p.is_absolute()
+        && (p.starts_with("/etc") || p.starts_with("/System") || p.starts_with("/usr"))
+    {
+        return Err(AppError::PathNotAllowed(path.to_string()));
+    }
+    Ok(p)
+}
+
+fn sanitize_filename(name: &str) -> Result<String, AppError> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+        return Err(AppError::InvalidInput(format!(
+            "Invalid filename: {}",
+            name
+        )));
+    }
+    if name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Filename cannot be empty".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct SearchMatch {
+    pub file_path: String,
+    pub file_name: String,
+    pub line_number: usize,
+    pub line_text: String,
+    pub match_start: usize,
+    pub match_end: usize,
+}
 
 #[tauri::command]
 #[specta::specta]
 pub async fn read_file(path: String) -> Result<String, AppError> {
-    let p = Path::new(&path);
+    let p = validate_path(&path)?;
     if !p.exists() {
         return Err(AppError::FileNotFound(path));
     }
-    let content = tokio::fs::read_to_string(&path).await?;
+    let content = tokio::fs::read_to_string(&p).await?;
     Ok(content)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn write_file(path: String, content: String) -> Result<(), AppError> {
+    let p = validate_path(&path)?;
     tracing::info!(
         "[write_file] path={}, content_bytes={}, content_lines={}",
-        path, content.len(), content.lines().count()
+        p.display(),
+        content.len(),
+        content.lines().count()
     );
-    let temp_path = format!("{}.novelist-tmp", path);
+    let temp_path = format!("{}.novelist-tmp", p.display());
     tokio::fs::write(&temp_path, &content).await?;
-    tokio::fs::rename(&temp_path, &path).await?;
+    tokio::fs::rename(&temp_path, &p).await?;
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn list_directory(path: String) -> Result<Vec<FileEntry>, AppError> {
-    let p = Path::new(&path);
-    if !p.exists() {
-        return Err(AppError::FileNotFound(path));
-    }
+    let p = validate_path(&path)?;
     if !p.is_dir() {
         return Err(AppError::NotADirectory(path));
     }
@@ -70,7 +110,9 @@ pub async fn list_directory(path: String) -> Result<Vec<FileEntry>, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn create_file(parent_dir: String, filename: String) -> Result<String, AppError> {
-    let file_path = Path::new(&parent_dir).join(&filename);
+    let parent = validate_path(&parent_dir)?;
+    let safe_name = sanitize_filename(&filename)?;
+    let file_path = parent.join(&safe_name);
     if file_path.exists() {
         return Err(AppError::Custom(format!(
             "File already exists: {}",
@@ -84,7 +126,9 @@ pub async fn create_file(parent_dir: String, filename: String) -> Result<String,
 #[tauri::command]
 #[specta::specta]
 pub async fn create_directory(parent_dir: String, name: String) -> Result<String, AppError> {
-    let dir_path = Path::new(&parent_dir).join(&name);
+    let parent = validate_path(&parent_dir)?;
+    let safe_name = sanitize_filename(&name)?;
+    let dir_path = parent.join(&safe_name);
     if dir_path.exists() {
         return Err(AppError::Custom(format!(
             "Directory already exists: {}",
@@ -98,14 +142,15 @@ pub async fn create_directory(parent_dir: String, name: String) -> Result<String
 #[tauri::command]
 #[specta::specta]
 pub async fn rename_item(old_path: String, new_name: String) -> Result<String, AppError> {
-    let old = Path::new(&old_path);
+    let old = validate_path(&old_path)?;
     if !old.exists() {
         return Err(AppError::FileNotFound(old_path));
     }
+    let safe_name = sanitize_filename(&new_name)?;
     let new_path = old
         .parent()
         .ok_or_else(|| AppError::Custom("Cannot determine parent directory".to_string()))?
-        .join(&new_name);
+        .join(&safe_name);
     if new_path.exists() {
         return Err(AppError::Custom(format!(
             "Already exists: {}",
@@ -119,16 +164,92 @@ pub async fn rename_item(old_path: String, new_name: String) -> Result<String, A
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_item(path: String) -> Result<(), AppError> {
-    let p = Path::new(&path);
+    let p = validate_path(&path)?;
     if !p.exists() {
         return Err(AppError::FileNotFound(path));
     }
     if p.is_dir() {
-        tokio::fs::remove_dir_all(&path).await?;
+        tokio::fs::remove_dir_all(&p).await?;
     } else {
-        tokio::fs::remove_file(&path).await?;
+        tokio::fs::remove_file(&p).await?;
     }
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn search_in_project(
+    dir_path: String,
+    query: String,
+) -> Result<Vec<SearchMatch>, AppError> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_lower = query.to_lowercase();
+    let extensions = ["md", "markdown", "txt"];
+    let max_matches = 200usize;
+    let mut matches = Vec::new();
+
+    for entry in WalkDir::new(&dir_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !extensions.contains(&ext) {
+            continue;
+        }
+
+        // Skip hidden directories/files
+        if path
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            // Allow .novelist but skip other hidden dirs
+            let has_hidden = path.components().any(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                s.starts_with('.') && s != ".novelist"
+            });
+            if has_hidden {
+                continue;
+            }
+        }
+
+        let file_path_str = path.to_string_lossy().to_string();
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let content = match tokio::fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let line_lower = line.to_lowercase();
+            let mut search_start = 0;
+            while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                let abs_pos = search_start + pos;
+                matches.push(SearchMatch {
+                    file_path: file_path_str.clone(),
+                    file_name: file_name.clone(),
+                    line_number: line_idx + 1,
+                    line_text: line.to_string(),
+                    match_start: abs_pos,
+                    match_end: abs_pos + query.len(),
+                });
+                if matches.len() >= max_matches {
+                    return Ok(matches);
+                }
+                search_start = abs_pos + 1;
+            }
+        }
+    }
+
+    Ok(matches)
 }
 
 #[cfg(test)]
@@ -269,12 +390,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let old_path = dir.path().join("old.md");
         fs::write(&old_path, "content").unwrap();
-        let new_path = rename_item(
-            old_path.to_string_lossy().to_string(),
-            "new.md".to_string(),
-        )
-        .await
-        .unwrap();
+        let new_path = rename_item(old_path.to_string_lossy().to_string(), "new.md".to_string())
+            .await
+            .unwrap();
         assert!(!old_path.exists());
         assert!(Path::new(&new_path).exists());
         assert_eq!(fs::read_to_string(&new_path).unwrap(), "content");
@@ -384,15 +502,27 @@ mod large_file_tests {
             }
         }
         let file_size = std::fs::metadata(&path).unwrap().len();
-        println!("File size: {} bytes ({:.1} MB)", file_size, file_size as f64 / 1e6);
+        println!(
+            "File size: {} bytes ({:.1} MB)",
+            file_size,
+            file_size as f64 / 1e6
+        );
 
         let content = read_file(path.to_string_lossy().to_string()).await.unwrap();
         let line_count = content.lines().count();
         println!("Read {} lines, {} bytes", line_count, content.len());
-        assert_eq!(line_count, 150000, "Line count mismatch: expected 150000, got {}", line_count);
+        assert_eq!(
+            line_count, 150000,
+            "Line count mismatch: expected 150000, got {}",
+            line_count
+        );
 
         let last_line = content.lines().last().unwrap();
-        assert_eq!(last_line, "Line 150000 of 150000", "Last line wrong: {}", last_line);
+        assert_eq!(
+            last_line, "Line 150000 of 150000",
+            "Last line wrong: {}",
+            last_line
+        );
         println!("Last line: {}", last_line);
         println!("✓ readFile returns all 150000 lines");
     }

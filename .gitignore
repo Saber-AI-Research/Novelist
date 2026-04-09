@@ -11,6 +11,11 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Environment and secrets
+.env
+.env.*
+*.log
+
 # Novelist project metadata
 .novelist/workspace.json
 

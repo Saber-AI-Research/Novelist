@@ -26,6 +26,23 @@ const editorViews = new Map<string, EditorView>();
  */
 const viewportModeTabs = new Set<string>();
 
+/**
+ * Saved CM6 EditorStates per tab, preserving undo history across tab switches.
+ */
+const savedEditorStates = new Map<string, import('@codemirror/state').EditorState>();
+
+export function saveEditorState(tabId: string, state: import('@codemirror/state').EditorState) {
+  savedEditorStates.set(tabId, state);
+}
+
+export function getSavedEditorState(tabId: string): import('@codemirror/state').EditorState | undefined {
+  return savedEditorStates.get(tabId);
+}
+
+export function deleteSavedEditorState(tabId: string) {
+  savedEditorStates.delete(tabId);
+}
+
 export function registerEditorView(tabId: string, view: EditorView, isViewportMode = false) {
   editorViews.set(tabId, view);
   if (isViewportMode) {
@@ -42,6 +59,10 @@ export function unregisterEditorView(tabId: string) {
 
 export function isTabViewportMode(tabId: string): boolean {
   return viewportModeTabs.has(tabId);
+}
+
+export function getEditorView(tabId: string): EditorView | undefined {
+  return editorViews.get(tabId);
 }
 
 export function getEditorContent(tabId: string): string | null {
@@ -126,6 +147,7 @@ class TabsStore {
       commands.unregisterOpenFile(tab.filePath).catch(err => {
         console.error('Failed to unregister open file:', err);
       });
+      savedEditorStates.delete(id);
       pane.tabs.splice(idx, 1);
       if (pane.activeTabId === id) {
         pane.activeTabId = pane.tabs.length > 0 ? pane.tabs[Math.min(idx, pane.tabs.length - 1)].id : null;
@@ -186,6 +208,8 @@ class TabsStore {
         tab.content = newContent;
         tab.isDirty = false;
         tab.version += 1;
+        // Clear saved editor state so the tab gets a fresh state with new content
+        savedEditorStates.delete(id);
         return;
       }
     }
@@ -205,6 +229,7 @@ class TabsStore {
     this.panes = [{ id: 'pane-1', tabs: [], activeTabId: null }];
     this.activePaneId = 'pane-1';
     this.splitActive = false;
+    savedEditorStates.clear();
   }
 
   // Returns all tabs across all panes (for auto-save)

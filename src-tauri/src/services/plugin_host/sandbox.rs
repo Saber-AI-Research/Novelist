@@ -37,6 +37,15 @@ pub struct PendingReplacement {
     pub text: String,
 }
 
+macro_rules! lock_inner {
+    ($self:expr) => {
+        $self
+            .inner
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))
+    };
+}
+
 /// Thread-safe plugin host managed by Tauri.
 pub struct PluginHostState {
     inner: Mutex<PluginHostInner>,
@@ -65,23 +74,20 @@ impl PluginHostState {
         selection_to: usize,
         word_count: usize,
     ) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_inner!(self).unwrap();
         inner.document_content = content;
         inner.selection = (selection_from, selection_to);
         inner.word_count = word_count;
     }
 
     /// Load a plugin from its manifest and source code.
-    pub fn load_plugin(
-        &self,
-        manifest: PluginManifest,
-        source: &str,
-    ) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap();
+    pub fn load_plugin(&self, manifest: PluginManifest, source: &str) -> Result<(), String> {
+        let mut inner = lock_inner!(self)?;
         let plugin_id = manifest.plugin.id.clone();
 
         // Create a new context for this plugin
-        let context = Context::full(&inner.runtime).map_err(|e| format!("QuickJS context error: {e}"))?;
+        let context =
+            Context::full(&inner.runtime).map_err(|e| format!("QuickJS context error: {e}"))?;
 
         // Inject the novelist API and run plugin code
         let pid = plugin_id.clone();
@@ -104,9 +110,8 @@ impl PluginHostState {
             // getDocument() -> string
             {
                 let doc = doc_content.clone();
-                let func = Function::new(ctx.clone(), move || -> String {
-                    doc.clone()
-                }).map_err(|e| format!("Failed to create getDocument: {e}"))?;
+                let func = Function::new(ctx.clone(), move || -> String { doc.clone() })
+                    .map_err(|e| format!("Failed to create getDocument: {e}"))?;
                 novelist
                     .set("getDocument", func)
                     .map_err(|e| format!("Failed to set getDocument: {e}"))?;
@@ -120,7 +125,8 @@ impl PluginHostState {
                     m.insert("from".to_string(), sel_from);
                     m.insert("to".to_string(), sel_to);
                     m
-                }).map_err(|e| format!("Failed to create getSelection: {e}"))?;
+                })
+                .map_err(|e| format!("Failed to create getSelection: {e}"))?;
                 novelist
                     .set("getSelection", func)
                     .map_err(|e| format!("Failed to set getSelection: {e}"))?;
@@ -128,9 +134,8 @@ impl PluginHostState {
 
             // getWordCount() -> number
             {
-                let func = Function::new(ctx.clone(), move || -> usize {
-                    wc
-                }).map_err(|e| format!("Failed to create getWordCount: {e}"))?;
+                let func = Function::new(ctx.clone(), move || -> usize { wc })
+                    .map_err(|e| format!("Failed to create getWordCount: {e}"))?;
                 novelist
                     .set("getWordCount", func)
                     .map_err(|e| format!("Failed to set getWordCount: {e}"))?;
@@ -139,9 +144,13 @@ impl PluginHostState {
             // registerCommand(id, label, handler) — store the command metadata
             // The handler is stored in the JS context; we just record the command.
             {
-                let func = Function::new(ctx.clone(), move |_id: String, _label: String, _handler: Function<'_>| {
-                    // Placeholder; the real registration is handled by the JS override below
-                }).map_err(|e| format!("Failed to create registerCommand: {e}"))?;
+                let func = Function::new(
+                    ctx.clone(),
+                    move |_id: String, _label: String, _handler: Function<'_>| {
+                        // Placeholder; the real registration is handled by the JS override below
+                    },
+                )
+                .map_err(|e| format!("Failed to create registerCommand: {e}"))?;
                 novelist
                     .set("registerCommand", func)
                     .map_err(|e| format!("Failed to set registerCommand: {e}"))?;
@@ -170,9 +179,8 @@ impl PluginHostState {
                 .map_err(|e| format!("Plugin eval error: {e}"))?;
 
             // Collect registered commands
-            let cmds: Vec<HashMap<String, String>> = ctx
-                .eval("__registered_commands")
-                .unwrap_or_default();
+            let cmds: Vec<HashMap<String, String>> =
+                ctx.eval("__registered_commands").unwrap_or_default();
 
             for cmd in cmds {
                 if let (Some(id), Some(label)) = (cmd.get("id"), cmd.get("label")) {
@@ -209,7 +217,7 @@ impl PluginHostState {
 
     /// Unload a plugin.
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_inner!(self)?;
         inner.plugins.remove(plugin_id);
         inner
             .registered_commands
@@ -219,7 +227,7 @@ impl PluginHostState {
 
     /// List all loaded plugins.
     pub fn list_loaded_plugins(&self) -> Vec<PluginInfo> {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_inner!(self).unwrap_or_else(|e| panic!("{}", e));
         inner
             .plugins
             .values()
@@ -235,7 +243,7 @@ impl PluginHostState {
 
     /// Get all registered commands.
     pub fn get_registered_commands(&self) -> Vec<RegisteredCommandInfo> {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_inner!(self).unwrap_or_else(|e| panic!("{}", e));
         inner
             .registered_commands
             .iter()
@@ -253,7 +261,13 @@ impl PluginHostState {
         plugin_id: &str,
         command_id: &str,
     ) -> Result<Vec<PendingReplacement>, String> {
-        let inner = self.inner.lock().unwrap();
+        if !command_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("Invalid command ID: {command_id}"));
+        }
+        let inner = lock_inner!(self)?;
         let plugin = inner
             .plugins
             .get(plugin_id)
@@ -263,59 +277,57 @@ impl PluginHostState {
             return Err(format!("Plugin is not active: {plugin_id}"));
         }
 
-        plugin.context.with(|ctx| -> Result<Vec<PendingReplacement>, String> {
-            // Update the document state in JS before calling command
-            let doc = inner.document_content.clone();
-            let (sel_from, sel_to) = inner.selection;
-            let wc = inner.word_count;
+        plugin
+            .context
+            .with(|ctx| -> Result<Vec<PendingReplacement>, String> {
+                // Update the document state in JS before calling command
+                let doc = inner.document_content.clone();
+                let (sel_from, sel_to) = inner.selection;
+                let wc = inner.word_count;
 
-            // Re-bind getDocument with current state
-            let novelist: rquickjs::Object = ctx
-                .globals()
-                .get("novelist")
-                .map_err(|e| format!("Failed to get novelist: {e}"))?;
+                // Re-bind getDocument with current state
+                let novelist: rquickjs::Object = ctx
+                    .globals()
+                    .get("novelist")
+                    .map_err(|e| format!("Failed to get novelist: {e}"))?;
 
-            {
-                let doc_clone = doc.clone();
-                let func = Function::new(ctx.clone(), move || -> String {
-                    doc_clone.clone()
-                })
-                .map_err(|e| format!("Failed to create getDocument: {e}"))?;
-                novelist
-                    .set("getDocument", func)
-                    .map_err(|e| format!("Failed to set getDocument: {e}"))?;
-            }
-            {
-                let func = Function::new(ctx.clone(), move || -> HashMap<String, usize> {
-                    let mut m = HashMap::new();
-                    m.insert("from".to_string(), sel_from);
-                    m.insert("to".to_string(), sel_to);
-                    m
-                })
-                .map_err(|e| format!("Failed to create getSelection: {e}"))?;
-                novelist
-                    .set("getSelection", func)
-                    .map_err(|e| format!("Failed to set getSelection: {e}"))?;
-            }
-            {
-                let func = Function::new(ctx.clone(), move || -> usize { wc })
-                    .map_err(|e| format!("Failed to create getWordCount: {e}"))?;
-                novelist
-                    .set("getWordCount", func)
-                    .map_err(|e| format!("Failed to set getWordCount: {e}"))?;
-            }
+                {
+                    let doc_clone = doc.clone();
+                    let func = Function::new(ctx.clone(), move || -> String { doc_clone.clone() })
+                        .map_err(|e| format!("Failed to create getDocument: {e}"))?;
+                    novelist
+                        .set("getDocument", func)
+                        .map_err(|e| format!("Failed to set getDocument: {e}"))?;
+                }
+                {
+                    let func = Function::new(ctx.clone(), move || -> HashMap<String, usize> {
+                        let mut m = HashMap::new();
+                        m.insert("from".to_string(), sel_from);
+                        m.insert("to".to_string(), sel_to);
+                        m
+                    })
+                    .map_err(|e| format!("Failed to create getSelection: {e}"))?;
+                    novelist
+                        .set("getSelection", func)
+                        .map_err(|e| format!("Failed to set getSelection: {e}"))?;
+                }
+                {
+                    let func = Function::new(ctx.clone(), move || -> usize { wc })
+                        .map_err(|e| format!("Failed to create getWordCount: {e}"))?;
+                    novelist
+                        .set("getWordCount", func)
+                        .map_err(|e| format!("Failed to set getWordCount: {e}"))?;
+                }
 
-            // Set up replacement collector if plugin has write permission
-            let has_write = permissions::has_permission(
-                &plugin.manifest.plugin.permissions,
-                "write",
-            );
-            if has_write {
-                ctx.eval::<(), _>("var __pending_replacements = [];")
-                    .map_err(|e| format!("Failed to init replacements: {e}"))?;
+                // Set up replacement collector if plugin has write permission
+                let has_write =
+                    permissions::has_permission(&plugin.manifest.plugin.permissions, "write");
+                if has_write {
+                    ctx.eval::<(), _>("var __pending_replacements = [];")
+                        .map_err(|e| format!("Failed to init replacements: {e}"))?;
 
-                let eval_code = format!(
-                    r#"
+                    let eval_code = format!(
+                        r#"
                     novelist.replaceSelection = function(text) {{
                         __pending_replacements.push({{from: {sel_from}, to: {sel_to}, text: text}});
                     }};
@@ -323,50 +335,49 @@ impl PluginHostState {
                         __pending_replacements.push({{from: from, to: to, text: text}});
                     }};
                     "#
-                );
-                ctx.eval::<(), _>(eval_code.as_bytes())
-                    .map_err(|e| format!("Failed to set up write API: {e}"))?;
-            }
+                    );
+                    ctx.eval::<(), _>(eval_code.as_bytes())
+                        .map_err(|e| format!("Failed to set up write API: {e}"))?;
+                }
 
-            // Call the command handler
-            let call_code = format!(
-                r#"
+                // Call the command handler
+                let call_code = format!(
+                    r#"
                 (function() {{
                     var fn = globalThis["__cmd_{command_id}"];
                     if (fn) fn();
                 }})()
                 "#
-            );
-            ctx.eval::<(), _>(call_code.as_bytes())
-                .map_err(|e| format!("Command execution error: {e}"))?;
+                );
+                ctx.eval::<(), _>(call_code.as_bytes())
+                    .map_err(|e| format!("Command execution error: {e}"))?;
 
-            // Collect replacements
-            if has_write {
-                let replacements: Vec<HashMap<String, rquickjs::Value>> = ctx
-                    .eval("__pending_replacements")
-                    .unwrap_or_default();
+                // Collect replacements
+                if has_write {
+                    let replacements: Vec<HashMap<String, rquickjs::Value>> =
+                        ctx.eval("__pending_replacements").unwrap_or_default();
 
-                let mut result = Vec::new();
-                for r in &replacements {
-                    let from: usize = r
-                        .get("from")
-                        .and_then(|v| v.as_number().map(|n| n as usize))
-                        .unwrap_or(0);
-                    let to: usize = r
-                        .get("to")
-                        .and_then(|v| v.as_number().map(|n| n as usize))
-                        .unwrap_or(0);
-                    let text: String = r
-                        .get("text")
-                        .and_then(|v| v.as_string().map(|s| s.to_string().unwrap_or_default()))
-                        .unwrap_or_default();
-                    result.push(PendingReplacement { from, to, text });
+                    let mut result = Vec::new();
+                    for r in &replacements {
+                        let from: usize = r
+                            .get("from")
+                            .and_then(|v| v.as_number().map(|n| n as usize))
+                            .unwrap_or(0);
+                        let to: usize = r
+                            .get("to")
+                            .and_then(|v| v.as_number().map(|n| n as usize))
+                            .unwrap_or(0);
+                        let text: String = r
+                            .get("text")
+                            .and_then(|v| v.as_string().map(|s| s.to_string().unwrap_or_default()))
+                            .unwrap_or_default();
+                        result.push(PendingReplacement { from, to, text });
+                    }
+                    Ok(result)
+                } else {
+                    Ok(vec![])
                 }
-                Ok(result)
-            } else {
-                Ok(vec![])
-            }
-        })
+            })
     }
 }
 

@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes } from '$lib/themes';
   import { commands } from '$lib/ipc/commands';
+  import { shortcutsStore } from '$lib/stores/shortcuts.svelte';
+  import { projectStore } from '$lib/stores/project.svelte';
 
   interface Props {
     onClose: () => void;
@@ -9,7 +12,7 @@
 
   let { onClose }: Props = $props();
 
-  let activeSection = $state<'editor' | 'theme' | 'plugins'>('editor');
+  let activeSection = $state<'editor' | 'theme' | 'shortcuts' | 'plugins' | 'sync'>('editor');
 
   // Editor settings
   const fontOptions = [
@@ -61,13 +64,135 @@
     await loadPlugins();
   }
 
+  // Sync settings
+  type SyncConfig = {
+    enabled: boolean;
+    webdav_url: string;
+    username: string;
+    password: string;
+    interval_minutes: number;
+  };
+  let syncConfig = $state<SyncConfig>({
+    enabled: false,
+    webdav_url: '',
+    username: '',
+    password: '',
+    interval_minutes: 30,
+  });
+  let syncLoaded = $state(false);
+  let syncTestResult = $state<'idle' | 'testing' | 'success' | 'fail'>('idle');
+  let syncInProgress = $state(false);
+  let lastSyncTime = $state<string | null>(null);
+  let syncErrors = $state<string[]>([]);
+
+  async function loadSyncConfig() {
+    if (!projectStore.dirPath) return;
+    try {
+      const config = await invoke('get_sync_config', { projectDir: projectStore.dirPath }) as SyncConfig;
+      syncConfig = config;
+    } catch (e) {
+      console.error('Failed to load sync config:', e);
+    }
+    syncLoaded = true;
+  }
+
+  async function saveSyncConfig() {
+    if (!projectStore.dirPath) return;
+    try {
+      await invoke('save_sync_config', { projectDir: projectStore.dirPath, config: syncConfig });
+    } catch (e) {
+      console.error('Failed to save sync config:', e);
+    }
+  }
+
+  async function testConnection() {
+    syncTestResult = 'testing';
+    try {
+      const ok = await invoke('test_sync_connection', {
+        webdavUrl: syncConfig.webdav_url,
+        username: syncConfig.username,
+        password: syncConfig.password,
+      }) as boolean;
+      syncTestResult = ok ? 'success' : 'fail';
+    } catch (e) {
+      syncTestResult = 'fail';
+    }
+  }
+
+  async function syncNow() {
+    if (!projectStore.dirPath) return;
+    syncInProgress = true;
+    syncErrors = [];
+    try {
+      const status = await invoke('sync_now', { projectDir: projectStore.dirPath }) as {
+        last_sync: string | null;
+        files_uploaded: number;
+        files_downloaded: number;
+        errors: string[];
+        in_progress: boolean;
+      };
+      lastSyncTime = status.last_sync;
+      syncErrors = status.errors;
+    } catch (e) {
+      syncErrors = [String(e)];
+    }
+    syncInProgress = false;
+  }
+
+  // Shortcut recording state
+  let recordingCommandId = $state<string | null>(null);
+
+  function startRecording(commandId: string) {
+    recordingCommandId = commandId;
+  }
+
+  function buildShortcutString(e: KeyboardEvent): string | null {
+    // Ignore bare modifier keys
+    if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return null;
+
+    const parts: string[] = [];
+    if (e.metaKey || e.ctrlKey) parts.push('Cmd');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+
+    // Normalize the key
+    let key = e.key;
+    if (key === ' ') key = 'Space';
+    else if (key.length === 1) key = key.toUpperCase();
+    // Function keys and special keys stay as-is (F11, Escape, etc.)
+
+    parts.push(key);
+    return parts.join('+');
+  }
+
   function handleKeydown(e: KeyboardEvent) {
+    if (recordingCommandId) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        // Cancel recording
+        recordingCommandId = null;
+        return;
+      }
+      const shortcut = buildShortcutString(e);
+      if (shortcut) {
+        shortcutsStore.set(recordingCommandId, shortcut);
+        recordingCommandId = null;
+      }
+      return;
+    }
     if (e.key === 'Escape') { e.preventDefault(); onClose(); }
   }
 
   $effect(() => {
     if (activeSection === 'plugins' && !pluginsLoaded) {
       loadPlugins();
+    }
+  });
+
+  $effect(() => {
+    if (activeSection === 'sync' && !syncLoaded) {
+      loadSyncConfig();
     }
   });
 </script>
@@ -89,7 +214,9 @@
       {#each [
         { id: 'editor', label: 'Editor' },
         { id: 'theme', label: 'Theme' },
+        { id: 'shortcuts', label: 'Shortcuts' },
         { id: 'plugins', label: 'Plugins' },
+        { id: 'sync', label: 'Sync' },
       ] as section}
         <button
           class="text-left px-4 py-2 text-sm cursor-pointer"
@@ -113,30 +240,41 @@
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Editor</h3>
 
         <div class="flex items-center justify-between mb-3">
-          <label class="text-sm">Font</label>
-          <select class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border); max-width: 180px;" value={settings.fontFamily} onchange={(e) => uiStore.updateEditorSettings({ fontFamily: (e.target as HTMLSelectElement).value })}>
+          <label for="settings-font" class="text-sm">Font</label>
+          <select id="settings-font" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border); max-width: 180px;" value={settings.fontFamily} onchange={(e) => uiStore.updateEditorSettings({ fontFamily: (e.target as HTMLSelectElement).value })}>
             {#each fontOptions as opt}<option value={opt.value}>{opt.label}</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label class="text-sm">Size</label>
-          <select class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.fontSize} onchange={(e) => uiStore.updateEditorSettings({ fontSize: Number((e.target as HTMLSelectElement).value) })}>
+          <label for="settings-size" class="text-sm">Size</label>
+          <select id="settings-size" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.fontSize} onchange={(e) => uiStore.updateEditorSettings({ fontSize: Number((e.target as HTMLSelectElement).value) })}>
             {#each fontSizeOptions as size}<option value={size}>{size}px</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label class="text-sm">Line Height</label>
-          <select class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.lineHeight} onchange={(e) => uiStore.updateEditorSettings({ lineHeight: Number((e.target as HTMLSelectElement).value) })}>
+          <label for="settings-line-height" class="text-sm">Line Height</label>
+          <select id="settings-line-height" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.lineHeight} onchange={(e) => uiStore.updateEditorSettings({ lineHeight: Number((e.target as HTMLSelectElement).value) })}>
             {#each lineHeightOptions as lh}<option value={lh}>{lh}</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label class="text-sm">Width</label>
-          <select class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.maxWidth} onchange={(e) => uiStore.updateEditorSettings({ maxWidth: Number((e.target as HTMLSelectElement).value) })}>
+          <label for="settings-width" class="text-sm">Width</label>
+          <select id="settings-width" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.maxWidth} onchange={(e) => uiStore.updateEditorSettings({ maxWidth: Number((e.target as HTMLSelectElement).value) })}>
             {#each maxWidthOptions as opt}<option value={opt.value}>{opt.label}</option>{/each}
+          </select>
+        </div>
+
+        <div class="flex items-center justify-between mb-3">
+          <label for="settings-autosave" class="text-sm">Auto-save</label>
+          <select id="settings-autosave" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.autoSaveMinutes} onchange={(e) => uiStore.updateEditorSettings({ autoSaveMinutes: Number((e.target as HTMLSelectElement).value) })}>
+            <option value={0}>Off</option>
+            <option value={1}>1 min</option>
+            <option value={2}>2 min</option>
+            <option value={5}>5 min (Default)</option>
+            <option value={10}>10 min</option>
           </select>
         </div>
 
@@ -167,6 +305,54 @@
 
         <div class="mt-4 text-xs" style="color: var(--novelist-text-secondary);">
           Custom themes can be created by editing <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">src/lib/themes.ts</code> — use Claude Code to design your own.
+        </div>
+
+      {:else if activeSection === 'shortcuts'}
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Keyboard Shortcuts</h3>
+
+        <div class="space-y-1">
+          {#each shortcutsStore.allCommandIds as cmdId}
+            {@const currentShortcut = shortcutsStore.get(cmdId)}
+            {@const isCustom = shortcutsStore.isCustomized(cmdId)}
+            {@const isRecording = recordingCommandId === cmdId}
+            <div class="flex items-center justify-between py-2 px-2 rounded" style="background: {isRecording ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'};">
+              <span class="text-sm" style="color: var(--novelist-text);">{shortcutsStore.labels[cmdId]}</span>
+              <div class="flex items-center gap-2">
+                {#if isRecording}
+                  <span class="text-xs px-2 py-1 rounded" style="background: var(--novelist-accent); color: #fff; animation: pulse 1s infinite;">Press keys...</span>
+                {:else}
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <span
+                    class="text-xs px-2 py-1 rounded cursor-pointer"
+                    style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
+                    onclick={() => startRecording(cmdId)}
+                    title="Click to change shortcut"
+                  >{currentShortcut}</span>
+                {/if}
+                {#if isCustom && !isRecording}
+                  <button
+                    class="text-xs px-1 py-0.5 rounded cursor-pointer"
+                    style="background: none; border: 1px solid var(--novelist-border); color: var(--novelist-text-secondary); font-size: 10px;"
+                    onclick={() => shortcutsStore.reset(cmdId)}
+                    title="Reset to default"
+                  >reset</button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+
+        <div class="mt-4 flex justify-end">
+          <button
+            class="text-xs px-3 py-1.5 rounded cursor-pointer"
+            style="background: var(--novelist-bg-secondary); color: var(--novelist-text-secondary); border: 1px solid var(--novelist-border);"
+            onclick={() => shortcutsStore.resetAll()}
+          >Reset All to Defaults</button>
+        </div>
+
+        <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
+          Click a shortcut badge to record a new key combination. Press <kbd style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">Esc</kbd> to cancel recording.
         </div>
 
       {:else if activeSection === 'plugins'}
@@ -208,6 +394,117 @@
                 >{plugin.active ? 'Active' : 'Enable'}</button>
               </div>
             {/each}
+          </div>
+        {/if}
+      {:else if activeSection === 'sync'}
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">WebDAV Sync</h3>
+
+        {#if !projectStore.dirPath}
+          <p class="text-sm" style="color: var(--novelist-text-secondary);">Open a project to configure sync.</p>
+        {:else if !syncLoaded}
+          <p class="text-sm" style="color: var(--novelist-text-secondary);">Loading...</p>
+        {:else}
+          <div class="flex items-center justify-between mb-3">
+            <label for="sync-enabled" class="text-sm">Enabled</label>
+            <button
+              id="sync-enabled"
+              class="text-xs px-3 py-1 rounded cursor-pointer"
+              style="background: {syncConfig.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, var(--novelist-bg-secondary))'}; color: {syncConfig.enabled ? '#fff' : 'var(--novelist-text)'}; border: none;"
+              onclick={() => { syncConfig.enabled = !syncConfig.enabled; saveSyncConfig(); }}
+            >{syncConfig.enabled ? 'On' : 'Off'}</button>
+          </div>
+
+          <div class="mb-3">
+            <label for="sync-webdav-url" class="text-sm block mb-1">WebDAV URL</label>
+            <input
+              id="sync-webdav-url"
+              type="text"
+              class="text-sm px-2 py-1 rounded w-full"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              placeholder="https://dav.example.com"
+              value={syncConfig.webdav_url}
+              oninput={(e) => { syncConfig.webdav_url = (e.target as HTMLInputElement).value; }}
+              onblur={saveSyncConfig}
+            />
+          </div>
+
+          <div class="mb-3">
+            <label for="sync-username" class="text-sm block mb-1">Username</label>
+            <input
+              id="sync-username"
+              type="text"
+              class="text-sm px-2 py-1 rounded w-full"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              value={syncConfig.username}
+              oninput={(e) => { syncConfig.username = (e.target as HTMLInputElement).value; }}
+              onblur={saveSyncConfig}
+            />
+          </div>
+
+          <div class="mb-3">
+            <label for="sync-password" class="text-sm block mb-1">Password</label>
+            <input
+              id="sync-password"
+              type="password"
+              class="text-sm px-2 py-1 rounded w-full"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              value={syncConfig.password}
+              oninput={(e) => { syncConfig.password = (e.target as HTMLInputElement).value; }}
+              onblur={saveSyncConfig}
+            />
+          </div>
+
+          <div class="flex items-center justify-between mb-3">
+            <label for="sync-interval" class="text-sm">Interval</label>
+            <select
+              id="sync-interval"
+              class="text-sm px-2 py-1 rounded cursor-pointer"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              value={syncConfig.interval_minutes}
+              onchange={(e) => { syncConfig.interval_minutes = Number((e.target as HTMLSelectElement).value); saveSyncConfig(); }}
+            >
+              <option value={15}>15 min</option>
+              <option value={30}>30 min (Default)</option>
+              <option value={60}>60 min</option>
+              <option value={120}>120 min</option>
+            </select>
+          </div>
+
+          <div class="flex gap-2 mb-3">
+            <button
+              class="text-xs px-3 py-1.5 rounded cursor-pointer"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              onclick={testConnection}
+              disabled={syncTestResult === 'testing'}
+            >{syncTestResult === 'testing' ? 'Testing...' : 'Test Connection'}</button>
+            <button
+              class="text-xs px-3 py-1.5 rounded cursor-pointer"
+              style="background: var(--novelist-accent); color: #fff; border: none;"
+              onclick={syncNow}
+              disabled={syncInProgress}
+            >{syncInProgress ? 'Syncing...' : 'Sync Now'}</button>
+          </div>
+
+          {#if syncTestResult === 'success'}
+            <div class="text-xs mb-2" style="color: #22c55e;">Connection successful.</div>
+          {:else if syncTestResult === 'fail'}
+            <div class="text-xs mb-2" style="color: #ef4444;">Connection failed. Check URL and credentials.</div>
+          {/if}
+
+          {#if lastSyncTime}
+            <div class="text-xs mb-2" style="color: var(--novelist-text-secondary);">Last sync: {lastSyncTime}</div>
+          {/if}
+
+          {#if syncErrors.length > 0}
+            <div class="rounded p-2 mb-2 text-xs" style="background: color-mix(in srgb, #ef4444 10%, transparent); color: #ef4444; border: 1px solid #ef4444;">
+              {#each syncErrors as err}
+                <div>{err}</div>
+              {/each}
+            </div>
+          {/if}
+
+          <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
+            Files are synced to <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist/<project-name>/"}</code>. Only .md, .markdown, and .txt files are synced.
           </div>
         {/if}
       {/if}

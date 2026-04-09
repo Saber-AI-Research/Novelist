@@ -22,12 +22,29 @@ pub async fn check_pandoc() -> Result<PandocStatus, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn export_project(
-    input_files: Vec<String>, // ordered list of .md file paths
-    output_path: String,      // output file path (e.g., /tmp/novel.pdf)
-    format: String,           // "html", "pdf", "docx", "epub"
-    extra_args: Vec<String>,  // additional pandoc arguments
+    input_files: Vec<String>,
+    output_path: String,
+    format: String,
+    extra_args: Vec<String>,
 ) -> Result<String, AppError> {
-    // Concatenate input files into a temp file
+    let allowed_formats = ["html", "pdf", "docx", "epub"];
+    if !allowed_formats.contains(&format.as_str()) {
+        return Err(AppError::InvalidInput(format!(
+            "Unsupported export format: {}. Allowed: {:?}",
+            format, allowed_formats
+        )));
+    }
+
+    for arg in &extra_args {
+        let lower = arg.to_lowercase();
+        if lower.starts_with("--output") || lower.starts_with("--extract-media") {
+            return Err(AppError::InvalidInput(format!(
+                "Forbidden argument in extra_args: {}",
+                arg
+            )));
+        }
+    }
+
     let temp_dir = std::env::temp_dir();
     let temp_input = temp_dir.join("novelist-export-input.md");
 

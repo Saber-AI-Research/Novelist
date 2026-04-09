@@ -4,7 +4,11 @@ use tokio::process::Command;
 
 /// Check if pandoc is available on the system
 pub async fn detect_pandoc() -> Option<String> {
-    let output = Command::new("pandoc").arg("--version").output().await.ok()?;
+    let output = Command::new("pandoc")
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout);
         let first_line = version.lines().next().unwrap_or("pandoc").to_string();

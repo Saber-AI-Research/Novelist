@@ -3,10 +3,11 @@
   import { EditorView, keymap } from '@codemirror/view';
   import type { Extension, ChangeSet } from '@codemirror/state';
   import { createEditorExtensions, createEditorState } from '$lib/editor/setup';
-  import { tabsStore, registerEditorView, unregisterEditorView } from '$lib/stores/tabs.svelte';
+  import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState } from '$lib/stores/tabs.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { commands } from '$lib/ipc/commands';
+  import { invoke } from '@tauri-apps/api/core';
   import { countWords } from '$lib/utils/wordcount';
   import { extractHeadings, type HeadingItem } from '$lib/editor/outline';
   import { setWysiwygProjectDir } from '$lib/editor/wysiwyg';
@@ -41,6 +42,11 @@
   let isReadOnly = $state(false);
   let readOnlyFileSize = $state(0);
   let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Session tracking for writing stats
+  let sessionStartWordCount: number | null = null;
+  let sessionStartTime: number | null = null;
+  let lastKnownWordCount = 0;
 
   function scrollToPosition(from: number) {
     if (!view) return;
@@ -106,6 +112,7 @@
         wordCount = countWords(currentState.doc.toString());
         headings = extractHeadings(currentState);
       }
+      lastKnownWordCount = wordCount;
     };
 
     if (statsTimer) clearTimeout(statsTimer);
@@ -119,14 +126,36 @@
     }, delay);
   }
 
-  function buildExtensions(fileSize: number): Extension[] {
+  function flushWritingStats() {
+    if (sessionStartWordCount === null || sessionStartTime === null) return;
+    if (!projectStore.dirPath) return;
+    const delta = lastKnownWordCount - sessionStartWordCount;
+    const minutes = Math.max(1, Math.round((Date.now() - sessionStartTime) / 60000));
+    if (delta === 0 && minutes < 2) {
+      // Don't record trivial sessions
+      sessionStartWordCount = null;
+      sessionStartTime = null;
+      return;
+    }
+    invoke('record_writing_stats', {
+      projectDir: projectStore.dirPath,
+      wordDelta: delta,
+      minutes,
+    }).catch(e => console.warn('[Stats] Failed to record:', e));
+    sessionStartWordCount = null;
+    sessionStartTime = null;
+  }
+
+  function buildExtensions(fileSize: number, lineCount: number): Extension[] {
     const readOnly = fileSize >= FILE_SIZE_READONLY;
     const largeFile = fileSize >= FILE_SIZE_LARGE;
+    const tallDoc = lineCount > LARGE_DOC_LINES;
 
     return createEditorExtensions({
-      wysiwyg: !largeFile && !readOnly,
+      wysiwyg: !largeFile && !readOnly && !tallDoc,
       zen: uiStore.zenMode && !largeFile && !readOnly,
       largeFile: largeFile && !readOnly,
+      tallDoc: tallDoc && !largeFile && !readOnly,
       readOnly,
     });
   }
@@ -137,8 +166,13 @@
         const t = getActiveTab();
         if (t) tabsStore.markDirty(t.id);
         scheduleStatsUpdate(update.state);
+        // Start session tracking on first keystroke
+        if (sessionStartWordCount === null) {
+          sessionStartWordCount = lastKnownWordCount;
+          sessionStartTime = Date.now();
+        }
       }
-      if (update.selectionSet || update.docChanged) {
+      if (update.selectionSet || update.docChanged || update.geometryChanged) {
         updateCursorInfo(update.view);
       }
     });
@@ -149,12 +183,12 @@
     if (!tab || !tab.isDirty || !view) return;
 
     const content = view.state.doc.toString();
-    console.log(`[Save] ${tab.fileName}: ${view.state.doc.lines} lines, ${content.length} bytes`);
     await commands.registerWriteIgnore(tab.filePath);
     const result = await commands.writeFile(tab.filePath, content);
     if (result.status === 'ok') {
       tabsStore.updateContent(tab.id, content);
       tabsStore.markSaved(tab.id);
+      flushWritingStats();
     } else {
       console.error('[Save] Failed:', result.error);
     }
@@ -225,12 +259,14 @@
     alert(`Split into ${chunks.length} files in ${baseName}-chunks/`);
   }
 
-  export { splitIntoChunks };
+
 
   // --- Tab lifecycle ---
 
   function cleanupCurrentView() {
+    flushWritingStats();
     if (view && currentTabId) {
+      saveEditorState(currentTabId, view.state);
       if (!isReadOnly) {
         tabsStore.syncFromView(currentTabId);
       }
@@ -241,6 +277,10 @@
       view = null;
     }
     isReadOnly = false;
+    if (typeof window !== 'undefined') {
+      delete (window as any).__novelist_view;
+      delete (window as any).__novelist_save;
+    }
   }
 
   function loadTab() {
@@ -264,27 +304,33 @@
 
     const fileEntry = projectStore.files.find(f => f.path === tab.filePath);
     const fileSize = fileEntry?.size ?? tab.content.length;
+    let lineCount = 0;
+    for (let i = 0; i < tab.content.length; i++) {
+      if (tab.content[i] === '\n') lineCount++;
+    }
+    lineCount += 1;
 
     isReadOnly = fileSize >= FILE_SIZE_READONLY;
     readOnlyFileSize = fileSize;
 
-    console.log(`[loadTab] ${tab.fileName}: ${fileSize} bytes, readOnly=${isReadOnly}`);
-
     const extensions = [
-      ...buildExtensions(fileSize),
+      ...buildExtensions(fileSize, lineCount),
       buildUpdateListener(),
       ...(!isReadOnly ? [keymap.of([{ key: 'Mod-s', run: () => { saveCurrentFile(); return true; } }])] : []),
     ];
 
-    const state = createEditorState(tab.content, extensions);
-    view = new EditorView({ state, parent: editorContainer });
+    const savedState = getSavedEditorState(tab.id);
+    if (savedState) {
+      // Restore saved state (preserves undo history) with current extensions
+      view = new EditorView({ state: savedState, parent: editorContainer });
+    } else {
+      const state = createEditorState(tab.content, extensions);
+      view = new EditorView({ state, parent: editorContainer });
+    }
     registerEditorView(tab.id, view);
 
-    // Expose for automated testing (accessible from DevTools / test harness)
     (window as any).__novelist_view = view;
     (window as any).__novelist_save = saveCurrentFile;
-
-    console.log(`[loadTab] CM6: ${view.state.doc.lines} lines, lastLine="${view.state.doc.line(view.state.doc.lines).text.substring(0, 60)}"`);
 
     if (view.state.doc.lines > LARGE_DOC_LINES) {
       wordCount = Math.round(view.state.doc.length / 4);
@@ -293,6 +339,7 @@
       wordCount = countWords(tab.content);
       headings = extractHeadings(view.state);
     }
+    lastKnownWordCount = wordCount;
     updateCursorInfo(view);
   }
 
@@ -308,24 +355,36 @@
   onMount(() => {
     loadTab();
 
-    // Auto-save: only process dirty tabs from this pane to avoid
-    // duplicate saves when split view has two Editor instances.
-    const autoSaveInterval = setInterval(async () => {
-      const paneTabs = tabsStore.getPaneTabs(effectivePaneId);
-      for (const tab of paneTabs) {
-        if (!tab.isDirty) continue;
-        tabsStore.syncFromView(tab.id);
-        const freshTab = tabsStore.findByPath(tab.filePath);
-        if (freshTab?.isDirty && freshTab.content) {
-          await commands.registerWriteIgnore(freshTab.filePath);
-          const result = await commands.writeFile(freshTab.filePath, freshTab.content);
-          if (result.status === 'ok') tabsStore.markSaved(freshTab.id);
+    let autoSaveIntervalId: ReturnType<typeof setInterval> | null = null;
+
+    function updateAutoSaveInterval() {
+      if (autoSaveIntervalId) { clearInterval(autoSaveIntervalId); autoSaveIntervalId = null; }
+      const autoSaveMinutes = uiStore.editorSettings.autoSaveMinutes;
+      if (autoSaveMinutes <= 0) return;
+      autoSaveIntervalId = setInterval(async () => {
+        const paneTabs = tabsStore.getPaneTabs(effectivePaneId);
+        for (const tab of paneTabs) {
+          if (!tab.isDirty) continue;
+          tabsStore.syncFromView(tab.id);
+          const freshTab = tabsStore.findByPath(tab.filePath);
+          if (freshTab?.isDirty && freshTab.content) {
+            await commands.registerWriteIgnore(freshTab.filePath);
+            const result = await commands.writeFile(freshTab.filePath, freshTab.content);
+            if (result.status === 'ok') tabsStore.markSaved(freshTab.id);
+          }
         }
-      }
-    }, 5 * 60 * 1000);
+      }, autoSaveMinutes * 60 * 1000);
+    }
+
+    updateAutoSaveInterval();
+
+    $effect(() => {
+      const _minutes = uiStore.editorSettings.autoSaveMinutes;
+      updateAutoSaveInterval();
+    });
 
     return () => {
-      clearInterval(autoSaveInterval);
+      if (autoSaveIntervalId) clearInterval(autoSaveIntervalId);
       if (statsTimer) clearTimeout(statsTimer);
       cleanupCurrentView();
     };

@@ -293,8 +293,11 @@ External edit (vim/AI)                                          |
 | Tier | File size | Strategy | Frontend memory |
 |------|-----------|----------|----------------|
 | **Normal** | < 1 MB | Rust reads entire file → send to CM6 via IPC. CM6 owns full document. Standard WYSIWYG. | ~2-4× file size |
+| **Tall doc** | < 1 MB, > 5000 lines | Same as Normal but **disable WYSIWYG decorations** and use flat heading sizes. Prevents CM6 height-map drift that causes click-after-scroll jump bugs. | ~2-4× file size |
 | **Large** | 1-10 MB | Rust reads entire file → send to CM6, but **disable WYSIWYG decorations** (plain Markdown highlighting only). CM6 virtual scrolling handles rendering. | ~2-4× file size, but much lower CPU/GC pressure |
 | **Huge** | > 10 MB | **Rust-backed viewport mode** (see below). CM6 only holds a window of content. | ~5-10 MB constant |
+
+**Why tall doc mode exists**: CM6 estimates heights for off-screen lines. WYSIWYG decorations (heading font-size changes, blockquote styling, etc.) only apply within the viewport. The difference between estimated and actual heights accumulates as the user scrolls, causing `posAtCoords` (click → document position) to land on the wrong line. For documents > 5000 lines, this drift becomes user-visible. The fix: disable all height-changing decorations and use uniform heading font sizes via `flatNovelistHighlightStyle` in `src/lib/editor/setup.ts`.
 
 #### Huge file: Rust-backed viewport mode
 

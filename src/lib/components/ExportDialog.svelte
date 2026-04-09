@@ -15,6 +15,7 @@
   let includeTheme = $state(true);
   let status = $state<'idle' | 'exporting' | 'success' | 'error'>('idle');
   let message = $state('');
+  let exportFileCount = $state(0);
 
   const formats = [
     { value: 'html', label: 'HTML' },
@@ -53,6 +54,7 @@
 
     status = 'exporting';
     message = '';
+    exportFileCount = files.length;
 
     // Build extra args — for HTML, inject theme CSS via pandoc --css
     const extraArgs: string[] = [];
@@ -170,9 +172,14 @@ img { max-width: 100%; border-radius: 6px; }`;
 
     <!-- Status message -->
     {#if status === 'exporting'}
-      <p class="text-sm mb-4" style="color: var(--novelist-text-secondary);">
-        Exporting&hellip;
-      </p>
+      <div class="mb-4">
+        <p class="text-sm mb-2" style="color: var(--novelist-text-secondary);">
+          Exporting {exportFileCount} {exportFileCount === 1 ? 'file' : 'files'}&hellip;
+        </p>
+        <div class="export-progress-track">
+          <div class="export-progress-bar"></div>
+        </div>
+      </div>
     {:else if status === 'success'}
       <p class="text-sm mb-4" style="color: #4ade80;">
         {message}
@@ -212,3 +219,33 @@ img { max-width: 100%; border-radius: 6px; }`;
     </div>
   </div>
 </div>
+
+<style>
+  .export-progress-track {
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--novelist-bg-secondary);
+    overflow: hidden;
+  }
+
+  .export-progress-bar {
+    width: 40%;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--novelist-accent);
+    animation: export-indeterminate 1.4s ease-in-out infinite;
+  }
+
+  @keyframes export-indeterminate {
+    0% {
+      transform: translateX(-100%);
+    }
+    50% {
+      transform: translateX(150%);
+    }
+    100% {
+      transform: translateX(-100%);
+    }
+  }
+</style>

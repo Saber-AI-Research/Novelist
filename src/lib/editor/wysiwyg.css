@@ -1,32 +1,32 @@
 /* Hidden syntax markers — cursor NOT in this node.
-   Inline markers (bold, italic, etc.) keep their layout space (opacity-only)
-   to avoid horizontal jumps on click. */
+   CRITICAL: Use visibility:hidden to keep layout space intact.
+   This ensures the line's wrap count is identical whether or not
+   WYSIWYG decorations are active.  If wrap count differed between
+   decorated (in viewport) and undecorated (out of viewport) lines,
+   CM6's height estimate for unseen lines would drift cumulatively,
+   causing click-after-scroll to land on the wrong line in large
+   documents (>5000 lines). */
 .cm-novelist-hidden {
-  opacity: 0;
-  color: transparent;
-  transition: opacity 80ms ease-out;
+  visibility: hidden;
+  /* Keep a thin width so markers don't create visible gaps but
+     still occupy their original inline flow space for wrapping. */
 }
 
-/* Heading markers hidden when cursor is outside the heading.
-   Use opacity:0 + zero-size to collapse them without changing the
-   line's measured height.  Keeping the same approach as inline markers
-   (opacity-only) would reserve space and misalign heading text.
-   font-size:0 is safe here because the heading TEXT (not the markers)
-   sets the line height via syntaxHighlighting, so collapsing the
-   markers cannot change the line's block height. */
+/* Heading markers hidden — same visibility approach.
+   The # and trailing space become invisible but keep their width,
+   so the heading line wraps identically to its undecorated form. */
 .cm-novelist-heading-hidden {
-  font-size: 0;
-  letter-spacing: 0;
-  opacity: 0;
-  overflow: hidden;
-  transition: font-size 80ms ease-out, opacity 80ms ease-out;
+  visibility: hidden;
 }
 
-/* Revealed syntax markers — cursor IS in this node */
+/* Revealed syntax markers — cursor IS in this node.
+   These are visible with reduced opacity. Since hidden markers use
+   visibility:hidden (same layout), toggling between hidden/visible
+   never changes the line's wrap count or height. */
 .cm-novelist-marker-visible {
+  visibility: visible;
   opacity: 0.38;
   color: var(--novelist-text-secondary);
-  transition: opacity 80ms ease-in;
 }
 
 /* Headings — sizes live in the CM6 theme (setup.ts) for specificity.
@@ -44,12 +44,12 @@
 .cm-novelist-bold { font-weight: 700; }
 .cm-novelist-italic { font-style: italic; }
 .cm-novelist-strikethrough { text-decoration: line-through; color: var(--novelist-text-secondary); }
+/* Inline code — background only, no font change.
+   Changing to monospace would alter character widths and wrap count. */
 .cm-novelist-inline-code {
-  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-  font-size: 0.88em;
   background: var(--novelist-code-bg);
   border-radius: 4px;
-  padding: 2px 5px;
+  padding: 1px 3px;
 }
 
 /* Links */
@@ -60,37 +60,33 @@
   text-underline-offset: 2px;
 }
 
-/* Blockquote */
+/* Blockquote — use box-shadow instead of padding-left to avoid
+   changing the line's available width (which would alter wrap count
+   and cause height drift for off-screen lines). */
 .cm-novelist-blockquote-line {
-  border-left: 3px solid var(--novelist-blockquote-border);
-  padding-left: 14px;
+  box-shadow: -3px 0 0 0 var(--novelist-blockquote-border);
   color: var(--novelist-text-secondary);
   font-style: italic;
 }
 
-/* Code block */
+/* Code block — only background color, no font change.
+   Changing to monospace font alters character width → changes wrap
+   count → height drift for off-screen lines. The syntax highlighter
+   already handles code token styling; this line deco is visual only. */
 .cm-novelist-codeblock-line {
   background: var(--novelist-code-bg);
-  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-  font-size: 0.88em;
 }
 
-/* Checkbox */
+/* Checkbox — no font-size change to avoid altering line height. */
 .cm-novelist-checkbox {
   cursor: pointer;
-  font-size: 1.1em;
-  vertical-align: middle;
-  margin-right: 4px;
   user-select: none;
 }
 
-/* Horizontal rule */
+/* Horizontal rule — use border-top on the .cm-line itself.
+   No margin change to avoid altering line height. */
 .cm-novelist-hr-widget {
-  display: block;
-  border: none;
   border-top: 1px solid var(--novelist-border);
-  margin: 16px 0;
-  padding: 0;
 }
 
 /* ── GFM Tables ─────────────────────────────────────────── */
@@ -98,9 +94,9 @@
   /* fallback for browsers without :has — handled by line deco below */
 }
 
+/* Table — only color hint, no font change (same wrap-count reason). */
 .cm-novelist-table-line {
-  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-  font-size: 0.9em;
+  background: color-mix(in srgb, var(--novelist-code-bg) 50%, transparent);
 }
 
 /* Rendered via CM6 theme — but keep for cascade overrides */
@@ -120,33 +116,21 @@
   font-weight: 600;
 }
 
-/* ── Images ─────────────────────────────────────────────── */
-.cm-novelist-image-widget {
-  display: block;
-  max-width: 100%;
-  margin: 8px 0;
-  border-radius: 6px;
+/* ── Images (inline indicator, no block widget) ───────── */
+/* Image alt text styled as a visual indicator — no block widget
+   is used because block widgets add viewport-only height that
+   causes cumulative height-map drift in large documents. */
+.cm-novelist-image-inline {
+  color: var(--novelist-link-color);
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--novelist-link-color) 40%, transparent);
 }
-.cm-novelist-image-widget img {
-  max-width: 100%;
-  max-height: 400px;
-  border-radius: 6px;
-  border: 1px solid var(--novelist-border);
-  display: block;
-}
-.cm-novelist-image-alt {
-  color: var(--novelist-text-secondary);
-  font-style: italic;
-  font-size: 0.9em;
-}
-.cm-novelist-image-error {
-  color: var(--novelist-text-secondary);
-  font-style: italic;
-  font-size: 0.85em;
-  padding: 4px 8px;
-  border: 1px dashed var(--novelist-border);
-  border-radius: 4px;
-  display: inline-block;
+.cm-novelist-image-inline::before {
+  content: "[img] ";
+  font-size: 0.8em;
+  opacity: 0.5;
 }
 
 /* Zen mode — paragraph focus dimming */
@@ -156,8 +140,6 @@
 }
 
 /* GPU acceleration hints for frequently-transitioned elements */
-.cm-novelist-hidden,
-.cm-novelist-heading-hidden,
 .cm-novelist-marker-visible,
 .cm-novelist-zen-dim {
   will-change: opacity;

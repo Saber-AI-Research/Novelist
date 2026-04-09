@@ -91,7 +91,7 @@ jobs:
         run: pnpm install
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -106,7 +106,7 @@ jobs:
   release:
     needs: [build-macos-arm, build-other]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ needs.build-macos-arm.result == 'success' || needs.build-other.result == 'success' }}
     steps:
       - name: Download macOS ARM artifact
         uses: actions/download-artifact@v4

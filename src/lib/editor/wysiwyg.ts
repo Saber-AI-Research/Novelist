@@ -232,11 +232,6 @@ function buildDecorations(view: EditorView): DecorationSet {
 
           // Apply line decorations using iterRange (avoids repeated line-number lookups)
           const bqDeco = Decoration.line({ class: 'cm-novelist-blockquote-line' });
-          state.doc.iterRange(node.from, node.to, (text, start) => {
-            // iterRange callback fires per text chunk; we need line starts.
-            // Use lineAt on chunk start for accurate line-from positions.
-          });
-          // Fallback: iterate by line number (CM6 caches lineAt results internally)
           let pos = node.from;
           while (pos <= node.to) {
             const line = state.doc.lineAt(pos);
@@ -278,7 +273,7 @@ function buildDecorations(view: EditorView): DecorationSet {
         // --- FencedCode ---
         if (node.name === 'FencedCode') {
           const fcNode = node.node;
-          const cursorIn = cursorInRange(state, node.from, node.to);
+          const cursorIn = cursorInRangeFast(cursorHeads, node.from, node.to);
           const fenceMarkerClass = cursorIn ? 'cm-novelist-marker-visible' : 'cm-novelist-hidden';
 
           // Apply line decorations — walk by position to avoid line-number lookups
@@ -349,10 +344,15 @@ function buildDecorations(view: EditorView): DecorationSet {
         }
 
         // --- Image ![alt](url) ---
+        // NOTE: We do NOT use block widgets for image preview.
+        // Block widgets add height that only exists in the viewport,
+        // causing CM6's height estimate for off-screen lines to drift
+        // cumulatively — click-after-scroll lands on the wrong line
+        // in documents >1000 lines. Instead, we style the image syntax
+        // as a link-like element (hide URL, show alt text styled).
         if (node.name === 'Image') {
           if (!cursorInside) {
-            // Extract alt text and URL from child nodes
-            let altText = '';
+            // Find URL and alt text
             let imgUrl = '';
             const imgCursor = node.node.cursor();
             if (imgCursor.firstChild()) {
@@ -362,25 +362,27 @@ function buildDecorations(view: EditorView): DecorationSet {
                 }
               } while (imgCursor.nextSibling());
             }
-            // Alt text is between first [ and ]
-            const lineText = state.doc.lineAt(node.from).text;
-            const altMatch = lineText.match(/!\[([^\]]*)\]/);
-            if (altMatch) altText = altMatch[1];
 
-            // Hide the full markdown syntax
-            decos.push(
-              Decoration.mark({ class: 'cm-novelist-hidden' }).range(node.from, node.to)
-            );
-
-            // Insert image preview widget after the line
-            if (imgUrl) {
-              const line = state.doc.lineAt(node.from);
-              decos.push(
-                Decoration.widget({
-                  widget: new ImageWidget(imgUrl, altText, projectDir),
-                  block: true,
-                }).range(line.to)
-              );
+            // Hide everything except alt text: hide ![, ](url)
+            // Find the ranges: ![alt](url)
+            const fullText = state.doc.sliceString(node.from, node.to);
+            const bangBracket = node.from; // position of !
+            const altStart = node.from + 2; // after ![
+            const closeBracketIdx = fullText.indexOf(']');
+            if (closeBracketIdx > 0) {
+              const altEnd = node.from + closeBracketIdx;
+              // Hide "!["
+              if (bangBracket < altStart) {
+                decos.push(Decoration.mark({ class: 'cm-novelist-hidden' }).range(bangBracket, altStart));
+              }
+              // Style alt text as image indicator
+              if (altStart < altEnd) {
+                decos.push(Decoration.mark({ class: 'cm-novelist-image-inline' }).range(altStart, altEnd));
+              }
+              // Hide "](url)"
+              if (altEnd < node.to) {
+                decos.push(Decoration.mark({ class: 'cm-novelist-hidden' }).range(altEnd, node.to));
+              }
             }
           } else {
             // Cursor inside — show raw syntax with dimmed markers
@@ -480,9 +482,6 @@ class WysiwygPluginClass {
     }
 
     // For selection-only changes: skip rebuild if cursor stayed on the same line.
-    // Marker visibility only changes when cursor enters/leaves a node, which
-    // typically means moving to a different line. This avoids full tree walks
-    // on every character-level cursor movement within a line.
     if (update.selectionSet) {
       const newLine = update.state.doc.lineAt(update.state.selection.main.head).number;
       if (newLine !== this.lastCursorLine) {
@@ -539,72 +538,69 @@ export const linkClickPlugin = EditorView.domEventHandlers({
  * save it to .novelist/images/ and insert markdown reference.
  */
 export const imagePastePlugin = EditorView.domEventHandlers({
-  async paste(event: ClipboardEvent, view: EditorView) {
+  paste(event: ClipboardEvent, view: EditorView) {
     const items = event.clipboardData?.items;
     if (!items || !_projectDir) return false;
 
+    let hasImage = false;
     for (const item of items) {
       if (!item.type.startsWith('image/')) continue;
+      hasImage = true;
 
       event.preventDefault();
       const file = item.getAsFile();
       if (!file) continue;
 
-      // Read as data URL for immediate preview, then save to disk via IPC
       const ext = file.type.split('/')[1] || 'png';
       const timestamp = Date.now();
       const filename = `paste-${timestamp}.${ext}`;
+      const projectDir = _projectDir;
 
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
+      (async () => {
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuffer);
 
-        // Save via Tauri — dynamically import to avoid circular deps
+          const imagesDir = `${projectDir}/.novelist/images`;
+          await invoke('create_directory', {
+            parentDir: `${projectDir}/.novelist`,
+            name: 'images',
+          }).catch(() => {});
 
+          const imgPath = `${imagesDir}/${filename}`;
+          await invoke('write_file', {
+            path: imgPath,
+            content: Array.from(bytes).map(b => String.fromCharCode(b)).join(''),
+          });
 
-        // Ensure .novelist/images/ exists
-        const imagesDir = `${_projectDir}/.novelist/images`;
-        await invoke('create_directory', {
-          parentDir: `${_projectDir}/.novelist`,
-          name: 'images',
-        }).catch(() => {}); // OK if already exists
-
-        // Write the image file
-        const imgPath = `${imagesDir}/${filename}`;
-        await invoke('write_file', {
-          path: imgPath,
-          content: Array.from(bytes).map(b => String.fromCharCode(b)).join(''),
-        });
-
-        // Insert markdown at cursor
-        const pos = view.state.selection.main.head;
-        const mdText = `![pasted image](.novelist/images/${filename})`;
-        view.dispatch({
-          changes: { from: pos, insert: mdText },
-          selection: { anchor: pos + mdText.length },
-        });
-      } catch (err) {
-        console.error('[ImagePaste] Failed:', err);
-        // Fallback: insert as data URL
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result as string;
           const pos = view.state.selection.main.head;
-          const mdText = `![pasted image](${dataUrl})`;
+          const mdText = `![pasted image](.novelist/images/${filename})`;
           view.dispatch({
             changes: { from: pos, insert: mdText },
             selection: { anchor: pos + mdText.length },
           });
-        };
-        reader.readAsDataURL(file);
-      }
+        } catch (err) {
+          console.error('[ImagePaste] Failed:', err);
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            const pos = view.state.selection.main.head;
+            const mdText = `![pasted image](${dataUrl})`;
+            view.dispatch({
+              changes: { from: pos, insert: mdText },
+              selection: { anchor: pos + mdText.length },
+            });
+          };
+          reader.readAsDataURL(file);
+        }
+      })();
 
-      return true;
+      break;
     }
-    return false;
+    return hasImage || undefined;
   },
 
-  async drop(event: DragEvent, view: EditorView) {
+  drop(event: DragEvent, view: EditorView) {
     const files = event.dataTransfer?.files;
     if (!files || files.length === 0 || !_projectDir) return false;
 
@@ -613,43 +609,45 @@ export const imagePastePlugin = EditorView.domEventHandlers({
 
     event.preventDefault();
     const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
-    let insertText = '';
+    const projectDir = _projectDir;
 
-    for (const file of imageFiles) {
-      const ext = file.name.split('.').pop() || 'png';
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const timestamp = Date.now();
-      const filename = `${timestamp}-${safeName}`;
+    (async () => {
+      let insertText = '';
+      for (const file of imageFiles) {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const timestamp = Date.now();
+        const filename = `${timestamp}-${safeName}`;
 
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuffer);
 
+          const imagesDir = `${projectDir}/.novelist/images`;
+          await invoke('create_directory', {
+            parentDir: `${projectDir}/.novelist`,
+            name: 'images',
+          }).catch(() => {});
 
-        const imagesDir = `${_projectDir}/.novelist/images`;
-        await invoke('create_directory', {
-          parentDir: `${_projectDir}/.novelist`,
-          name: 'images',
-        }).catch(() => {});
+          const imgPath = `${imagesDir}/${filename}`;
+          await invoke('write_file', {
+            path: imgPath,
+            content: Array.from(bytes).map(b => String.fromCharCode(b)).join(''),
+          });
 
-        const imgPath = `${imagesDir}/${filename}`;
-        await invoke('write_file', {
-          path: imgPath,
-          content: Array.from(bytes).map(b => String.fromCharCode(b)).join(''),
-        });
-
-        insertText += `![${file.name}](.novelist/images/${filename})\n`;
-      } catch (err) {
-        console.error('[ImageDrop] Failed:', err);
+          insertText += `![${file.name}](.novelist/images/${filename})\n`;
+        } catch (err) {
+          console.error('[ImageDrop] Failed:', err);
+        }
       }
-    }
 
-    if (insertText) {
-      view.dispatch({
-        changes: { from: pos, insert: insertText },
-        selection: { anchor: pos + insertText.length },
-      });
-    }
+      if (insertText) {
+        view.dispatch({
+          changes: { from: pos, insert: insertText },
+          selection: { anchor: pos + insertText.length },
+        });
+      }
+    })();
+
     return true;
   },
 });

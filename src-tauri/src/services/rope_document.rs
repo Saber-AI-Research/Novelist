@@ -21,6 +21,7 @@ pub struct RopeDocument {
     pub rope: Rope,
     pub file_path: PathBuf,
     pub dirty: bool,
+    pub generation: u64,
 }
 
 /// Shared state holding all open Rope documents.
@@ -34,6 +35,15 @@ impl RopeDocumentState {
             docs: Mutex::new(HashMap::new()),
         }
     }
+}
+
+macro_rules! lock_docs {
+    ($state:expr) => {
+        $state
+            .docs
+            .lock()
+            .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))
+    };
 }
 
 #[derive(serde::Serialize, specta::Type)]
@@ -62,9 +72,8 @@ pub fn rope_open(
     path: String,
     state: tauri::State<'_, RopeDocumentState>,
 ) -> Result<RopeDocumentMeta, AppError> {
-    let rope = Rope::from_reader(
-        std::io::BufReader::new(std::fs::File::open(&path)?)
-    ).map_err(|e| AppError::Custom(format!("Failed to load rope: {}", e)))?;
+    let rope = Rope::from_reader(std::io::BufReader::new(std::fs::File::open(&path)?))
+        .map_err(|e| AppError::Custom(format!("Failed to load rope: {}", e)))?;
 
     let total_lines = rope.len_lines();
     let total_bytes = rope.len_bytes();
@@ -74,9 +83,14 @@ pub fn rope_open(
         rope,
         file_path: PathBuf::from(&path),
         dirty: false,
+        generation: 0,
     };
 
-    state.docs.lock().unwrap().insert(file_id.clone(), doc);
+    state
+        .docs
+        .lock()
+        .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))?
+        .insert(file_id.clone(), doc);
 
     Ok(RopeDocumentMeta {
         file_id,
@@ -95,7 +109,7 @@ pub fn rope_get_lines(
     end_line: usize,
     state: tauri::State<'_, RopeDocumentState>,
 ) -> Result<ViewportContent, AppError> {
-    let docs = state.docs.lock().unwrap();
+    let docs = lock_docs!(state)?;
     let doc = docs
         .get(&file_id)
         .ok_or_else(|| AppError::Custom(format!("Rope document not found: {}", file_id)))?;
@@ -142,7 +156,7 @@ pub fn rope_apply_edit(
     insert: String,
     state: tauri::State<'_, RopeDocumentState>,
 ) -> Result<usize, AppError> {
-    let mut docs = state.docs.lock().unwrap();
+    let mut docs = lock_docs!(state)?;
     let doc = docs
         .get_mut(&file_id)
         .ok_or_else(|| AppError::Custom(format!("Rope document not found: {}", file_id)))?;
@@ -163,6 +177,7 @@ pub fn rope_apply_edit(
     }
 
     doc.dirty = true;
+    doc.generation += 1;
     Ok(doc.rope.len_lines())
 }
 
@@ -173,8 +188,8 @@ pub async fn rope_save(
     file_id: String,
     state: tauri::State<'_, RopeDocumentState>,
 ) -> Result<(), AppError> {
-    let (text, file_path, line_count) = {
-        let docs = state.docs.lock().unwrap();
+    let (text, file_path, line_count, saved_generation) = {
+        let docs = lock_docs!(state)?;
         let doc = docs
             .get(&file_id)
             .ok_or_else(|| AppError::Custom(format!("Rope document not found: {}", file_id)))?;
@@ -182,21 +197,30 @@ pub async fn rope_save(
         let text = doc.rope.to_string();
         tracing::info!(
             "[rope_save] file={}, rope_lines={}, text_bytes={}, text_lines={}",
-            doc.file_path.display(), lines, text.len(), text.lines().count()
+            doc.file_path.display(),
+            lines,
+            text.len(),
+            text.lines().count()
         );
-        (text, doc.file_path.clone(), lines)
+        (text, doc.file_path.clone(), lines, doc.generation)
     };
 
     let temp_path = format!("{}.novelist-tmp", file_path.display());
     tokio::fs::write(&temp_path, &text).await?;
     tokio::fs::rename(&temp_path, &file_path).await?;
 
-    tracing::info!("[rope_save] DONE: wrote {} bytes, {} lines to {}", text.len(), line_count, file_path.display());
+    tracing::info!(
+        "[rope_save] DONE: wrote {} bytes, {} lines to {}",
+        text.len(),
+        line_count,
+        file_path.display()
+    );
 
-    // Mark clean
-    let mut docs = state.docs.lock().unwrap();
+    let mut docs = lock_docs!(state)?;
     if let Some(doc) = docs.get_mut(&file_id) {
-        doc.dirty = false;
+        if doc.generation == saved_generation {
+            doc.dirty = false;
+        }
     }
 
     Ok(())
@@ -221,7 +245,7 @@ pub fn rope_line_to_char(
     line: usize,
     state: tauri::State<'_, RopeDocumentState>,
 ) -> Result<usize, AppError> {
-    let docs = state.docs.lock().unwrap();
+    let docs = lock_docs!(state)?;
     let doc = docs
         .get(&file_id)
         .ok_or_else(|| AppError::Custom(format!("Rope document not found: {}", file_id)))?;
@@ -246,8 +270,9 @@ mod tests {
             file_id.clone(),
             RopeDocument {
                 rope,
-                file_path: path,
+                file_path: PathBuf::from(&file_id),
                 dirty: false,
+                generation: 0,
             },
         );
         (state, file_id)
@@ -271,10 +296,8 @@ mod tests {
         }
 
         let state = RopeDocumentState::new();
-        let rope = Rope::from_reader(
-            std::io::BufReader::new(std::fs::File::open(&path).unwrap()),
-        )
-        .unwrap();
+        let rope = Rope::from_reader(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
+            .unwrap();
         let total_lines = rope.len_lines();
         let total_bytes = rope.len_bytes();
         let file_id = path.to_string_lossy().to_string();
@@ -285,6 +308,7 @@ mod tests {
                 rope,
                 file_path: path,
                 dirty: false,
+                generation: 0,
             },
         );
 
@@ -419,11 +443,13 @@ mod tests {
             rope: Rope::from_str("doc1"),
             file_path: PathBuf::from("/tmp/doc1.md"),
             dirty: false,
+            generation: 0,
         };
         let doc2 = RopeDocument {
             rope: Rope::from_str("doc2"),
             file_path: PathBuf::from("/tmp/doc2.md"),
             dirty: false,
+            generation: 0,
         };
 
         {
@@ -445,10 +471,8 @@ mod tests {
         let path = dir.path().join("save_test.md");
         std::fs::write(&path, content).unwrap();
 
-        let rope = Rope::from_reader(
-            std::io::BufReader::new(std::fs::File::open(&path).unwrap()),
-        )
-        .unwrap();
+        let rope = Rope::from_reader(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
+            .unwrap();
 
         // Modify
         let mut rope = rope;

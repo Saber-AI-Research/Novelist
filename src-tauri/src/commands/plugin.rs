@@ -16,9 +16,7 @@ fn plugins_dir() -> PathBuf {
 /// Scan ~/.novelist/plugins/ and return info for each plugin found.
 #[tauri::command]
 #[specta::specta]
-pub async fn list_plugins(
-    state: State<'_, PluginHostState>,
-) -> Result<Vec<PluginInfo>, AppError> {
+pub async fn list_plugins(state: State<'_, PluginHostState>) -> Result<Vec<PluginInfo>, AppError> {
     let dir = plugins_dir();
     if !dir.exists() {
         return Ok(vec![]);
@@ -104,9 +102,7 @@ pub async fn unload_plugin(
     plugin_id: String,
     state: State<'_, PluginHostState>,
 ) -> Result<(), AppError> {
-    state
-        .unload_plugin(&plugin_id)
-        .map_err(AppError::Custom)?;
+    state.unload_plugin(&plugin_id).map_err(AppError::Custom)?;
     Ok(())
 }
 

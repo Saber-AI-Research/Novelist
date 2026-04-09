@@ -9,6 +9,11 @@
   let switcherOpen = $state(false);
   let recentProjects = $state<RecentProject[]>([]);
 
+  interface Props {
+    onOpenProjectFromPath?: (path: string) => void;
+  }
+  let { onOpenProjectFromPath }: Props = $props();
+
   async function toggleSwitcher() {
     if (switcherOpen) {
       switcherOpen = false;
@@ -27,7 +32,10 @@
   }
 
   async function openProjectFromPath(dirPath: string) {
-    // Prompt to save unsaved changes
+    if (onOpenProjectFromPath) {
+      onOpenProjectFromPath(dirPath);
+      return;
+    }
     if (projectStore.isOpen) {
       const dirty = tabsStore.dirtyTabs;
       if (dirty.length > 0) {
@@ -57,11 +65,11 @@
     return textExtensions.some(ext => name.toLowerCase().endsWith(ext));
   }
 
-  function sortedFiles(): FileEntry[] {
+  let sortedFiles = $derived.by(() => {
     const dirs = projectStore.files.filter(f => f.is_dir).sort((a, b) => a.name.localeCompare(b.name));
     const files = projectStore.files.filter(f => !f.is_dir).sort((a, b) => a.name.localeCompare(b.name));
     return [...dirs, ...files];
-  }
+  });
 
   // --- Refresh file list ---
   async function refreshFiles() {
@@ -76,24 +84,21 @@
   async function openDirectory() {
     const selected = await open({ directory: true, multiple: false });
     if (!selected) return;
-
     const dirPath = selected as string;
+    if (onOpenProjectFromPath) {
+      onOpenProjectFromPath(dirPath);
+      return;
+    }
     projectStore.isLoading = true;
-
     await commands.stopFileWatcher();
-
     const configResult = await commands.detectProject(dirPath);
     const config = configResult.status === 'ok' ? configResult.data : null;
-
     const filesResult = await commands.listDirectory(dirPath);
     const files = filesResult.status === 'ok' ? filesResult.data : [];
-
     projectStore.setProject(dirPath, config, files);
     tabsStore.closeAll();
-
     const name = config?.project?.name || dirPath.split('/').pop() || 'Untitled';
     commands.addRecentProject(dirPath, name);
-
     const watchResult = await commands.startFileWatcher(dirPath);
     if (watchResult.status !== 'ok') {
       console.error('Failed to start file watcher:', watchResult.error);
@@ -320,7 +325,7 @@
         </div>
       {/if}
 
-      {#each sortedFiles() as entry}
+      {#each sortedFiles as entry}
         {#if renaming && renaming.path === entry.path}
           <div class="sidebar-input-row">
             <input
@@ -332,7 +337,8 @@
             />
           </div>
         {:else if entry.is_dir}
-          <div class="sidebar-item sidebar-item-dir" oncontextmenu={(e) => handleContextMenu(e, entry)}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div role="listitem" class="sidebar-item sidebar-item-dir" oncontextmenu={(e) => handleContextMenu(e, entry)}>
             <svg class="sidebar-item-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h4l2 2h6v7H2z"/></svg>
             <span class="sidebar-item-name">{entry.name}</span>
           </div>
@@ -348,7 +354,8 @@
             <span class="sidebar-item-ext">.{entry.name.split('.').pop()}</span>
           </button>
         {:else}
-          <div class="sidebar-item sidebar-item-disabled" oncontextmenu={(e) => handleContextMenu(e, entry)}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div role="listitem" class="sidebar-item sidebar-item-disabled" oncontextmenu={(e) => handleContextMenu(e, entry)}>
             <svg class="sidebar-item-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>
             <span class="sidebar-item-name">{entry.name}</span>
           </div>
@@ -398,14 +405,17 @@
 
 <!-- Context menu -->
 {#if contextMenu}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="menu"
+    tabindex="-1"
     class="context-menu"
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
-    <button class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>Rename</button>
-    <button class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>Delete</button>
+    <button role="menuitem" class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>Rename</button>
+    <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>Delete</button>
   </div>
 {/if}
 

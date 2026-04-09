@@ -5,9 +5,7 @@ use std::path::Path;
 #[tauri::command]
 #[specta::specta]
 pub async fn detect_project(dir_path: String) -> Result<Option<ProjectConfig>, AppError> {
-    let config_path = Path::new(&dir_path)
-        .join(".novelist")
-        .join("project.toml");
+    let config_path = Path::new(&dir_path).join(".novelist").join("project.toml");
 
     if !config_path.exists() {
         return Ok(None);
@@ -21,9 +19,7 @@ pub async fn detect_project(dir_path: String) -> Result<Option<ProjectConfig>, A
 #[tauri::command]
 #[specta::specta]
 pub async fn read_project_config(dir_path: String) -> Result<ProjectConfig, AppError> {
-    let config_path = Path::new(&dir_path)
-        .join(".novelist")
-        .join("project.toml");
+    let config_path = Path::new(&dir_path).join(".novelist").join("project.toml");
 
     if !config_path.exists() {
         return Err(AppError::FileNotFound(

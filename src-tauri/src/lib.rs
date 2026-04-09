@@ -8,14 +8,18 @@ pub use error::AppError;
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
 use commands::export::{check_pandoc, export_project};
 use commands::file::{
-    create_directory, create_file, delete_item, list_directory, read_file, rename_item, write_file,
+    create_directory, create_file, delete_item, list_directory, read_file, rename_item,
+    search_in_project, write_file,
 };
 use commands::plugin::{
-    get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin, set_plugin_document_state,
-    unload_plugin,
+    get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin,
+    set_plugin_document_state, unload_plugin,
 };
 use commands::project::{detect_project, read_project_config};
 use commands::recent::{add_recent_project, get_recent_projects};
+use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
+use commands::stats::{get_writing_stats, record_writing_stats};
+use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
 use services::file_watcher::{
     register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
     unregister_open_file, FileWatcherState,
@@ -71,6 +75,17 @@ pub fn run() {
         write_draft_note,
         delete_draft_note,
         has_draft_note,
+        search_in_project,
+        create_snapshot,
+        list_snapshots,
+        restore_snapshot,
+        delete_snapshot,
+        record_writing_stats,
+        get_writing_stats,
+        get_sync_config,
+        save_sync_config,
+        sync_now,
+        test_sync_connection,
     ]);
 
     #[cfg(debug_assertions)]

@@ -25,6 +25,12 @@ import './wysiwyg.css';
  * line.  syntaxHighlighting is driven by the incremental parser and
  * applies consistently to every line regardless of viewport, keeping
  * heading heights stable for CM6's height estimation.
+ *
+ * NOTE: Even with syntaxHighlighting, the heading font-size differences
+ * (1.75em for H1, etc.) cause CM6's height estimation to drift for
+ * off-screen lines in documents with >5000 lines. For such "tall docs",
+ * use flatNovelistHighlightStyle instead, which keeps headings bold and
+ * colored but at uniform font-size, eliminating height-map drift entirely.
  */
 const novelistHighlightStyle = HighlightStyle.define([
   { tag: tags.heading, fontWeight: 'bold' },
@@ -34,6 +40,23 @@ const novelistHighlightStyle = HighlightStyle.define([
   { tag: tags.heading4, fontSize: '1.05em', fontWeight: '600', lineHeight: '1.4',  color: 'var(--novelist-heading-color)' },
   { tag: tags.heading5, fontSize: '1.0em',  fontWeight: '600', lineHeight: '1.4',  color: 'var(--novelist-text-secondary)' },
   { tag: tags.heading6, fontSize: '0.92em', fontWeight: '600', lineHeight: '1.4',  color: 'var(--novelist-text-secondary)' },
+]);
+
+/**
+ * Flat highlight style for tall documents (>5000 lines).
+ * Keeps headings bold and colored but removes font-size / line-height
+ * differences so every line has identical height.  This makes CM6's
+ * height-map estimation exact regardless of scroll position, preventing
+ * the "click after scroll jumps to wrong line" bug.
+ */
+const flatNovelistHighlightStyle = HighlightStyle.define([
+  { tag: tags.heading, fontWeight: 'bold' },
+  { tag: tags.heading1, fontWeight: '700', color: 'var(--novelist-heading-color)' },
+  { tag: tags.heading2, fontWeight: '600', color: 'var(--novelist-heading-color)' },
+  { tag: tags.heading3, fontWeight: '600', color: 'var(--novelist-heading-color)' },
+  { tag: tags.heading4, fontWeight: '600', color: 'var(--novelist-heading-color)' },
+  { tag: tags.heading5, fontWeight: '600', color: 'var(--novelist-text-secondary)' },
+  { tag: tags.heading6, fontWeight: '600', color: 'var(--novelist-text-secondary)' },
 ]);
 
 const novelistTheme = EditorView.theme({
@@ -94,6 +117,7 @@ interface EditorOptions {
   wysiwyg?: boolean;
   zen?: boolean;
   largeFile?: boolean;   // Stripped extension set (no WYSIWYG, 1-3.5MB)
+  tallDoc?: boolean;     // >5000 lines — flat heading sizes, no WYSIWYG decorations
   readOnly?: boolean;    // View-only mode (>3.5MB)
 }
 
@@ -122,7 +146,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     indentOnInput(),
     scrollPastEnd(),
     placeholder('Start writing...'),
-    syntaxHighlighting(novelistHighlightStyle),
+    syntaxHighlighting(options?.tallDoc ? flatNovelistHighlightStyle : novelistHighlightStyle),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
     markdown({ base: markdownLanguage, extensions: [GFM] }),
     imeComposingField,
@@ -139,7 +163,8 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     ]),
   ];
 
-  if (options?.wysiwyg !== false) {
+  // Disable WYSIWYG for tall docs to prevent height-map drift
+  if (options?.wysiwyg !== false && !options?.tallDoc) {
     exts.push(wysiwygPlugin);
   }
 
