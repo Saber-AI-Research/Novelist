@@ -1,6 +1,6 @@
 import { EditorState, type Extension } from '@codemirror/state';
 import {
-  EditorView, lineNumbers, highlightActiveLine, keymap, drawSelection,
+  EditorView, ViewPlugin, lineNumbers, highlightActiveLine, keymap, drawSelection,
   dropCursor, rectangularSelection, scrollPastEnd, placeholder,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
@@ -58,6 +58,231 @@ const flatNovelistHighlightStyle = HighlightStyle.define([
   { tag: tags.heading5, fontWeight: '600', color: 'var(--novelist-text-secondary)' },
   { tag: tags.heading6, fontWeight: '600', color: 'var(--novelist-text-secondary)' },
 ]);
+
+/**
+ * Diagnostic logger for scroll stabilizer debugging.
+ * Logs: (a) viewport first line, (b) cursor line, (c) mouse click position.
+ * Remove after debugging is complete.
+ */
+const scrollDiagnosticPlugin = ViewPlugin.fromClass(class {
+  private cleanup: () => void;
+
+  constructor(view: EditorView) {
+    let trackingClick = false;
+    let clickScrollTop = 0;
+
+    const onMousedown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+      if (pos === null) return;
+      const clickLine = view.state.doc.lineAt(pos).number;
+      const vpFrom = view.state.doc.lineAt(view.viewport.from).number;
+      const cursor = view.state.doc.lineAt(view.state.selection.main.head).number;
+      const scrollTop = view.scrollDOM.scrollTop;
+      const state = stabilizerStates.get(view);
+      console.log(
+        `[scroll-diag] mousedown` +
+        `  viewport_first=${vpFrom}  cursor=${cursor}  click=${clickLine}` +
+        `  scrollTop=${Math.round(scrollTop)}` +
+        `  pending=${state?.pending}  locked=${state?.locked}`
+      );
+      trackingClick = true;
+      clickScrollTop = scrollTop;
+
+      // Stop tracking after 500ms
+      setTimeout(() => { trackingClick = false; }, 500);
+    };
+
+    // Catch EVERY scroll during click processing — log stack trace for large jumps
+    const onScroll = () => {
+      if (!trackingClick) return;
+      const newTop = view.scrollDOM.scrollTop;
+      const delta = Math.abs(newTop - clickScrollTop);
+      if (delta > view.scrollDOM.clientHeight * 2) {
+        console.log(
+          `[scroll-diag] JUMP DETECTED` +
+          `  scrollTop=${Math.round(clickScrollTop)}→${Math.round(newTop)}` +
+          `  delta=${Math.round(delta)}`
+        );
+        console.trace('[scroll-diag] jump stack trace');
+        trackingClick = false;
+      }
+    };
+
+    view.scrollDOM.addEventListener('mousedown', onMousedown, true);
+    view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
+    this.cleanup = () => {
+      view.scrollDOM.removeEventListener('mousedown', onMousedown, true);
+      view.scrollDOM.removeEventListener('scroll', onScroll);
+    };
+  }
+
+  update() {}
+  destroy() { this.cleanup(); }
+});
+
+/**
+ * Scroll stabilizer: prevents click-after-scroll position jumps.
+ *
+ * Root cause: after a fast scrollbar drag, CM6's dispatch() updates the DOM
+ * (re-renders viewport, sets selection). This triggers the BROWSER's native
+ * scroll-into-view behavior, which computes a completely wrong scrollTop in
+ * CM6's virtual scrolling environment (e.g., jumping from scrollTop=3M to 67).
+ *
+ * This native scroll happens synchronously during dispatch, BEFORE CM6's
+ * measure loop / scrollHandler facet can intercept it. So the fix must
+ * operate at the DOM event level, not the CM6 extension level.
+ *
+ * Three-layer defense:
+ * 1. mousedown guard — saves scrollTop before CM6 processes the click
+ * 2. scroll listener — detects and reverts the native browser jump
+ * 3. scrollHandler facet — suppresses CM6's own scrollIntoView as backup
+ */
+
+interface StabilizerState {
+  pending: boolean;     // large scroll detected, guard next click
+  locked: boolean;      // block onScroll during restoration
+  lastScrollTop: number;
+  settleTimer: ReturnType<typeof setTimeout> | null;
+  guardScrollTop: number;  // saved scrollTop at mousedown
+  guardClickPos: number;   // saved document position at click
+  guardActive: boolean;    // mousedown guard is armed
+}
+
+const stabilizerStates = new WeakMap<EditorView, StabilizerState>();
+
+const scrollStabilizerPlugin = ViewPlugin.fromClass(class {
+  private state: StabilizerState;
+  private cleanup: () => void;
+
+  constructor(private view: EditorView) {
+    this.state = {
+      pending: false,
+      locked: false,
+      lastScrollTop: view.scrollDOM.scrollTop,
+      settleTimer: null,
+      guardScrollTop: 0,
+      guardClickPos: -1,
+      guardActive: false,
+    };
+    stabilizerStates.set(view, this.state);
+
+    // Layer 1: mousedown guard (capture phase, fires BEFORE CM6's handler)
+    // Saves scrollTop and click position so we can revert native scroll
+    // and fix the selection afterward.
+    const onMousedown = (e: MouseEvent) => {
+      if (e.button !== 0 || !this.state.pending) return;
+      if (!view.contentDOM.contains(e.target as Node)) return;
+      this.state.guardActive = true;
+      this.state.guardScrollTop = view.scrollDOM.scrollTop;
+      this.state.guardClickPos = view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? -1;
+    };
+
+    // Layer 2: scroll listener
+    const onScroll = () => {
+      // Intercept native browser scroll during click processing
+      if (this.state.guardActive && this.state.pending) {
+        const newTop = view.scrollDOM.scrollTop;
+        const delta = Math.abs(newTop - this.state.guardScrollTop);
+        if (delta > view.scrollDOM.clientHeight) {
+          // Native browser scroll — revert immediately
+          view.scrollDOM.scrollTop = this.state.guardScrollTop;
+          this.state.guardActive = false;
+          this.state.locked = true;
+          this.state.pending = false;
+
+          // Fix selection: the native scroll corrupted CM6's mouse tracking,
+          // so dispatch the correct cursor position we captured at mousedown.
+          const pos = this.state.guardClickPos;
+          if (pos >= 0) {
+            queueMicrotask(() => {
+              view.dispatch({ selection: { anchor: pos } });
+            });
+          }
+
+          // Unlock after CM6's measure loop completes
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              this.state.locked = false;
+              this.state.lastScrollTop = view.scrollDOM.scrollTop;
+            });
+          });
+          return;
+        }
+        this.state.guardActive = false;
+      }
+
+      if (this.state.locked) return;
+
+      const newTop = view.scrollDOM.scrollTop;
+      const delta = Math.abs(newTop - this.state.lastScrollTop);
+      if (delta > view.scrollDOM.clientHeight * 0.5) {
+        this.state.pending = true;
+        view.requestMeasure();
+      }
+      this.state.lastScrollTop = newTop;
+
+      if (this.state.settleTimer) clearTimeout(this.state.settleTimer);
+      this.state.settleTimer = setTimeout(() => {
+        view.requestMeasure();
+        this.state.settleTimer = null;
+      }, 150);
+    };
+
+    view.scrollDOM.addEventListener('mousedown', onMousedown, true);
+    view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
+    this.cleanup = () => {
+      view.scrollDOM.removeEventListener('mousedown', onMousedown, true);
+      view.scrollDOM.removeEventListener('scroll', onScroll);
+    };
+  }
+
+  update() {}
+
+  destroy() {
+    this.cleanup();
+    stabilizerStates.delete(this.view);
+    if (this.state.settleTimer) clearTimeout(this.state.settleTimer);
+  }
+});
+
+// Layer 3: scrollHandler — backup suppression of CM6's own scrollIntoView
+const scrollStabilizerHandler = EditorView.scrollHandler.of((view, range) => {
+  const state = stabilizerStates.get(view);
+  if (!state || !state.pending) return false;
+
+  const vp = view.viewport;
+  if (range.head < vp.from || range.head > vp.to) return false;
+
+  console.log(`[stabilizer] scrollHandler SUPPRESSING scrollIntoView`);
+  state.pending = false;
+  state.locked = true;
+
+  // Clear settleTimer to prevent delayed height-map corrections
+  if (state.settleTimer) {
+    clearTimeout(state.settleTimer);
+    state.settleTimer = null;
+  }
+
+  // Brief lock — no rAF restoration needed since native scroll was already
+  // handled by Layer 2. This just prevents height anchor correction.
+  requestAnimationFrame(() => {
+    state.locked = false;
+    state.lastScrollTop = view.scrollDOM.scrollTop;
+  });
+
+  return true;
+});
+
+/**
+ * Scroll stabilizer extensions.
+ * Add to extensions to prevent click-after-scroll position jumps.
+ */
+export const scrollStabilizer: Extension = [
+  scrollStabilizerPlugin,
+  scrollStabilizerHandler,
+  scrollDiagnosticPlugin,
+];
 
 const novelistTheme = EditorView.theme({
   '&': {
@@ -151,7 +376,13 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     markdown({ base: markdownLanguage, extensions: [GFM] }),
     imeComposingField,
     imeGuardPlugin,
-    EditorView.lineWrapping,
+    // NO lineWrapping for tall docs — same reason as large files:
+    // CM6's height estimation for unseen wrapped lines is inaccurate,
+    // especially with CJK text and bold headings. Over 5000+ lines the
+    // cumulative drift causes posAtCoords (click → position) to land on
+    // the wrong line. Fixed-width lines have uniform height, making the
+    // height-map estimation exact.
+    ...(options?.tallDoc ? [] : [EditorView.lineWrapping]),
     novelistTheme,
     keymap.of([
       ...closeBracketsKeymap,
@@ -170,6 +401,9 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
 
   // Always add link click and image paste (even without WYSIWYG)
   exts.push(linkClickPlugin, imagePastePlugin);
+
+  // Scroll stabilizer — prevents click-after-scroll jumping in long documents
+  exts.push(scrollStabilizer);
 
   if (options?.zen) {
     exts.push(typewriterPlugin, paragraphFocusPlugin);
@@ -205,6 +439,7 @@ function createLargeFileExtensions(): Extension[] {
     // after scrolling tens of thousands of lines. Fixed-width lines have
     // uniform height, making scroll position calculation exact.
     novelistTheme,
+    scrollStabilizer,
     keymap.of([
       ...defaultKeymap,
       ...historyKeymap,
