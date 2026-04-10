@@ -30,7 +30,7 @@ function saveSettings(s: EditorSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 }
 
-export type RightPanel = 'draft' | 'snapshot' | 'stats' | null;
+export type RightPanel = 'draft' | 'snapshot' | 'stats' | 'mindmap' | null;
 
 class UiStore {
   sidebarVisible = $state(true);
@@ -38,6 +38,7 @@ class UiStore {
   /** Which right panel is active. Draft/Snapshot/Stats are mutually exclusive. */
   activeRightPanel = $state<RightPanel>(null);
   sidebarWidth = $state(240);
+  splitRatio = $state(parseFloat(localStorage.getItem('novelist-split-ratio') || '0.5'));
   zenMode = $state(false);
   settingsOpen = $state(false);
   editorSettings = $state<EditorSettings>(loadSettings());
@@ -51,6 +52,7 @@ class UiStore {
   get draftVisible(): boolean { return this.activeRightPanel === 'draft'; }
   get snapshotVisible(): boolean { return this.activeRightPanel === 'snapshot'; }
   get statsVisible(): boolean { return this.activeRightPanel === 'stats'; }
+  get mindmapVisible(): boolean { return this.activeRightPanel === 'mindmap'; }
 
   toggleSidebar() { this.sidebarVisible = !this.sidebarVisible; }
   toggleOutline() { this.outlineVisible = !this.outlineVisible; }
@@ -63,8 +65,14 @@ class UiStore {
   toggleDraft() { this.toggleRightPanel('draft'); }
   toggleSnapshot() { this.toggleRightPanel('snapshot'); }
   toggleStats() { this.toggleRightPanel('stats'); }
+  toggleMindmap() { this.toggleRightPanel('mindmap'); }
   toggleZen() { this.zenMode = !this.zenMode; }
   toggleSettings() { this.settingsOpen = !this.settingsOpen; }
+
+  setSplitRatio(ratio: number) {
+    this.splitRatio = Math.max(0.2, Math.min(0.8, ratio));
+    localStorage.setItem('novelist-split-ratio', String(this.splitRatio));
+  }
 
   zoomIn() { this.setZoom(Math.min(this.zoomLevel + 0.1, 2.0)); }
   zoomOut() { this.setZoom(Math.max(this.zoomLevel - 0.1, 0.5)); }

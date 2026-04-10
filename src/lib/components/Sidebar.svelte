@@ -59,10 +59,14 @@
     if (watchResult.status !== 'ok') console.error('Failed to start file watcher:', watchResult.error);
   }
 
-  const textExtensions = ['.md', '.markdown', '.txt'];
+  const textExtensions = ['.md', '.markdown', '.txt', '.canvas'];
 
   function isTextFile(name: string): boolean {
     return textExtensions.some(ext => name.toLowerCase().endsWith(ext));
+  }
+
+  function isCanvasFile(name: string): boolean {
+    return name.toLowerCase().endsWith('.canvas');
   }
 
   let sortedFiles = $derived.by(() => {
@@ -123,6 +127,21 @@
     const regResult = await commands.registerOpenFile(entry.path);
     if (regResult.status !== 'ok') {
       console.error('Failed to register open file:', regResult.error);
+    }
+  }
+
+  async function openInOtherPane(entry: FileEntry) {
+    closeContextMenu();
+    if (entry.is_dir || !isTextFile(entry.name)) return;
+    // Determine the "other" pane
+    const currentPane = tabsStore.activePaneId;
+    const otherPane = currentPane === 'pane-1' ? 'pane-2' : 'pane-1';
+    // Ensure split is active
+    if (!tabsStore.splitActive) tabsStore.toggleSplit();
+    const result = await commands.readFile(entry.path);
+    if (result.status === 'ok') {
+      tabsStore.openTabInPane(otherPane, entry.path, result.data);
+      await commands.registerOpenFile(entry.path);
     }
   }
 
@@ -414,6 +433,7 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
+    <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>Open in Other Pane</button>
     <button role="menuitem" class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>Rename</button>
     <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>Delete</button>
   </div>

@@ -7,6 +7,7 @@
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Editor from '$lib/components/Editor.svelte';
+  import CanvasEditor from '$lib/components/CanvasEditor.svelte';
   import TabBar from '$lib/components/TabBar.svelte';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import ConflictDialog from '$lib/components/ConflictDialog.svelte';
@@ -21,6 +22,7 @@
   import StatsPanel from '$lib/components/StatsPanel.svelte';
   import ProjectSearch from '$lib/components/ProjectSearch.svelte';
   import ErrorBoundary from '$lib/components/ErrorBoundary.svelte';
+  import MindmapPanel from '$lib/components/MindmapPanel.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
@@ -60,6 +62,30 @@
   let paletteOpen = $state(false);
   let exportDialogOpen = $state(false);
   let projectSearchOpen = $state(false);
+
+  // Split divider drag state
+  let isDraggingSplit = $state(false);
+  let splitContainerRef: HTMLDivElement | undefined = $state(undefined);
+
+  function startSplitDrag(e: MouseEvent) {
+    if (!tabsStore.splitActive) return;
+    e.preventDefault();
+    isDraggingSplit = true;
+
+    const onMove = (ev: MouseEvent) => {
+      if (!splitContainerRef) return;
+      const rect = splitContainerRef.getBoundingClientRect();
+      const ratio = (ev.clientX - rect.left) / rect.width;
+      uiStore.setSplitRatio(ratio);
+    };
+    const onUp = () => {
+      isDraggingSplit = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
 
   // Recent projects cache for Cmd+Number switching (Notion-style)
   import type { RecentProject } from '$lib/ipc/commands';
@@ -243,6 +269,7 @@
     'toggle-draft': () => uiStore.toggleDraft(),
     'toggle-snapshot': () => uiStore.toggleSnapshot(),
     'toggle-stats': () => uiStore.toggleStats(),
+    'toggle-mindmap': () => uiStore.toggleMindmap(),
     'toggle-zen': () => uiStore.toggleZen(),
     'command-palette': () => { paletteOpen = !paletteOpen; },
     'toggle-split': () => tabsStore.toggleSplit(),
@@ -379,6 +406,7 @@
     commandRegistry.register({ id: 'toggle-draft', label: 'Toggle Draft Note', shortcut: shortcutsStore.get('toggle-draft'), handler: () => uiStore.toggleDraft() });
     commandRegistry.register({ id: 'toggle-snapshot', label: 'Toggle Snapshots', shortcut: shortcutsStore.get('toggle-snapshot'), handler: () => uiStore.toggleSnapshot() });
     commandRegistry.register({ id: 'toggle-stats', label: 'Toggle Writing Stats', shortcut: shortcutsStore.get('toggle-stats'), handler: () => uiStore.toggleStats() });
+    commandRegistry.register({ id: 'toggle-mindmap', label: 'Toggle Mindmap', shortcut: shortcutsStore.get('toggle-mindmap'), handler: () => uiStore.toggleMindmap() });
     commandRegistry.register({ id: 'command-palette', label: 'Command Palette', shortcut: shortcutsStore.get('command-palette'), handler: () => { paletteOpen = !paletteOpen; } });
     commandRegistry.register({ id: 'project-search', label: 'Search in Project', shortcut: 'Cmd+Shift+F', handler: () => { projectSearchOpen = !projectSearchOpen; } });
     commandRegistry.register({ id: 'toggle-split', label: 'Toggle Split View', shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
@@ -550,15 +578,15 @@
     <!-- Main editor column (contains split panes + status bar) -->
     <div class="flex flex-col flex-1 min-w-0">
       <!-- Panes row -->
-      <div class="flex flex-1 min-h-0">
+      <div class="flex flex-1 min-h-0" bind:this={splitContainerRef} style="{isDraggingSplit ? 'cursor: col-resize; user-select: none;' : ''}">
 
         <!-- Pane 1 -->
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-          class="flex flex-col flex-1 min-w-0"
+          class="flex flex-col min-w-0"
           style="
-            border-right: {tabsStore.splitActive ? '1px solid var(--novelist-border-subtle, var(--novelist-border))' : 'none'};
+            flex: {tabsStore.splitActive ? `0 0 ${uiStore.splitRatio * 100}%` : '1 1 0%'};
             {tabsStore.splitActive && tabsStore.activePaneId === 'pane-1' ? 'box-shadow: inset 0 2px 0 0 var(--novelist-accent);' : ''}
           "
           onclick={() => tabsStore.setActivePane('pane-1')}
@@ -567,7 +595,11 @@
 
           <div class="flex-1 min-h-0 overflow-hidden">
             {#if tabsStore.getPaneActiveTab('pane-1')}
-              <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
+              {#if tabsStore.getPaneActiveTab('pane-1')?.fileName.endsWith('.canvas')}
+                <ErrorBoundary><CanvasEditor paneId="pane-1" /></ErrorBoundary>
+              {:else}
+                <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
+              {/if}
             {:else}
               <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
                 <div class="text-center">
@@ -579,20 +611,33 @@
           </div>
         </div>
 
+        <!-- Resizable split divider -->
+        {#if tabsStore.splitActive}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="split-divider"
+            onmousedown={startSplitDrag}
+          ></div>
+        {/if}
+
         <!-- Pane 2 (shown when split is active) -->
         {#if tabsStore.splitActive}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
-            class="flex flex-col flex-1 min-w-0"
-            style="{tabsStore.activePaneId === 'pane-2' ? 'box-shadow: inset 0 2px 0 0 var(--novelist-accent);' : ''}"
+            class="flex flex-col min-w-0"
+            style="flex: 0 0 {(1 - uiStore.splitRatio) * 100}%; {tabsStore.activePaneId === 'pane-2' ? 'box-shadow: inset 0 2px 0 0 var(--novelist-accent);' : ''}"
             onclick={() => tabsStore.setActivePane('pane-2')}
           >
             <TabBar paneId="pane-2" />
 
             <div class="flex-1 min-h-0 overflow-hidden">
               {#if tabsStore.getPaneActiveTab('pane-2')}
-                <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
+                {#if tabsStore.getPaneActiveTab('pane-2')?.fileName.endsWith('.canvas')}
+                  <ErrorBoundary><CanvasEditor paneId="pane-2" /></ErrorBoundary>
+                {:else}
+                  <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
+                {/if}
               {:else}
                 <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
                   <div class="text-center">
@@ -633,6 +678,10 @@
             chapters={projectChapters}
           />
         </div>
+      {:else if uiStore.mindmapVisible && tabsStore.activeTab}
+        <div style="width: 400px; border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
+          <MindmapPanel onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} />
+        </div>
       {/if}
       <!-- Vertical toggle tabs -->
       <div class="flex flex-col" style="border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
@@ -671,6 +720,15 @@
         >
           STATS
         </button>
+        <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
+        <button
+          class="flex items-center justify-center cursor-pointer"
+          style="width: 20px; flex: 1; background: {uiStore.mindmapVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.mindmapVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
+          onclick={() => uiStore.toggleMindmap()}
+          title="Toggle Mindmap (Cmd+Shift+M)"
+        >
+          MAP
+        </button>
       </div>
     </div>
   </div>
@@ -700,3 +758,16 @@
 {#if projectSearchOpen}
   <ProjectSearch onClose={() => { projectSearchOpen = false; }} />
 {/if}
+
+<style>
+  .split-divider {
+    flex-shrink: 0;
+    width: 5px;
+    cursor: col-resize;
+    background: var(--novelist-border-subtle, var(--novelist-border));
+    transition: background 150ms;
+  }
+  .split-divider:hover {
+    background: var(--novelist-accent);
+  }
+</style>

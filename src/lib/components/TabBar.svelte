@@ -28,11 +28,36 @@
       tabsStore.closeTab(id);
     }
   }
+
+  function handleDragStart(e: DragEvent, id: string) {
+    e.dataTransfer?.setData('novelist/tab-id', id);
+    e.dataTransfer?.setData('novelist/source-pane', effectivePaneId);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  function handleDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types.includes('novelist/tab-id')) {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    }
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    const tabId = e.dataTransfer?.getData('novelist/tab-id');
+    const sourcePaneId = e.dataTransfer?.getData('novelist/source-pane');
+    if (tabId && sourcePaneId && sourcePaneId !== effectivePaneId) {
+      tabsStore.moveTabToPane(tabId, effectivePaneId);
+    }
+  }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="tab-bar flex items-center overflow-x-auto"
   data-tauri-drag-region
+  ondragover={handleDragOver}
+  ondrop={handleDrop}
   style="
     height: 2rem;
     background: transparent;
@@ -44,6 +69,8 @@
     <button
       class="tab-item group relative flex items-center h-full shrink-0 cursor-pointer"
       class:tab-active={tab.id === paneActiveTabId}
+      draggable="true"
+      ondragstart={(e) => handleDragStart(e, tab.id)}
       style="
         padding: 0 0.75rem;
         background: transparent;

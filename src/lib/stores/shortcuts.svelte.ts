@@ -1,11 +1,12 @@
 const SHORTCUTS_KEY = 'novelist-shortcuts';
 
 const defaultShortcuts: Record<string, string> = {
-  'toggle-sidebar': 'Cmd+B',
+  'toggle-sidebar': 'Cmd+Shift+B',
   'toggle-outline': 'Cmd+Shift+O',
   'toggle-draft': 'Cmd+Shift+D',
   'toggle-snapshot': 'Cmd+Shift+S',
   'toggle-stats': 'Cmd+Shift+T',
+  'toggle-mindmap': 'Cmd+Shift+M',
   'toggle-zen': 'F11',
   'command-palette': 'Cmd+Shift+P',
   'toggle-split': 'Cmd+\\',
@@ -16,8 +17,8 @@ const defaultShortcuts: Record<string, string> = {
   'go-to-line': 'Cmd+G',
 
   // Editor formatting shortcuts
-  'editor-bold': 'Cmd+Shift+B',
-  'editor-italic': 'Cmd+Shift+I',
+  'editor-bold': 'Cmd+B',
+  'editor-italic': 'Cmd+I',
   'editor-link': 'Cmd+K',
   'editor-heading': 'Cmd+H',
   'editor-code-inline': 'Cmd+E',
@@ -30,6 +31,7 @@ const commandLabels: Record<string, string> = {
   'toggle-draft': 'Toggle Draft Note',
   'toggle-snapshot': 'Toggle Snapshots',
   'toggle-stats': 'Toggle Writing Stats',
+  'toggle-mindmap': 'Toggle Mindmap',
   'toggle-zen': 'Toggle Zen Mode',
   'command-palette': 'Command Palette',
   'toggle-split': 'Toggle Split View',

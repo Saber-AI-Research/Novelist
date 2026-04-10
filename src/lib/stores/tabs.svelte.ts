@@ -101,8 +101,23 @@ class TabsStore {
 
   toggleSplit() {
     if (this.splitActive) {
-      this.panes = [this.panes[0]];
-      this.activePaneId = this.panes[0].id;
+      // Merge pane-2 tabs into pane-1 (skip duplicates by filePath)
+      const pane1 = this.panes[0];
+      const pane2 = this.panes.find(p => p.id === 'pane-2');
+      if (pane2) {
+        const existingPaths = new Set(pane1.tabs.map(t => t.filePath));
+        for (const tab of pane2.tabs) {
+          if (!existingPaths.has(tab.filePath)) {
+            pane1.tabs.push(tab);
+          } else {
+            // Clean up state for the duplicate tab being discarded
+            savedEditorStates.delete(tab.id);
+            editorViews.delete(tab.id);
+          }
+        }
+      }
+      this.panes = [pane1];
+      this.activePaneId = pane1.id;
       this.splitActive = false;
     } else {
       this.panes = [...this.panes, { id: 'pane-2', tabs: [], activeTabId: null }];
@@ -128,6 +143,17 @@ class TabsStore {
     return pane.tabs.find(t => t.id === pane.activeTabId);
   }
 
+  /** Find ALL tabs across ALL panes with a given file path. */
+  findAllByPath(filePath: string): TabState[] {
+    const result: TabState[] = [];
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        if (tab.filePath === filePath) result.push(tab);
+      }
+    }
+    return result;
+  }
+
   openTab(filePath: string, content: string) {
     const pane = this.activePane;
     const existing = pane.tabs.find(t => t.filePath === filePath);
@@ -137,6 +163,43 @@ class TabsStore {
     const id = crypto.randomUUID();
     pane.tabs.push({ id, filePath, fileName, content, isDirty: false, scrollPosition: 0, cursorPosition: 0, version: 0 });
     pane.activeTabId = id;
+  }
+
+  /** Open a tab in a specific pane (for "Open in Other Pane"). */
+  openTabInPane(paneId: string, filePath: string, content: string) {
+    const pane = this.panes.find(p => p.id === paneId);
+    if (!pane) return;
+    const existing = pane.tabs.find(t => t.filePath === filePath);
+    if (existing) { pane.activeTabId = existing.id; return; }
+
+    const fileName = filePath.split('/').pop() || filePath;
+    const id = crypto.randomUUID();
+    pane.tabs.push({ id, filePath, fileName, content, isDirty: false, scrollPosition: 0, cursorPosition: 0, version: 0 });
+    pane.activeTabId = id;
+  }
+
+  /** Move a tab from its current pane to a target pane. */
+  moveTabToPane(tabId: string, targetPaneId: string) {
+    let sourcePane: PaneState | undefined;
+    let tabIdx = -1;
+    for (const pane of this.panes) {
+      const idx = pane.tabs.findIndex(t => t.id === tabId);
+      if (idx !== -1) { sourcePane = pane; tabIdx = idx; break; }
+    }
+    if (!sourcePane || tabIdx === -1) return;
+    const targetPane = this.panes.find(p => p.id === targetPaneId);
+    if (!targetPane || targetPane.id === sourcePane.id) return;
+
+    const [tab] = sourcePane.tabs.splice(tabIdx, 1);
+    targetPane.tabs.push(tab);
+    targetPane.activeTabId = tab.id;
+
+    // Fix source pane's active tab
+    if (sourcePane.activeTabId === tabId) {
+      sourcePane.activeTabId = sourcePane.tabs.length > 0
+        ? sourcePane.tabs[Math.min(tabIdx, sourcePane.tabs.length - 1)].id
+        : null;
+    }
   }
 
   async closeTab(id: string) {
@@ -226,6 +289,15 @@ class TabsStore {
     for (const pane of this.panes) {
       const tab = pane.tabs.find(t => t.id === id);
       if (tab) { tab.isDirty = false; return; }
+    }
+  }
+
+  /** Mark all tabs with the given file path as saved (used after cross-pane sync saves). */
+  markSavedByPath(filePath: string) {
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        if (tab.filePath === filePath) tab.isDirty = false;
+      }
     }
   }
 

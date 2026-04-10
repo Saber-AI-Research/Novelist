@@ -3,7 +3,9 @@
   import { EditorView, keymap } from '@codemirror/view';
   import type { Extension, ChangeSet } from '@codemirror/state';
   import { createEditorExtensions, createEditorState } from '$lib/editor/setup';
-  import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState } from '$lib/stores/tabs.svelte';
+  import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState, getEditorView } from '$lib/stores/tabs.svelte';
+  import { Transaction } from '@codemirror/state';
+  import { remoteChangeAnnotation } from '$lib/editor/annotations';
   import { projectStore } from '$lib/stores/project.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { commands } from '$lib/ipc/commands';
@@ -164,7 +166,29 @@
     return EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         const t = getActiveTab();
-        if (t) tabsStore.markDirty(t.id);
+        if (t) {
+          tabsStore.markDirty(t.id);
+
+          // Cross-pane sync: propagate changes to other views of the same file
+          const isRemote = update.transactions.some(tr => tr.annotation(remoteChangeAnnotation));
+          if (!isRemote) {
+            const otherTabs = tabsStore.findAllByPath(t.filePath);
+            for (const other of otherTabs) {
+              if (other.id === t.id) continue;
+              const otherView = getEditorView(other.id);
+              if (otherView) {
+                otherView.dispatch({
+                  changes: update.changes,
+                  annotations: [
+                    remoteChangeAnnotation.of(true),
+                    Transaction.addToHistory.of(false),
+                  ],
+                });
+                tabsStore.markDirty(other.id);
+              }
+            }
+          }
+        }
         scheduleStatsUpdate(update.state);
         // Start session tracking on first keystroke
         if (sessionStartWordCount === null) {
@@ -187,7 +211,7 @@
     const result = await commands.writeFile(tab.filePath, content);
     if (result.status === 'ok') {
       tabsStore.updateContent(tab.id, content);
-      tabsStore.markSaved(tab.id);
+      tabsStore.markSavedByPath(tab.filePath);
       flushWritingStats();
     } else {
       console.error('[Save] Failed:', result.error);
