@@ -5,6 +5,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { themeToCSS } from '$lib/themes';
+  import { t } from '$lib/i18n';
 
   interface Props { onClose: () => void; }
   let { onClose }: Props = $props();
@@ -39,7 +40,7 @@
       .map(f => f.path);
 
     if (files.length === 0) {
-      message = 'No markdown files to export';
+      message = t('export.noFiles');
       status = 'error';
       return;
     }
@@ -116,7 +117,7 @@ img { max-width: 100%; border-radius: 6px; }`;
     onclick={(e) => e.stopPropagation()}
   >
     <h2 id="export-dialog-title" class="text-base font-semibold mb-4">
-      Export Project
+      {t('export.title')}
     </h2>
 
     <!-- Pandoc status -->
@@ -128,14 +129,14 @@ img { max-width: 100%; border-radius: 6px; }`;
       "
     >
       {#if pandocAvailable}
-        <span style="color: #4ade80;">&#x2713; Pandoc available</span>
+        <span style="color: #4ade80;">&#x2713; {t('export.pandocAvailable')}</span>
         {#if pandocVersion}
           <span style="color: var(--novelist-text-secondary);"> &mdash; {pandocVersion}</span>
         {/if}
       {:else}
-        <span style="color: #f87171;">&#x2717; Pandoc not found</span>
+        <span style="color: #f87171;">&#x2717; {t('export.pandocNotFound')}</span>
         <p class="mt-1" style="color: var(--novelist-text-secondary);">
-          Install pandoc from <strong>pandoc.org/installing</strong> to enable export.
+          {t('export.pandocInstall')}
         </p>
       {/if}
     </div>
@@ -143,7 +144,7 @@ img { max-width: 100%; border-radius: 6px; }`;
     <!-- Format selector -->
     <div class="mb-5">
       <p class="block text-sm mb-2" style="color: var(--novelist-text-secondary);">
-        Export format
+        {t('export.format')}
       </p>
       <div class="flex gap-2 flex-wrap">
         {#each formats as f}
@@ -166,7 +167,7 @@ img { max-width: 100%; border-radius: 6px; }`;
     {#if format === 'html' || format === 'epub'}
       <label class="flex items-center gap-2 mb-4 text-sm cursor-pointer" style="color: var(--novelist-text-secondary);">
         <input type="checkbox" bind:checked={includeTheme} class="cursor-pointer" />
-        Include current theme styling ({uiStore.currentTheme.name})
+        {t('export.includeTheme')} ({uiStore.currentTheme.name})
       </label>
     {/if}
 
@@ -174,7 +175,7 @@ img { max-width: 100%; border-radius: 6px; }`;
     {#if status === 'exporting'}
       <div class="mb-4">
         <p class="text-sm mb-2" style="color: var(--novelist-text-secondary);">
-          Exporting {exportFileCount} {exportFileCount === 1 ? 'file' : 'files'}&hellip;
+          {t('export.exporting', { count: exportFileCount })}&hellip;
         </p>
         <div class="export-progress-track">
           <div class="export-progress-bar"></div>
@@ -201,7 +202,7 @@ img { max-width: 100%; border-radius: 6px; }`;
         "
         onclick={onClose}
       >
-        Close
+        {t('export.close')}
       </button>
       <button
         class="px-4 py-2 text-sm rounded cursor-pointer hover:opacity-80"
@@ -214,7 +215,7 @@ img { max-width: 100%; border-radius: 6px; }`;
         disabled={!pandocAvailable || status === 'exporting'}
         onclick={doExport}
       >
-        {status === 'exporting' ? 'Exporting...' : 'Export'}
+        {status === 'exporting' ? t('export.exportingButton') : t('export.export')}
       </button>
     </div>
   </div>

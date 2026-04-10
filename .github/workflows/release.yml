@@ -24,14 +24,13 @@ jobs:
       - name: Build Tauri app
         run: pnpm tauri build
 
-      - name: Create DMG (fallback)
+      - name: Create styled DMG
         if: always()
         run: |
+          APP="src-tauri/target/release/bundle/macos/Novelist.app"
           DMG="src-tauri/target/release/bundle/dmg/Novelist_${{ github.ref_name }}_aarch64.dmg"
           if [ ! -f "$DMG" ]; then
-            hdiutil create -volname "Novelist" \
-              -srcfolder "src-tauri/target/release/bundle/macos/Novelist.app" \
-              -ov -format UDZO "$DMG"
+            bash scripts/create-dmg.sh "$APP" "$DMG"
           fi
 
       - name: Upload artifacts

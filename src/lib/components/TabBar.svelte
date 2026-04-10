@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     paneId?: string;
@@ -99,7 +100,7 @@
             opacity: 0.7;
             flex-shrink: 0;
           "
-          title="Unsaved changes"
+          title={t('tab.unsaved')}
         ></span>
       {/if}
       <span>{tab.fileName}</span>
@@ -119,7 +120,7 @@
         "
         onclick={(e: MouseEvent) => handleCloseTab(e, tab.id)}
         onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); tabsStore.closeTab(tab.id); } }}
-        title="Close tab"
+        title={t('tab.close')}
       >
         &#x2715;
       </span>

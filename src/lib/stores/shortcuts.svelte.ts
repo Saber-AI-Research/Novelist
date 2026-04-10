@@ -1,4 +1,30 @@
+import { en } from '$lib/i18n/locales/en';
+
 const SHORTCUTS_KEY = 'novelist-shortcuts';
+
+/** Map commandId → i18n key for labels. */
+const commandI18nKeys: Record<string, string> = {
+  'toggle-sidebar': 'command.toggleSidebar',
+  'toggle-outline': 'command.toggleOutline',
+  'toggle-draft': 'command.toggleDraft',
+  'toggle-snapshot': 'command.toggleSnapshot',
+  'toggle-stats': 'command.toggleStats',
+  'toggle-mindmap': 'command.toggleMindmap',
+  'toggle-zen': 'command.toggleZen',
+  'command-palette': 'command.commandPalette',
+  'toggle-split': 'command.toggleSplit',
+  'new-file': 'command.newFile',
+  'export-project': 'command.exportProject',
+  'close-tab': 'command.closeTab',
+  'open-settings': 'command.openSettings',
+  'go-to-line': 'command.goToLine',
+  'editor-bold': 'command.bold',
+  'editor-italic': 'command.italic',
+  'editor-link': 'command.insertLink',
+  'editor-heading': 'command.toggleHeading',
+  'editor-code-inline': 'command.inlineCode',
+  'editor-strikethrough': 'command.strikethrough',
+};
 
 const defaultShortcuts: Record<string, string> = {
   'toggle-sidebar': 'Cmd+Shift+B',
@@ -23,31 +49,6 @@ const defaultShortcuts: Record<string, string> = {
   'editor-heading': 'Cmd+H',
   'editor-code-inline': 'Cmd+E',
   'editor-strikethrough': 'Cmd+Shift+X',
-};
-
-const commandLabels: Record<string, string> = {
-  'toggle-sidebar': 'Toggle Sidebar',
-  'toggle-outline': 'Toggle Outline',
-  'toggle-draft': 'Toggle Draft Note',
-  'toggle-snapshot': 'Toggle Snapshots',
-  'toggle-stats': 'Toggle Writing Stats',
-  'toggle-mindmap': 'Toggle Mindmap',
-  'toggle-zen': 'Toggle Zen Mode',
-  'command-palette': 'Command Palette',
-  'toggle-split': 'Toggle Split View',
-  'new-file': 'New File',
-  'export-project': 'Export Project',
-  'close-tab': 'Close Tab',
-  'open-settings': 'Open Settings',
-  'go-to-line': 'Go to Line',
-
-  // Editor formatting
-  'editor-bold': 'Bold',
-  'editor-italic': 'Italic',
-  'editor-link': 'Insert Link',
-  'editor-heading': 'Toggle Heading',
-  'editor-code-inline': 'Inline Code',
-  'editor-strikethrough': 'Strikethrough',
 };
 
 /** Command IDs that are editor-formatting actions (used to group in Settings). */
@@ -101,6 +102,31 @@ export function matchesShortcut(e: KeyboardEvent, shortcut: string): boolean {
   return eventKey.toLowerCase() === key.toLowerCase();
 }
 
+// Lazy reference to the i18n `t` function. We can't import it eagerly because
+// the i18n module uses `$state` which only exists in the Svelte compile context.
+let _t: ((key: string) => string) | null = null;
+
+/** Resolve a command label — uses i18n `t()` if available, falls back to English. */
+function resolveLabel(i18nKey: string): string {
+  if (!_t) {
+    try {
+      // Vite supports dynamic import() but this getter is synchronous.
+      // Instead, we rely on the eager import of `en` as fallback.
+      // The Svelte compiler will have loaded i18n by the time components render.
+      const val = en[i18nKey];
+      return typeof val === 'string' ? val : i18nKey.split('.').pop() ?? i18nKey;
+    } catch {
+      return i18nKey.split('.').pop() ?? i18nKey;
+    }
+  }
+  return _t(i18nKey);
+}
+
+/** Called by components to wire up the live i18n function. */
+export function initShortcutsI18n(tFn: (key: string) => string) {
+  _t = tFn;
+}
+
 class ShortcutsStore {
   overrides = $state<Record<string, string>>(loadOverrides());
 
@@ -129,7 +155,11 @@ class ShortcutsStore {
   }
 
   get labels(): Record<string, string> {
-    return commandLabels;
+    const result: Record<string, string> = {};
+    for (const id of Object.keys(commandI18nKeys)) {
+      result[id] = resolveLabel(commandI18nKeys[id]);
+    }
+    return result;
   }
 
   get allCommandIds(): string[] {

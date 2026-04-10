@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HeadingItem } from '$lib/editor/outline';
+  import { t } from '$lib/i18n';
 
   interface Props {
     headings: HeadingItem[];
@@ -62,11 +63,11 @@
 
 <div class="outline-panel">
   <div class="outline-header">
-    <span>OUTLINE</span>
+    <span>{t('outline.title')}</span>
   </div>
 
   {#if headings.length === 0}
-    <div class="outline-empty">No headings found</div>
+    <div class="outline-empty">{t('outline.empty')}</div>
   {:else}
     <ul class="outline-list">
       {#each headings as heading, i}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from '$lib/i18n';
+
   interface Props {
     filePath: string;
     onKeepMine: () => void;
@@ -24,12 +26,11 @@
     style="background: var(--novelist-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
   >
     <h2 id="conflict-dialog-title" class="text-base font-semibold mb-3">
-      External Change Detected
+      {t('conflict.title')}
     </h2>
 
     <p class="text-sm mb-5" style="color: var(--novelist-text-secondary);">
-      File <strong style="color: var(--novelist-text);">{fileName}</strong> was changed externally.
-      You have unsaved changes. What would you like to do?
+      {t('conflict.message', { fileName })}
     </p>
 
     <div class="flex gap-3 justify-end">
@@ -38,14 +39,14 @@
         style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
         onclick={() => { onKeepMine(); onClose(); }}
       >
-        Keep Mine
+        {t('conflict.keepMine')}
       </button>
       <button
         class="px-4 py-2 text-sm rounded cursor-pointer hover:opacity-80"
         style="background: var(--novelist-accent); color: #fff;"
         onclick={() => { onLoadTheirs(); onClose(); }}
       >
-        Load Theirs
+        {t('conflict.loadTheirs')}
       </button>
     </div>
   </div>

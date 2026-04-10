@@ -4,6 +4,7 @@
   import type { FileEntry, RecentProject } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { t } from '$lib/i18n';
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
@@ -40,7 +41,7 @@
       const dirty = tabsStore.dirtyTabs;
       if (dirty.length > 0) {
         const names = dirty.map(t => t.fileName).join(', ');
-        if (confirm(`Unsaved changes in: ${names}\n\nSave before switching?`)) {
+        if (confirm(t('dialog.unsavedBeforeClose', { names }))) {
           await tabsStore.saveAllDirty();
         }
       }
@@ -290,7 +291,7 @@
 
   async function handleDelete(entry: FileEntry) {
     closeContextMenu();
-    const confirmed = confirm(`Delete "${entry.name}"? This cannot be undone.`);
+    const confirmed = confirm(t('sidebar.deleteConfirm', { name: entry.name }));
     if (!confirmed) return;
 
     // Close any open tab for this file
@@ -317,15 +318,15 @@
     {#if projectStore.isOpen}
       <span class="sidebar-project-name">{projectStore.name}</span>
       <div class="sidebar-actions">
-        <button class="sidebar-icon-btn" onclick={startCreateFile} title="New File (Cmd+N)">
+        <button class="sidebar-icon-btn" onclick={startCreateFile} title={t('sidebar.newFile')}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v10M3 8h10"/></svg>
         </button>
-        <button class="sidebar-icon-btn" onclick={startCreateFolder} title="New Folder">
+        <button class="sidebar-icon-btn" onclick={startCreateFolder} title={t('sidebar.newFolder')}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 5h4l2 2h6v6H2z"/></svg>
         </button>
       </div>
     {:else}
-      <button class="sidebar-open-btn" onclick={openDirectory}>Open Folder</button>
+      <button class="sidebar-open-btn" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
     {/if}
   </div>
 
@@ -339,7 +340,7 @@
             onkeydown={handleCreateKeydown}
             onblur={confirmCreate}
             class="sidebar-input"
-            placeholder={creatingFolder ? 'Folder name...' : 'File name...'}
+            placeholder={creatingFolder ? t('sidebar.folderNamePlaceholder') : t('sidebar.fileNamePlaceholder')}
           />
         </div>
       {/if}
@@ -384,7 +385,7 @@
 
     <!-- Bottom bar: Notion-style project switcher -->
     <div class="sidebar-bottom" style="position: relative;">
-      <button class="sidebar-switch-btn" onclick={toggleSwitcher} title="Switch Project (Cmd+1~9)">
+      <button class="sidebar-switch-btn" onclick={toggleSwitcher} title={t('sidebar.switchProject')}>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h4l2 2h6v7H2z"/></svg>
         <span>{projectStore.dirPath?.split('/').pop() ?? 'Project'}</span>
         <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: auto; opacity: 0.5;"><path d="{switcherOpen ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4'}"/></svg>
@@ -392,7 +393,7 @@
 
       {#if switcherOpen}
         <div class="project-switcher">
-          <div class="project-switcher-header">Projects</div>
+          <div class="project-switcher-header">{t('sidebar.projects')}</div>
           {#each recentProjects.slice(0, 9) as project, i}
             <button
               class="project-switcher-item"
@@ -409,15 +410,15 @@
           <div class="project-switcher-divider"></div>
           <button class="project-switcher-item" onclick={() => { switcherOpen = false; openDirectory(); }}>
             <span class="project-switcher-num">+</span>
-            <span class="project-switcher-name">Open Folder...</span>
+            <span class="project-switcher-name">{t('sidebar.openFolderEllipsis')}</span>
           </button>
         </div>
       {/if}
     </div>
   {:else}
     <div class="sidebar-empty">
-      <p>No project open</p>
-      <button class="sidebar-open-btn" onclick={openDirectory}>Open Folder</button>
+      <p>{t('sidebar.noProject')}</p>
+      <button class="sidebar-open-btn" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
     </div>
   {/if}
 </aside>
@@ -433,9 +434,9 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
-    <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>Open in Other Pane</button>
-    <button role="menuitem" class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>Rename</button>
-    <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>Delete</button>
+    <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
+    <button role="menuitem" class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>{t('sidebar.rename')}</button>
+    <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>{t('sidebar.delete')}</button>
   </div>
 {/if}
 

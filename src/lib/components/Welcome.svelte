@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { commands } from '$lib/ipc/commands';
   import type { RecentProject } from '$lib/ipc/commands';
+  import { t } from '$lib/i18n';
 
   interface Props {
     onOpenDirectory: () => void;
@@ -44,13 +45,13 @@
 <div class="welcome-root" data-tauri-drag-region>
   <div class="welcome-card">
     <div class="welcome-header">
-      <h1 class="welcome-title">Novelist</h1>
-      <p class="welcome-subtitle">A desktop writing app for novelists</p>
+      <h1 class="welcome-title">{t('app.name')}</h1>
+      <p class="welcome-subtitle">{t('app.subtitle')}</p>
     </div>
 
     {#if recentProjects.length > 0}
       <div class="recent-section">
-        <h2 class="recent-heading">Recent Projects</h2>
+        <h2 class="recent-heading">{t('welcome.recentProjects')}</h2>
         <ul class="recent-list">
           {#each recentProjects as project}
             <li>
@@ -67,13 +68,13 @@
       </div>
     {:else}
       <div class="empty-state">
-        <p>No recent projects yet.</p>
+        <p>{t('welcome.noRecent')}</p>
       </div>
     {/if}
 
     <div class="welcome-actions">
       <button class="open-btn" onclick={onOpenDirectory}>
-        Open Directory...
+        {t('welcome.openDirectory')}
       </button>
     </div>
   </div>

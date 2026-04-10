@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { t } from '$lib/i18n';
 
   import type { Snippet } from 'svelte';
 
@@ -39,12 +40,12 @@
 
   {#if hudVisible}
     <div class="zen-hud">
-      {wordCount.toLocaleString()} words
+      {t('zen.words', { count: wordCount.toLocaleString() })}
     </div>
   {/if}
 
   <button class="zen-exit-btn" onclick={() => uiStore.toggleZen()}>
-    Exit Zen Mode (Esc)
+    {t('zen.exit')}
   </button>
 </div>
 

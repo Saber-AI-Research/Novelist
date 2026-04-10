@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { t } from '$lib/i18n';
 
   interface SnapshotMeta {
     id: string;
@@ -97,7 +98,7 @@
   <div class="shrink-0 px-3 py-1.5"
     style="border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border)); background: var(--novelist-bg);">
     <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--novelist-text-secondary); font-weight: 600;">
-      Snapshots
+      {t('snapshot.title')}
     </span>
   </div>
 
@@ -107,7 +108,7 @@
       <input
         type="text"
         bind:value={newName}
-        placeholder="Snapshot name..."
+        placeholder={t('snapshot.namePlaceholder')}
         class="flex-1 min-w-0"
         style="
           padding: 4px 8px;
@@ -135,7 +136,7 @@
           white-space: nowrap;
         "
       >
-        Create
+        {t('snapshot.create')}
       </button>
     </div>
     {#if error}
@@ -147,7 +148,7 @@
   <div class="flex-1 min-h-0 overflow-y-auto">
     {#if snapshots.length === 0}
       <div class="p-3" style="font-size: 12px; color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-align: center;">
-        No snapshots yet
+        {t('snapshot.empty')}
       </div>
     {:else}
       {#each snapshots as snap (snap.id)}
@@ -161,21 +162,21 @@
 
           {#if confirmRestoreId === snap.id}
             <div style="margin-top: 6px; font-size: 11px; color: var(--novelist-text-secondary);">
-              Restore will overwrite current files. Continue?
+              {t('snapshot.restoreConfirm')}
               <div class="flex gap-1 mt-1">
                 <button
                   class="cursor-pointer"
                   style="padding: 2px 8px; font-size: 10px; border: 1px solid #e55; border-radius: 3px; background: #e55; color: white;"
                   onclick={() => handleRestore(snap.id)}
                 >
-                  Yes, Restore
+                  {t('snapshot.yesRestore')}
                 </button>
                 <button
                   class="cursor-pointer"
                   style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary);"
                   onclick={() => { confirmRestoreId = null; }}
                 >
-                  Cancel
+                  {t('snapshot.cancel')}
                 </button>
               </div>
             </div>
@@ -186,14 +187,14 @@
                 style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary); transition: color 100ms;"
                 onclick={() => { confirmRestoreId = snap.id; }}
               >
-                Restore
+                {t('snapshot.restore')}
               </button>
               <button
                 class="cursor-pointer"
                 style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary); transition: color 100ms;"
                 onclick={() => handleDelete(snap.id)}
               >
-                Delete
+                {t('snapshot.delete')}
               </button>
             </div>
           {/if}

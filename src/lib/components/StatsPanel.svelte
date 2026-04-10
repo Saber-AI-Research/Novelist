@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { t } from '$lib/i18n';
 
   interface Props {
     projectDir: string;
@@ -73,7 +74,7 @@
 
   function dayLabel(dateStr: string): string {
     const d = new Date(dateStr + 'T12:00:00');
-    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] ?? '';
+    return t(`stats.day.${d.getDay()}`);
   }
 
   function formatMinutes(m: number): string {
@@ -93,13 +94,13 @@
   <div class="shrink-0 flex items-center justify-between px-3 py-1.5"
     style="border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
     <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--novelist-text-secondary); font-weight: 600;">
-      Stats
+      {t('stats.title')}
     </span>
   </div>
 
   {#if loading}
     <div class="flex-1 flex items-center justify-center">
-      <span style="font-size: 12px; color: var(--novelist-text-secondary);">Loading...</span>
+      <span style="font-size: 12px; color: var(--novelist-text-secondary);">{t('stats.loading')}</span>
     </div>
   {:else if stats}
     <div class="flex-1 overflow-y-auto px-3 py-3" style="font-size: 13px;">
@@ -107,13 +108,13 @@
       <!-- Today's Progress -->
       <div class="mb-4">
         <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--novelist-text-secondary); margin-bottom: 8px;">
-          Today
+          {t('stats.today')}
         </div>
         <div class="flex items-end gap-2 mb-2">
           <span style="font-size: 28px; font-weight: 700; line-height: 1; color: var(--novelist-accent);">
             {stats.today_words > 0 ? '+' : ''}{stats.today_words}
           </span>
-          <span style="font-size: 12px; color: var(--novelist-text-secondary); margin-bottom: 2px;">words</span>
+          <span style="font-size: 12px; color: var(--novelist-text-secondary); margin-bottom: 2px;">{t('stats.words')}</span>
         </div>
 
         <!-- Progress bar -->
@@ -121,7 +122,7 @@
           <div style="height: 100%; width: {goalPercent}%; background: var(--novelist-accent); border-radius: 3px; transition: width 300ms;"></div>
         </div>
         <div class="flex justify-between" style="font-size: 10px; color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
-          <span>{goalPercent}% of {dailyGoal} goal</span>
+          <span>{t('stats.goalProgress', { percent: goalPercent, goal: dailyGoal })}</span>
           <span>{formatMinutes(Number(stats.today_minutes))}</span>
         </div>
       </div>
@@ -130,7 +131,7 @@
       {#if stats.streak_days > 0}
         <div class="mb-4 flex items-center gap-1.5" style="font-size: 12px;">
           <span style="display: inline-block; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--novelist-accent) 15%, transparent); color: var(--novelist-accent); font-weight: 600; font-size: 11px;">
-            {stats.streak_days}-day streak
+            {t('stats.streak', { days: stats.streak_days })}
           </span>
         </div>
       {/if}
@@ -138,7 +139,7 @@
       <!-- 7-day Chart -->
       <div class="mb-4">
         <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--novelist-text-secondary); margin-bottom: 8px;">
-          Last 7 Days
+          {t('stats.last7Days')}
         </div>
         <div class="flex items-end gap-1" style="height: 80px;">
           {#each last7 as day}
@@ -160,19 +161,19 @@
       <!-- Project Total -->
       <div class="mb-4">
         <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--novelist-text-secondary); margin-bottom: 4px;">
-          Project Total
+          {t('stats.projectTotal')}
         </div>
         <span style="font-size: 18px; font-weight: 600;">
           {stats.total_words.toLocaleString()}
         </span>
-        <span style="font-size: 12px; color: var(--novelist-text-secondary);"> words</span>
+        <span style="font-size: 12px; color: var(--novelist-text-secondary);"> {t('stats.words')}</span>
       </div>
 
       <!-- Chapter Breakdown -->
       {#if sortedChapters.length > 0}
         <div>
           <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--novelist-text-secondary); margin-bottom: 8px;">
-            Chapters
+            {t('stats.chapters')}
           </div>
           <div style="font-size: 12px;">
             {#each sortedChapters as ch}

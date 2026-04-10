@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     children: Snippet;
@@ -23,12 +24,12 @@
   {#if error}
     <div class="error-boundary">
       <div class="error-boundary-content">
-        <h2 class="error-boundary-title">Something went wrong</h2>
-        <p class="error-boundary-message">The editor encountered an unexpected error.</p>
+        <h2 class="error-boundary-title">{t('error.title')}</h2>
+        <p class="error-boundary-message">{t('error.message')}</p>
         <pre class="error-boundary-detail">{error.message}</pre>
         <div class="error-boundary-actions">
-          <button class="error-boundary-btn secondary" onclick={handleReset}>Try Again</button>
-          <button class="error-boundary-btn primary" onclick={handleReload}>Reload</button>
+          <button class="error-boundary-btn secondary" onclick={handleReset}>{t('error.tryAgain')}</button>
+          <button class="error-boundary-btn primary" onclick={handleReload}>{t('error.reload')}</button>
         </div>
       </div>
     </div>

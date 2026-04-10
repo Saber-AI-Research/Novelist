@@ -29,7 +29,8 @@
   import { commands } from '$lib/ipc/commands';
   import { moveSection } from '$lib/editor/section-move';
   import { commandRegistry } from '$lib/stores/commands.svelte';
-  import { shortcutsStore, matchesShortcut } from '$lib/stores/shortcuts.svelte';
+  import { shortcutsStore, matchesShortcut, initShortcutsI18n } from '$lib/stores/shortcuts.svelte';
+  import { t } from '$lib/i18n';
   import type { HeadingItem } from '$lib/editor/outline';
   import { EditorView } from '@codemirror/view';
 
@@ -95,11 +96,11 @@
   $effect(() => {
     const tab = tabsStore.activeTab;
     const project = projectStore.name;
-    let title = 'Novelist';
+    let title = t('app.name');
     if (tab) {
-      title = `${tab.isDirty ? '● ' : ''}${tab.fileName} — ${project} — Novelist`;
+      title = `${tab.isDirty ? '● ' : ''}${tab.fileName} — ${project} — ${t('app.name')}`;
     } else if (projectStore.isOpen) {
-      title = `${project} — Novelist`;
+      title = `${project} — ${t('app.name')}`;
     }
     getCurrentWindow().setTitle(title);
   });
@@ -121,9 +122,7 @@
     if (dirty.length === 0) return true;
 
     const names = dirty.map(t => t.fileName).join(', ');
-    const choice = confirm(
-      `You have unsaved changes in: ${names}\n\nClick "OK" to save, or "Cancel" to discard changes.`
-    );
+    const choice = confirm(t('dialog.unsavedInFiles', { names }));
     if (choice) {
       await tabsStore.saveAllDirty();
     }
@@ -364,7 +363,7 @@
   }
 
   function handleGoToLine() {
-    const input = prompt('Go to line:');
+    const input = prompt(t('gotoline.prompt'));
     if (!input) return;
     const line = parseInt(input, 10);
     if (isNaN(line) || line < 1) return;
@@ -396,38 +395,41 @@
   }
 
   onMount(() => {
+    // Wire up i18n for shortcuts store (needs Svelte compile context)
+    initShortcutsI18n(t);
+
     // Load recent projects for Cmd+Number switching
     refreshRecentProjects();
 
-    commandRegistry.register({ id: 'new-window', label: 'New Window', shortcut: 'Cmd+Shift+N', handler: () => openNewWindow() });
-    commandRegistry.register({ id: 'toggle-sidebar', label: 'Toggle Sidebar', shortcut: shortcutsStore.get('toggle-sidebar'), handler: () => uiStore.toggleSidebar() });
-    commandRegistry.register({ id: 'toggle-outline', label: 'Toggle Outline', shortcut: shortcutsStore.get('toggle-outline'), handler: () => uiStore.toggleOutline() });
-    commandRegistry.register({ id: 'toggle-zen', label: 'Toggle Zen Mode', shortcut: shortcutsStore.get('toggle-zen'), handler: () => uiStore.toggleZen() });
-    commandRegistry.register({ id: 'toggle-draft', label: 'Toggle Draft Note', shortcut: shortcutsStore.get('toggle-draft'), handler: () => uiStore.toggleDraft() });
-    commandRegistry.register({ id: 'toggle-snapshot', label: 'Toggle Snapshots', shortcut: shortcutsStore.get('toggle-snapshot'), handler: () => uiStore.toggleSnapshot() });
-    commandRegistry.register({ id: 'toggle-stats', label: 'Toggle Writing Stats', shortcut: shortcutsStore.get('toggle-stats'), handler: () => uiStore.toggleStats() });
-    commandRegistry.register({ id: 'toggle-mindmap', label: 'Toggle Mindmap', shortcut: shortcutsStore.get('toggle-mindmap'), handler: () => uiStore.toggleMindmap() });
-    commandRegistry.register({ id: 'command-palette', label: 'Command Palette', shortcut: shortcutsStore.get('command-palette'), handler: () => { paletteOpen = !paletteOpen; } });
-    commandRegistry.register({ id: 'project-search', label: 'Search in Project', shortcut: 'Cmd+Shift+F', handler: () => { projectSearchOpen = !projectSearchOpen; } });
-    commandRegistry.register({ id: 'toggle-split', label: 'Toggle Split View', shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
-    commandRegistry.register({ id: 'new-file', label: 'New File', shortcut: shortcutsStore.get('new-file'), handler: () => handleNewFile() });
-    commandRegistry.register({ id: 'export-project', label: 'Export Project', shortcut: shortcutsStore.get('export-project'), handler: () => { exportDialogOpen = true; } });
-    commandRegistry.register({ id: 'close-tab', label: 'Close Tab', shortcut: shortcutsStore.get('close-tab'), handler: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); } });
-    commandRegistry.register({ id: 'open-settings', label: 'Open Settings', shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
-    commandRegistry.register({ id: 'go-to-line', label: 'Go to Line', shortcut: shortcutsStore.get('go-to-line'), handler: () => handleGoToLine() });
+    commandRegistry.register({ id: 'new-window', label: t('command.newWindow'), shortcut: 'Cmd+Shift+N', handler: () => openNewWindow() });
+    commandRegistry.register({ id: 'toggle-sidebar', label: t('command.toggleSidebar'), shortcut: shortcutsStore.get('toggle-sidebar'), handler: () => uiStore.toggleSidebar() });
+    commandRegistry.register({ id: 'toggle-outline', label: t('command.toggleOutline'), shortcut: shortcutsStore.get('toggle-outline'), handler: () => uiStore.toggleOutline() });
+    commandRegistry.register({ id: 'toggle-zen', label: t('command.toggleZen'), shortcut: shortcutsStore.get('toggle-zen'), handler: () => uiStore.toggleZen() });
+    commandRegistry.register({ id: 'toggle-draft', label: t('command.toggleDraft'), shortcut: shortcutsStore.get('toggle-draft'), handler: () => uiStore.toggleDraft() });
+    commandRegistry.register({ id: 'toggle-snapshot', label: t('command.toggleSnapshot'), shortcut: shortcutsStore.get('toggle-snapshot'), handler: () => uiStore.toggleSnapshot() });
+    commandRegistry.register({ id: 'toggle-stats', label: t('command.toggleStats'), shortcut: shortcutsStore.get('toggle-stats'), handler: () => uiStore.toggleStats() });
+    commandRegistry.register({ id: 'toggle-mindmap', label: t('command.toggleMindmap'), shortcut: shortcutsStore.get('toggle-mindmap'), handler: () => uiStore.toggleMindmap() });
+    commandRegistry.register({ id: 'command-palette', label: t('command.commandPalette'), shortcut: shortcutsStore.get('command-palette'), handler: () => { paletteOpen = !paletteOpen; } });
+    commandRegistry.register({ id: 'project-search', label: t('command.projectSearch'), shortcut: 'Cmd+Shift+F', handler: () => { projectSearchOpen = !projectSearchOpen; } });
+    commandRegistry.register({ id: 'toggle-split', label: t('command.toggleSplit'), shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
+    commandRegistry.register({ id: 'new-file', label: t('command.newFile'), shortcut: shortcutsStore.get('new-file'), handler: () => handleNewFile() });
+    commandRegistry.register({ id: 'export-project', label: t('command.exportProject'), shortcut: shortcutsStore.get('export-project'), handler: () => { exportDialogOpen = true; } });
+    commandRegistry.register({ id: 'close-tab', label: t('command.closeTab'), shortcut: shortcutsStore.get('close-tab'), handler: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); } });
+    commandRegistry.register({ id: 'open-settings', label: t('command.openSettings'), shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
+    commandRegistry.register({ id: 'go-to-line', label: t('command.goToLine'), shortcut: shortcutsStore.get('go-to-line'), handler: () => handleGoToLine() });
     // Editor formatting commands
-    commandRegistry.register({ id: 'editor-bold', label: 'Bold', shortcut: shortcutsStore.get('editor-bold'), handler: () => wrapSelection('**', '**') });
-    commandRegistry.register({ id: 'editor-italic', label: 'Italic', shortcut: shortcutsStore.get('editor-italic'), handler: () => wrapSelection('*', '*') });
-    commandRegistry.register({ id: 'editor-link', label: 'Insert Link', shortcut: shortcutsStore.get('editor-link'), handler: () => wrapSelection('[', '](url)') });
-    commandRegistry.register({ id: 'editor-heading', label: 'Toggle Heading', shortcut: shortcutsStore.get('editor-heading'), handler: () => toggleLinePrefix('#') });
-    commandRegistry.register({ id: 'editor-code-inline', label: 'Inline Code', shortcut: shortcutsStore.get('editor-code-inline'), handler: () => wrapSelection('`', '`') });
-    commandRegistry.register({ id: 'editor-strikethrough', label: 'Strikethrough', shortcut: shortcutsStore.get('editor-strikethrough'), handler: () => wrapSelection('~~', '~~') });
-    commandRegistry.register({ id: 'run-benchmark', label: 'Run Performance Benchmark (150K lines)', handler: async () => {
+    commandRegistry.register({ id: 'editor-bold', label: t('command.bold'), shortcut: shortcutsStore.get('editor-bold'), handler: () => wrapSelection('**', '**') });
+    commandRegistry.register({ id: 'editor-italic', label: t('command.italic'), shortcut: shortcutsStore.get('editor-italic'), handler: () => wrapSelection('*', '*') });
+    commandRegistry.register({ id: 'editor-link', label: t('command.insertLink'), shortcut: shortcutsStore.get('editor-link'), handler: () => wrapSelection('[', '](url)') });
+    commandRegistry.register({ id: 'editor-heading', label: t('command.toggleHeading'), shortcut: shortcutsStore.get('editor-heading'), handler: () => toggleLinePrefix('#') });
+    commandRegistry.register({ id: 'editor-code-inline', label: t('command.inlineCode'), shortcut: shortcutsStore.get('editor-code-inline'), handler: () => wrapSelection('`', '`') });
+    commandRegistry.register({ id: 'editor-strikethrough', label: t('command.strikethrough'), shortcut: shortcutsStore.get('editor-strikethrough'), handler: () => wrapSelection('~~', '~~') });
+    commandRegistry.register({ id: 'run-benchmark', label: t('command.runBenchmark'), handler: async () => {
       const { runBenchmark } = await import('$lib/utils/benchmark');
       const result = await runBenchmark(150000);
       alert(result);
     }});
-    commandRegistry.register({ id: 'run-scroll-test', label: 'Run Scroll+Edit Stability Test', handler: async () => {
+    commandRegistry.register({ id: 'run-scroll-test', label: t('command.runScrollTest'), handler: async () => {
       const { runScrollEditTest } = await import('$lib/utils/scroll-edit-test');
       const result = await runScrollEditTest();
       alert(result);
@@ -517,8 +519,8 @@
         event.preventDefault();
         const names = dirty.map(t => t.fileName).join(', ');
         const shouldSave = await ask(
-          `You have unsaved changes in: ${names}\n\nSave before closing?`,
-          { title: 'Unsaved Changes', kind: 'warning', okLabel: 'Save', cancelLabel: "Don't Save" }
+          t('dialog.unsavedBeforeClose', { names }),
+          { title: t('dialog.unsavedChanges'), kind: 'warning', okLabel: t('dialog.save'), cancelLabel: t('dialog.dontSave') }
         );
         if (shouldSave) {
           await tabsStore.saveAllDirty();
@@ -571,8 +573,8 @@
       {:else}
         <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-secondary);">
           <div class="text-center">
-            <p class="text-lg mb-2">Novelist</p>
-            <p class="text-sm">Open a folder to get started</p>
+            <p class="text-lg mb-2">{t('app.name')}</p>
+            <p class="text-sm">{t('app.openFolder')}</p>
           </div>
         </div>
       {/if}
@@ -618,8 +620,8 @@
             {:else}
               <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
                 <div class="text-center">
-                  <p style="font-size: 1.1rem; font-weight: 500; margin-bottom: 6px; color: var(--novelist-text-secondary);">Novelist</p>
-                  <p style="font-size: 0.8rem;">Open a folder to get started</p>
+                  <p style="font-size: 1.1rem; font-weight: 500; margin-bottom: 6px; color: var(--novelist-text-secondary);">{t('app.name')}</p>
+                  <p style="font-size: 0.8rem;">{t('app.openFolder')}</p>
                 </div>
               </div>
             {/if}
@@ -656,7 +658,7 @@
               {:else}
                 <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
                   <div class="text-center">
-                    <p style="font-size: 0.85rem;">Open a file in this pane</p>
+                    <p style="font-size: 0.85rem;">{t('app.openFile')}</p>
                   </div>
                 </div>
               {/if}
@@ -706,7 +708,7 @@
           onclick={() => uiStore.toggleOutline()}
           title="Toggle Outline (Cmd+Shift+O)"
         >
-          OUTLINE
+          {t('outline.title')}
         </button>
         <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
         <button
@@ -715,7 +717,7 @@
           onclick={() => uiStore.toggleDraft()}
           title="Toggle Draft Note (Cmd+Shift+D)"
         >
-          DRAFT
+          {t('draft.title')}
         </button>
         <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
         <button
@@ -724,7 +726,7 @@
           onclick={() => uiStore.toggleSnapshot()}
           title="Toggle Snapshots (Cmd+Shift+S)"
         >
-          SNAPS
+          {t('snapshot.title')}
         </button>
         <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
         <button
@@ -733,7 +735,7 @@
           onclick={() => uiStore.toggleStats()}
           title="Toggle Writing Stats (Cmd+Shift+T)"
         >
-          STATS
+          {t('stats.title')}
         </button>
         <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
         <button
@@ -742,7 +744,7 @@
           onclick={() => uiStore.toggleMindmap()}
           title="Toggle Mindmap (Cmd+Shift+M)"
         >
-          MAP
+          {t('mindmap.title')}
         </button>
       </div>
     </div>

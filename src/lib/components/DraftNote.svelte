@@ -7,6 +7,7 @@
   import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
   import { commands } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     filePath: string;
@@ -54,7 +55,7 @@
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.lineWrapping,
       draftTheme,
-      placeholder('Draft notes for this file...'),
+      placeholder(t('draft.placeholder')),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           isDirty = true;
@@ -129,7 +130,7 @@
   <div class="shrink-0 flex items-center justify-between px-3 py-1.5"
     style="border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border)); background: var(--novelist-bg);">
     <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--novelist-text-secondary); font-weight: 600;">
-      Draft
+      {t('draft.title')}
       {#if isDirty}
         <span style="color: var(--novelist-accent);">●</span>
       {/if}

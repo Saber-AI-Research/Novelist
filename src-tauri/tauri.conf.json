@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicksenger/tauri/refs/heads/dev-2/crates/tauri-cli/schema.json",
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
   "productName": "Novelist",
   "version": "0.0.4",
   "identifier": "com.novelist.desktop",
@@ -16,7 +16,7 @@
         "width": 1200,
         "height": 800,
         "decorations": true,
-        "titleBarStyle": "overlay",
+        "titleBarStyle": "Overlay",
         "hiddenTitle": true
       }
     ],

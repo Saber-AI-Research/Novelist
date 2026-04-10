@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { commandRegistry } from '$lib/stores/commands.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     onClose: () => void;
@@ -39,7 +40,7 @@
       bind:this={inputEl}
       bind:value={query}
       onkeydown={handleKeydown}
-      placeholder="Type a command..."
+      placeholder={t('palette.placeholder')}
       class="palette-input"
     />
     <ul class="palette-list">

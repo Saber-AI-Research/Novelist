@@ -7,6 +7,8 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { convertTyporaTheme } from '$lib/utils/typora-theme';
+  import { t, i18n } from '$lib/i18n';
+  import type { Locale } from '$lib/i18n';
 
   interface Props {
     onClose: () => void;
@@ -241,11 +243,11 @@
     <!-- Left nav -->
     <div class="shrink-0 flex flex-col py-3" style="width: 140px; border-right: 1px solid var(--novelist-border); background: var(--novelist-bg-secondary); border-radius: 8px 0 0 8px;">
       {#each [
-        { id: 'editor', label: 'Editor' },
-        { id: 'theme', label: 'Theme' },
-        { id: 'shortcuts', label: 'Shortcuts' },
-        { id: 'plugins', label: 'Plugins' },
-        { id: 'sync', label: 'Sync' },
+        { id: 'editor', label: t('settings.editor') },
+        { id: 'theme', label: t('settings.theme') },
+        { id: 'shortcuts', label: t('settings.shortcuts') },
+        { id: 'plugins', label: t('settings.plugins') },
+        { id: 'sync', label: t('settings.sync') },
       ] as section}
         <button
           class="text-left px-4 py-2 text-sm cursor-pointer"
@@ -259,61 +261,76 @@
         class="text-xs px-4 py-2 cursor-pointer"
         style="color: var(--novelist-text-secondary); background: none; border: none;"
         onclick={onClose}
-      >Close (Esc)</button>
+      >{t('settings.close')}</button>
     </div>
 
     <!-- Right content -->
     <div class="flex-1 overflow-y-auto px-5 py-4">
 
+      <div class="flex items-center justify-between mb-3">
+        <label for="settings-language" class="text-sm" style="color: var(--novelist-text-secondary);">Language / 语言</label>
+        <select
+          id="settings-language"
+          class="text-sm px-2 py-1 rounded cursor-pointer"
+          style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+          value={i18n.locale}
+          onchange={(e) => i18n.setLocale((e.target as HTMLSelectElement).value as Locale)}
+        >
+          {#each i18n.availableLocales as loc}
+            <option value={loc.code}>{loc.nativeName}</option>
+          {/each}
+        </select>
+      </div>
+
       {#if activeSection === 'editor'}
-        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Editor</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.editor')}</h3>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-font" class="text-sm">Font</label>
+          <label for="settings-font" class="text-sm">{t('settings.font')}</label>
           <select id="settings-font" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border); max-width: 180px;" value={settings.fontFamily} onchange={(e) => uiStore.updateEditorSettings({ fontFamily: (e.target as HTMLSelectElement).value })}>
             {#each fontOptions as opt}<option value={opt.value}>{opt.label}</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-size" class="text-sm">Size</label>
+          <label for="settings-size" class="text-sm">{t('settings.size')}</label>
           <select id="settings-size" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.fontSize} onchange={(e) => uiStore.updateEditorSettings({ fontSize: Number((e.target as HTMLSelectElement).value) })}>
             {#each fontSizeOptions as size}<option value={size}>{size}px</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-line-height" class="text-sm">Line Height</label>
+          <label for="settings-line-height" class="text-sm">{t('settings.lineHeight')}</label>
           <select id="settings-line-height" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.lineHeight} onchange={(e) => uiStore.updateEditorSettings({ lineHeight: Number((e.target as HTMLSelectElement).value) })}>
             {#each lineHeightOptions as lh}<option value={lh}>{lh}</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-width" class="text-sm">Width</label>
+          <label for="settings-width" class="text-sm">{t('settings.width')}</label>
           <select id="settings-width" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.maxWidth} onchange={(e) => uiStore.updateEditorSettings({ maxWidth: Number((e.target as HTMLSelectElement).value) })}>
             {#each maxWidthOptions as opt}<option value={opt.value}>{opt.label}</option>{/each}
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-autosave" class="text-sm">Auto-save</label>
+          <label for="settings-autosave" class="text-sm">{t('settings.autoSave')}</label>
           <select id="settings-autosave" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.autoSaveMinutes} onchange={(e) => uiStore.updateEditorSettings({ autoSaveMinutes: Number((e.target as HTMLSelectElement).value) })}>
-            <option value={0}>Off</option>
-            <option value={1}>1 min</option>
-            <option value={2}>2 min</option>
-            <option value={5}>5 min (Default)</option>
-            <option value={10}>10 min</option>
+            <option value={0}>{t('settings.autoSave.off')}</option>
+            <option value={1}>{t('settings.autoSave.1min')}</option>
+            <option value={2}>{t('settings.autoSave.2min')}</option>
+            <option value={5}>{t('settings.autoSave.5min')}</option>
+            <option value={10}>{t('settings.autoSave.10min')}</option>
           </select>
         </div>
 
         <div class="flex items-center justify-between mb-3">
-          <label for="settings-indent" class="text-sm">Tab / Indent</label>
+          <label for="settings-indent" class="text-sm">{t('settings.tabIndent')}</label>
           <select id="settings-indent" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.indentStyle} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; uiStore.updateEditorSettings({ indentStyle: v === 'tab' ? 'tab' : Number(v) }); }}>
-            <option value={2}>2 Spaces</option>
-            <option value={4}>4 Spaces (Default)</option>
-            <option value={8}>8 Spaces</option>
-            <option value="tab">Tab Character</option>
+            <option value={2}>{t('settings.indent.2spaces')}</option>
+            <option value={4}>{t('settings.indent.4spaces')}</option>
+            <option value={8}>{t('settings.indent.8spaces')}</option>
+            <option value="tab">{t('settings.indent.tab')}</option>
           </select>
         </div>
 
@@ -323,7 +340,7 @@
         </div>
 
       {:else if activeSection === 'theme'}
-        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Theme</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.theme')}</h3>
 
         <div class="grid grid-cols-2 gap-2">
           {#each themeOptions as theme}
@@ -338,7 +355,7 @@
                 onclick={() => uiStore.setTheme(theme.id)}
               >
                 <div class="text-sm font-medium mb-1">{theme.name}</div>
-                <div class="text-xs" style="opacity: 0.6">{theme.id === 'system' ? 'Follow OS' : theme.dark ? 'Dark' : 'Light'}</div>
+                <div class="text-xs" style="opacity: 0.6">{theme.id === 'system' ? t('settings.theme.system') : theme.dark ? t('settings.theme.dark') : t('settings.theme.light')}</div>
               </button>
               {#if theme.id.startsWith('typora-')}
                 <button
@@ -357,19 +374,19 @@
             class="text-sm px-3 py-1.5 rounded cursor-pointer w-full"
             style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
             onclick={importTyporaTheme}
-          >Import Typora Theme (.css)</button>
+          >{t('settings.theme.importTypora')}</button>
         </div>
 
         <div class="mt-4 text-xs" style="color: var(--novelist-text-secondary);">
-          Import <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">.css</code> themes from Typora — colors are auto-mapped. Or edit <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">src/lib/themes.ts</code> for custom themes.
+          {t('settings.theme.importHint')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">src/lib/themes.ts</code> {t('settings.theme.forCustom')}
         </div>
 
       {:else if activeSection === 'shortcuts'}
-        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Keyboard Shortcuts</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.shortcuts')}</h3>
 
         <!-- App shortcuts -->
         <div class="mb-4">
-          <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">Application</div>
+          <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.shortcuts.application')}</div>
           <div class="space-y-1">
             {#each shortcutsStore.appCommandIds as cmdId}
               {@const currentShortcut = shortcutsStore.get(cmdId)}
@@ -379,7 +396,7 @@
                 <span class="text-sm" style="color: var(--novelist-text);">{shortcutsStore.labels[cmdId]}</span>
                 <div class="flex items-center gap-2">
                   {#if isRecording}
-                    <span class="text-xs px-2 py-1 rounded" style="background: var(--novelist-accent); color: #fff; animation: pulse 1s infinite;">Press keys...</span>
+                    <span class="text-xs px-2 py-1 rounded" style="background: var(--novelist-accent); color: #fff; animation: pulse 1s infinite;">{t('settings.shortcuts.pressKeys')}</span>
                   {:else}
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -387,7 +404,7 @@
                       class="text-xs px-2 py-1 rounded cursor-pointer"
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
-                      title="Click to change shortcut"
+                      title={t('settings.shortcuts.clickToChange')}
                     >{currentShortcut || '—'}</span>
                   {/if}
                   {#if isCustom && !isRecording}
@@ -395,8 +412,8 @@
                       class="text-xs px-1 py-0.5 rounded cursor-pointer"
                       style="background: none; border: 1px solid var(--novelist-border); color: var(--novelist-text-secondary); font-size: 10px;"
                       onclick={() => shortcutsStore.reset(cmdId)}
-                      title="Reset to default"
-                    >reset</button>
+                      title={t('settings.shortcuts.resetToDefault')}
+                    >{t('settings.shortcuts.reset')}</button>
                   {/if}
                 </div>
               </div>
@@ -406,7 +423,7 @@
 
         <!-- Editor shortcuts -->
         <div class="mb-4">
-          <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">Editor Formatting</div>
+          <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.shortcuts.editorFormatting')}</div>
           <div class="space-y-1">
             {#each editorCommandIds as cmdId}
               {@const currentShortcut = shortcutsStore.get(cmdId)}
@@ -416,7 +433,7 @@
                 <span class="text-sm" style="color: var(--novelist-text);">{shortcutsStore.labels[cmdId]}</span>
                 <div class="flex items-center gap-2">
                   {#if isRecording}
-                    <span class="text-xs px-2 py-1 rounded" style="background: var(--novelist-accent); color: #fff; animation: pulse 1s infinite;">Press keys...</span>
+                    <span class="text-xs px-2 py-1 rounded" style="background: var(--novelist-accent); color: #fff; animation: pulse 1s infinite;">{t('settings.shortcuts.pressKeys')}</span>
                   {:else}
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -424,7 +441,7 @@
                       class="text-xs px-2 py-1 rounded cursor-pointer"
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
-                      title="Click to change shortcut"
+                      title={t('settings.shortcuts.clickToChange')}
                     >{currentShortcut || '—'}</span>
                   {/if}
                   {#if isCustom && !isRecording}
@@ -432,8 +449,8 @@
                       class="text-xs px-1 py-0.5 rounded cursor-pointer"
                       style="background: none; border: 1px solid var(--novelist-border); color: var(--novelist-text-secondary); font-size: 10px;"
                       onclick={() => shortcutsStore.reset(cmdId)}
-                      title="Reset to default"
-                    >reset</button>
+                      title={t('settings.shortcuts.resetToDefault')}
+                    >{t('settings.shortcuts.reset')}</button>
                   {/if}
                 </div>
               </div>
@@ -446,30 +463,30 @@
             class="text-xs px-3 py-1.5 rounded cursor-pointer"
             style="background: var(--novelist-bg-secondary); color: var(--novelist-text-secondary); border: 1px solid var(--novelist-border);"
             onclick={() => shortcutsStore.resetAll()}
-          >Reset All to Defaults</button>
+          >{t('settings.shortcuts.resetAll')}</button>
         </div>
 
         <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
-          Click a shortcut badge to record a new key combination. Press <kbd style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">Esc</kbd> to cancel recording.
+          {t('settings.shortcuts.hint')}
         </div>
 
       {:else if activeSection === 'plugins'}
-        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">Plugins</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.plugins')}</h3>
 
         {#if !pluginsLoaded}
-          <p class="text-sm" style="color: var(--novelist-text-secondary);">Loading...</p>
+          <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>
         {:else if plugins.length === 0}
           <div class="text-sm" style="color: var(--novelist-text-secondary);">
-            <p class="mb-3">No plugins installed.</p>
+            <p class="mb-3">{t('settings.plugins.noPlugins')}</p>
             <div class="rounded p-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
-              <p class="font-medium mb-2">Create a plugin</p>
-              <p class="text-xs mb-2">Plugins live in <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">~/.novelist/plugins/&lt;id&gt;/</code></p>
-              <p class="text-xs mb-1">Each plugin needs:</p>
+              <p class="font-medium mb-2">{t('settings.plugins.createPlugin')}</p>
+              <p class="text-xs mb-2">{t('settings.plugins.pluginPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">~/.novelist/plugins/&lt;id&gt;/</code></p>
+              <p class="text-xs mb-1">{t('settings.plugins.pluginNeeds')}</p>
               <ul class="text-xs list-disc pl-4 space-y-1">
-                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">manifest.toml</code> — metadata &amp; permissions</li>
-                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">index.js</code> — plugin code</li>
+                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">manifest.toml</code> {t('settings.plugins.manifest')}</li>
+                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">index.js</code> {t('settings.plugins.indexJs')}</li>
               </ul>
-              <p class="text-xs mt-2">Use Claude Code: <em>"Create a Novelist plugin that counts sentences"</em></p>
+              <p class="text-xs mt-2">{t('settings.plugins.aiSuggestion')}</p>
             </div>
           </div>
         {:else}
@@ -489,31 +506,31 @@
                   class="text-xs px-3 py-1 rounded cursor-pointer"
                   style="background: {plugin.active ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary)'}; color: {plugin.active ? '#fff' : 'var(--novelist-text)'}; border: none;"
                   onclick={() => togglePlugin(plugin)}
-                >{plugin.active ? 'Active' : 'Enable'}</button>
+                >{plugin.active ? t('settings.plugins.active') : t('settings.plugins.enable')}</button>
               </div>
             {/each}
           </div>
         {/if}
       {:else if activeSection === 'sync'}
-        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">WebDAV Sync</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.sync.webdav')}</h3>
 
         {#if !projectStore.dirPath}
-          <p class="text-sm" style="color: var(--novelist-text-secondary);">Open a project to configure sync.</p>
+          <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.sync.openProject')}</p>
         {:else if !syncLoaded}
-          <p class="text-sm" style="color: var(--novelist-text-secondary);">Loading...</p>
+          <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>
         {:else}
           <div class="flex items-center justify-between mb-3">
-            <label for="sync-enabled" class="text-sm">Enabled</label>
+            <label for="sync-enabled" class="text-sm">{t('settings.sync.enabled')}</label>
             <button
               id="sync-enabled"
               class="text-xs px-3 py-1 rounded cursor-pointer"
               style="background: {syncConfig.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, var(--novelist-bg-secondary))'}; color: {syncConfig.enabled ? '#fff' : 'var(--novelist-text)'}; border: none;"
               onclick={() => { syncConfig.enabled = !syncConfig.enabled; saveSyncConfig(); }}
-            >{syncConfig.enabled ? 'On' : 'Off'}</button>
+            >{syncConfig.enabled ? t('settings.sync.on') : t('settings.sync.off')}</button>
           </div>
 
           <div class="mb-3">
-            <label for="sync-webdav-url" class="text-sm block mb-1">WebDAV URL</label>
+            <label for="sync-webdav-url" class="text-sm block mb-1">{t('settings.sync.url')}</label>
             <input
               id="sync-webdav-url"
               type="text"
@@ -527,7 +544,7 @@
           </div>
 
           <div class="mb-3">
-            <label for="sync-username" class="text-sm block mb-1">Username</label>
+            <label for="sync-username" class="text-sm block mb-1">{t('settings.sync.username')}</label>
             <input
               id="sync-username"
               type="text"
@@ -540,7 +557,7 @@
           </div>
 
           <div class="mb-3">
-            <label for="sync-password" class="text-sm block mb-1">Password</label>
+            <label for="sync-password" class="text-sm block mb-1">{t('settings.sync.password')}</label>
             <input
               id="sync-password"
               type="password"
@@ -553,7 +570,7 @@
           </div>
 
           <div class="flex items-center justify-between mb-3">
-            <label for="sync-interval" class="text-sm">Interval</label>
+            <label for="sync-interval" class="text-sm">{t('settings.sync.interval')}</label>
             <select
               id="sync-interval"
               class="text-sm px-2 py-1 rounded cursor-pointer"
@@ -561,10 +578,10 @@
               value={syncConfig.interval_minutes}
               onchange={(e) => { syncConfig.interval_minutes = Number((e.target as HTMLSelectElement).value); saveSyncConfig(); }}
             >
-              <option value={15}>15 min</option>
-              <option value={30}>30 min (Default)</option>
-              <option value={60}>60 min</option>
-              <option value={120}>120 min</option>
+              <option value={15}>{t('settings.sync.15min')}</option>
+              <option value={30}>{t('settings.sync.30min')}</option>
+              <option value={60}>{t('settings.sync.60min')}</option>
+              <option value={120}>{t('settings.sync.120min')}</option>
             </select>
           </div>
 
@@ -574,23 +591,23 @@
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               onclick={testConnection}
               disabled={syncTestResult === 'testing'}
-            >{syncTestResult === 'testing' ? 'Testing...' : 'Test Connection'}</button>
+            >{syncTestResult === 'testing' ? t('settings.sync.testing') : t('settings.sync.testConnection')}</button>
             <button
               class="text-xs px-3 py-1.5 rounded cursor-pointer"
               style="background: var(--novelist-accent); color: #fff; border: none;"
               onclick={syncNow}
               disabled={syncInProgress}
-            >{syncInProgress ? 'Syncing...' : 'Sync Now'}</button>
+            >{syncInProgress ? t('settings.sync.syncing') : t('settings.sync.syncNow')}</button>
           </div>
 
           {#if syncTestResult === 'success'}
-            <div class="text-xs mb-2" style="color: #22c55e;">Connection successful.</div>
+            <div class="text-xs mb-2" style="color: #22c55e;">{t('settings.sync.connectionSuccess')}</div>
           {:else if syncTestResult === 'fail'}
-            <div class="text-xs mb-2" style="color: #ef4444;">Connection failed. Check URL and credentials.</div>
+            <div class="text-xs mb-2" style="color: #ef4444;">{t('settings.sync.connectionFailed')}</div>
           {/if}
 
           {#if lastSyncTime}
-            <div class="text-xs mb-2" style="color: var(--novelist-text-secondary);">Last sync: {lastSyncTime}</div>
+            <div class="text-xs mb-2" style="color: var(--novelist-text-secondary);">{t('settings.sync.lastSync', { time: lastSyncTime })}</div>
           {/if}
 
           {#if syncErrors.length > 0}
@@ -602,7 +619,7 @@
           {/if}
 
           <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
-            Files are synced to <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist/<project-name>/"}</code>. Only .md, .markdown, and .txt files are synced.
+            {t('settings.sync.syncPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist/<project-name>/"}</code>
           </div>
         {/if}
       {/if}

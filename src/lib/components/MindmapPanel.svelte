@@ -3,6 +3,7 @@
   import { Transformer } from 'markmap-lib';
   import { Markmap } from 'markmap-view';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     onNavigate?: (from: number) => void;
@@ -64,11 +65,11 @@
 
 <div class="mindmap-panel">
   <div class="mindmap-header">
-    <span class="mindmap-title">Mindmap</span>
+    <span class="mindmap-title">{t('mindmap.title')}</span>
     <button
       class="mindmap-fit-btn"
       onclick={() => mm?.fit()}
-      title="Fit to view"
+      title={t('mindmap.fitToView')}
     >
       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M2 6h12M6 2v12"/></svg>
     </button>

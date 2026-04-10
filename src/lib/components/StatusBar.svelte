@@ -1,6 +1,7 @@
 <script lang="ts">
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     wordCount?: number;
@@ -30,10 +31,10 @@
   class="h-5 flex items-center px-3 gap-2 select-none"
   style="background: var(--novelist-bg); border-top: 1px solid var(--novelist-border-subtle); color: var(--novelist-text-tertiary); font-size: 0.65rem; letter-spacing: 0.01em;"
 >
-  <span>{wordCount} words</span>
+  <span>{t('status.words', { count: wordCount })}</span>
   {#if goalPercent > 0}
     <span class="opacity-50">·</span>
-    <span>{goalPercent}% of {dailyGoal}</span>
+    <span>{t('status.goalProgress', { percent: goalPercent, goal: dailyGoal })}</span>
   {/if}
 
   <span class="ml-auto flex items-center gap-2">
@@ -45,6 +46,6 @@
       {/if}
       <span class="opacity-50">·</span>
     {/if}
-    <span>Ln {cursorLine}, Col {cursorCol}</span>
+    <span>{t('status.lineCol', { line: cursorLine, col: cursorCol })}</span>
   </span>
 </div>

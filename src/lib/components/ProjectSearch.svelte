@@ -3,6 +3,7 @@
   import { commands } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { t } from '$lib/i18n';
 
   interface Props {
     onClose: () => void;
@@ -116,25 +117,25 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="project-search-panel" onclick={(e) => e.stopPropagation()}>
     <div class="search-header">
-      <span class="search-title">PROJECT SEARCH</span>
-      <button class="search-close" onclick={onClose} title="Close (Escape)">&times;</button>
+      <span class="search-title">{t('search.title')}</span>
+      <button class="search-close" onclick={onClose} title={t('search.close')}>&times;</button>
     </div>
     <div class="search-input-wrap">
       <input
         bind:this={inputEl}
         bind:value={query}
         onkeydown={handleKeydown}
-        placeholder="Search in project..."
+        placeholder={t('search.placeholder')}
         class="search-input"
       />
     </div>
     <div class="search-results">
       {#if searching}
-        <div class="search-status">Searching...</div>
+        <div class="search-status">{t('search.searching')}</div>
       {:else if query.trim() && results.length === 0}
-        <div class="search-status">No results found</div>
+        <div class="search-status">{t('search.noResults')}</div>
       {:else if results.length >= 200}
-        <div class="search-status search-limit-notice">Showing first 200 matches</div>
+        <div class="search-status search-limit-notice">{t('search.showingFirst200')}</div>
       {/if}
       {#each groupedResults as group}
         <div class="result-group">
