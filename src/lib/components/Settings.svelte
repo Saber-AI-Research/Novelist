@@ -307,6 +307,16 @@
           </select>
         </div>
 
+        <div class="flex items-center justify-between mb-3">
+          <label for="settings-indent" class="text-sm">Tab / Indent</label>
+          <select id="settings-indent" class="text-sm px-2 py-1 rounded cursor-pointer" style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);" value={settings.indentStyle} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; uiStore.updateEditorSettings({ indentStyle: v === 'tab' ? 'tab' : Number(v) }); }}>
+            <option value={2}>2 Spaces</option>
+            <option value={4}>4 Spaces (Default)</option>
+            <option value={8}>8 Spaces</option>
+            <option value="tab">Tab Character</option>
+          </select>
+        </div>
+
         <div class="mt-4 rounded p-3 text-sm" style="background: var(--novelist-bg-secondary); font-family: {settings.fontFamily}; font-size: {settings.fontSize}px; line-height: {settings.lineHeight}; border: 1px solid var(--novelist-border);">
           The quick brown fox jumps over the lazy dog.<br/>
           落霞与孤鹜齐飞，秋水共长天一色。

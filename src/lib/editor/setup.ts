@@ -3,10 +3,10 @@ import {
   EditorView, ViewPlugin, lineNumbers, highlightActiveLine, keymap, drawSelection,
   dropCursor, rectangularSelection, scrollPastEnd, placeholder,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { markdown, markdownLanguage, markdownKeymap } from '@codemirror/lang-markdown';
 import { GFM } from '@lezer/markdown';
-import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language';
+import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle, bracketMatching, indentOnInput, indentUnit } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
@@ -344,6 +344,8 @@ interface EditorOptions {
   largeFile?: boolean;   // Stripped extension set (no WYSIWYG, 1-3.5MB)
   tallDoc?: boolean;     // >5000 lines — flat heading sizes, no WYSIWYG decorations
   readOnly?: boolean;    // View-only mode (>3.5MB)
+  /** 'tab' for real tab character, or number for spaces (2, 4, 8). Default: 4 */
+  indentStyle?: 'tab' | number;
 }
 
 /**
@@ -358,7 +360,15 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     return createLargeFileExtensions();
   }
 
+  // Indent configuration
+  const useTab = options?.indentStyle === 'tab';
+  const spaces = typeof options?.indentStyle === 'number' ? options.indentStyle : 4;
+  const indentStr = useTab ? '\t' : ' '.repeat(spaces);
+
   const exts: Extension[] = [
+    // Tab size and indent unit
+    EditorState.tabSize.of(useTab ? spaces : spaces),
+    indentUnit.of(indentStr),
     lineNumbers(),
     highlightActiveLine(),
     history(),
@@ -385,6 +395,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     ...(options?.tallDoc ? [] : [EditorView.lineWrapping]),
     novelistTheme,
     keymap.of([
+      indentWithTab,
       ...closeBracketsKeymap,
       ...markdownKeymap,
       ...defaultKeymap,

@@ -8,6 +8,8 @@ interface EditorSettings {
   lineHeight: number;
   maxWidth: number;
   autoSaveMinutes: number;
+  /** 'tab' for real tab character, or number for spaces (2, 4, 8) */
+  indentStyle: 'tab' | number;
 }
 
 const defaultSettings: EditorSettings = {
@@ -16,6 +18,7 @@ const defaultSettings: EditorSettings = {
   lineHeight: 1.8,
   maxWidth: 720,
   autoSaveMinutes: 5,
+  indentStyle: 4,
 };
 
 function loadSettings(): EditorSettings {

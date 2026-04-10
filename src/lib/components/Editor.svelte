@@ -159,6 +159,7 @@
       largeFile: largeFile && !readOnly,
       tallDoc: tallDoc && !largeFile && !readOnly,
       readOnly,
+      indentStyle: uiStore.editorSettings.indentStyle,
     });
   }
 
