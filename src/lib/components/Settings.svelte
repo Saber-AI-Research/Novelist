@@ -1,10 +1,12 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { uiStore } from '$lib/stores/ui.svelte';
-  import { builtinThemes } from '$lib/themes';
+  import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
   import { commands } from '$lib/ipc/commands';
   import { shortcutsStore, editorCommandIds } from '$lib/stores/shortcuts.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { convertTyporaTheme } from '$lib/utils/typora-theme';
 
   interface Props {
     onClose: () => void;
@@ -36,11 +38,38 @@
 
   let settings = $derived(uiStore.editorSettings);
 
-  // Theme options: system + all builtins
-  const themeOptions = [
+  // Theme options: system + builtins + custom (imported)
+  let customThemes = $state(loadCustomThemes());
+  let themeOptions = $derived([
     { id: 'system', name: 'System (Auto)', dark: false },
     ...builtinThemes,
-  ];
+    ...customThemes,
+  ]);
+
+  async function importTyporaTheme() {
+    const selected = await openDialog({
+      filters: [{ name: 'CSS Theme', extensions: ['css'] }],
+      multiple: false,
+    });
+    if (!selected) return;
+    const filePath = selected as string;
+    const result = await commands.readFile(filePath);
+    if (result.status !== 'ok') return;
+    const css = result.data;
+    // Derive name from filename
+    const fileName = filePath.split('/').pop()?.replace(/\.css$/i, '') || 'Imported';
+    const theme = convertTyporaTheme(css, fileName);
+    addCustomTheme(theme);
+    customThemes = loadCustomThemes();
+    uiStore.setTheme(theme.id);
+  }
+
+  function deleteCustomTheme(id: string) {
+    removeCustomTheme(id);
+    customThemes = loadCustomThemes();
+    // If the deleted theme was active, switch to system
+    if (uiStore.themeId === id) uiStore.setTheme('system');
+  }
 
   // Plugins
   type PluginInfo = { id: string; name: string; version: string; permissions: string[]; active: boolean };
@@ -288,23 +317,41 @@
 
         <div class="grid grid-cols-2 gap-2">
           {#each themeOptions as theme}
-            <button
-              class="rounded-lg p-3 text-left cursor-pointer"
-              style="
-                border: 2px solid {uiStore.themeId === theme.id ? 'var(--novelist-accent)' : 'var(--novelist-border)'};
-                background: {theme.id === 'system' ? 'var(--novelist-bg-secondary)' : theme.dark ? '#1e1e1e' : '#f8f8f8'};
-                color: {theme.id === 'system' ? 'var(--novelist-text)' : theme.dark ? '#d4d4d4' : '#2c2c2c'};
-              "
-              onclick={() => uiStore.setTheme(theme.id)}
-            >
-              <div class="text-sm font-medium mb-1">{theme.name}</div>
-              <div class="text-xs" style="opacity: 0.6">{theme.id === 'system' ? 'Follow OS' : theme.dark ? 'Dark' : 'Light'}</div>
-            </button>
+            <div class="relative">
+              <button
+                class="rounded-lg p-3 text-left cursor-pointer w-full"
+                style="
+                  border: 2px solid {uiStore.themeId === theme.id ? 'var(--novelist-accent)' : 'var(--novelist-border)'};
+                  background: {theme.id === 'system' ? 'var(--novelist-bg-secondary)' : theme.dark ? '#1e1e1e' : '#f8f8f8'};
+                  color: {theme.id === 'system' ? 'var(--novelist-text)' : theme.dark ? '#d4d4d4' : '#2c2c2c'};
+                "
+                onclick={() => uiStore.setTheme(theme.id)}
+              >
+                <div class="text-sm font-medium mb-1">{theme.name}</div>
+                <div class="text-xs" style="opacity: 0.6">{theme.id === 'system' ? 'Follow OS' : theme.dark ? 'Dark' : 'Light'}</div>
+              </button>
+              {#if theme.id.startsWith('typora-')}
+                <button
+                  class="absolute top-1 right-1 rounded-full cursor-pointer"
+                  style="width: 18px; height: 18px; font-size: 10px; line-height: 1; background: rgba(255,0,0,0.15); color: #e55; border: none; display: flex; align-items: center; justify-content: center;"
+                  onclick={(e) => { e.stopPropagation(); deleteCustomTheme(theme.id); }}
+                  title="Delete imported theme"
+                >&times;</button>
+              {/if}
+            </div>
           {/each}
         </div>
 
+        <div class="mt-3">
+          <button
+            class="text-sm px-3 py-1.5 rounded cursor-pointer w-full"
+            style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+            onclick={importTyporaTheme}
+          >Import Typora Theme (.css)</button>
+        </div>
+
         <div class="mt-4 text-xs" style="color: var(--novelist-text-secondary);">
-          Custom themes can be created by editing <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">src/lib/themes.ts</code> — use Claude Code to design your own.
+          Import <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">.css</code> themes from Typora — colors are auto-mapped. Or edit <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">src/lib/themes.ts</code> for custom themes.
         </div>
 
       {:else if activeSection === 'shortcuts'}

@@ -118,18 +118,23 @@ function buildDecorations(view: EditorView): DecorationSet {
         // This block only handles marker hiding (# symbols + trailing space).
         if (node.name in headingClasses) {
           const headingNode = node.node;
-          const hMarkerClass = cursorInside ? 'cm-novelist-marker-visible' : 'cm-novelist-heading-hidden';
 
-          // Find HeaderMark children (the # symbols and trailing space)
+          // Find HeaderMark children (the # symbols)
           let markerEnd = node.from;
           const cursor = headingNode.cursor();
           if (cursor.firstChild()) {
             do {
               if (cursor.name === 'HeaderMark') {
                 if (cursor.from < cursor.to) {
-                  decos.push(
-                    Decoration.mark({ class: hMarkerClass }).range(cursor.from, cursor.to)
-                  );
+                  if (cursorInside) {
+                    // Cursor on heading line: show markers with reduced opacity
+                    decos.push(
+                      Decoration.mark({ class: 'cm-novelist-marker-visible' }).range(cursor.from, cursor.to)
+                    );
+                  } else {
+                    // Cursor elsewhere: collapse markers to zero width (Typora-style)
+                    decos.push(Decoration.replace({}).range(cursor.from, cursor.to));
+                  }
                 }
                 if (cursor.to > markerEnd) {
                   markerEnd = cursor.to;
@@ -138,11 +143,10 @@ function buildDecorations(view: EditorView): DecorationSet {
             } while (cursor.nextSibling());
           }
 
-          // Also hide the space between # marks and heading text.
-          // Single sliceString call instead of per-character loop.
+          // Also handle the space between # marks and heading text.
           const afterMarker = markerEnd;
           const lineEndPos = state.doc.lineAt(node.from).to;
-          const maxSpaces = Math.min(lineEndPos - afterMarker, 4); // headings have at most 1-2 spaces
+          const maxSpaces = Math.min(lineEndPos - afterMarker, 4);
           let contentStart = afterMarker;
           if (maxSpaces > 0) {
             const chunk = state.doc.sliceString(afterMarker, afterMarker + maxSpaces);
@@ -151,9 +155,13 @@ function buildDecorations(view: EditorView): DecorationSet {
             }
           }
           if (contentStart > afterMarker && afterMarker < lineEndPos) {
-            decos.push(
-              Decoration.mark({ class: hMarkerClass }).range(afterMarker, contentStart)
-            );
+            if (cursorInside) {
+              decos.push(
+                Decoration.mark({ class: 'cm-novelist-marker-visible' }).range(afterMarker, contentStart)
+              );
+            } else {
+              decos.push(Decoration.replace({}).range(afterMarker, contentStart));
+            }
           }
 
           return false; // Don't descend further

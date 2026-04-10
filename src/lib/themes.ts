@@ -138,6 +138,7 @@ export const builtinThemes: Theme[] = [
 ];
 
 const THEME_KEY = 'novelist-theme';
+const CUSTOM_THEMES_KEY = 'novelist-custom-themes';
 
 export function loadThemeId(): string {
   try {
@@ -151,8 +152,41 @@ export function saveThemeId(id: string) {
   localStorage.setItem(THEME_KEY, id);
 }
 
+/** Load custom (imported) themes from localStorage. */
+export function loadCustomThemes(): Theme[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_THEMES_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return [];
+}
+
+/** Save custom themes to localStorage. */
+function saveCustomThemes(themes: Theme[]) {
+  localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
+}
+
+/** Add an imported theme. Returns the theme (with potentially deduplicated id). */
+export function addCustomTheme(theme: Theme): Theme {
+  const customs = loadCustomThemes();
+  customs.push(theme);
+  saveCustomThemes(customs);
+  return theme;
+}
+
+/** Remove a custom theme by id. */
+export function removeCustomTheme(id: string) {
+  const customs = loadCustomThemes().filter(t => t.id !== id);
+  saveCustomThemes(customs);
+}
+
+/** Get all themes (builtin + custom). */
+export function getAllThemes(): Theme[] {
+  return [...builtinThemes, ...loadCustomThemes()];
+}
+
 export function getThemeById(id: string): Theme | undefined {
-  return builtinThemes.find(t => t.id === id);
+  return builtinThemes.find(t => t.id === id) || loadCustomThemes().find(t => t.id === id);
 }
 
 /**
@@ -163,7 +197,7 @@ export function resolveTheme(id: string): Theme {
     const prefersDark = typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
     return prefersDark ? builtinThemes[1] : builtinThemes[0];
   }
-  return getThemeById(id) || builtinThemes[0];
+  return getThemeById(id) || loadCustomThemes().find(t => t.id === id) || builtinThemes[0];
 }
 
 /**

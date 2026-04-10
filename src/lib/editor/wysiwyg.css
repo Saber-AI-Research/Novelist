@@ -12,12 +12,10 @@
      still occupy their original inline flow space for wrapping. */
 }
 
-/* Heading markers hidden — same visibility approach.
-   The # and trailing space become invisible but keep their width,
-   so the heading line wraps identically to its undecorated form. */
-.cm-novelist-heading-hidden {
-  visibility: hidden;
-}
+/* Heading markers are now collapsed via Decoration.replace() (Typora-style)
+   when the cursor is not on the heading line. No CSS class needed for hidden
+   state — CM6 replaces the range with nothing. When cursor IS on the line,
+   markers use cm-novelist-marker-visible (visible with 38% opacity). */
 
 /* Revealed syntax markers — cursor IS in this node.
    These are visible with reduced opacity. Since hidden markers use
