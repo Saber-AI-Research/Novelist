@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { open, ask } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -499,17 +499,32 @@
     // Set up sync timer for the current project
     setupSyncTimer();
 
-    // Prevent window close when there are unsaved changes
+    // Cmd+W on macOS triggers window close via native menu.
+    // Convert it to "close active tab" when tabs are open.
+    // Only actually close the window when no tabs remain.
     getCurrentWindow().onCloseRequested(async (event) => {
-      const dirty = tabsStore.dirtyTabs;
-      if (dirty.length === 0) return;
+      // If there's an active tab, close it instead of the window
+      const activeTab = tabsStore.activeTab;
+      if (activeTab) {
+        event.preventDefault();
+        await tabsStore.closeTab(activeTab.id);
+        return;
+      }
 
-      const names = dirty.map(t => t.fileName).join(', ');
-      const choice = confirm(
-        `You have unsaved changes in: ${names}\n\nClick "OK" to save, or "Cancel" to discard changes.`
-      );
-      if (choice) {
-        await tabsStore.saveAllDirty();
+      // No open tabs — check for dirty tabs in other panes before closing window
+      const dirty = tabsStore.dirtyTabs;
+      if (dirty.length > 0) {
+        event.preventDefault();
+        const names = dirty.map(t => t.fileName).join(', ');
+        const shouldSave = await ask(
+          `You have unsaved changes in: ${names}\n\nSave before closing?`,
+          { title: 'Unsaved Changes', kind: 'warning', okLabel: 'Save', cancelLabel: "Don't Save" }
+        );
+        if (shouldSave) {
+          await tabsStore.saveAllDirty();
+        }
+        // Now actually close the window
+        await getCurrentWindow().close();
       }
     }).then(fn => { unlistenCloseRequested = fn; });
 
