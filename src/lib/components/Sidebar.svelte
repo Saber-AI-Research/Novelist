@@ -366,7 +366,9 @@
           </div>
         {:else if entry.is_dir}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div role="listitem" class="sidebar-item sidebar-item-dir" oncontextmenu={(e) => handleContextMenu(e, entry)}>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <div role="listitem" tabindex="0" class="sidebar-item sidebar-item-dir" oncontextmenu={(e) => handleContextMenu(e, entry)} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); startRename(entry); } }}>
             <svg class="sidebar-item-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h4l2 2h6v7H2z"/></svg>
             <span class="sidebar-item-name">{entry.name}</span>
           </div>
@@ -375,6 +377,7 @@
             class="sidebar-item"
             class:sidebar-item-active={tabsStore.activeTab?.filePath === entry.path}
             onclick={() => openFile(entry)}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); startRename(entry); } }}
             oncontextmenu={(e) => handleContextMenu(e, entry)}
           >
             <svg class="sidebar-item-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>

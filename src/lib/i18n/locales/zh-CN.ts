@@ -152,6 +152,7 @@ export const zhCN: TranslationMap = {
   'command.openDirectory': '打开目录',
   'command.exportProject': '导出项目',
   'command.closeTab': '关闭标签',
+  'command.renameFile': '重命名 / 另存为',
   'command.openSettings': '打开设置',
   'command.goToLine': '跳转到行',
   'command.bold': '粗体',

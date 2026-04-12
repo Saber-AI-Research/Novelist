@@ -40,13 +40,13 @@
   let pane1CursorLine = $state(1);
   let pane1CursorCol = $state(1);
   let pane1Headings = $state<HeadingItem[]>([]);
-  let pane1EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void } | undefined>(undefined);
+  let pane1EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void } | undefined>(undefined);
 
   let pane2WordCount = $state(0);
   let pane2CursorLine = $state(1);
   let pane2CursorCol = $state(1);
   let pane2Headings = $state<HeadingItem[]>([]);
-  let pane2EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void } | undefined>(undefined);
+  let pane2EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void } | undefined>(undefined);
 
   // Status bar reflects active pane
   let wordCount = $derived(tabsStore.activePaneId === 'pane-2' ? pane2WordCount : pane1WordCount);
@@ -118,26 +118,16 @@
     if (result.status === 'ok') recentProjects = result.data;
   }
 
-  /**
-   * Check for unsaved changes before switching project.
-   * Returns true if safe to proceed, false if user cancelled.
-   */
-  async function confirmUnsavedChanges(): Promise<boolean> {
+  /** Auto-save all dirty files before switching project. */
+  async function autoSaveBeforeSwitch(): Promise<void> {
     const dirty = tabsStore.dirtyTabs;
-    if (dirty.length === 0) return true;
-
-    const names = dirty.map(t => t.fileName).join(', ');
-    const choice = confirm(t('dialog.unsavedInFiles', { names }));
-    if (choice) {
-      await tabsStore.saveAllDirty();
-    }
-    return true;
+    if (dirty.length === 0) return;
+    await tabsStore.saveAllDirty();
   }
 
   async function openProjectFromPath(dirPath: string) {
     if (projectStore.isOpen) {
-      const proceed = await confirmUnsavedChanges();
-      if (!proceed) return;
+      await autoSaveBeforeSwitch();
     }
     projectStore.isLoading = true;
     await commands.stopFileWatcher();
@@ -206,20 +196,15 @@
 
   async function handleNewFile() {
     if (!projectStore.dirPath) return;
-    // Generate unique filename
-    let name = 'untitled.md';
-    let counter = 1;
-    const existing = new Set(projectStore.files.map(f => f.name));
-    while (existing.has(name)) {
-      name = `untitled-${counter}.md`;
-      counter++;
-    }
+    // Generate timestamped untitled file
+    const ts = Date.now();
+    const name = `novelist_scratch_${ts}.md`;
     const result = await commands.createFile(projectStore.dirPath, name);
     if (result.status === 'ok') {
       // Refresh sidebar
       const filesResult = await commands.listDirectory(projectStore.dirPath!);
       if (filesResult.status === 'ok') projectStore.updateFiles(filesResult.data);
-      // Open in editor
+      // Open in editor — openTab detects the scratch pattern and shows "Untitled N"
       const readResult = await commands.readFile(result.data);
       if (readResult.status === 'ok') {
         tabsStore.openTab(result.data, readResult.data);
@@ -294,7 +279,8 @@
     'new-file': () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); },
     'open-directory': () => handleOpenDirectory(),
     'export-project': () => { exportDialogOpen = true; },
-    'close-tab': () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); },
+    'close-tab': () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); else getCurrentWindow().close(); },
+    'rename-file': () => { activeEditorRef?.renameCurrentFile(); },
     'open-settings': () => uiStore.toggleSettings(),
     'go-to-line': () => handleGoToLine(),
 
@@ -437,7 +423,8 @@
     commandRegistry.register({ id: 'new-file', label: t('command.newFile'), shortcut: shortcutsStore.get('new-file'), handler: () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); } });
     commandRegistry.register({ id: 'open-directory', label: t('command.openDirectory'), shortcut: shortcutsStore.get('open-directory'), handler: () => handleOpenDirectory() });
     commandRegistry.register({ id: 'export-project', label: t('command.exportProject'), shortcut: shortcutsStore.get('export-project'), handler: () => { exportDialogOpen = true; } });
-    commandRegistry.register({ id: 'close-tab', label: t('command.closeTab'), shortcut: shortcutsStore.get('close-tab'), handler: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); } });
+    commandRegistry.register({ id: 'close-tab', label: t('command.closeTab'), shortcut: shortcutsStore.get('close-tab'), handler: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); else getCurrentWindow().close(); } });
+    commandRegistry.register({ id: 'rename-file', label: t('command.renameFile'), shortcut: shortcutsStore.get('rename-file'), handler: () => { activeEditorRef?.renameCurrentFile(); } });
     commandRegistry.register({ id: 'open-settings', label: t('command.openSettings'), shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
     commandRegistry.register({ id: 'go-to-line', label: t('command.goToLine'), shortcut: shortcutsStore.get('go-to-line'), handler: () => handleGoToLine() });
     // Editor formatting commands

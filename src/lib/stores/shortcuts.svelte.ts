@@ -16,6 +16,7 @@ const commandI18nKeys: Record<string, string> = {
   'open-directory': 'command.openDirectory',
   'export-project': 'command.exportProject',
   'close-tab': 'command.closeTab',
+  'rename-file': 'command.renameFile',
   'open-settings': 'command.openSettings',
   'go-to-line': 'command.goToLine',
   'editor-bold': 'command.bold',
@@ -39,6 +40,7 @@ const defaultShortcuts: Record<string, string> = {
   'open-directory': 'Cmd+O',
   'export-project': 'Cmd+P',
   'close-tab': 'Cmd+W',
+  'rename-file': 'Cmd+Shift+R',
   'open-settings': 'Cmd+,',
   'go-to-line': 'Cmd+G',
 

@@ -152,6 +152,7 @@ export const en: TranslationMap = {
   'command.openDirectory': 'Open Directory',
   'command.exportProject': 'Export Project',
   'command.closeTab': 'Close Tab',
+  'command.renameFile': 'Rename / Save As',
   'command.openSettings': 'Open Settings',
   'command.goToLine': 'Go to Line',
   'command.bold': 'Bold',

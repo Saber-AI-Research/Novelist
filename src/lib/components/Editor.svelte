@@ -13,6 +13,7 @@
   import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { isScratchFile } from '$lib/utils/scratch';
   import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { countWords } from '$lib/utils/wordcount';
   import { extractHeadings, type HeadingItem } from '$lib/editor/outline';
   import { setWysiwygProjectDir } from '$lib/editor/wysiwyg';
@@ -213,26 +214,9 @@
 
     const content = view.state.doc.toString();
 
-    // Scratch files (pattern-based) → prompt Save As
+    // Scratch files (pattern-based) → prompt Save As with rename
     if (isScratchFile(tab.filePath)) {
-      const savePath = await saveDialog({
-        defaultPath: tab.fileName,
-        filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'txt'] }],
-      });
-      if (!savePath) return; // user cancelled
-
-      await commands.registerWriteIgnore(savePath);
-      const result = await commands.writeFile(savePath, content);
-      if (result.status === 'ok') {
-        // Update the tab to point to the new path
-        tabsStore.updateFilePath(tab.id, savePath);
-        tabsStore.updateContent(tab.id, content);
-        tabsStore.markSavedByPath(savePath);
-        await commands.registerOpenFile(savePath);
-        flushWritingStats();
-      } else {
-        console.error('[Save As] Failed:', result.error);
-      }
+      await saveAsRename(tab, content);
       return;
     }
 
@@ -245,6 +229,44 @@
     } else {
       console.error('[Save] Failed:', result.error);
     }
+  }
+
+  /** Save As / Rename: prompt user for a new file name and location. */
+  async function saveAsRename(tab: { id: string; filePath: string; fileName: string }, content: string) {
+    // Default to project dir if available, otherwise the file's own dir
+    const defaultDir = projectStore.dirPath || tab.filePath.replace(/\/[^/]+$/, '');
+    const savePath = await saveDialog({
+      defaultPath: `${defaultDir}/untitled.md`,
+      filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'txt'] }],
+    });
+    if (!savePath) return;
+
+    await commands.registerWriteIgnore(savePath);
+    const result = await commands.writeFile(savePath, content);
+    if (result.status === 'ok') {
+      // Delete old scratch file if it was in the project dir
+      if (isScratchFile(tab.filePath)) {
+        commands.deleteItem(tab.filePath).catch(() => {});
+      }
+      tabsStore.updateFilePath(tab.id, savePath);
+      tabsStore.updateContent(tab.id, content);
+      tabsStore.markSavedByPath(savePath);
+      await commands.registerOpenFile(savePath);
+      // Refresh sidebar if in project mode
+      if (projectStore.dirPath) {
+        const filesResult = await commands.listDirectory(projectStore.dirPath);
+        if (filesResult.status === 'ok') projectStore.updateFiles(filesResult.data);
+      }
+      flushWritingStats();
+    }
+  }
+
+  /** Rename current file (Cmd+Shift+R) — always shows Save As dialog. */
+  export async function renameCurrentFile() {
+    const tab = getActiveTab();
+    if (!tab || !view) return;
+    const content = view.state.doc.toString();
+    await saveAsRename(tab, content);
   }
 
   /** Split a large read-only file into chapters based on H1 headings */
@@ -373,7 +395,7 @@
       buildUpdateListener(),
       ...(!isReadOnly ? [keymap.of([
         { key: 'Mod-s', run: () => { saveCurrentFile(); return true; } },
-        { key: 'Mod-w', run: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); return true; } },
+        { key: 'Mod-w', run: () => { const tab = tabsStore.activeTab; if (tab) tabsStore.closeTab(tab.id); else getCurrentWindow().close(); return true; } },
       ])] : []),
     ];
 
