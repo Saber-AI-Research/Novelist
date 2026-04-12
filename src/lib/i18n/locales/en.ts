@@ -26,6 +26,9 @@ export const en: TranslationMap = {
   'sidebar.rename': 'Rename',
   'sidebar.delete': 'Delete',
   'sidebar.deleteConfirm': 'Delete "{name}"? This cannot be undone.',
+  'sidebar.edit': 'Edit',
+  'sidebar.done': 'Done',
+  'sidebar.removeProject': 'Remove from list',
   'sidebar.switchProject': 'Switch Project (Cmd+1~9)',
 
   // --- TabBar ---

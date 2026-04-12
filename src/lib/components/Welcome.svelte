@@ -12,6 +12,7 @@
   let { onOpenDirectory, onOpenRecent, onNewFile }: Props = $props();
 
   let recentProjects = $state<RecentProject[]>([]);
+  let editing = $state(false);
 
   onMount(async () => {
     const result = await commands.getRecentProjects();
@@ -19,6 +20,12 @@
       recentProjects = result.data;
     }
   });
+
+  async function removeProject(path: string) {
+    await commands.removeRecentProject(path);
+    recentProjects = recentProjects.filter(p => p.path !== path);
+    if (recentProjects.length === 0) editing = false;
+  }
 
   function displayPath(path: string): string {
     const home = '/Users/';
@@ -52,13 +59,27 @@
 
     {#if recentProjects.length > 0}
       <div class="recent-section">
-        <h2 class="recent-heading">{t('welcome.recentProjects')}</h2>
+        <div class="recent-header">
+          <h2 class="recent-heading">{t('welcome.recentProjects')}</h2>
+          <button class="recent-edit-btn" onclick={() => { editing = !editing; }}>
+            {editing ? t('sidebar.done') : t('sidebar.edit')}
+          </button>
+        </div>
         <ul class="recent-list">
           {#each recentProjects as project}
-            <li>
+            <li class="recent-row">
+              {#if editing}
+                <button
+                  class="recent-remove-btn"
+                  onclick={() => removeProject(project.path)}
+                  title={t('sidebar.removeProject')}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+              {/if}
               <button
                 class="recent-item"
-                onclick={() => onOpenRecent(project.path)}
+                onclick={() => { if (!editing) onOpenRecent(project.path); }}
               >
                 <span class="recent-name">{project.name}</span>
                 <span class="recent-path">{displayPath(project.path)}</span>
@@ -128,6 +149,12 @@
     overflow: hidden;
   }
 
+  .recent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
   .recent-heading {
     font-size: 0.85rem;
     font-weight: 600;
@@ -135,6 +162,42 @@
     letter-spacing: 0.05em;
     margin: 0;
     color: var(--novelist-text-secondary);
+  }
+
+  .recent-edit-btn {
+    border: none;
+    background: transparent;
+    color: var(--novelist-accent);
+    font-size: 0.82rem;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .recent-edit-btn:hover {
+    opacity: 0.7;
+  }
+
+  .recent-row {
+    display: flex;
+    align-items: center;
+  }
+
+  .recent-remove-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin-left: 4px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #e5484d;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.1s;
+  }
+  .recent-remove-btn:hover {
+    background: #e5484d18;
   }
 
   .recent-list {

@@ -36,6 +36,7 @@ export const commands = {
 	registerWriteIgnore: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_write_ignore", { path })),
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
+	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
 	// Scan ~/.novelist/plugins/ and return info for each plugin found.
 	listPlugins: () => typedError<PluginInfo[], string>(__TAURI_INVOKE("list_plugins")),
 	// Load and activate a plugin by its ID.

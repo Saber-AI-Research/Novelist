@@ -16,7 +16,7 @@ use commands::plugin::{
     set_plugin_document_state, unload_plugin,
 };
 use commands::project::{detect_project, read_project_config};
-use commands::recent::{add_recent_project, get_recent_projects};
+use commands::recent::{add_recent_project, get_recent_projects, remove_recent_project};
 use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
 use commands::stats::{get_writing_stats, record_writing_stats};
 use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
@@ -61,6 +61,7 @@ pub fn run() {
         register_write_ignore,
         get_recent_projects,
         add_recent_project,
+        remove_recent_project,
         list_plugins,
         load_plugin,
         unload_plugin,

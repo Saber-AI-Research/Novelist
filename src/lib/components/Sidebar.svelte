@@ -8,6 +8,7 @@
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
+  let switcherEditing = $state(false);
   let recentProjects = $state<RecentProject[]>([]);
 
   interface Props {
@@ -28,8 +29,15 @@
 
   async function switchToProject(path: string) {
     switcherOpen = false;
+    switcherEditing = false;
     if (path === projectStore.dirPath) return;
     await openProjectFromPath(path);
+  }
+
+  async function removeProject(path: string) {
+    await commands.removeRecentProject(path);
+    recentProjects = recentProjects.filter(p => p.path !== path);
+    if (recentProjects.length === 0) switcherEditing = false;
   }
 
   async function openProjectFromPath(dirPath: string) {
@@ -310,7 +318,7 @@
 </script>
 
 <!-- Close context menu and project switcher on click anywhere -->
-<svelte:window onclick={() => { closeContextMenu(); switcherOpen = false; }} />
+<svelte:window onclick={() => { closeContextMenu(); switcherOpen = false; switcherEditing = false; }} />
 
 <aside class="sidebar">
   <!-- Project header -->
@@ -392,23 +400,46 @@
       </button>
 
       {#if switcherOpen}
-        <div class="project-switcher">
-          <div class="project-switcher-header">{t('sidebar.projects')}</div>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="project-switcher" onclick={(e) => e.stopPropagation()}>
+          <div class="project-switcher-header">
+            <span>{t('sidebar.projects')}</span>
+            {#if recentProjects.length > 0}
+              <button
+                class="project-switcher-edit-btn"
+                onclick={() => { switcherEditing = !switcherEditing; }}
+              >
+                {switcherEditing ? t('sidebar.done') : t('sidebar.edit')}
+              </button>
+            {/if}
+          </div>
           {#each recentProjects.slice(0, 9) as project, i}
-            <button
-              class="project-switcher-item"
-              class:project-switcher-item-active={project.path === projectStore.dirPath}
-              onclick={() => switchToProject(project.path)}
-            >
-              <span class="project-switcher-num">{i + 1}</span>
-              <span class="project-switcher-name">{project.name}</span>
-              {#if project.path === projectStore.dirPath}
-                <span class="project-switcher-check">&#x2713;</span>
+            <div class="project-switcher-row">
+              {#if switcherEditing}
+                <button
+                  class="project-switcher-remove-btn"
+                  onclick={() => removeProject(project.path)}
+                  title={t('sidebar.removeProject')}
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
               {/if}
-            </button>
+              <button
+                class="project-switcher-item"
+                class:project-switcher-item-active={project.path === projectStore.dirPath}
+                onclick={() => { if (!switcherEditing) switchToProject(project.path); }}
+              >
+                <span class="project-switcher-num">{i + 1}</span>
+                <span class="project-switcher-name">{project.name}</span>
+                {#if project.path === projectStore.dirPath && !switcherEditing}
+                  <span class="project-switcher-check">&#x2713;</span>
+                {/if}
+              </button>
+            </div>
           {/each}
           <div class="project-switcher-divider"></div>
-          <button class="project-switcher-item" onclick={() => { switcherOpen = false; openDirectory(); }}>
+          <button class="project-switcher-item" onclick={() => { switcherOpen = false; switcherEditing = false; openDirectory(); }}>
             <span class="project-switcher-num">+</span>
             <span class="project-switcher-name">{t('sidebar.openFolderEllipsis')}</span>
           </button>
@@ -689,12 +720,54 @@
   }
 
   .project-switcher-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 6px 10px 4px;
     font-size: 0.68rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--novelist-text-tertiary, var(--novelist-text-secondary));
+  }
+
+  .project-switcher-edit-btn {
+    border: none;
+    background: transparent;
+    color: var(--novelist-accent);
+    font-size: 0.68rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: normal;
+    padding: 0 2px;
+  }
+  .project-switcher-edit-btn:hover {
+    opacity: 0.7;
+  }
+
+  .project-switcher-row {
+    display: flex;
+    align-items: center;
+  }
+
+  .project-switcher-remove-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-left: 4px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #e5484d;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 80ms;
+  }
+  .project-switcher-remove-btn:hover {
+    background: #e5484d18;
   }
 
   .project-switcher-item {

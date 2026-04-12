@@ -26,6 +26,9 @@ export const zhCN: TranslationMap = {
   'sidebar.rename': '重命名',
   'sidebar.delete': '删除',
   'sidebar.deleteConfirm': '删除「{name}」？此操作无法撤销。',
+  'sidebar.edit': '编辑',
+  'sidebar.done': '完成',
+  'sidebar.removeProject': '从列表移除',
   'sidebar.switchProject': '切换项目 (Cmd+1~9)',
 
   // --- TabBar ---

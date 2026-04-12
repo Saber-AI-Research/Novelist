@@ -92,6 +92,21 @@ pub async fn add_recent_project(path: String, name: String) -> Result<(), AppErr
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_recent_project(path: String) -> Result<(), AppError> {
+    let file_path = recent_projects_path();
+    if !file_path.exists() {
+        return Ok(());
+    }
+    let content = tokio::fs::read_to_string(&file_path).await?;
+    let mut projects: Vec<RecentProject> = serde_json::from_str(&content).unwrap_or_default();
+    projects.retain(|p| p.path != path);
+    let json = serde_json::to_string_pretty(&projects)?;
+    tokio::fs::write(&file_path, json).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
