@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyFileSize, FileSize } from "./large-file";
+import { classifyFileSize, FileSize } from "$lib/editor/large-file";
 
 describe("classifyFileSize", () => {
   it("classifies small files as Normal", () => {

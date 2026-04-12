@@ -156,6 +156,7 @@ export const en: TranslationMap = {
   'command.inlineCode': 'Inline Code',
   'command.strikethrough': 'Strikethrough',
   'command.runBenchmark': 'Run Performance Benchmark (150K lines)',
+  'command.runReleaseBenchmark': 'Run Release Benchmark (Small vs Large)',
   'command.runScrollTest': 'Run Scroll+Edit Stability Test',
 
   // --- Settings ---
@@ -184,6 +185,10 @@ export const en: TranslationMap = {
   'settings.indent.4spaces': '4 Spaces (Default)',
   'settings.indent.8spaces': '8 Spaces',
   'settings.indent.tab': 'Tab Character',
+
+  'settings.highlightMatches': 'Highlight Matching Words',
+  'settings.on': 'On',
+  'settings.off': 'Off',
 
   'settings.theme.system': 'System (Auto)',
   'settings.theme.dark': 'Dark',

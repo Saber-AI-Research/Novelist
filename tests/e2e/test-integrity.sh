@@ -8,7 +8,7 @@ echo "  Novelist Integrity Test Suite"
 echo "====================================="
 echo ""
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 # 1. Rust Rope tests
 echo "--- Rust Rope Tests ---"

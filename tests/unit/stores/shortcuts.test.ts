@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchesShortcut } from './shortcuts.svelte';
+import { matchesShortcut } from '$lib/stores/shortcuts.svelte';
 
 /** Create a minimal KeyboardEvent-like object for testing. */
 function fakeKeyEvent(opts: {

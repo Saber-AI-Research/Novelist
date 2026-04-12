@@ -1,0 +1,11 @@
+[plugin]
+id = "mindmap"
+name = "Mindmap"
+version = "1.0.0"
+permissions = ["read", "ui"]
+
+[ui]
+type = "panel"
+entry = "index.html"
+width = 400
+label = "Mindmap"

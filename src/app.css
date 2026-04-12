@@ -1,6 +1,12 @@
 @import "tailwindcss";
-@import "lxgw-wenkai-webfont/lxgwwenkai-regular.css";
-@import "lxgw-wenkai-webfont/lxgwwenkai-bold.css";
+
+@font-face {
+  font-family: "LXGW WenKai Screen";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/LXGWWenKaiScreen-Regular.woff2") format("woff2");
+}
 
 :root {
   --novelist-bg: #fcfcfa;
@@ -14,7 +20,7 @@
   --novelist-border: #e8e6e1;
   --novelist-border-subtle: #f0eeea;
   --novelist-editor-bg: var(--novelist-bg);
-  --novelist-editor-font: "LXGW WenKai", "Noto Serif SC", Georgia, serif;
+  --novelist-editor-font: "LXGW WenKai Screen", "LXGW WenKai", "Noto Serif SC", Georgia, serif;
   --novelist-editor-font-size: 16px;
   --novelist-editor-line-height: 1.85;
   --novelist-editor-max-width: 740px;

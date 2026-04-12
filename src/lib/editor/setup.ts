@@ -1,4 +1,4 @@
-import { EditorState, type Extension } from '@codemirror/state';
+import { EditorState, Compartment, type Extension } from '@codemirror/state';
 import {
   EditorView, ViewPlugin, lineNumbers, highlightActiveLine, keymap, drawSelection,
   dropCursor, rectangularSelection, scrollPastEnd, placeholder,
@@ -14,6 +14,8 @@ import { wysiwygPlugin, linkClickPlugin, imagePastePlugin } from './wysiwyg';
 import { imeComposingField, imeGuardPlugin } from './ime-guard';
 import { typewriterPlugin, paragraphFocusPlugin } from './zen';
 import './wysiwyg.css';
+
+export const highlightMatchCompartment = new Compartment();
 
 /**
  * Heading font sizes MUST live in syntaxHighlighting, NOT in WYSIWYG
@@ -349,6 +351,7 @@ const novelistTheme = EditorView.theme({
   '.cm-novelist-h4': { fontSize: '1.05em', fontWeight: '600', lineHeight: '1.7',  color: 'var(--novelist-heading-color)' },
   '.cm-novelist-h5': { fontSize: '1.0em',  fontWeight: '600', lineHeight: '1.8',  color: 'var(--novelist-text-secondary)' },
   '.cm-novelist-h6': { fontSize: '0.92em', fontWeight: '600', lineHeight: '1.8',  color: 'var(--novelist-text-secondary)' },
+  '.cm-selectionMatch': { backgroundColor: 'rgba(0, 180, 80, 0.15)' },
 });
 
 interface EditorOptions {
@@ -359,6 +362,8 @@ interface EditorOptions {
   readOnly?: boolean;    // View-only mode (>3.5MB)
   /** 'tab' for real tab character, or number for spaces (2, 4, 8). Default: 4 */
   indentStyle?: 'tab' | number;
+  /** Highlight matching words on selection. Default: true */
+  highlightMatches?: boolean;
 }
 
 /**
@@ -390,7 +395,9 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     rectangularSelection(),
     bracketMatching(),
     closeBrackets(),
-    highlightSelectionMatches(),
+    highlightMatchCompartment.of(
+      options?.highlightMatches !== false ? highlightSelectionMatches() : []
+    ),
     indentOnInput(),
     scrollPastEnd(),
     placeholder('Start writing...'),

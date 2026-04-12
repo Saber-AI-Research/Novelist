@@ -122,3 +122,106 @@ export async function runBenchmark(lineCount = 150000): Promise<string> {
   console.log(output);
   return output;
 }
+
+/**
+ * Release benchmark: compare small vs large file performance.
+ * Measures EditorState creation, typing latency, scroll speed, and memory.
+ */
+export async function runReleaseBenchmark(): Promise<string> {
+  const sizes = [
+    { label: 'Small (100)', lines: 100 },
+    { label: 'Large (50K)', lines: 50000 },
+  ];
+
+  const rows: Record<string, string[]> = {};
+  const metrics = [
+    'EditorState create',
+    'Typing avg',
+    'Typing p95',
+    'Typing max',
+    'Scroll to end',
+    'Heap after create',
+  ];
+  const thresholds: Record<string, number> = {
+    'EditorState create': 200,
+    'Typing avg': 16,
+    'Typing p95': 16,
+    'Typing max': 50,
+    'Scroll to end': 50,
+    'Heap after create': 100,
+  };
+
+  for (const metric of metrics) rows[metric] = [];
+
+  for (const { label, lines } of sizes) {
+    const doc = generateDoc(lines);
+    const ext = createEditorExtensions({ wysiwyg: lines <= 5000 });
+
+    // Memory before
+    const heapBefore = getHeapMB();
+
+    // EditorState creation
+    const { result: state, ms: createMs } = time('create', () => createEditorState(doc, ext));
+    rows['EditorState create'].push(`${createMs.toFixed(1)}ms`);
+
+    // Heap after create
+    const heapAfter = getHeapMB();
+    rows['Heap after create'].push(heapAfter !== null ? `${(heapAfter - (heapBefore ?? 0)).toFixed(1)} MB` : 'N/A');
+
+    // Mount view off-screen
+    const container = document.createElement('div');
+    container.style.cssText = 'width:800px;height:600px;position:fixed;top:-9999px;left:-9999px;';
+    document.body.appendChild(container);
+    const view = new EditorView({ state, parent: container });
+
+    // Typing simulation (20 chars)
+    const typingTimes: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const pos = view.state.selection.main.head;
+      const start = performance.now();
+      view.dispatch({ changes: { from: pos, insert: 'a' } });
+      typingTimes.push(performance.now() - start);
+    }
+    const avg = typingTimes.reduce((a, b) => a + b, 0) / typingTimes.length;
+    const sorted = [...typingTimes].sort((a, b) => a - b);
+    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    const max = sorted[sorted.length - 1];
+    rows['Typing avg'].push(`${avg.toFixed(1)}ms`);
+    rows['Typing p95'].push(`${p95.toFixed(1)}ms`);
+    rows['Typing max'].push(`${max.toFixed(1)}ms`);
+
+    // Scroll to end
+    const { ms: scrollMs } = time('scroll', () => {
+      view.dispatch({ selection: { anchor: view.state.doc.length }, scrollIntoView: true });
+    });
+    rows['Scroll to end'].push(`${scrollMs.toFixed(1)}ms`);
+
+    view.destroy();
+    container.remove();
+  }
+
+  // Format table
+  const lines: string[] = [];
+  lines.push('=== Release Benchmark: Small vs Large ===\n');
+  lines.push(padRow('Metric', sizes.map(s => s.label), 'Threshold'));
+  lines.push(padRow('---', sizes.map(() => '---'), '---'));
+  for (const metric of metrics) {
+    const threshold = metric === 'Heap after create' ? `< ${thresholds[metric]} MB` : `< ${thresholds[metric]}ms`;
+    lines.push(padRow(metric, rows[metric], threshold));
+  }
+
+  const output = lines.join('\n');
+  console.log(output);
+  return output;
+}
+
+function getHeapMB(): number | null {
+  if ('memory' in performance) {
+    return (performance as any).memory.usedJSHeapSize / 1024 / 1024;
+  }
+  return null;
+}
+
+function padRow(label: string, values: string[], threshold: string): string {
+  return `| ${label.padEnd(20)} | ${values.map(v => v.padEnd(12)).join(' | ')} | ${threshold} |`;
+}

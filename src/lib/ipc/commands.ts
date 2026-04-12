@@ -118,12 +118,21 @@ export type PluginInfo = {
 	version: string,
 	permissions: string[],
 	active: boolean,
+	ui: PluginUiConfig | null,
 };
 
 export type PluginReplacementResult = {
 	from: number,
 	to: number,
 	text: string,
+};
+
+export type PluginUiConfig = {
+	type: string,
+	entry: string,
+	width?: number | null,
+	label?: string | null,
+	file_extensions?: string[] | null,
 };
 
 export type ProjectConfig = {

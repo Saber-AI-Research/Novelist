@@ -4,6 +4,20 @@ use specta::Type;
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
 pub struct PluginManifest {
     pub plugin: PluginMeta,
+    pub ui: Option<PluginUiConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Type)]
+pub struct PluginUiConfig {
+    #[serde(rename = "type")]
+    pub ui_type: String,
+    pub entry: String,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub file_extensions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
@@ -22,6 +36,7 @@ pub struct PluginInfo {
     pub version: String,
     pub permissions: Vec<String>,
     pub active: bool,
+    pub ui: Option<PluginUiConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
@@ -70,6 +85,7 @@ version = "0.1.0"
             version: "1.0".to_string(),
             permissions: vec!["read".to_string(), "write".to_string()],
             active: true,
+            ui: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"active\":true"));

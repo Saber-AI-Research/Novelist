@@ -7,7 +7,6 @@
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Editor from '$lib/components/Editor.svelte';
-  import CanvasEditor from '$lib/components/CanvasEditor.svelte';
   import TabBar from '$lib/components/TabBar.svelte';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import ConflictDialog from '$lib/components/ConflictDialog.svelte';
@@ -22,7 +21,9 @@
   import StatsPanel from '$lib/components/StatsPanel.svelte';
   import ProjectSearch from '$lib/components/ProjectSearch.svelte';
   import ErrorBoundary from '$lib/components/ErrorBoundary.svelte';
-  import MindmapPanel from '$lib/components/MindmapPanel.svelte';
+  import { extensionStore } from '$lib/stores/extensions.svelte';
+  import PluginPanel from '$lib/components/PluginPanel.svelte';
+  import PluginFileEditor from '$lib/components/PluginFileEditor.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
@@ -268,7 +269,6 @@
     'toggle-draft': () => uiStore.toggleDraft(),
     'toggle-snapshot': () => uiStore.toggleSnapshot(),
     'toggle-stats': () => uiStore.toggleStats(),
-    'toggle-mindmap': () => uiStore.toggleMindmap(),
     'toggle-zen': () => uiStore.toggleZen(),
     'command-palette': () => { paletteOpen = !paletteOpen; },
     'toggle-split': () => tabsStore.toggleSplit(),
@@ -401,6 +401,9 @@
     // Load recent projects for Cmd+Number switching
     refreshRecentProjects();
 
+    // Load UI extensions from installed plugins
+    extensionStore.loadFromPlugins();
+
     commandRegistry.register({ id: 'new-window', label: t('command.newWindow'), shortcut: 'Cmd+Shift+N', handler: () => openNewWindow() });
     commandRegistry.register({ id: 'toggle-sidebar', label: t('command.toggleSidebar'), shortcut: shortcutsStore.get('toggle-sidebar'), handler: () => uiStore.toggleSidebar() });
     commandRegistry.register({ id: 'toggle-outline', label: t('command.toggleOutline'), shortcut: shortcutsStore.get('toggle-outline'), handler: () => uiStore.toggleOutline() });
@@ -408,7 +411,6 @@
     commandRegistry.register({ id: 'toggle-draft', label: t('command.toggleDraft'), shortcut: shortcutsStore.get('toggle-draft'), handler: () => uiStore.toggleDraft() });
     commandRegistry.register({ id: 'toggle-snapshot', label: t('command.toggleSnapshot'), shortcut: shortcutsStore.get('toggle-snapshot'), handler: () => uiStore.toggleSnapshot() });
     commandRegistry.register({ id: 'toggle-stats', label: t('command.toggleStats'), shortcut: shortcutsStore.get('toggle-stats'), handler: () => uiStore.toggleStats() });
-    commandRegistry.register({ id: 'toggle-mindmap', label: t('command.toggleMindmap'), shortcut: shortcutsStore.get('toggle-mindmap'), handler: () => uiStore.toggleMindmap() });
     commandRegistry.register({ id: 'command-palette', label: t('command.commandPalette'), shortcut: shortcutsStore.get('command-palette'), handler: () => { paletteOpen = !paletteOpen; } });
     commandRegistry.register({ id: 'project-search', label: t('command.projectSearch'), shortcut: 'Cmd+Shift+F', handler: () => { projectSearchOpen = !projectSearchOpen; } });
     commandRegistry.register({ id: 'toggle-split', label: t('command.toggleSplit'), shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
@@ -427,6 +429,11 @@
     commandRegistry.register({ id: 'run-benchmark', label: t('command.runBenchmark'), handler: async () => {
       const { runBenchmark } = await import('$lib/utils/benchmark');
       const result = await runBenchmark(150000);
+      alert(result);
+    }});
+    commandRegistry.register({ id: 'run-release-benchmark', label: t('command.runReleaseBenchmark'), handler: async () => {
+      const { runReleaseBenchmark } = await import('$lib/utils/benchmark');
+      const result = await runReleaseBenchmark();
       alert(result);
     }});
     commandRegistry.register({ id: 'run-scroll-test', label: t('command.runScrollTest'), handler: async () => {
@@ -612,8 +619,9 @@
 
           <div class="flex-1 min-h-0 overflow-hidden">
             {#if tabsStore.getPaneActiveTab('pane-1')}
-              {#if tabsStore.getPaneActiveTab('pane-1')?.fileName.endsWith('.canvas')}
-                <ErrorBoundary><CanvasEditor paneId="pane-1" /></ErrorBoundary>
+              {@const fileHandler1 = extensionStore.getFileHandler(tabsStore.getPaneActiveTab('pane-1')?.fileName ?? '')}
+              {#if fileHandler1}
+                <ErrorBoundary><PluginFileEditor extension={fileHandler1} paneId="pane-1" /></ErrorBoundary>
               {:else}
                 <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
               {/if}
@@ -650,8 +658,9 @@
 
             <div class="flex-1 min-h-0 overflow-hidden">
               {#if tabsStore.getPaneActiveTab('pane-2')}
-                {#if tabsStore.getPaneActiveTab('pane-2')?.fileName.endsWith('.canvas')}
-                  <ErrorBoundary><CanvasEditor paneId="pane-2" /></ErrorBoundary>
+                {@const fileHandler2 = extensionStore.getFileHandler(tabsStore.getPaneActiveTab('pane-2')?.fileName ?? '')}
+                {#if fileHandler2}
+                  <ErrorBoundary><PluginFileEditor extension={fileHandler2} paneId="pane-2" /></ErrorBoundary>
                 {:else}
                   <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
                 {/if}
@@ -695,10 +704,13 @@
             chapters={projectChapters}
           />
         </div>
-      {:else if uiStore.mindmapVisible && tabsStore.activeTab}
-        <div style="width: 400px; border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
-          <MindmapPanel onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} />
-        </div>
+      {:else if extensionStore.activePanelId && tabsStore.activeTab}
+        {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
+        {#if activePanel}
+          <div style="width: {activePanel.width ?? 400}px; border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
+            <PluginPanel extension={activePanel} onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} />
+          </div>
+        {/if}
       {/if}
       <!-- Vertical toggle tabs -->
       <div class="flex flex-col" style="border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
@@ -737,15 +749,17 @@
         >
           {t('stats.title')}
         </button>
-        <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
-        <button
-          class="flex items-center justify-center cursor-pointer"
-          style="width: 20px; flex: 1; background: {uiStore.mindmapVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.mindmapVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
-          onclick={() => uiStore.toggleMindmap()}
-          title="Toggle Mindmap (Cmd+Shift+M)"
-        >
-          {t('mindmap.title')}
-        </button>
+        {#each extensionStore.panels as panel}
+          <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
+          <button
+            class="flex items-center justify-center cursor-pointer"
+            style="width: 20px; flex: 1; background: {extensionStore.activePanelId === panel.pluginId ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {extensionStore.activePanelId === panel.pluginId ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
+            onclick={() => extensionStore.togglePanel(panel.pluginId)}
+            title="Toggle {panel.label}"
+          >
+            {panel.label}
+          </button>
+        {/each}
       </div>
     </div>
   </div>

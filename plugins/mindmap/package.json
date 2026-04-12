@@ -1,0 +1,17 @@
+{
+  "name": "novelist-plugin-mindmap",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "markmap-lib": "^0.18.12",
+    "markmap-view": "^0.18.12"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

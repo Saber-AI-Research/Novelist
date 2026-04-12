@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { convertTyporaTheme } from './typora-theme';
+import { convertTyporaTheme } from '$lib/utils/typora-theme';
 
 describe('convertTyporaTheme', () => {
   it('extracts background from :root --bg-color', () => {

@@ -237,6 +237,7 @@ impl PluginHostState {
                 version: p.manifest.plugin.version.clone(),
                 permissions: p.manifest.plugin.permissions.clone(),
                 active: p.active,
+                ui: p.manifest.ui.clone(),
             })
             .collect()
     }
@@ -394,6 +395,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 permissions: permissions.into_iter().map(|s| s.to_string()).collect(),
             },
+            ui: None,
         }
     }
 

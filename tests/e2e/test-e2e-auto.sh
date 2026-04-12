@@ -8,7 +8,7 @@ echo "======================================"
 echo "  Automated E2E Correctness Test"
 echo "======================================"
 
-cd "$(dirname "$0")/../src-tauri"
+cd "$(dirname "$0")/../../src-tauri"
 
 echo ""
 echo "--- Test 1: File integrity (150K lines, no edits → hash unchanged) ---"

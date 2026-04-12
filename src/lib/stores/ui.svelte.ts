@@ -10,15 +10,18 @@ interface EditorSettings {
   autoSaveMinutes: number;
   /** 'tab' for real tab character, or number for spaces (2, 4, 8) */
   indentStyle: 'tab' | number;
+  /** Highlight all matching words when text is selected */
+  highlightMatches: boolean;
 }
 
 const defaultSettings: EditorSettings = {
-  fontFamily: '"LXGW WenKai", "Noto Serif SC", Georgia, serif',
+  fontFamily: '"LXGW WenKai Screen", "LXGW WenKai", "Noto Serif SC", Georgia, serif',
   fontSize: 16,
   lineHeight: 1.8,
   maxWidth: 720,
   autoSaveMinutes: 5,
   indentStyle: 4,
+  highlightMatches: true,
 };
 
 function loadSettings(): EditorSettings {
@@ -33,7 +36,7 @@ function saveSettings(s: EditorSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 }
 
-export type RightPanel = 'draft' | 'snapshot' | 'stats' | 'mindmap' | null;
+export type RightPanel = 'draft' | 'snapshot' | 'stats' | null;
 
 class UiStore {
   sidebarVisible = $state(true);
@@ -55,8 +58,6 @@ class UiStore {
   get draftVisible(): boolean { return this.activeRightPanel === 'draft'; }
   get snapshotVisible(): boolean { return this.activeRightPanel === 'snapshot'; }
   get statsVisible(): boolean { return this.activeRightPanel === 'stats'; }
-  get mindmapVisible(): boolean { return this.activeRightPanel === 'mindmap'; }
-
   toggleSidebar() { this.sidebarVisible = !this.sidebarVisible; }
   toggleOutline() { this.outlineVisible = !this.outlineVisible; }
 
@@ -68,7 +69,6 @@ class UiStore {
   toggleDraft() { this.toggleRightPanel('draft'); }
   toggleSnapshot() { this.toggleRightPanel('snapshot'); }
   toggleStats() { this.toggleRightPanel('stats'); }
-  toggleMindmap() { this.toggleRightPanel('mindmap'); }
   toggleZen() { this.zenMode = !this.zenMode; }
   toggleSettings() { this.settingsOpen = !this.settingsOpen; }
 

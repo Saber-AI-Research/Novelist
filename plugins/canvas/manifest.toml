@@ -1,0 +1,11 @@
+[plugin]
+id = "canvas"
+name = "Canvas Editor"
+version = "1.0.0"
+permissions = ["read", "write", "ui"]
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+file_extensions = [".canvas"]
+label = "Canvas"

@@ -53,6 +53,7 @@ pub async fn list_plugins(state: State<'_, PluginHostState>) -> Result<Vec<Plugi
             version: manifest.plugin.version,
             permissions: manifest.plugin.permissions,
             active: is_active,
+            ui: manifest.ui,
         });
     }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { countWords } from "./wordcount";
+import { countWords } from "$lib/utils/wordcount";
 
 describe("countWords", () => {
   // Empty / whitespace

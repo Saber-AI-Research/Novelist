@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { EditorView, keymap } from '@codemirror/view';
   import type { Extension, ChangeSet } from '@codemirror/state';
-  import { createEditorExtensions, createEditorState } from '$lib/editor/setup';
+  import { createEditorExtensions, createEditorState, highlightMatchCompartment } from '$lib/editor/setup';
+  import { highlightSelectionMatches } from '@codemirror/search';
   import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState, getEditorView } from '$lib/stores/tabs.svelte';
   import { Transaction } from '@codemirror/state';
   import { remoteChangeAnnotation } from '$lib/editor/annotations';
@@ -160,6 +161,7 @@
       tallDoc: tallDoc && !largeFile && !readOnly,
       readOnly,
       indentStyle: uiStore.editorSettings.indentStyle,
+      highlightMatches: uiStore.editorSettings.highlightMatches,
     });
   }
 
@@ -376,6 +378,18 @@
     const _zen = uiStore.zenMode;
     if (editorContainer) {
       loadTab();
+    }
+  });
+
+  // Dynamically toggle highlight matches without reloading the tab
+  $effect(() => {
+    const enabled = uiStore.editorSettings.highlightMatches;
+    if (view) {
+      view.dispatch({
+        effects: highlightMatchCompartment.reconfigure(
+          enabled ? highlightSelectionMatches() : []
+        ),
+      });
     }
   });
 

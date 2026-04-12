@@ -334,6 +334,16 @@
           </select>
         </div>
 
+        <div class="flex items-center justify-between mb-3">
+          <label for="settings-highlight" class="text-sm">{t('settings.highlightMatches')}</label>
+          <button
+            id="settings-highlight"
+            class="text-xs px-3 py-1 rounded cursor-pointer"
+            style="background: {settings.highlightMatches ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, var(--novelist-bg-secondary))'}; color: {settings.highlightMatches ? '#fff' : 'var(--novelist-text)'}; border: none;"
+            onclick={() => uiStore.updateEditorSettings({ highlightMatches: !settings.highlightMatches })}
+          >{settings.highlightMatches ? t('settings.on') : t('settings.off')}</button>
+        </div>
+
         <div class="mt-4 rounded p-3 text-sm" style="background: var(--novelist-bg-secondary); font-family: {settings.fontFamily}; font-size: {settings.fontSize}px; line-height: {settings.lineHeight}; border: 1px solid var(--novelist-border);">
           The quick brown fox jumps over the lazy dog.<br/>
           落霞与孤鹜齐飞，秋水共长天一色。
