@@ -41,13 +41,13 @@
   let pane1CursorLine = $state(1);
   let pane1CursorCol = $state(1);
   let pane1Headings = $state<HeadingItem[]>([]);
-  let pane1EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void } | undefined>(undefined);
+  let pane1EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void; saveCurrentFile: () => Promise<void> } | undefined>(undefined);
 
   let pane2WordCount = $state(0);
   let pane2CursorLine = $state(1);
   let pane2CursorCol = $state(1);
   let pane2Headings = $state<HeadingItem[]>([]);
-  let pane2EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void } | undefined>(undefined);
+  let pane2EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void; saveCurrentFile: () => Promise<void> } | undefined>(undefined);
 
   // Status bar reflects active pane
   let wordCount = $derived(tabsStore.activePaneId === 'pane-2' ? pane2WordCount : pane1WordCount);
@@ -287,18 +287,13 @@
   let closingTab = false;
 
   async function handleCloseTab() {
-    if (closingTab) {
-      console.log('[handleCloseTab] skipped — already in progress');
-      return;
-    }
+    if (closingTab) return;
     closingTab = true;
 
     try {
       const tab = tabsStore.activeTab;
-      console.log('[handleCloseTab] activeTab:', tab?.fileName ?? 'none', 'singleFileMode:', projectStore.singleFileMode, 'dirPath:', projectStore.dirPath);
 
       if (!tab) {
-        console.log('[handleCloseTab] no tab open, closing window');
         getCurrentWindow().destroy();
         return;
       }
@@ -306,13 +301,10 @@
       await tabsStore.closeTab(tab.id);
 
       const remainingTabs = tabsStore.activeTab;
-      console.log('[handleCloseTab] after close — remaining activeTab:', remainingTabs?.fileName ?? 'none', 'singleFileMode:', projectStore.singleFileMode);
 
       if (!remainingTabs && projectStore.singleFileMode) {
-        console.log('[handleCloseTab] last tab in single-file mode closed, returning to Welcome');
         projectStore.close();
       } else if (!remainingTabs && !projectStore.dirPath) {
-        console.log('[handleCloseTab] no project, no tabs, closing window');
         getCurrentWindow().destroy();
       }
     } finally {
@@ -397,6 +389,14 @@
     if (mod && e.shiftKey && e.key === 'N') {
       e.preventDefault();
       openNewWindow();
+      return;
+    }
+
+    // Cmd+S: save current file (non-customizable)
+    // Handled globally so save works even when editor is not focused.
+    if (mod && !e.shiftKey && e.key === 's') {
+      e.preventDefault();
+      activeEditorRef?.saveCurrentFile();
       return;
     }
 
@@ -739,7 +739,6 @@
     getCurrentWindow().onCloseRequested(async (event) => {
       // If our tab-close handler is already running, suppress the native close
       if (closingTab) {
-        console.log('[onCloseRequested] suppressed — closingTab in progress');
         event.preventDefault();
         return;
       }

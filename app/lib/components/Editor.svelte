@@ -10,7 +10,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { commands } from '$lib/ipc/commands';
-  import { save as saveDialog, ask } from '@tauri-apps/plugin-dialog';
+  import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { isScratchFile } from '$lib/utils/scratch';
   import { invoke } from '@tauri-apps/api/core';
   import { t } from '$lib/i18n';
@@ -51,6 +51,12 @@
   let readOnlyFileSize = $state(0);
   let statsTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Recovery banner state (replaces modal dialog for better UX)
+  let recoveryAvailable = $state(false);
+  let recoveryContent = $state<string | null>(null);
+  let recoveryFilePath = $state<string | null>(null);
+  let recoveryFileName = $state('');
+
   // Session tracking for writing stats
   let sessionStartWordCount: number | null = null;
   let sessionStartTime: number | null = null;
@@ -73,14 +79,14 @@
     await commands.deleteDraftNote(projectStore.dirPath, filePath + RECOVERY_SUFFIX).catch(() => {});
   }
 
-  /** Check for and potentially recover a crash-recovery draft. Returns recovered content or null. */
-  async function checkRecoveryDraft(filePath: string): Promise<string | null> {
-    if (!projectStore.dirPath) return null;
+  /** Check for a crash-recovery draft and show a non-intrusive banner if found. */
+  async function checkRecoveryDraft(filePath: string): Promise<void> {
+    if (!projectStore.dirPath) return;
     const hasResult = await commands.hasDraftNote(projectStore.dirPath, filePath + RECOVERY_SUFFIX);
-    if (hasResult.status !== 'ok' || !hasResult.data) return null;
+    if (hasResult.status !== 'ok' || !hasResult.data) return;
 
     const readResult = await commands.readDraftNote(projectStore.dirPath, filePath + RECOVERY_SUFFIX);
-    if (readResult.status !== 'ok' || !readResult.data) return null;
+    if (readResult.status !== 'ok' || !readResult.data) return;
 
     const draftContent = readResult.data;
     // Only offer recovery if content differs from what's on disk
@@ -88,21 +94,42 @@
     if (!tab || draftContent === tab.content) {
       // Draft matches disk — clean it up silently
       await clearRecoveryDraft(filePath);
-      return null;
+      return;
     }
 
-    const fileName = filePath.split('/').pop() ?? filePath;
-    const shouldRecover = await ask(
-      t('recovery.message', { fileName }),
-      { title: t('recovery.title'), kind: 'warning', okLabel: t('recovery.recover'), cancelLabel: t('recovery.discard') }
-    );
+    // Show recovery banner instead of modal dialog
+    recoveryAvailable = true;
+    recoveryContent = draftContent;
+    recoveryFilePath = filePath;
+    recoveryFileName = filePath.split('/').pop() ?? filePath;
+  }
 
-    // Always delete the recovery draft after the user decides — it has served
-    // its purpose.  If they chose "Recover", the content is now in the editor
-    // (and will be re-saved as a new recovery draft if they keep editing).
-    // If they chose "Discard", the draft is no longer wanted.
-    await clearRecoveryDraft(filePath);
-    return shouldRecover ? draftContent : null;
+  /** User chose to recover the draft from the banner. */
+  function acceptRecovery() {
+    if (recoveryContent && view && currentTabId) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: recoveryContent },
+      });
+      tabsStore.markDirty(currentTabId);
+      wordCount = countWords(recoveryContent);
+      lastKnownWordCount = wordCount;
+      headings = extractHeadings(view.state);
+    }
+    if (recoveryFilePath) clearRecoveryDraft(recoveryFilePath);
+    dismissRecoveryBanner();
+  }
+
+  /** User chose to discard the recovery draft. */
+  function discardRecovery() {
+    if (recoveryFilePath) clearRecoveryDraft(recoveryFilePath);
+    dismissRecoveryBanner();
+  }
+
+  function dismissRecoveryBanner() {
+    recoveryAvailable = false;
+    recoveryContent = null;
+    recoveryFilePath = null;
+    recoveryFileName = '';
   }
 
   function scrollToPosition(from: number) {
@@ -126,7 +153,7 @@
     }
   }
 
-  export { scrollToPosition, jumpToAbsoluteLine };
+  export { scrollToPosition, jumpToAbsoluteLine, saveCurrentFile };
 
   function updateCursorInfo(v: EditorView) {
     const pos = v.state.selection.main.head;
@@ -383,7 +410,7 @@
       projectStore.updateFiles(filesResult.data);
     }
 
-    alert(`Split into ${chunks.length} files in ${baseName}-chunks/`);
+    alert(t('editor.splitResult', { count: chunks.length, name: baseName }));
   }
 
 
@@ -479,19 +506,10 @@
     lastKnownWordCount = wordCount;
     updateCursorInfo(view);
 
-    // Check for crash recovery draft (async, non-blocking)
+    // Check for crash recovery draft (async, shows banner if found)
+    dismissRecoveryBanner(); // Clear any previous banner
     if (!savedState && !isReadOnly && projectStore.dirPath) {
-      checkRecoveryDraft(tab.filePath).then(recovered => {
-        if (recovered && view && currentTabId === tab.id) {
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: recovered },
-          });
-          tabsStore.markDirty(tab.id);
-          wordCount = countWords(recovered);
-          lastKnownWordCount = wordCount;
-          headings = extractHeadings(view.state);
-        }
-      });
+      checkRecoveryDraft(tab.filePath);
     }
   }
 
@@ -584,14 +602,31 @@
 </script>
 
 <div class="flex flex-col h-full w-full">
+  {#if recoveryAvailable}
+    <div data-testid="recovery-banner" class="shrink-0 flex items-center gap-2 px-3 py-1.5 text-xs" style="background: color-mix(in srgb, var(--novelist-warning, #e8a838) 15%, var(--novelist-bg)); color: var(--novelist-warning, #e8a838); border-bottom: 1px solid var(--novelist-border);">
+      <span>{t('recovery.bannerMessage', { fileName: recoveryFileName })}</span>
+      <button
+        data-testid="recovery-accept"
+        class="px-2 py-0.5 rounded text-xs cursor-pointer"
+        style="background: var(--novelist-warning, #e8a838); color: #fff;"
+        onclick={acceptRecovery}
+      >{t('recovery.recover')}</button>
+      <button
+        data-testid="recovery-discard"
+        class="px-2 py-0.5 rounded text-xs cursor-pointer"
+        style="background: transparent; color: var(--novelist-text-secondary); border: 1px solid var(--novelist-border);"
+        onclick={discardRecovery}
+      >{t('recovery.discard')}</button>
+    </div>
+  {/if}
   {#if isReadOnly}
     <div data-testid="readonly-banner" class="shrink-0 flex items-center gap-2 px-3 py-1.5 text-xs" style="background: color-mix(in srgb, var(--novelist-accent) 15%, var(--novelist-bg)); color: var(--novelist-accent); border-bottom: 1px solid var(--novelist-border);">
-      <span>Read-only — file is {(readOnlyFileSize / 1024 / 1024).toFixed(1)}MB. Use "Split into Chunks" to edit in smaller files.</span>
+      <span>{t('editor.readOnly', { size: (readOnlyFileSize / 1024 / 1024).toFixed(1) })}</span>
       <button
         class="px-2 py-0.5 rounded text-xs cursor-pointer"
         style="background: var(--novelist-accent); color: #fff;"
         onclick={splitIntoChunks}
-      >Split into Chunks</button>
+      >{t('editor.splitChunks')}</button>
     </div>
   {/if}
   <div class="flex-1 min-h-0 w-full" data-testid="editor-container" bind:this={editorContainer}></div>

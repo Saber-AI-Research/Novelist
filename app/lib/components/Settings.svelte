@@ -124,9 +124,12 @@
   }
 
   // Plugins
-  type PluginInfo = { id: string; name: string; version: string; permissions: string[]; active: boolean };
+  import type { PluginInfo } from '$lib/ipc/commands';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
+
+  let builtinPlugins = $derived(plugins.filter(p => p.builtin));
+  let communityPlugins = $derived(plugins.filter(p => !p.builtin));
 
   async function loadPlugins() {
     const result = await commands.listPlugins();
@@ -136,12 +139,9 @@
     pluginsLoaded = true;
   }
 
-  async function togglePlugin(plugin: PluginInfo) {
-    if (plugin.active) {
-      await commands.unloadPlugin(plugin.id);
-    } else {
-      await commands.loadPlugin(plugin.id);
-    }
+  async function togglePluginEnabled(plugin: PluginInfo) {
+    const newEnabled = !plugin.enabled;
+    await commands.setPluginEnabled(plugin.id, newEnabled);
     await loadPlugins();
   }
 
@@ -285,6 +285,40 @@
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
+
+{#snippet pluginCard(plugin: PluginInfo)}
+  <div class="rounded p-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
+    <div class="flex items-center justify-between">
+      <div class="flex-1 min-w-0 mr-3">
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium">{plugin.name}</span>
+          <span class="text-xs" style="color: var(--novelist-text-secondary);">v{plugin.version}</span>
+          {#if plugin.builtin}
+            <span class="text-xs px-1.5 py-0.5 rounded" style="background: color-mix(in srgb, var(--novelist-accent) 15%, transparent); color: var(--novelist-accent); font-size: 10px;">{t('settings.plugins.builtinBadge')}</span>
+          {/if}
+        </div>
+        {#if plugin.description}
+          <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">{plugin.description}</div>
+        {/if}
+        <div class="text-xs mt-1" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); opacity: 0.7;">
+          {#if plugin.author}{plugin.author} &middot; {/if}{plugin.permissions.join(', ')}
+        </div>
+      </div>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="shrink-0 w-10 h-5 rounded-full cursor-pointer relative transition-colors"
+        style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'};"
+        onclick={() => togglePluginEnabled(plugin)}
+      >
+        <div
+          class="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
+          style="background: #fff; left: {plugin.enabled ? '22px' : '2px'}; box-shadow: 0 1px 2px rgba(0,0,0,0.2);"
+        ></div>
+      </div>
+    </div>
+  </div>
+{/snippet}
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -630,40 +664,37 @@
 
         {#if !pluginsLoaded}
           <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>
-        {:else if plugins.length === 0}
-          <div class="text-sm" style="color: var(--novelist-text-secondary);">
-            <p class="mb-3">{t('settings.plugins.noPlugins')}</p>
-            <div class="rounded p-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
-              <p class="font-medium mb-2">{t('settings.plugins.createPlugin')}</p>
-              <p class="text-xs mb-2">{t('settings.plugins.pluginPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">~/.novelist/plugins/&lt;id&gt;/</code></p>
-              <p class="text-xs mb-1">{t('settings.plugins.pluginNeeds')}</p>
-              <ul class="text-xs list-disc pl-4 space-y-1">
-                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">manifest.toml</code> {t('settings.plugins.manifest')}</li>
-                <li><code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">index.js</code> {t('settings.plugins.indexJs')}</li>
-              </ul>
-              <p class="text-xs mt-2">{t('settings.plugins.aiSuggestion')}</p>
-            </div>
-          </div>
         {:else}
-          <div class="space-y-2">
-            {#each plugins as plugin}
-              <div class="flex items-center justify-between rounded p-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
-                <div>
-                  <div class="text-sm font-medium">{plugin.name}</div>
-                  <div class="text-xs" style="color: var(--novelist-text-secondary);">
-                    {plugin.id} v{plugin.version}
-                    {#if plugin.permissions.length > 0}
-                      &middot; {plugin.permissions.join(', ')}
-                    {/if}
-                  </div>
-                </div>
-                <button
-                  class="text-xs px-3 py-1 rounded cursor-pointer"
-                  style="background: {plugin.active ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary)'}; color: {plugin.active ? '#fff' : 'var(--novelist-text)'}; border: none;"
-                  onclick={() => togglePlugin(plugin)}
-                >{plugin.active ? t('settings.plugins.active') : t('settings.plugins.enable')}</button>
-              </div>
-            {/each}
+          {#if builtinPlugins.length > 0}
+            <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.plugins.builtin')}</div>
+            <div class="space-y-2 mb-4">
+              {#each builtinPlugins as plugin}
+                {@render pluginCard(plugin)}
+              {/each}
+            </div>
+          {/if}
+
+          {#if communityPlugins.length > 0}
+            <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.plugins.community')}</div>
+            <div class="space-y-2 mb-4">
+              {#each communityPlugins as plugin}
+                {@render pluginCard(plugin)}
+              {/each}
+            </div>
+          {/if}
+
+          {#if plugins.length === 0}
+            <div class="text-sm" style="color: var(--novelist-text-secondary);">
+              <p class="mb-3">{t('settings.plugins.noPlugins')}</p>
+            </div>
+          {/if}
+
+          <div class="rounded p-3 mt-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
+            <p class="text-xs font-medium mb-1">{t('settings.plugins.createPlugin')}</p>
+            <p class="text-xs" style="color: var(--novelist-text-secondary);">
+              {t('settings.plugins.pluginPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">~/.novelist/plugins/&lt;id&gt;/</code>
+            </p>
+            <p class="text-xs mt-1" style="color: var(--novelist-text-secondary);">{t('settings.plugins.aiSuggestion')}</p>
           </div>
         {/if}
       {:else if activeSection === 'sync'}

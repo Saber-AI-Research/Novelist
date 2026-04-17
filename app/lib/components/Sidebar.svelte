@@ -122,21 +122,14 @@
   async function openFile(entry: FileEntry) {
     if (entry.is_dir || !isTextFile(entry.name)) return;
 
-    console.log(`[Sidebar.openFile] ${entry.name}: size=${entry.size}`);
-
     // Always read full content. Editor decides mode based on size.
     const result = await commands.readFile(entry.path);
     if (result.status === 'ok') {
       tabsStore.openTab(entry.path, result.data);
-      console.log(`[Sidebar.openFile] loaded ${result.data.length} bytes, ${result.data.split('\n').length} lines`);
     } else {
-      console.error('Failed to read file:', result.error);
       return;
     }
-    const regResult = await commands.registerOpenFile(entry.path);
-    if (regResult.status !== 'ok') {
-      console.error('Failed to register open file:', regResult.error);
-    }
+    await commands.registerOpenFile(entry.path);
   }
 
   async function openInOtherPane(entry: FileEntry) {
@@ -232,6 +225,15 @@
     }
   }
 
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      }
+    };
+  }
+
   // --- Context menu ---
   let contextMenu = $state<{ x: number; y: number; entry: FileEntry } | null>(null);
   let renaming = $state<FileEntry | null>(null);
@@ -240,7 +242,8 @@
 
   function handleContextMenu(e: MouseEvent, entry: FileEntry) {
     e.preventDefault();
-    contextMenu = { x: e.clientX, y: e.clientY, entry };
+    const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
+    contextMenu = { x: e.clientX / zoom, y: e.clientY / zoom, entry };
   }
 
   function closeContextMenu() {
@@ -487,7 +490,6 @@
   {/if}
 </aside>
 
-<!-- Context menu -->
 {#if contextMenu}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -496,6 +498,7 @@
     tabindex="-1"
     class="context-menu"
     data-testid="context-menu"
+    use:portal
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
@@ -673,9 +676,9 @@
     font-size: 0.78rem;
   }
 
-  .context-menu {
+  :global(.context-menu) {
     position: fixed;
-    z-index: 50;
+    z-index: 9999;
     min-width: 140px;
     padding: 4px;
     border-radius: 8px;
@@ -684,7 +687,7 @@
     box-shadow: 0 4px 16px rgba(0,0,0,0.1);
     color: var(--novelist-text);
   }
-  .context-menu-item {
+  :global(.context-menu-item) {
     display: block;
     width: 100%;
     padding: 6px 12px;
@@ -697,14 +700,14 @@
     cursor: pointer;
     transition: background 80ms;
   }
-  .context-menu-item:hover {
+  :global(.context-menu-item:hover) {
     background: var(--novelist-sidebar-hover);
   }
-  .context-menu-item-danger:hover {
+  :global(.context-menu-item-danger:hover) {
     background: #e5484d18;
     color: #e5484d;
   }
-  .context-menu-separator {
+  :global(.context-menu-separator) {
     height: 1px;
     margin: 4px 8px;
     background: var(--novelist-border-subtle, var(--novelist-border));
