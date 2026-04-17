@@ -57,4 +57,40 @@ test.describe('Settings Dialog', () => {
       await expect(fontSizeSelect).toBeEnabled();
     }
   });
+
+  test('plugins: "+" button creates a plugin from template', async ({ app }) => {
+    await app.evaluate(() => (window as any).__test_api__.toggleSettings());
+    await app.getByTestId('settings-dialog').waitFor({ state: 'visible' });
+    await app.getByTestId('settings-section-plugins').click();
+
+    await app.getByTestId('plugin-add-btn').click();
+    await app.getByTestId('plugin-add-menu').getByRole('button', { name: /Create from template/i }).click();
+
+    const dialog = app.getByTestId('plugin-scaffold-dialog');
+    await expect(dialog).toBeVisible();
+
+    await app.getByTestId('plugin-scaffold-id').fill('hello-world');
+    await app.getByTestId('plugin-scaffold-create').click();
+
+    // New plugin appears in the Community list.
+    await expect(app.getByText('hello-world')).toBeVisible();
+  });
+
+  test('plugins: help tooltip copies prompt to clipboard', async ({ app, context }) => {
+    await context.grantPermissions(['clipboard-read']);
+
+    await app.evaluate(() => (window as any).__test_api__.toggleSettings());
+    await app.getByTestId('settings-dialog').waitFor({ state: 'visible' });
+    await app.getByTestId('settings-section-plugins').click();
+
+    // Open the help card (click toggles reliably in Playwright).
+    await app.getByTestId('help-trigger').click();
+    await expect(app.getByTestId('help-card')).toBeVisible();
+
+    // Copy.
+    await app.getByTestId('help-copy-btn').click();
+
+    const clip = await app.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toContain('counts sentences');
+  });
 });

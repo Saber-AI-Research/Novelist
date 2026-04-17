@@ -20,6 +20,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const createdFiles = [];
       const deletedFiles = [];
       const eventListeners = {};
+      const scaffoldedPlugins = [];
 
       function handleInvoke(cmd, args) {
         switch (cmd) {
@@ -73,8 +74,19 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'add_recent_project': case 'remove_recent_project': return null;
           case 'check_pandoc': return { installed: false, version: null };
           case 'export_project': return 'mock-export.pdf';
-          case 'list_plugins': return [];
+          case 'list_plugins': return scaffoldedPlugins.slice();
           case 'get_plugin_commands': return [];
+          case 'scaffold_plugin': {
+            const id = args.id;
+            const name = args.displayName || id;
+            const p = '/mock/home/.novelist/plugins/' + id;
+            scaffoldedPlugins.push({
+              id, name, version: '0.1.0', description: '', author: '',
+              enabled: false, builtin: false, path: p, permissions: [],
+            });
+            return p;
+          }
+          case 'get_plugins_dir': return '/mock/home/.novelist/plugins';
           case 'load_plugin': case 'unload_plugin': case 'set_plugin_document_state': return null;
           case 'rope_open': return { file_id: 'mock-rope-id', total_lines: 100, total_chars: 5000 };
           case 'rope_get_lines': return { lines: 'Mock content\\n', first_line: args.startLine, line_count: args.endLine - args.startLine };
