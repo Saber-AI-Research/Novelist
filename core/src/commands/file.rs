@@ -53,8 +53,7 @@ fn decode_bytes(bytes: &[u8]) -> (Option<&'static str>, String) {
     }
 
     // 3. Use chardetng for encoding detection
-    let mut detector =
-        chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
     let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
     let encoding_name = encoding.name();
@@ -79,15 +78,11 @@ fn decode_bytes(bytes: &[u8]) -> (Option<&'static str>, String) {
 
 /// Encode a UTF-8 string back to the specified encoding.
 fn encode_string(content: &str, encoding_name: &str) -> Result<Vec<u8>, AppError> {
-    let encoding = encoding_rs::Encoding::for_label(encoding_name.as_bytes()).ok_or_else(|| {
-        AppError::Custom(format!("Unknown encoding: {}", encoding_name))
-    })?;
+    let encoding = encoding_rs::Encoding::for_label(encoding_name.as_bytes())
+        .ok_or_else(|| AppError::Custom(format!("Unknown encoding: {}", encoding_name)))?;
     let (encoded, _, had_errors) = encoding.encode(content);
     if had_errors {
-        tracing::warn!(
-            "Re-encoding to {} had unmappable characters",
-            encoding_name
-        );
+        tracing::warn!("Re-encoding to {} had unmappable characters", encoding_name);
     }
     Ok(encoded.into_owned())
 }
@@ -112,9 +107,7 @@ fn validate_path(path: &str) -> Result<PathBuf, AppError> {
     #[cfg(unix)]
     {
         let blocked = ["/etc", "/System", "/usr", "/bin", "/sbin"];
-        if p.is_absolute()
-            && blocked.iter().any(|b| p.starts_with(b))
-        {
+        if p.is_absolute() && blocked.iter().any(|b| p.starts_with(b)) {
             return Err(AppError::PathNotAllowed(path.to_string()));
         }
     }
@@ -270,11 +263,7 @@ pub async fn get_file_encoding(
         .encodings
         .lock()
         .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))?;
-    Ok(map
-        .get(&canonical)
-        .copied()
-        .unwrap_or("UTF-8")
-        .to_string())
+    Ok(map.get(&canonical).copied().unwrap_or("UTF-8").to_string())
 }
 
 #[tauri::command]
@@ -670,13 +659,9 @@ mod tests {
     async fn test_write_file_atomic() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("output.md");
-        write_file_inner(
-            &file_path.to_string_lossy(),
-            "# New Content",
-            &enc(),
-        )
-        .await
-        .unwrap();
+        write_file_inner(&file_path.to_string_lossy(), "# New Content", &enc())
+            .await
+            .unwrap();
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "# New Content");
         let temp_path = format!("{}.novelist-tmp", file_path.to_string_lossy());
@@ -851,13 +836,9 @@ mod tests {
     async fn test_write_file_creates_new() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("new.md");
-        write_file_inner(
-            &file_path.to_string_lossy(),
-            "# Title\n\nBody",
-            &enc(),
-        )
-        .await
-        .unwrap();
+        write_file_inner(&file_path.to_string_lossy(), "# Title\n\nBody", &enc())
+            .await
+            .unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "# Title\n\nBody");
     }
 
@@ -866,13 +847,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("existing.md");
         fs::write(&file_path, "old content").unwrap();
-        write_file_inner(
-            &file_path.to_string_lossy(),
-            "new content",
-            &enc(),
-        )
-        .await
-        .unwrap();
+        write_file_inner(&file_path.to_string_lossy(), "new content", &enc())
+            .await
+            .unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "new content");
     }
 
@@ -970,10 +947,7 @@ mod tests {
 
         // Verify raw bytes on disk are GBK, not UTF-8
         let raw = fs::read(&file_path).unwrap();
-        assert_eq!(
-            raw, &*original_bytes,
-            "Written bytes should be GBK-encoded"
-        );
+        assert_eq!(raw, &*original_bytes, "Written bytes should be GBK-encoded");
     }
 
     #[tokio::test]

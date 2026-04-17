@@ -276,7 +276,10 @@ mod tests {
     #[test]
     fn test_extract_tag_content_d_prefix() {
         let xml = "<d:href>/remote/path</d:href>";
-        assert_eq!(extract_tag_content(xml, "href"), Some("/remote/path".to_string()));
+        assert_eq!(
+            extract_tag_content(xml, "href"),
+            Some("/remote/path".to_string())
+        );
     }
 
     #[test]

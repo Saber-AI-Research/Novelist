@@ -641,7 +641,10 @@ mod tests {
     #[test]
     fn test_collect_local_files() {
         // Use prefix without dot — collect_local_files skips dirs starting with '.'
-        let dir = tempfile::Builder::new().prefix("novelist_test_").tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("novelist_test_")
+            .tempdir()
+            .unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(root.join("chapter1.md"), "content").unwrap();
         std::fs::write(root.join("notes.txt"), "notes").unwrap();
@@ -655,7 +658,10 @@ mod tests {
 
     #[test]
     fn test_collect_local_files_skips_hidden() {
-        let dir = tempfile::Builder::new().prefix("novelist_test_").tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("novelist_test_")
+            .tempdir()
+            .unwrap();
         let root = dir.path().canonicalize().unwrap();
         let hidden = root.join(".git");
         std::fs::create_dir(&hidden).unwrap();
@@ -712,7 +718,13 @@ mod tests {
 
         write_sync_state(&project, &state).unwrap();
         let loaded = read_sync_state(&project).unwrap();
-        assert_eq!(loaded.last_sync_iso, Some("2024-01-01T00:00:00Z".to_string()));
-        assert_eq!(loaded.file_mod_times.get("chapter1.md"), Some(&1704067200u64));
+        assert_eq!(
+            loaded.last_sync_iso,
+            Some("2024-01-01T00:00:00Z".to_string())
+        );
+        assert_eq!(
+            loaded.file_mod_times.get("chapter1.md"),
+            Some(&1704067200u64)
+        );
     }
 }

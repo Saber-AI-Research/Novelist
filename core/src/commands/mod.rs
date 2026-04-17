@@ -6,6 +6,6 @@ pub mod project;
 pub mod recent;
 pub mod snapshot;
 pub mod stats;
-pub mod template;
 #[cfg(feature = "sync")]
 pub mod sync;
+pub mod template;

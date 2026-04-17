@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 /// Returns the base directory for user templates: ~/.novelist/templates/
 fn templates_dir() -> Result<PathBuf, AppError> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Custom("Cannot determine home directory".into()))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| AppError::Custom("Cannot determine home directory".into()))?;
     Ok(home.join(".novelist").join("templates"))
 }
 
@@ -96,7 +97,11 @@ pub async fn list_templates() -> Result<Vec<TemplateInfo>, AppError> {
 }
 
 /// Scaffolds a built-in template into the given directory.
-fn scaffold_builtin(template_id: &str, project_name: &str, dest: &Path) -> Result<String, AppError> {
+fn scaffold_builtin(
+    template_id: &str,
+    project_name: &str,
+    dest: &Path,
+) -> Result<String, AppError> {
     let novelist_dir = dest.join(".novelist");
     std::fs::create_dir_all(&novelist_dir)?;
 
@@ -189,10 +194,7 @@ auto_save_minutes = 5
             std::fs::write(novelist_dir.join("project.toml"), &outline_config)?;
         }
         "short-story" => {
-            std::fs::write(
-                dest.join("正文.md"),
-                format!("# {}\n\n", project_name),
-            )?;
+            std::fs::write(dest.join("正文.md"), format!("# {}\n\n", project_name))?;
             std::fs::write(
                 dest.join("创作笔记.md"),
                 "# 创作笔记\n\n## 灵感来源\n\n\n\n## 核心冲突\n\n\n\n## 人物速写\n\n\n\n## 结局构想\n\n\n",
@@ -253,7 +255,10 @@ auto_save_minutes = 5
         "blog" => {
             std::fs::create_dir_all(dest.join("posts"))?;
             std::fs::create_dir_all(dest.join("drafts"))?;
-            std::fs::write(dest.join("posts").join("first-post.md"), "# My First Post\n\n")?;
+            std::fs::write(
+                dest.join("posts").join("first-post.md"),
+                "# My First Post\n\n",
+            )?;
         }
         "journal" => {
             let today = chrono_today();
@@ -324,7 +329,15 @@ pub async fn create_project_from_template(
     std::fs::create_dir_all(&dest)?;
 
     // Check if it's a built-in template
-    let builtins: Vec<&str> = vec!["blank", "novel", "long-novel", "short-story", "screenplay", "blog", "journal"];
+    let builtins: Vec<&str> = vec![
+        "blank",
+        "novel",
+        "long-novel",
+        "short-story",
+        "screenplay",
+        "blog",
+        "journal",
+    ];
     if builtins.contains(&template_id.as_str()) {
         return scaffold_builtin(&template_id, &project_name, &dest);
     }
@@ -583,16 +596,12 @@ pub async fn import_template_zip(zip_path: String) -> Result<TemplateInfo, AppEr
 
 /// If a zip extracts to a single directory, use that as the root.
 fn find_content_root(dir: &Path) -> Result<PathBuf, AppError> {
-    let entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
 
     // Skip __MACOSX directory
     let real_entries: Vec<_> = entries
         .iter()
-        .filter(|e| {
-            e.file_name().to_string_lossy() != "__MACOSX"
-        })
+        .filter(|e| e.file_name().to_string_lossy() != "__MACOSX")
         .collect();
 
     if real_entries.len() == 1 && real_entries[0].path().is_dir() {

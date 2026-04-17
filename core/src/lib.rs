@@ -22,12 +22,12 @@ use commands::project::{detect_project, read_project_config};
 use commands::recent::{add_recent_project, get_recent_projects, remove_recent_project};
 use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
 use commands::stats::{get_writing_stats, record_writing_stats};
+#[cfg(feature = "sync")]
+use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
 use commands::template::{
     create_project_from_template, delete_template, import_template_zip, list_templates,
     save_project_as_template,
 };
-#[cfg(feature = "sync")]
-use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
 use services::file_watcher::{
     register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
     unregister_open_file, FileWatcherState,
