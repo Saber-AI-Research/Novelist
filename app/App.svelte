@@ -682,16 +682,26 @@
 
     listen<{ path: string }>('file-changed', async (event) => {
       const { path } = event.payload;
-      const tab = tabsStore.findByPath(path);
-      if (!tab) return;
 
-      if (!tab.isDirty) {
-        const result = await commands.readFile(path);
-        if (result.status === 'ok') {
-          tabsStore.reloadContent(tab.id, result.data);
+      // Refresh tab content if a currently-open file changed on disk.
+      const tab = tabsStore.findByPath(path);
+      if (tab) {
+        if (!tab.isDirty) {
+          const result = await commands.readFile(path);
+          if (result.status === 'ok') {
+            tabsStore.reloadContent(tab.id, result.data);
+          }
+        } else {
+          conflictFilePath = path;
         }
-      } else {
-        conflictFilePath = path;
+      }
+
+      // Also refresh the sidebar folder containing the changed path, IF it's
+      // been loaded (expanded at least once). refreshFolder is a no-op for
+      // folders whose children are still undefined.
+      const parentPath = path.slice(0, path.lastIndexOf('/'));
+      if (parentPath) {
+        await projectStore.refreshFolder(parentPath);
       }
     }).then(fn => { unlistenFileChanged = fn; });
 
