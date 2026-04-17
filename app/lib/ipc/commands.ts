@@ -64,6 +64,11 @@ export const commands = {
 	 *  When enabling, also loads the plugin. When disabling, unloads it.
 	 */
 	setPluginEnabled: (pluginId: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("set_plugin_enabled", { pluginId, enabled })),
+	/**
+	 *  Create a minimal plugin at ~/.novelist/plugins/<id>/ with manifest.toml + index.js.
+	 *  ID must match `[a-z0-9][a-z0-9-]*`. display_name defaults to id.
+	 */
+	scaffoldPlugin: (id: string, displayName: string | null) => typedError<string, string>(__TAURI_INVOKE("scaffold_plugin", { id, displayName })),
 	// Open a large file into a Rope. Returns metadata.
 	ropeOpen: (path: string) => typedError<RopeDocumentMeta, string>(__TAURI_INVOKE("rope_open", { path })),
 	/**

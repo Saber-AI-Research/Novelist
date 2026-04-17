@@ -15,7 +15,7 @@ use commands::file::{
     reveal_in_file_manager, search_in_project, write_binary_file, write_file, EncodingState,
 };
 use commands::plugin::{
-    get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin,
+    get_plugin_commands, invoke_plugin_command, list_plugins, load_plugin, scaffold_plugin,
     set_plugin_document_state, set_plugin_enabled, unload_plugin,
 };
 use commands::project::{detect_project, read_project_config};
@@ -103,6 +103,7 @@ pub fn run() {
         invoke_plugin_command,
         set_plugin_document_state,
         set_plugin_enabled,
+        scaffold_plugin,
         rope_open,
         rope_get_lines,
         rope_apply_edit,
@@ -166,6 +167,7 @@ pub fn run() {
         invoke_plugin_command,
         set_plugin_document_state,
         set_plugin_enabled,
+        scaffold_plugin,
         rope_open,
         rope_get_lines,
         rope_apply_edit,
