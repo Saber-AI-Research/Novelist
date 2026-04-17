@@ -11,7 +11,7 @@ use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_
 use commands::export::{check_pandoc, export_project};
 use commands::file::{
     create_directory, create_file, create_scratch_file, delete_item, duplicate_file,
-    get_file_encoding, list_directory, read_file, read_image_data_uri, rename_item,
+    get_file_encoding, list_directory, move_item, read_file, read_image_data_uri, rename_item,
     reveal_in_file_manager, search_in_project, write_binary_file, write_file, EncodingState,
 };
 use commands::plugin::{
@@ -82,6 +82,7 @@ pub fn run() {
         create_scratch_file,
         create_directory,
         rename_item,
+        move_item,
         delete_item,
         check_pandoc,
         export_project,
@@ -144,6 +145,7 @@ pub fn run() {
         create_scratch_file,
         create_directory,
         rename_item,
+        move_item,
         delete_item,
         check_pandoc,
         export_project,

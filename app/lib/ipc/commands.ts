@@ -25,6 +25,11 @@ export const commands = {
 	createScratchFile: () => typedError<string, string>(__TAURI_INVOKE("create_scratch_file")),
 	createDirectory: (parentDir: string, name: string) => typedError<string, string>(__TAURI_INVOKE("create_directory", { parentDir, name })),
 	renameItem: (oldPath: string, newName: string) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName })),
+	/**
+	 *  Move a file or folder into `target_dir`. Auto-numbers on collision
+	 *  ("a.md" -> "a 2.md"). Rejects moving a folder into its own descendant.
+	 */
+	moveItem: (sourcePath: string, targetDir: string) => typedError<string, string>(__TAURI_INVOKE("move_item", { sourcePath, targetDir })),
 	deleteItem: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { path })),
 	checkPandoc: () => typedError<PandocStatus, string>(__TAURI_INVOKE("check_pandoc")),
 	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[]) => typedError<string, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs })),
@@ -48,13 +53,17 @@ export const commands = {
 	loadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("load_plugin", { pluginId })),
 	// Unload (deactivate) a plugin.
 	unloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("unload_plugin", { pluginId })),
-	setPluginEnabled: (pluginId: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("set_plugin_enabled", { pluginId, enabled })),
 	// Get all commands registered by active plugins.
 	getPluginCommands: () => typedError<RegisteredCommandInfo[], string>(__TAURI_INVOKE("get_plugin_commands")),
 	// Execute a registered plugin command. Returns any text replacements the plugin wants to make.
 	invokePluginCommand: (pluginId: string, commandId: string) => typedError<PluginReplacementResult[], string>(__TAURI_INVOKE("invoke_plugin_command", { pluginId, commandId })),
 	// Update the document state that plugins can read.
 	setPluginDocumentState: (content: string, selectionFrom: number, selectionTo: number, wordCount: number) => typedError<null, string>(__TAURI_INVOKE("set_plugin_document_state", { content, selectionFrom, selectionTo, wordCount })),
+	/**
+	 *  Enable or disable a plugin (persists to settings file).
+	 *  When enabling, also loads the plugin. When disabling, unloads it.
+	 */
+	setPluginEnabled: (pluginId: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("set_plugin_enabled", { pluginId, enabled })),
 	// Open a large file into a Rope. Returns metadata.
 	ropeOpen: (path: string) => typedError<RopeDocumentMeta, string>(__TAURI_INVOKE("rope_open", { path })),
 	/**
@@ -90,10 +99,17 @@ export const commands = {
 	saveProjectAsTemplate: (projectDir: string, templateName: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("save_project_as_template", { projectDir, templateName })),
 	deleteTemplate: (templateId: string) => typedError<null, string>(__TAURI_INVOKE("delete_template", { templateId })),
 	importTemplateZip: (zipPath: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("import_template_zip", { zipPath })),
-	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
-	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
-	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
-	testSyncConnection: (webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { webdavUrl, username, password })),
+	getPendingOpenFiles: () => __TAURI_INVOKE<string[]>("get_pending_open_files"),
+	/**
+	 *  Read an image file and return it as a data URI (e.g. `data:image/png;base64,...`).
+	 *  Used by the WYSIWYG editor to render local images without the asset protocol.
+	 */
+	readImageDataUri: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_image_data_uri", { path })),
+	/**
+	 *  Write raw bytes (passed as base64) to a file. Used by the frontend to save
+	 *  pasted/dropped images without UTF-8 encoding corruption.
+	 */
+	writeBinaryFile: (path: string, base64Data: string) => typedError<null, string>(__TAURI_INVOKE("write_binary_file", { path, base64Data })),
 	// Reveal a file or folder in the platform's file manager (Finder on macOS).
 	revealInFileManager: (path: string) => typedError<null, string>(__TAURI_INVOKE("reveal_in_file_manager", { path })),
 	// Duplicate a file. Returns the path of the new copy.
@@ -208,30 +224,6 @@ export type SnapshotMeta = {
 	timestamp: number,
 	file_count: number,
 	total_bytes: number,
-};
-
-export type SyncConfig = {
-	enabled: boolean,
-	webdav_url: string,
-	username: string,
-	password: string,
-	interval_minutes: number,
-};
-
-export type SyncConfigMasked = {
-	enabled: boolean,
-	webdav_url: string,
-	username: string,
-	password: string,
-	interval_minutes: number,
-};
-
-export type SyncStatus = {
-	last_sync: string | null,
-	files_uploaded: number,
-	files_downloaded: number,
-	errors: string[],
-	in_progress: boolean,
 };
 
 // Info returned to the frontend for listing templates.
