@@ -25,7 +25,7 @@ fi
 echo "  PASS"
 
 # Check DMG if present
-DMG_PATH=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+DMG_PATH=$(find core/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
 if [ -n "$DMG_PATH" ]; then
   DMG_KB=$(du -sk "$DMG_PATH" | awk '{print $1}')
   echo "DMG size: ${DMG_KB} KB (threshold: ${DMG_MAX_KB} KB)"
