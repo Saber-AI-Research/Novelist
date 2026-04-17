@@ -342,3 +342,157 @@ pub async fn set_plugin_document_state(
     );
     Ok(())
 }
+
+/// Create a minimal plugin at ~/.novelist/plugins/<id>/ with manifest.toml + index.js.
+/// ID must match `[a-z0-9][a-z0-9-]*`. display_name defaults to id.
+#[tauri::command]
+#[specta::specta]
+pub async fn scaffold_plugin(
+    id: String,
+    display_name: Option<String>,
+) -> Result<String, AppError> {
+    // Manual validation (no regex dep): non-empty, starts with [a-z0-9], remaining chars [a-z0-9-].
+    let valid = !id.is_empty()
+        && id
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            .unwrap_or(false)
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        return Err(AppError::InvalidInput(format!(
+            "Plugin ID must match [a-z0-9][a-z0-9-]*, got '{id}'"
+        )));
+    }
+
+    let plugins = plugins_dir();
+    tokio::fs::create_dir_all(&plugins).await?;
+    let dir = plugins.join(&id);
+    if dir.exists() {
+        return Err(AppError::InvalidInput(format!(
+            "Plugin directory already exists: {}",
+            dir.display()
+        )));
+    }
+
+    let name = display_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+
+    let manifest = format!(
+        "id = \"{id}\"\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         author = \"\"\n\
+         description = \"\"\n\
+         permissions = []\n\
+         entry = \"index.js\"\n"
+    );
+    let index_js = "// Minimal Novelist plugin - runs in QuickJS sandbox.\n\
+export default {\n\
+  activate(ctx) {\n\
+    // ctx.registerCommand({ id: \"example\", title: \"Example\", run: () => {} });\n\
+  }\n\
+};\n";
+
+    // Write to <id>.tmp then rename, so a partial failure doesn't leave a half-baked dir.
+    let tmp = plugins.join(format!("{id}.tmp"));
+    if tmp.exists() {
+        tokio::fs::remove_dir_all(&tmp).await?;
+    }
+    tokio::fs::create_dir_all(&tmp).await?;
+    tokio::fs::write(tmp.join("manifest.toml"), manifest).await?;
+    tokio::fs::write(tmp.join("index.js"), index_js).await?;
+    tokio::fs::rename(&tmp, &dir).await?;
+
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    // Tests that mutate HOME must not run concurrently (env is process-global).
+    static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+    // These tests mutate HOME to isolate the plugins_dir(). Run sequentially by
+    // serializing through a single process mutex (tokio tests already serialize
+    // when each test sets+restores HOME in a scoped manner).
+
+    #[tokio::test]
+    async fn test_scaffold_plugin_creates_files() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let result = scaffold_plugin(
+            "sentence-counter".to_string(),
+            Some("Sentence Counter".into()),
+        )
+        .await
+        .unwrap();
+        assert!(result.ends_with("/.novelist/plugins/sentence-counter"));
+        let dir = std::path::PathBuf::from(&result);
+        assert!(dir.join("manifest.toml").is_file());
+        assert!(dir.join("index.js").is_file());
+        let manifest = std::fs::read_to_string(dir.join("manifest.toml")).unwrap();
+        assert!(manifest.contains("id = \"sentence-counter\""));
+        assert!(manifest.contains("name = \"Sentence Counter\""));
+
+        if let Some(h) = old {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scaffold_plugin_rejects_invalid_id() {
+        for bad in ["", "Foo", "foo bar", "_foo", "foo/bar", "-foo"] {
+            let result = scaffold_plugin(bad.to_string(), None).await;
+            assert!(result.is_err(), "expected error for id '{bad}'");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scaffold_plugin_rejects_duplicate() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        scaffold_plugin("dup".to_string(), None).await.unwrap();
+        let second = scaffold_plugin("dup".to_string(), None).await;
+        assert!(second.is_err());
+
+        if let Some(h) = old {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scaffold_plugin_defaults_display_name_to_id() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let result = scaffold_plugin("foo".to_string(), None).await.unwrap();
+        let manifest =
+            std::fs::read_to_string(std::path::Path::new(&result).join("manifest.toml")).unwrap();
+        assert!(manifest.contains("name = \"foo\""));
+
+        if let Some(h) = old {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+}
