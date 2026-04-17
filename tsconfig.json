@@ -15,6 +15,6 @@
       "$lib/*": ["./app/lib/*"]
     }
   },
-  "include": ["app/**/*.ts", "app/**/*.svelte"],
+  "include": ["app/**/*.ts", "app/**/*.svelte", "tests/**/*.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

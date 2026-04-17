@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { projectStore, type FileNode } from '../../../app/lib/stores/project.svelte';
+import { projectStore, type FileNode } from '$lib/stores/project.svelte';
 
-vi.mock('../../../app/lib/ipc/commands', () => ({
+vi.mock('$lib/ipc/commands', () => ({
   commands: {
     listDirectory: vi.fn(),
   },
 }));
 
-import { commands } from '../../../app/lib/ipc/commands';
+import { commands } from '$lib/ipc/commands';
 
 function node(name: string, isDir: boolean, path = `/proj/${name}`): FileNode {
   return { name, path, is_dir: isDir, size: 0, expanded: false, loading: false };
@@ -40,7 +40,7 @@ describe('projectStore tree extensions', () => {
     (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
 
     await projectStore.expandFolder('/proj/sub');
-    await projectStore.collapseFolder('/proj/sub');
+    projectStore.collapseFolder('/proj/sub');
     await projectStore.expandFolder('/proj/sub');
 
     expect(commands.listDirectory).toHaveBeenCalledTimes(1);
@@ -54,7 +54,7 @@ describe('projectStore tree extensions', () => {
     });
 
     await projectStore.expandFolder('/proj/sub');
-    await projectStore.collapseFolder('/proj/sub');
+    projectStore.collapseFolder('/proj/sub');
 
     const sub = projectStore.files.find(f => f.path === '/proj/sub')!;
     expect(sub.expanded).toBe(false);
