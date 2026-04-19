@@ -141,12 +141,7 @@
                 data-testid="recent-project-{index}"
                 onclick={() => onOpenRecent(project.path)}
               >
-                <span class="recent-name">
-                  {project.name}
-                  {#if project.pinned}
-                    <span class="pin-indicator" aria-hidden="true">📌</span>
-                  {/if}
-                </span>
+                <span class="recent-name">{project.name}</span>
                 <span class="recent-path">{displayPath(project.path)}</span>
               </button>
               <button
@@ -308,13 +303,6 @@
   .recent-name {
     font-size: 1rem;
     font-weight: 500;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .pin-indicator {
-    font-size: 11px;
-    opacity: 0.85;
   }
   .recent-path {
     font-size: 0.82rem;
