@@ -524,6 +524,7 @@
         toggleSplit: () => tabsStore.toggleSplit(),
         toggleSettings: () => uiStore.toggleSettings(),
         save: () => activeEditorRef?.saveCurrentFile(),
+        newFile: () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); },
       };
     }
 
