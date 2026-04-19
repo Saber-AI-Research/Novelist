@@ -202,12 +202,8 @@ class TabsStore {
     const newPath = result.data;
     this.updatePath(filePath, newPath);
 
-    // Task 3.9 will add broadcast_file_renamed; for now, try it but tolerate missing binding.
-    try {
-      if ((commands as any).broadcastFileRenamed) {
-        await (commands as any).broadcastFileRenamed(filePath, newPath);
-      }
-    } catch { /* ignore */ }
+    // Broadcast to other windows so their tabs/sidebar can update.
+    await commands.broadcastFileRenamed(filePath, newPath).catch(() => {});
 
     return newPath;
   }

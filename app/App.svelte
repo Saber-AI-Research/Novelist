@@ -661,6 +661,7 @@
     let unlistenDragDrop: (() => void) | null = null;
     let unlistenCloseRequested: (() => void) | null = null;
     let unlistenOpenFile: (() => void) | null = null;
+    let unlistenFileRenamed: (() => void) | null = null;
 
     // Shared helper: open a file by path (single-file mode if no project open)
     async function openFileByPath(filePath: string) {
@@ -721,6 +722,18 @@
         await projectStore.refreshFolder(path.slice(0, slashIdx));
       }
     }).then(fn => { unlistenFileChanged = fn; });
+
+    // Cross-window file rename broadcast: another window auto-renamed a file we
+    // may have open. Update our tab paths and refresh the affected sidebar folder.
+    listen<{ old_path: string; new_path: string }>('file-renamed', (event) => {
+      const { old_path, new_path } = event.payload;
+      tabsStore.updatePath(old_path, new_path);
+      const parentIdx = new_path.lastIndexOf('/');
+      if (parentIdx > 0) {
+        const parent = new_path.slice(0, parentIdx);
+        projectStore.refreshFolder(parent).catch(() => {});
+      }
+    }).then(fn => { unlistenFileRenamed = fn; });
 
     // Drag-and-drop: open .md/.markdown/.txt files dropped onto the window
     getCurrentWindow().onDragDropEvent(async (event) => {
@@ -812,6 +825,7 @@
       unlistenDragDrop?.();
       unlistenCloseRequested?.();
       unlistenOpenFile?.();
+      unlistenFileRenamed?.();
       window.removeEventListener('novelist-goto-line', handleGotoLine);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (syncIntervalId) clearInterval(syncIntervalId);

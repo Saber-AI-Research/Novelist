@@ -26,6 +26,10 @@ export const commands = {
 	createDirectory: (parentDir: string, name: string) => typedError<string, string>(__TAURI_INVOKE("create_directory", { parentDir, name })),
 	renameItem: (oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName, allowCollisionBump })),
 	/**
+	 *  Emit a global Tauri event so other windows can update their tab state.
+	 */
+	broadcastFileRenamed: (oldPath: string, newPath: string) => typedError<null, string>(__TAURI_INVOKE("broadcast_file_renamed", { oldPath, newPath })),
+	/**
 	 *  Move a file or folder into `target_dir`. Auto-numbers on collision
 	 *  ("a.md" -> "a 2.md"). Rejects moving a folder into its own descendant.
 	 */

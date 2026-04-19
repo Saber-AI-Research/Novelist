@@ -391,6 +391,26 @@ pub async fn create_directory(parent_dir: String, name: String) -> Result<String
     Ok(dir_path.to_string_lossy().to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct FileRenamedPayload {
+    pub old_path: String,
+    pub new_path: String,
+}
+
+/// Emit a global Tauri event so other windows can update their tab state.
+#[tauri::command]
+#[specta::specta]
+pub async fn broadcast_file_renamed(
+    old_path: String,
+    new_path: String,
+    app: tauri::AppHandle,
+) -> Result<(), AppError> {
+    use tauri::Emitter;
+    app.emit("file-renamed", FileRenamedPayload { old_path, new_path })
+        .map_err(|e| AppError::Custom(format!("emit failed: {e}")))?;
+    Ok(())
+}
+
 /// Rename a file or folder in place.
 /// When `allow_collision_bump` is Some(true), appends " 2", " 3", … on collision.
 /// Defaults to error-on-collision when None or Some(false).
