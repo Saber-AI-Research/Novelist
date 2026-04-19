@@ -6,6 +6,7 @@ import {
   MOCK_RECENT_PROJECTS,
   MOCK_PROJECT_DIR,
   MOCK_PROJECT_CONFIG,
+  type MockFileEntry,
 } from './mock-data';
 
 /**
@@ -52,7 +53,10 @@ export const test = base.extend<{
     getWrittenFiles: () => Promise<Record<string, string>>;
     getCreatedFiles: () => Promise<string[]>;
     getDeletedFiles: () => Promise<string[]>;
+    getFiles: () => Promise<MockFileEntry[]>;
     emitEvent: (event: string, payload: unknown) => Promise<void>;
+    openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
+    renameFile: (oldPath: string, newPath: string) => Promise<void>;
     reset: () => Promise<void>;
   };
 }>({
@@ -90,10 +94,25 @@ export const test = base.extend<{
       async getDeletedFiles() {
         return app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.deletedFiles);
       },
+      async getFiles() {
+        return app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.files);
+      },
       async emitEvent(event: string, payload: unknown) {
         await app.evaluate(
           ([e, p]) => (window as any).__TAURI_MOCK_STATE__.emitEvent(e, p),
           [event, payload] as const,
+        );
+      },
+      async openProject(dirPath: string, files: MockFileEntry[]) {
+        await app.evaluate(
+          ([d, f]) => (window as any).__TAURI_MOCK_STATE__.openProject(d, f),
+          [dirPath, files] as const,
+        );
+      },
+      async renameFile(oldPath: string, newPath: string) {
+        await app.evaluate(
+          ([o, n]) => (window as any).__TAURI_MOCK_STATE__.renameFile(o, n),
+          [oldPath, newPath] as const,
         );
       },
       async reset() {

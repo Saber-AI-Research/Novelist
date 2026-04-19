@@ -5,6 +5,7 @@ export interface MockFileEntry {
   path: string;
   is_dir: boolean;
   size: number;
+  mtime?: number;
 }
 
 export interface MockRecentProject {

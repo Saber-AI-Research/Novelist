@@ -11,16 +11,22 @@ export interface TauriMockConfig {
 export function buildTauriMockScript(config: TauriMockConfig): string {
   return `
     (() => {
-      const files = ${JSON.stringify(config.files)};
+      const now = Date.now();
+      const files = ${JSON.stringify(config.files)}.map(f => ({ ...f, mtime: f.mtime ?? now }));
       const fileContents = ${JSON.stringify(config.fileContents)};
       const recentProjects = ${JSON.stringify(config.recentProjects)};
-      const projectDir = ${JSON.stringify(config.projectDir)};
+      let projectDir = ${JSON.stringify(config.projectDir)};
       const projectConfig = ${JSON.stringify(config.projectConfig)};
       const writtenFiles = {};
       const createdFiles = [];
       const deletedFiles = [];
       const eventListeners = {};
       const scaffoldedPlugins = [];
+
+      function ensureMtime(entry) {
+        if (entry && typeof entry.mtime !== 'number') entry.mtime = Date.now();
+        return entry;
+      }
 
       function handleInvoke(cmd, args) {
         switch (cmd) {
@@ -29,17 +35,19 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'get_file_encoding': return 'utf-8';
           case 'list_directory': {
             const prefix = args.path.endsWith('/') ? args.path : args.path + '/';
-            return files.filter(f => {
-              if (!f.path.startsWith(prefix)) return false;
-              const rest = f.path.slice(prefix.length);
-              return rest.length > 0 && !rest.includes('/');
-            });
+            return files
+              .filter(f => {
+                if (!f.path.startsWith(prefix)) return false;
+                const rest = f.path.slice(prefix.length);
+                return rest.length > 0 && !rest.includes('/');
+              })
+              .map(f => ensureMtime({ ...f }));
           }
           case 'create_file': {
             const p = args.parentDir + '/' + args.filename;
             createdFiles.push(p);
             fileContents[p] = '';
-            files.push({ name: args.filename, path: p, is_dir: false, size: 0 });
+            files.push({ name: args.filename, path: p, is_dir: false, size: 0, mtime: Date.now() });
             return p;
           }
           case 'create_scratch_file': {
@@ -48,7 +56,46 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             return p;
           }
           case 'create_directory': return args.parentDir + '/' + args.name;
-          case 'rename_item': return args.oldPath.replace(/[^\\/]+$/, args.newName);
+          case 'rename_item': {
+            const oldPath = args.oldPath;
+            const newName = args.newName;
+            const allowCollisionBump = args.allowCollisionBump;
+            const file = files.find(f => f.path === oldPath);
+            if (!file) throw new Error('not found: ' + oldPath);
+            const parent = oldPath.slice(0, oldPath.lastIndexOf('/'));
+            let target = parent + '/' + newName;
+            if (files.some(f => f.path === target && f.path !== oldPath)) {
+              if (allowCollisionBump) {
+                const dotIdx = newName.lastIndexOf('.');
+                const base = dotIdx > 0 ? newName.slice(0, dotIdx) : newName;
+                const ext = dotIdx > 0 ? newName.slice(dotIdx) : '';
+                let n = 2;
+                while (files.some(f => f.path === parent + '/' + base + ' ' + n + ext)) n++;
+                target = parent + '/' + base + ' ' + n + ext;
+              } else {
+                throw new Error('Already exists: ' + target);
+              }
+            }
+            const finalName = target.slice(target.lastIndexOf('/') + 1);
+            // Update directory descendants if renaming a directory
+            if (file.is_dir) {
+              for (let i = 0; i < files.length; i++) {
+                if (files[i].path.startsWith(oldPath + '/')) {
+                  files[i] = { ...files[i], path: target + files[i].path.slice(oldPath.length) };
+                }
+              }
+            }
+            // Move fileContents key if present
+            if (fileContents[oldPath] !== undefined) {
+              fileContents[target] = fileContents[oldPath];
+              delete fileContents[oldPath];
+            }
+            file.path = target;
+            file.name = finalName;
+            file.mtime = Date.now();
+            return target;
+          }
+          case 'broadcast_file_renamed': return null;
           case 'move_item': {
             const src = args.sourcePath;
             const parent = args.targetDir.endsWith('/') ? args.targetDir : args.targetDir + '/';
@@ -115,9 +162,38 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get writtenFiles() { return { ...writtenFiles }; },
         get createdFiles() { return [...createdFiles]; },
         get deletedFiles() { return [...deletedFiles]; },
+        get files() { return files.map(f => ({ ...f })); },
+        get projectDir() { return projectDir; },
         emitEvent(event, payload) {
           const listeners = eventListeners[event] || [];
           listeners.forEach(cb => cb({ event, payload }));
+        },
+        openProject(dirPath, newFiles) {
+          projectDir = dirPath;
+          files.length = 0;
+          const nowTs = Date.now();
+          for (const f of (newFiles || [])) {
+            files.push({ ...f, mtime: f.mtime != null ? f.mtime : nowTs });
+          }
+        },
+        renameFile(oldPath, newPath) {
+          const f = files.find(x => x.path === oldPath);
+          if (!f) return;
+          const finalName = newPath.slice(newPath.lastIndexOf('/') + 1);
+          if (f.is_dir) {
+            for (let i = 0; i < files.length; i++) {
+              if (files[i].path.startsWith(oldPath + '/')) {
+                files[i] = { ...files[i], path: newPath + files[i].path.slice(oldPath.length) };
+              }
+            }
+          }
+          if (fileContents[oldPath] !== undefined) {
+            fileContents[newPath] = fileContents[oldPath];
+            delete fileContents[oldPath];
+          }
+          f.path = newPath;
+          f.name = finalName;
+          f.mtime = Date.now();
         },
         reset() {
           Object.keys(writtenFiles).forEach(k => delete writtenFiles[k]);
