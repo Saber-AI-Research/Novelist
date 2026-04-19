@@ -170,8 +170,11 @@ playwright.config.ts          # Playwright config (browser-mode E2E)
 .github/workflows/            # CI: svelte-check + vitest + playwright + cargo test
 ```
 
-## Recent Additions (v0.0.2+)
+## Recent Additions (v0.1.0+)
 
+- **Smart new file naming**: project-mode "New file" infers the next chapter number from sibling filenames (recognizes `第{N}章`, `Chapter {N}`, `{N}-{title}`, etc. including bracket/quote wraps); falls back to a user-configurable template in Settings > Editor > New file in project. Saving a placeholder file with an H1 renames it to match (one-shot, only while filename is still placeholder). Pipeline: `app/lib/utils/{numbering,h1,filename,placeholder}.ts`.
+- **Numeric-aware sidebar sort**: file tree orders `第二章 < 第十章` numerically by default (leftmost digit or CJK numeral run). Sort dropdown in sidebar header offers name/number/mtime asc/desc; choice persists per project via `novelist.sortMode.<path>` in localStorage. Comparator: `app/lib/utils/file-sort.ts`.
+- **Save flow auto-rename**: `tabsStore.tryRenameAfterSave(filePath, content)` runs after every successful writeFile; uses `rename_item(..., allow_collision_bump: true)` with ` 2`/` 3` suffix on collision. Cross-window consistency via `broadcast_file_renamed` IPC → `file-renamed` Tauri event → `tabsStore.updatePath` in every window. File watcher has `register_rename_ignore(old, new)` to suppress the rename's own FS events.
 - **Error boundary**: `ErrorBoundary.svelte` wraps Editor components to prevent white-screen crashes
 - **Multi-window**: `Cmd+Shift+N` opens new independent window via `WebviewWindow`
 - **Project search**: `Cmd+Shift+F` opens project-wide search (Rust `walkdir` backend, `ProjectSearch.svelte`)
