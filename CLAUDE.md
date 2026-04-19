@@ -78,6 +78,19 @@ Image rendering uses `Decoration.replace({block: true, widget})` via a `StateFie
 - Plugins live in `~/.novelist/plugins/<id>/` with `manifest.toml` + `index.js`
 - Sandboxed via QuickJS with permission tiers: read, write, execute
 - Plugin commands appear in the command palette
+- Built-in plugins (`canvas`, `mindmap`, `kanban`) are bundled via `core/build.rs` → `core/bundled-plugins/` → Tauri resources → installed to `~/.novelist/plugins/` on startup (version-gated by `ensure_bundled_plugins`)
+- **UI plugins use asset protocol**: `tauri.conf.json` enables `assetProtocol` with scope `$HOME/.novelist/plugins/**`. Every UI plugin's `vite.config.ts` **must** set `base: './'` — absolute `/assets/...` paths resolve outside the plugin dir and 403
+- **Iframes are un-sandboxed**: `PluginPanel.svelte` and `PluginFileEditor.svelte` intentionally omit the `sandbox` attribute. WKWebView blocks custom-protocol main-resource loads from sandboxed iframes, which breaks every asset://-served plugin
+- **`.kanban` is a file-handler extension**: `Sidebar.svelte`'s `textExtensions` list routes these to the kanban plugin via `extensionStore.getFileHandler()`
+
+### Recent projects: pin + manual order
+`core/src/commands/recent.rs` persists `~/.novelist/recent-projects.json`. Each `RecentProject` has optional `pinned: bool` and `sort_order: Option<i64>` (both `#[serde(default)]`, so legacy files deserialize cleanly). Canonical sort is `sort_projects()`: pinned before unpinned, then ascending `sort_order` (None after Some), then descending `last_opened` as tiebreaker. `set_project_pinned` toggles pin; `reorder_recent_projects(ordered_paths)` rewrites `sort_order` by position. `add_recent_project` preserves existing pin/sort_order when a user re-opens a project. The Welcome screen (`Welcome.svelte`) wires a drag handle + pin button per row; the Tauri mock mirrors the same sort for browser-mode E2E.
+
+### Mindmap overlay
+Built into the app (not a plugin panel). Trigger with `Cmd+Shift+M`. The overlay is implemented in `app/lib/components/MindmapOverlay.svelte`, consumes active-editor content, and renders via `markmap-lib` + `markmap-view` directly in Svelte (no iframe, so theme CSS variables propagate naturally). Fold logic lives in `app/lib/utils/mindmap.ts` (`applyFoldLevel`) and is unit-tested in `tests/unit/utils/mindmap.test.ts`. The plugin in `plugins/mindmap/` is retained as a reference implementation but is filtered out of the side-panel list in `App.svelte`.
+
+### Unified selection background
+CM6's `drawSelection` paints first-line and middle-line rects in different coordinate frames, leaving a ~19px stair-step on the left edge across heading lines. We neutralize this by making `.cm-selectionBackground` transparent (keeping it only for cursor/caret rendering) and painting each selected line via a `Decoration.line` (`cm-novelist-selected-line`) from `app/lib/editor/selection-line.ts`. Regression test in `tests/e2e/specs/selection-geometry.spec.ts`.
 
 ## Design Philosophy
 
@@ -96,12 +109,12 @@ Image rendering uses `Decoration.replace({block: true, widget})` via a `StateFie
 Three-tier automated testing — run all three before pushing:
 
 ### Tier 1: Unit Tests (Vitest) — `pnpm test`
-- **258 tests** in `tests/unit/**/*.test.ts`
+- **301 tests** in `tests/unit/**/*.test.ts` (17 files)
 - Tests pure functions: word counting, markdown parsing, editor logic, store behavior
 - Naming convention: describe the behavior being tested, not the function name
 
 ### Tier 2: Browser E2E (Playwright) — `pnpm test:e2e:browser`
-- **38 tests** in `tests/e2e/specs/*.spec.ts`
+- **54 tests** in `tests/e2e/specs/*.spec.ts` (13 files)
 - Runs the full Svelte app in a real browser (Chromium) against the Vite dev server
 - Tauri IPC is mocked via `tests/e2e/fixtures/tauri-mock.ts` (`window.__TAURI_INTERNALS__`)
 - Uses `data-testid` attributes for stable element selection (not CSS classes or coordinates)
@@ -127,7 +140,7 @@ Three-tier automated testing — run all three before pushing:
 - Run before releases for full integration validation
 
 ### Backend Tests (Rust) — `pnpm test:rust`
-- **160 tests** in `core/src/` via `#[cfg(test)]` modules
+- **171 tests** in `core/src/` via `#[cfg(test)]` modules
 - Tests file I/O, encoding, rope data structure, plugin sandbox, project config
 
 ### Legacy
@@ -175,6 +188,11 @@ playwright.config.ts          # Playwright config (browser-mode E2E)
 - **Smart new file naming**: project-mode "New file" infers the next chapter number from sibling filenames (recognizes `第{N}章`, `Chapter {N}`, `{N}-{title}`, etc. including bracket/quote wraps); falls back to a user-configurable template in Settings > Editor > New file in project. Saving a placeholder file with an H1 renames it to match (one-shot, only while filename is still placeholder). Pipeline: `app/lib/utils/{numbering,h1,filename,placeholder}.ts`.
 - **Numeric-aware sidebar sort**: file tree orders `第二章 < 第十章` numerically by default (leftmost digit or CJK numeral run). Sort dropdown in sidebar header offers name/number/mtime asc/desc; choice persists per project via `novelist.sortMode.<path>` in localStorage. Comparator: `app/lib/utils/file-sort.ts`.
 - **Save flow auto-rename**: `tabsStore.tryRenameAfterSave(filePath, content)` runs after every successful writeFile; uses `rename_item(..., allow_collision_bump: true)` with ` 2`/` 3` suffix on collision. Cross-window consistency via `broadcast_file_renamed` IPC → `file-renamed` Tauri event → `tabsStore.updatePath` in every window. File watcher has `register_rename_ignore(old, new)` to suppress the rename's own FS events.
+- **Sidebar folder tree**: `FileTreeNode.svelte` renders a recursive, collapsible tree of the opened folder; `FileNode` model lives in `projectStore`; tree auto-refreshes on file-watcher events
+- **Sidebar drag-drop**: HTML5 drag-drop reorders files/folders across the tree; root drop zone moves items back to the project root; backed by `move_item` Rust command (rejects moving a folder into its own descendant and rejects no-op moves)
+- **Plugin scaffolding**: `scaffold_plugin(id, display_name?)` Rust command creates `~/.novelist/plugins/<id>/` with a starter `manifest.toml` + `index.js`; triggered from Settings > Plugins via the "+" button and `PluginScaffoldDialog.svelte`; ID pattern `[a-z0-9][a-z0-9-]*`
+- **Help tooltip**: `HelpTooltip.svelte` used in Settings > Plugins to explain the manifest/permissions model inline
+- **Language picker scoped to Editor**: Moved from a global setting into Settings > Editor so it sits alongside the other editor-scoped preferences
 - **Error boundary**: `ErrorBoundary.svelte` wraps Editor components to prevent white-screen crashes
 - **Multi-window**: `Cmd+Shift+N` opens new independent window via `WebviewWindow`
 - **Project search**: `Cmd+Shift+F` opens project-wide search (Rust `walkdir` backend, `ProjectSearch.svelte`)
@@ -187,8 +205,9 @@ playwright.config.ts          # Playwright config (browser-mode E2E)
 - **Recent projects cleanup**: Filters non-existent paths on load
 - **Export progress**: Animated progress bar during Pandoc export
 - **CSP security**: Content Security Policy configured in `tauri.conf.json`
+- **Updater signing**: Updater key loaded from `.env` (regenerated without password)
 - **CI/CD**: GitHub Actions workflow for type-check + vitest + Playwright E2E + cargo test
-- **Playwright E2E**: 38 browser-mode tests replacing old bash+cliclick GUI tests
+- **Playwright E2E**: 44 browser-mode tests replacing old bash+cliclick GUI tests
 - **Test API bridge**: `window.__test_api__` for testing browser-intercepted shortcuts
 - **Image block decoration fix**: Single `Decoration.replace({block: true})` for images, CSS zoom→transform migration, async height refresh, gutter dedup
 - **Image block tests**: 21 tests in `tests/unit/editor/image-block-deco.test.ts` covering decoration strategy, height map, coordinate mapping, zoom impact

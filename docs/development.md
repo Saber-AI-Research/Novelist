@@ -17,10 +17,21 @@ pnpm install          # Install frontend deps
 pnpm tauri dev        # Start dev server + Tauri window
 pnpm tauri build      # Production build
 pnpm test             # Frontend unit tests (vitest)
+pnpm test:e2e:browser # Browser E2E tests (Playwright, mocked Tauri IPC)
+pnpm test:e2e:ui      # Playwright interactive UI mode
+pnpm test:e2e:debug   # Playwright step-through debugger
 pnpm test:rust        # Rust backend tests (cargo test)
-pnpm test:all         # Both frontend + backend
+pnpm test:all         # Unit + Rust tests
 pnpm check            # Svelte type checking
 ```
+
+## Testing
+
+Three tiers — see `CLAUDE.md` for details:
+
+1. **Unit (Vitest)** — pure functions, stores, editor logic (`tests/unit/`)
+2. **Browser E2E (Playwright)** — full Svelte app against a real browser with mocked Tauri IPC (`tests/e2e/specs/`)
+3. **Full E2E (tauri-plugin-playwright)** — same specs against the real Rust backend, gated behind the `e2e-testing` cargo feature; run before releases
 
 ## Project Structure
 

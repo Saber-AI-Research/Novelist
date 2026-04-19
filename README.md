@@ -26,7 +26,10 @@
 - **Split View** — Two-pane editing (Cmd+\\) / 双栏编辑
 - **Zen Mode** — Fullscreen + typewriter scrolling (F11) / 全屏 + 打字机滚动
 - **Themes** — Light, Dark, Sepia, Nord, GitHub, Dracula / 多主题切换
-- **Plugin System** — QuickJS sandbox / QuickJS 沙箱插件
+- **Sidebar Folder Tree** — Recursive tree with drag-drop reorder / 递归文件夹树，支持拖拽重排
+- **Plugin System** — QuickJS sandbox with in-app scaffolding / QuickJS 沙箱，支持应用内脚手架
+- **Project Search** — Cmd+Shift+F across the project / 项目内搜索
+- **Multi-Window** — Cmd+Shift+N for a new independent window / 多窗口
 - **Export** — HTML, PDF, DOCX, EPUB via Pandoc / 多格式导出
 - **CJK-Aware** — Proper word count & IME handling / 中日韩文字支持
 - **Large Files** — Tiered performance up to 10MB+ / 大文件分级优化
