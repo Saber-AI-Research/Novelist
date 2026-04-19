@@ -181,4 +181,11 @@ describe('renameFromH1', () => {
     expect(renameFromH1('Untitled 1.md', '开篇', ['开篇.md'])).toBe('开篇 2.md');
     expect(renameFromH1('Untitled 1.md', '开篇', ['开篇.md', '开篇 2.md'])).toBe('开篇 3.md');
   });
+  it('non-placeholder returns null even with a fresh H1 (body H1 must not rename)', () => {
+    // Once the file has a real name, typing more H1s in the body must not
+    // re-trigger auto-rename. isPlaceholder is the only gate.
+    expect(renameFromH1('开篇.md', 'Second heading', [])).toBeNull();
+    expect(renameFromH1('Chapter 3 开篇.md', 'Another', [])).toBeNull();
+    expect(renameFromH1('03-开篇.md', 'Another', [])).toBeNull();
+  });
 });
