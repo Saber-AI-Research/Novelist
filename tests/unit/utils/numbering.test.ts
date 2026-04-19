@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseNumber, formatNumber, type NumberStyle } from '$lib/utils/numbering';
+import { parseNumber, formatNumber } from '$lib/utils/numbering';
 
 describe('parseNumber — Arabic', () => {
   it('parses bare digits', () => {
