@@ -1,5 +1,18 @@
 import type { FileEntry, ProjectConfig } from '$lib/ipc/commands';
 import { commands } from '$lib/ipc/commands';
+import type { SortMode } from '$lib/utils/file-sort';
+
+const SORT_KEY_PREFIX = 'novelist.sortMode.';
+
+function readPersistedSort(dirPath: string): SortMode {
+  if (typeof localStorage === 'undefined') return 'numeric-asc';
+  const raw = localStorage.getItem(SORT_KEY_PREFIX + dirPath);
+  if (raw === 'name-asc' || raw === 'name-desc' || raw === 'numeric-asc' ||
+      raw === 'numeric-desc' || raw === 'mtime-asc' || raw === 'mtime-desc') {
+    return raw;
+  }
+  return 'numeric-asc';
+}
 
 export interface FileNode extends FileEntry {
   /** undefined = children never loaded; [] = loaded but empty. */
@@ -32,8 +45,16 @@ class ProjectStore {
   files = $state<FileNode[]>([]);
   isLoading = $state(false);
   singleFileMode = $state(false);
+  sortMode = $state<SortMode>('numeric-asc');
 
   get isOpen() { return this.dirPath !== null || this.singleFileMode; }
+
+  setSortMode(mode: SortMode) {
+    this.sortMode = mode;
+    if (this.dirPath && typeof localStorage !== 'undefined') {
+      localStorage.setItem(SORT_KEY_PREFIX + this.dirPath, mode);
+    }
+  }
 
   get name() {
     if (this.config) return this.config.project.name;
@@ -57,6 +78,7 @@ class ProjectStore {
     this.files = files.map(toNode);
     this.isLoading = false;
     this.singleFileMode = false;
+    this.sortMode = readPersistedSort(dirPath);
   }
 
   /** Replace the project-root children. Used by legacy callers; preserves expansion state of still-present folders. */
@@ -76,6 +98,7 @@ class ProjectStore {
     this.config = null;
     this.files = [];
     this.singleFileMode = false;
+    this.sortMode = 'numeric-asc';
   }
 
   /** Find a folder node anywhere in the tree. */
