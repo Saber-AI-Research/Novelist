@@ -1,6 +1,9 @@
 import { commands } from '$lib/ipc/commands';
 import { ask, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { isScratchFile, nextScratchDisplayName } from '$lib/utils/scratch';
+import { isPlaceholder, renameFromH1 } from '$lib/utils/placeholder';
+import { extractFirstH1 } from '$lib/utils/h1';
+import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
 import { t } from '$lib/i18n';
 import type { EditorView } from '@codemirror/view';
 
@@ -169,6 +172,46 @@ class TabsStore {
     }
   }
 
+  /**
+   * Post-write hook: if the file is a placeholder and its content has an H1,
+   * rename the file to match. Returns the new path (== old path if no rename).
+   * Safe to call after every successful writeFile.
+   */
+  async tryRenameAfterSave(filePath: string, content: string): Promise<string> {
+    if (!newFileSettings.autoRenameFromH1) return filePath;
+    const fileName = filePath.split('/').pop() || filePath;
+    if (!isPlaceholder(fileName)) return filePath;
+    const h1 = extractFirstH1(content);
+    if (!h1 || h1.trim().length === 0) return filePath;
+
+    const lastSlash = filePath.lastIndexOf('/');
+    const parentDir = lastSlash > 0 ? filePath.slice(0, lastSlash) : filePath;
+
+    // Re-list to get current siblings for collision check
+    const list = await commands.listDirectory(parentDir);
+    const siblings = list.status === 'ok' ? list.data.map(e => e.name) : [];
+
+    const newName = renameFromH1(fileName, h1, siblings);
+    if (!newName || newName === fileName) return filePath;
+
+    const result = await commands.renameItem(filePath, newName, true);
+    if (result.status !== 'ok') {
+      console.warn('Auto-rename failed:', result.error);
+      return filePath;
+    }
+    const newPath = result.data;
+    this.updatePath(filePath, newPath);
+
+    // Task 3.9 will add broadcast_file_renamed; for now, try it but tolerate missing binding.
+    try {
+      if ((commands as any).broadcastFileRenamed) {
+        await (commands as any).broadcastFileRenamed(filePath, newPath);
+      }
+    } catch { /* ignore */ }
+
+    return newPath;
+  }
+
   openTab(filePath: string, content: string) {
     const pane = this.activePane;
     const existing = pane.tabs.find(t => t.filePath === filePath);
@@ -249,7 +292,10 @@ class TabsStore {
             } else {
               await commands.registerWriteIgnore(fresh.filePath);
               const result = await commands.writeFile(fresh.filePath, fresh.content);
-              if (result.status === 'ok') this.markSaved(fresh.id);
+              if (result.status === 'ok') {
+                await this.tryRenameAfterSave(fresh.filePath, fresh.content);
+                this.markSaved(fresh.id);
+              }
             }
           }
         }
@@ -389,7 +435,10 @@ class TabsStore {
       if (fresh?.isDirty && fresh.content) {
         await commands.registerWriteIgnore(fresh.filePath);
         const result = await commands.writeFile(fresh.filePath, fresh.content);
-        if (result.status === 'ok') this.markSaved(fresh.id);
+        if (result.status === 'ok') {
+          await this.tryRenameAfterSave(fresh.filePath, fresh.content);
+          this.markSaved(fresh.id);
+        }
       }
     }
   }

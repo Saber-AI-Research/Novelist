@@ -494,6 +494,7 @@
     await commands.registerWriteIgnore(filePath);
     const result = await commands.writeFile(filePath, tab.content);
     if (result.status === 'ok') {
+      await tabsStore.tryRenameAfterSave(filePath, tab.content);
       tabsStore.markSaved(tab.id);
     } else {
       console.error('Failed to save (keep mine):', result.error);

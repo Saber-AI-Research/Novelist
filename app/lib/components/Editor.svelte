@@ -302,7 +302,8 @@
     const result = await commands.writeFile(tab.filePath, content);
     if (result.status === 'ok') {
       tabsStore.updateContent(tab.id, content);
-      tabsStore.markSavedByPath(tab.filePath);
+      const finalPath = await tabsStore.tryRenameAfterSave(tab.filePath, content);
+      tabsStore.markSavedByPath(finalPath);
       clearRecoveryDraft(tab.filePath);
       flushWritingStats();
     } else {
@@ -570,7 +571,10 @@
           if (freshTab?.isDirty && freshTab.content) {
             await commands.registerWriteIgnore(freshTab.filePath);
             const result = await commands.writeFile(freshTab.filePath, freshTab.content);
-            if (result.status === 'ok') tabsStore.markSaved(freshTab.id);
+            if (result.status === 'ok') {
+              await tabsStore.tryRenameAfterSave(freshTab.filePath, freshTab.content);
+              tabsStore.markSaved(freshTab.id);
+            }
           }
         }
       }, autoSaveMinutes * 60 * 1000);
