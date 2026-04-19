@@ -33,6 +33,7 @@
     "@tsconfig/svelte": "^5.0.4",
     "@types/katex": "^0.16.8",
     "dotenv-cli": "^11.0.0",
+    "happy-dom": "^20.9.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "tailwindcss": "^4.2.2",
