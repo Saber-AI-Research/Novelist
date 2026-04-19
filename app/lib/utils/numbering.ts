@@ -17,14 +17,28 @@ export function parseNumber(s: string): ParsedNumber | null {
   if (cnLower !== null) return { value: cnLower, style: { kind: 'chinese-lower' } };
   const cnUpper = parseChineseUpper(s);
   if (cnUpper !== null) return { value: cnUpper, style: { kind: 'chinese-upper' } };
+  const roman = parseRoman(s);
+  if (roman !== null) return { value: roman, style: { kind: 'roman-upper' } };
   return null;
 }
 
 export function formatNumber(value: number, style: NumberStyle): string {
-  if (style.kind === 'arabic') return String(value).padStart(style.width, '0');
-  if (style.kind === 'chinese-lower') return formatChineseLower(value);
-  if (style.kind === 'chinese-upper') return formatChineseUpper(value);
-  throw new Error(`formatNumber: unsupported style ${style.kind}`);
+  switch (style.kind) {
+    case 'arabic':
+      return String(value).padStart(style.width, '0');
+    case 'chinese-lower':
+      return formatChineseLower(value);
+    case 'chinese-upper':
+      return formatChineseUpper(value);
+    case 'roman-upper':
+      return formatRoman(value);
+    default: {
+      // Exhaustiveness guard: adding a new NumberStyle variant without a case here
+      // becomes a compile error instead of a runtime throw.
+      const _exhaustive: never = style;
+      throw new Error(`formatNumber: unsupported style ${JSON.stringify(_exhaustive)}`);
+    }
+  }
 }
 
 const CN_LOWER_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'] as const;
@@ -142,4 +156,39 @@ function formatChineseUpper(n: number): string {
   if (n === 10) return '拾';
   if (n >= 1 && n <= 9) return CN_UPPER_DIGITS[n];
   throw new Error(`formatChineseUpper: out of range ${n} (only 1-10 supported)`);
+}
+
+const ROMAN_PAIRS: Array<[number, string]> = [
+  [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+  [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'],
+  [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],
+];
+
+function parseRoman(s: string): number | null {
+  if (!/^[IVXLCDM]+$/.test(s)) return null;
+  let i = 0;
+  let total = 0;
+  for (const [v, sym] of ROMAN_PAIRS) {
+    while (s.startsWith(sym, i)) {
+      total += v;
+      i += sym.length;
+    }
+  }
+  if (i !== s.length) return null;
+  // Round-trip check: rejects non-canonical forms like "IIII"
+  if (formatRoman(total) !== s) return null;
+  return total;
+}
+
+function formatRoman(n: number): string {
+  if (n < 1 || n > 3999) throw new Error(`formatRoman: out of range ${n}`);
+  let out = '';
+  let rem = n;
+  for (const [v, sym] of ROMAN_PAIRS) {
+    while (rem >= v) {
+      out += sym;
+      rem -= v;
+    }
+  }
+  return out;
 }

@@ -126,3 +126,49 @@ describe('formatNumber — Chinese upper', () => {
     expect(formatNumber(10, { kind: 'chinese-upper' })).toBe('拾');
   });
 });
+
+describe('parseNumber — Roman', () => {
+  it('parses I, V, X, L, C, D, M', () => {
+    expect(parseNumber('I')?.value).toBe(1);
+    expect(parseNumber('V')?.value).toBe(5);
+    expect(parseNumber('X')?.value).toBe(10);
+  });
+  it('parses additive (II, III, VIII)', () => {
+    expect(parseNumber('II')?.value).toBe(2);
+    expect(parseNumber('VIII')?.value).toBe(8);
+  });
+  it('parses subtractive (IV, IX, XL, XC, CD, CM)', () => {
+    expect(parseNumber('IV')?.value).toBe(4);
+    expect(parseNumber('IX')?.value).toBe(9);
+    expect(parseNumber('XL')?.value).toBe(40);
+    expect(parseNumber('XC')?.value).toBe(90);
+    expect(parseNumber('CD')?.value).toBe(400);
+    expect(parseNumber('CM')?.value).toBe(900);
+  });
+  it('parses compound (XLII = 42, MCMXCIV = 1994)', () => {
+    expect(parseNumber('XLII')?.value).toBe(42);
+    expect(parseNumber('MCMXCIV')?.value).toBe(1994);
+  });
+  it('returns roman-upper style', () => {
+    expect(parseNumber('IV')?.style).toEqual({ kind: 'roman-upper' });
+  });
+  it('rejects mixed case or invalid', () => {
+    expect(parseNumber('iv')).toBeNull();
+    expect(parseNumber('IIII')).toBeNull();  // strict: non-canonical
+  });
+});
+
+describe('formatNumber — Roman', () => {
+  it('formats 1, 4, 9, 40, 90, 400, 900', () => {
+    expect(formatNumber(1, { kind: 'roman-upper' })).toBe('I');
+    expect(formatNumber(4, { kind: 'roman-upper' })).toBe('IV');
+    expect(formatNumber(9, { kind: 'roman-upper' })).toBe('IX');
+    expect(formatNumber(40, { kind: 'roman-upper' })).toBe('XL');
+    expect(formatNumber(90, { kind: 'roman-upper' })).toBe('XC');
+    expect(formatNumber(400, { kind: 'roman-upper' })).toBe('CD');
+    expect(formatNumber(900, { kind: 'roman-upper' })).toBe('CM');
+  });
+  it('formats compound (1994 = MCMXCIV)', () => {
+    expect(formatNumber(1994, { kind: 'roman-upper' })).toBe('MCMXCIV');
+  });
+});
