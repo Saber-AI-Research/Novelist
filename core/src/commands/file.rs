@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 pub struct EncodingState {
     /// Maps canonical file path -> encoding name (e.g. "GBK", "Big5", "Shift_JIS").
     /// UTF-8 files are NOT stored here; absence means UTF-8.
-    encodings: Mutex<HashMap<String, &'static str>>,
+    pub(crate) encodings: Mutex<HashMap<String, &'static str>>,
 }
 
 impl EncodingState {
@@ -23,6 +23,15 @@ impl EncodingState {
         Self {
             encodings: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+/// Move the encoding entry from `old_canonical` to `new_canonical`. No-op when
+/// the old key is not present (file was UTF-8).
+pub fn migrate_encoding_state(state: &EncodingState, old_canonical: &str, new_canonical: &str) {
+    let mut map = state.encodings.lock().expect("encodings lock");
+    if let Some(enc) = map.remove(old_canonical) {
+        map.insert(new_canonical.to_string(), enc);
     }
 }
 
@@ -391,6 +400,16 @@ pub async fn rename_item(
     old_path: String,
     new_name: String,
     allow_collision_bump: Option<bool>,
+    encoding_state: tauri::State<'_, EncodingState>,
+) -> Result<String, AppError> {
+    rename_item_inner(old_path, new_name, allow_collision_bump, &encoding_state).await
+}
+
+pub(crate) async fn rename_item_inner(
+    old_path: String,
+    new_name: String,
+    allow_collision_bump: Option<bool>,
+    encoding_state: &EncodingState,
 ) -> Result<String, AppError> {
     let old = validate_path(&old_path)?;
     if !old.exists() {
@@ -426,6 +445,9 @@ pub async fn rename_item(
         }
     }
 
+    // Canonicalize the OLD path BEFORE the rename -- after the rename, the old
+    // file no longer exists and canonicalize would fail.
+    let old_canon = old.canonicalize().ok().map(|p| p.to_string_lossy().to_string());
     // Suppress the imminent file-watcher events for the old and new paths so
     // the frontend doesn't reload the file (which would lose editor state).
     crate::services::file_watcher::register_rename_ignore(
@@ -434,6 +456,11 @@ pub async fn rename_item(
     )
     .await;
     tokio::fs::rename(&old, &new_path).await?;
+    // Canonicalize the NEW path AFTER the rename so the target exists.
+    let new_canon = new_path.canonicalize().ok().map(|p| p.to_string_lossy().to_string());
+    if let (Some(o), Some(n)) = (old_canon, new_canon) {
+        migrate_encoding_state(encoding_state, &o, &n);
+    }
     Ok(new_path.to_string_lossy().to_string())
 }
 
@@ -899,10 +926,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let old_path = dir.path().join("old.md");
         fs::write(&old_path, "content").unwrap();
-        let new_path = rename_item(
+        let state = enc();
+        let new_path = rename_item_inner(
             old_path.to_string_lossy().to_string(),
             "new.md".to_string(),
             None,
+            &state,
         )
             .await
             .unwrap();
@@ -913,10 +942,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_rename_item_not_found() {
-        let result = rename_item(
+        let state = enc();
+        let result = rename_item_inner(
             "/nonexistent.md".to_string(),
             "new.md".to_string(),
             None,
+            &state,
         ).await;
         assert!(result.is_err());
     }
@@ -926,10 +957,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.md"), "").unwrap();
         fs::write(dir.path().join("b.md"), "").unwrap();
-        let result = rename_item(
+        let state = enc();
+        let result = rename_item_inner(
             dir.path().join("a.md").to_string_lossy().to_string(),
             "b.md".to_string(),
             None,
+            &state,
         )
         .await;
         assert!(result.is_err());
@@ -944,10 +977,12 @@ mod tests {
         fs::write(&src, "x").unwrap();
         fs::write(&conflict, "y").unwrap();
         fs::write(&conflict2, "z").unwrap();
-        let result = rename_item(
+        let state = enc();
+        let result = rename_item_inner(
             src.to_string_lossy().to_string(),
             "target.md".to_string(),
             Some(true),
+            &state,
         ).await.unwrap();
         assert!(result.ends_with("target 3.md"));
         assert!(!src.exists());
@@ -960,10 +995,12 @@ mod tests {
         let conflict = dir.path().join("target.md");
         fs::write(&src, "x").unwrap();
         fs::write(&conflict, "y").unwrap();
-        let result = rename_item(
+        let state = enc();
+        let result = rename_item_inner(
             src.to_string_lossy().to_string(),
             "target.md".to_string(),
             Some(false),
+            &state,
         ).await;
         assert!(result.is_err());
         assert!(src.exists());
@@ -1282,6 +1319,38 @@ mod tests {
         let encoded = encode_string("你好", "GBK").unwrap();
         let (decoded, _, _) = encoding_rs::GBK.decode(&encoded);
         assert_eq!(decoded, "你好");
+    }
+
+    #[tokio::test]
+    async fn test_rename_migrates_encoding_state() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("orig.md");
+        fs::write(&src, "x").unwrap();
+        let canonical_old = src.canonicalize().unwrap().to_string_lossy().to_string();
+
+        let state = EncodingState::new();
+        state
+            .encodings
+            .lock()
+            .unwrap()
+            .insert(canonical_old.clone(), "GBK");
+
+        let old_copy = canonical_old.clone();
+        let new_name = "renamed.md".to_string();
+        // We call the migration helper directly (bypass State injection in tests).
+        // Compute what the new canonical path will be.
+        let new_path_raw = dir.path().join(&new_name);
+
+        // Simulate rename
+        tokio::fs::rename(&src, &new_path_raw).await.unwrap();
+
+        let canonical_new = new_path_raw.canonicalize().unwrap().to_string_lossy().to_string();
+
+        migrate_encoding_state(&state, &old_copy, &canonical_new);
+
+        let map = state.encodings.lock().unwrap();
+        assert!(!map.contains_key(&old_copy));
+        assert_eq!(map.get(&canonical_new), Some(&"GBK"));
     }
 }
 
