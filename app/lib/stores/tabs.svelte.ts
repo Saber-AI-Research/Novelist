@@ -156,6 +156,19 @@ class TabsStore {
     return result;
   }
 
+  /** Update filePath and fileName for ALL tabs across ALL panes that match `oldPath`. */
+  updatePath(oldPath: string, newPath: string) {
+    const newName = newPath.split('/').pop() || newPath;
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        if (tab.filePath === oldPath) {
+          tab.filePath = newPath;
+          tab.fileName = newName;
+        }
+      }
+    }
+  }
+
   openTab(filePath: string, content: string) {
     const pane = this.activePane;
     const existing = pane.tabs.find(t => t.filePath === filePath);
