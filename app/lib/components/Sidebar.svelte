@@ -6,6 +6,7 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { t } from '$lib/i18n';
   import FileTreeNode from '$lib/components/FileTreeNode.svelte';
+  import { compareByMode } from '$lib/utils/file-sort';
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
@@ -74,9 +75,9 @@
   let filesContainer = $state<HTMLDivElement | null>(null);
 
   let sortedFiles = $derived.by<FileNode[]>(() => {
-    const dirs = projectStore.files.filter(f => f.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-    const files = projectStore.files.filter(f => !f.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-    return [...dirs, ...files];
+    return [...projectStore.files].sort((a, b) =>
+      compareByMode(a, b, projectStore.sortMode)
+    );
   });
 
   // Reset scroll position when project changes

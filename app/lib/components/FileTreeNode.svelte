@@ -1,6 +1,7 @@
 <script lang="ts">
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { compareByMode } from '$lib/utils/file-sort';
 
   interface Props {
     node: FileNode;
@@ -26,11 +27,9 @@
     isTextFile,
   }: Props = $props();
 
-  // Sort: folders first, then files, both alphabetical.
+  // Sort using the project-wide sort mode (folders-first is handled by compareByMode).
   function sortChildren(children: FileNode[]): FileNode[] {
-    const dirs = children.filter(c => c.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-    const files = children.filter(c => !c.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-    return [...dirs, ...files];
+    return [...children].sort((a, b) => compareByMode(a, b, projectStore.sortMode));
   }
 
   async function toggleFolder() {
