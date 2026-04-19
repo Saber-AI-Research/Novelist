@@ -29,6 +29,8 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
+  import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
+  import { parseTemplate, inferNextName } from '$lib/utils/placeholder';
   import { moveSection } from '$lib/editor/section-move';
   import { commandRegistry } from '$lib/stores/commands.svelte';
   import { shortcutsStore, matchesShortcut, initShortcutsI18n } from '$lib/stores/shortcuts.svelte';
@@ -254,20 +256,34 @@
 
   async function handleNewFile() {
     if (!projectStore.dirPath) return;
-    // Generate timestamped untitled file
-    const ts = Date.now();
-    const name = `novelist_scratch_${ts}.md`;
-    const result = await commands.createFile(projectStore.dirPath, name);
-    if (result.status === 'ok') {
-      // Refresh sidebar
-      const filesResult = await commands.listDirectory(projectStore.dirPath!);
-      if (filesResult.status === 'ok') projectStore.updateFiles(filesResult.data);
-      // Open in editor — openTab detects the scratch pattern and shows "Untitled N"
-      const readResult = await commands.readFile(result.data);
-      if (readResult.status === 'ok') {
-        tabsStore.openTab(result.data, readResult.data);
-        await commands.registerOpenFile(result.data);
-      }
+
+    // For v1: target folder = project root. Subfolder targeting is a later enhancement.
+    const targetDir = projectStore.dirPath;
+
+    // List sibling files (only .md-ish basenames matter for pattern inference)
+    const filesResult = await commands.listDirectory(targetDir);
+    const siblings = filesResult.status === 'ok'
+      ? filesResult.data.filter(e => !e.is_dir).map(e => e.name)
+      : [];
+
+    // Resolve template — fall back to "Untitled {N}" if the configured one is invalid
+    const userTemplate = parseTemplate(newFileSettings.template) ?? parseTemplate('Untitled {N}')!;
+
+    const proposedName = newFileSettings.detectFromFolder
+      ? inferNextName(siblings, userTemplate)
+      : inferNextName([], userTemplate); // no folder scan → default template at N=1
+
+    const result = await commands.createFile(targetDir, proposedName);
+    if (result.status !== 'ok') return;
+
+    // Refresh sidebar (the file watcher will also trigger, but do it eagerly)
+    const after = await commands.listDirectory(targetDir);
+    if (after.status === 'ok') projectStore.updateFiles(after.data);
+
+    const readResult = await commands.readFile(result.data);
+    if (readResult.status === 'ok') {
+      tabsStore.openTab(result.data, readResult.data);
+      await commands.registerOpenFile(result.data);
     }
   }
 
