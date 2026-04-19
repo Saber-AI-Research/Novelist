@@ -237,3 +237,53 @@ function bumpUntilFree(
   }
   return `Untitled ${Date.now()}.md`;
 }
+
+/**
+ * Compute the new filename when an H1 has been written into a placeholder file.
+ *
+ * - If `currentName` is not a placeholder, returns null (caller should not rename).
+ * - If `h1` sanitizes to empty, returns null (no rename).
+ * - Else: produces a new filename per the rules in spec §3.5.
+ *   On collision with `siblings`, appends " 2", " 3", … to the *whole stem*.
+ */
+export function renameFromH1(currentName: string, h1: string, siblings: string[]): string | null {
+  if (!isPlaceholder(currentName)) return null;
+  const sanitized = sanitizeFilenameStem(h1);
+  if (sanitized.length === 0) return null;
+
+  const newName = computeNewNameForPlaceholder(currentName, sanitized);
+  if (newName === currentName) return null;
+
+  return bumpStemUntilFree(newName, siblings, currentName);
+}
+
+/** Map a known placeholder filename + sanitized H1 → new filename. */
+function computeNewNameForPlaceholder(currentName: string, h1Stem: string): string {
+  // Untitled N: replace whole stem
+  if (/^Untitled \d+\.md$/.test(currentName)) return `${h1Stem}.md`;
+  // legacy scratch: replace whole stem
+  if (/^novelist_scratch_\d+\.md$/.test(currentName)) return `${h1Stem}.md`;
+  // {N}<sep>Untitled with title slot: substitute "Untitled" with H1
+  const slotMatch = /^(\d+[-_. ])Untitled\.md$/.exec(currentName);
+  if (slotMatch) return `${slotMatch[1]}${h1Stem}.md`;
+  // No-slot placeholders (chapter prefixes) → append with separator
+  const stem = currentName.replace(/\.md$/, '');
+  const lastChar = stem.slice(-1);
+  const sep = NO_SPACE_AFTER.has(lastChar) ? '' : ' ';
+  return `${stem}${sep}${h1Stem}.md`;
+}
+
+function bumpStemUntilFree(newName: string, siblings: string[], currentName: string): string {
+  const taken = new Set(siblings);
+  taken.delete(currentName); // own name is not a collision
+  if (!taken.has(newName)) return newName;
+
+  const stem = newName.replace(/\.md$/, '');
+  let n = 2;
+  for (let i = 0; i < 10000; i++) {
+    const candidate = `${stem} ${n}.md`;
+    if (!taken.has(candidate)) return candidate;
+    n++;
+  }
+  return newName; // give up; caller handles error
+}

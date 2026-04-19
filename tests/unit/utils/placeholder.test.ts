@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTemplate, renderTemplate, isPlaceholder, inferNextName } from '$lib/utils/placeholder';
+import { parseTemplate, renderTemplate, isPlaceholder, inferNextName, renameFromH1 } from '$lib/utils/placeholder';
 
 describe('parseTemplate', () => {
   it('parses Untitled {N}', () => {
@@ -148,5 +148,37 @@ describe('inferNextName', () => {
   it('Untitled fallback bumps number on collision', () => {
     expect(inferNextName(['Untitled 1.md', 'Untitled 2.md'], defaultTemplate))
       .toBe('Untitled 3.md');
+  });
+});
+
+describe('renameFromH1', () => {
+  it('Untitled 1.md → 开篇.md', () => {
+    expect(renameFromH1('Untitled 1.md', '开篇', [])).toBe('开篇.md');
+  });
+  it('returns null when filename is not a placeholder', () => {
+    expect(renameFromH1('开篇.md', 'NewTitle', [])).toBeNull();
+  });
+  it('returns null when H1 is empty after sanitization', () => {
+    expect(renameFromH1('Untitled 1.md', '   ', [])).toBeNull();
+    expect(renameFromH1('Untitled 1.md', '', [])).toBeNull();
+  });
+  it('第三章.md + 开篇 → 第三章 开篇.md', () => {
+    expect(renameFromH1('第三章.md', '开篇', [])).toBe('第三章 开篇.md');
+  });
+  it('Chapter 3.md + Opening → Chapter 3 Opening.md', () => {
+    expect(renameFromH1('Chapter 3.md', 'Opening', [])).toBe('Chapter 3 Opening.md');
+  });
+  it('03-Untitled.md + 开篇 → 03-开篇.md', () => {
+    expect(renameFromH1('03-Untitled.md', '开篇', [])).toBe('03-开篇.md');
+  });
+  it('03_Untitled.md + Opening → 03_Opening.md', () => {
+    expect(renameFromH1('03_Untitled.md', 'Opening', [])).toBe('03_Opening.md');
+  });
+  it('legacy novelist_scratch → uses H1 as full name', () => {
+    expect(renameFromH1('novelist_scratch_1234.md', '开篇', [])).toBe('开篇.md');
+  });
+  it('collision bumps with " 2"', () => {
+    expect(renameFromH1('Untitled 1.md', '开篇', ['开篇.md'])).toBe('开篇 2.md');
+    expect(renameFromH1('Untitled 1.md', '开篇', ['开篇.md', '开篇 2.md'])).toBe('开篇 3.md');
   });
 });
