@@ -7,6 +7,8 @@ pub struct FileEntry {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    /// Unix epoch milliseconds; None when filesystem doesn't expose mtime.
+    pub mtime: Option<i64>,
 }
 
 #[cfg(test)]
@@ -20,6 +22,7 @@ mod tests {
             path: "/project/chapter1.md".to_string(),
             is_dir: false,
             size: 4096,
+            mtime: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["name"], "chapter1.md");
@@ -35,6 +38,7 @@ mod tests {
             path: "/project/chapters".to_string(),
             is_dir: true,
             size: 0,
+            mtime: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["is_dir"], true);
@@ -47,6 +51,7 @@ mod tests {
             path: "/test.md".to_string(),
             is_dir: false,
             size: 100,
+            mtime: None,
         };
         let cloned = entry.clone();
         assert_eq!(entry.name, cloned.name);
@@ -61,6 +66,7 @@ mod tests {
             path: "/test.md".to_string(),
             is_dir: false,
             size: 0,
+            mtime: None,
         };
         let debug = format!("{:?}", entry);
         assert!(debug.contains("test.md"));

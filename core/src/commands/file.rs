@@ -286,11 +286,17 @@ pub async fn list_directory(path: String) -> Result<Vec<FileEntry>, AppError> {
         }
 
         let metadata = entry.metadata().await?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
         entries.push(FileEntry {
             name,
             path: entry.path().to_string_lossy().to_string(),
             is_dir: metadata.is_dir(),
             size: metadata.len(),
+            mtime,
         });
     }
 
@@ -748,6 +754,10 @@ mod tests {
         assert!(entries[0].is_dir);
         assert_eq!(entries[1].name, "a.md");
         assert_eq!(entries[2].name, "b.md");
+        assert!(
+            entries.iter().any(|e| e.mtime.is_some()),
+            "at least one entry should have mtime"
+        );
     }
 
     #[tokio::test]
