@@ -1,0 +1,13 @@
+[plugin]
+id = "kanban"
+name = "Kanban"
+version = "0.1.0"
+description = "Trello-style kanban board editor for .kanban files"
+author = "Novelist Team"
+permissions = ["read", "write", "ui"]
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+label = "Kanban"
+file_extensions = [".kanban"]

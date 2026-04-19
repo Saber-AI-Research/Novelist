@@ -51,12 +51,18 @@ export const commands = {
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
 	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
+	// Pin or unpin a recent project — pinned projects stay above unpinned.
+	setProjectPinned: (path: string, pinned: boolean) => typedError<null, string>(__TAURI_INVOKE("set_project_pinned", { path, pinned })),
+	// Reorder recent projects by the given path list; index becomes each project's sort_order.
+	reorderRecentProjects: (orderedPaths: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_recent_projects", { orderedPaths })),
 	// Scan ~/.novelist/plugins/ and return info for each plugin found.
 	listPlugins: () => typedError<PluginInfo[], string>(__TAURI_INVOKE("list_plugins")),
 	// Load and activate a plugin by its ID.
 	loadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("load_plugin", { pluginId })),
 	// Unload (deactivate) a plugin.
 	unloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("unload_plugin", { pluginId })),
+	// Unload then re-load a plugin from disk. Used to pick up edits to manifest.toml / index.js without restarting the app.
+	reloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("reload_plugin", { pluginId })),
 	// Get all commands registered by active plugins.
 	getPluginCommands: () => typedError<RegisteredCommandInfo[], string>(__TAURI_INVOKE("get_plugin_commands")),
 	// Execute a registered plugin command. Returns any text replacements the plugin wants to make.
@@ -206,6 +212,8 @@ export type RecentProject = {
 	path: string,
 	name: string,
 	last_opened: string,
+	pinned: boolean,
+	sort_order: number | null,
 };
 
 export type RegisteredCommandInfo = {

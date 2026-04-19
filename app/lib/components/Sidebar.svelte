@@ -91,7 +91,7 @@
     if (watchResult.status !== 'ok') console.error('Failed to start file watcher:', watchResult.error);
   }
 
-  const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.json', '.jsonl', '.csv'];
+  const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
 
   function isTextFile(name: string): boolean {
     return textExtensions.some(ext => name.toLowerCase().endsWith(ext));

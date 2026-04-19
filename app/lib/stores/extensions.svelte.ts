@@ -49,8 +49,12 @@ class ExtensionStore {
   }
 
   private async getPluginsDir(): Promise<string> {
+    const result = await commands.getPluginsDir();
+    if (result.status === 'ok') return result.data;
     const { homeDir } = await import('@tauri-apps/api/path');
-    return `${await homeDir()}.novelist/plugins`;
+    const home = await homeDir();
+    const sep = home.endsWith('/') ? '' : '/';
+    return `${home}${sep}.novelist/plugins`;
   }
 
   togglePanel(pluginId: string) {

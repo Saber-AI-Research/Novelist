@@ -22,7 +22,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' asset:; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://github.com https://api.github.com https://objects.githubusercontent.com; frame-src 'self' asset: blob:"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' asset: http://asset.localhost; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://github.com https://api.github.com https://objects.githubusercontent.com; frame-src 'self' asset: http://asset.localhost blob:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/.novelist/plugins/**"
+        ]
+      }
     }
   },
   "plugins": {

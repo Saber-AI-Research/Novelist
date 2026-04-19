@@ -41,11 +41,15 @@
 <svelte:window onmessage={handleMessage} />
 
 <div class="plugin-panel">
+  <!--
+    No `sandbox` attribute: WKWebView blocks custom-protocol main-resource loads
+    from sandboxed iframes, which breaks plugins whose `entry` is served from
+    Tauri's asset protocol. Plugins are trusted (local install or marketplace-vetted).
+  -->
   <iframe
     bind:this={iframeEl}
     src={extension.entryUrl}
     title={extension.label}
-    sandbox="allow-scripts allow-same-origin"
   ></iframe>
 </div>
 

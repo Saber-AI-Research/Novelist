@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tauri::{Manager, State};
 
 /// Known built-in plugin IDs that ship with Novelist.
-const BUILTIN_PLUGIN_IDS: &[&str] = &["canvas", "mindmap"];
+const BUILTIN_PLUGIN_IDS: &[&str] = &["canvas", "mindmap", "kanban"];
 
 fn novelist_dir() -> PathBuf {
     dirs::home_dir()
@@ -283,6 +283,44 @@ pub async fn unload_plugin(
     state: State<'_, PluginHostState>,
 ) -> Result<(), AppError> {
     state.unload_plugin(&plugin_id).map_err(AppError::Custom)?;
+    Ok(())
+}
+
+/// Unload then re-load a plugin from disk. Used to pick up edits to
+/// `manifest.toml` / `index.js` without restarting the app.
+#[tauri::command]
+#[specta::specta]
+pub async fn reload_plugin(
+    plugin_id: String,
+    state: State<'_, PluginHostState>,
+) -> Result<(), AppError> {
+    state.unload_plugin(&plugin_id).ok();
+
+    let plugin_dir = plugins_dir().join(&plugin_id);
+    let manifest_path = plugin_dir.join("manifest.toml");
+    let index_path = plugin_dir.join("index.js");
+
+    if !manifest_path.exists() {
+        return Err(AppError::FileNotFound(format!(
+            "Plugin manifest not found: {}",
+            manifest_path.display()
+        )));
+    }
+    if !index_path.exists() {
+        return Err(AppError::FileNotFound(format!(
+            "Plugin entry point not found: {}",
+            index_path.display()
+        )));
+    }
+
+    let manifest_content = tokio::fs::read_to_string(&manifest_path).await?;
+    let manifest: PluginManifest = toml::from_str(&manifest_content)?;
+    let source = tokio::fs::read_to_string(&index_path).await?;
+
+    state
+        .load_plugin(manifest, &source)
+        .map_err(AppError::Custom)?;
+
     Ok(())
 }
 

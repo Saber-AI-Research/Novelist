@@ -55,11 +55,12 @@
 <svelte:window onmessage={handleMessage} />
 
 <div class="plugin-file-editor">
+  <!-- No sandbox: WKWebView blocks custom-protocol main-resource loads from
+       sandboxed iframes, which breaks file-handler plugins served via asset://. -->
   <iframe
     bind:this={iframeEl}
     src={extension.entryUrl}
     title={extension.label}
-    sandbox="allow-scripts allow-same-origin"
     onload={() => loaded = true}
   ></iframe>
 </div>

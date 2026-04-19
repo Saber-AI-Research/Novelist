@@ -17,10 +17,13 @@ use commands::file::{
 };
 use commands::plugin::{
     get_plugin_commands, get_plugins_dir, invoke_plugin_command, list_plugins, load_plugin,
-    scaffold_plugin, set_plugin_document_state, set_plugin_enabled, unload_plugin,
+    reload_plugin, scaffold_plugin, set_plugin_document_state, set_plugin_enabled, unload_plugin,
 };
 use commands::project::{detect_project, read_project_config};
-use commands::recent::{add_recent_project, get_recent_projects, remove_recent_project};
+use commands::recent::{
+    add_recent_project, get_recent_projects, remove_recent_project, reorder_recent_projects,
+    set_project_pinned,
+};
 use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
 use commands::stats::{get_writing_stats, record_writing_stats};
 #[cfg(feature = "sync")]
@@ -98,9 +101,12 @@ pub fn run() {
         get_recent_projects,
         add_recent_project,
         remove_recent_project,
+        set_project_pinned,
+        reorder_recent_projects,
         list_plugins,
         load_plugin,
         unload_plugin,
+        reload_plugin,
         get_plugin_commands,
         invoke_plugin_command,
         set_plugin_document_state,
@@ -164,9 +170,12 @@ pub fn run() {
         get_recent_projects,
         add_recent_project,
         remove_recent_project,
+        set_project_pinned,
+        reorder_recent_projects,
         list_plugins,
         load_plugin,
         unload_plugin,
+        reload_plugin,
         get_plugin_commands,
         invoke_plugin_command,
         set_plugin_document_state,

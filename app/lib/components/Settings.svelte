@@ -189,6 +189,18 @@
     await loadPlugins();
   }
 
+  let reloadingPluginId = $state<string | null>(null);
+  async function reloadPlugin(plugin: PluginInfo) {
+    if (!plugin.enabled || reloadingPluginId) return;
+    reloadingPluginId = plugin.id;
+    try {
+      await commands.reloadPlugin(plugin.id);
+      await loadPlugins();
+    } finally {
+      reloadingPluginId = null;
+    }
+  }
+
   let pluginAddMenuOpen = $state(false);
   let scaffoldDialogOpen = $state(false);
 
@@ -380,17 +392,31 @@
           {#if plugin.author}{plugin.author} &middot; {/if}{plugin.permissions.join(', ')}
         </div>
       </div>
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="shrink-0 w-10 h-5 rounded-full cursor-pointer relative transition-colors"
-        style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'};"
-        onclick={() => togglePluginEnabled(plugin)}
-      >
+      <div class="shrink-0 flex items-center gap-2">
+        <button
+          type="button"
+          class="w-6 h-6 flex items-center justify-center rounded text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 transition-opacity"
+          style="background: var(--novelist-bg-tertiary, rgba(127,127,127,0.1)); color: var(--novelist-text-secondary);"
+          title={t('settings.plugins.reload')}
+          aria-label={t('settings.plugins.reload')}
+          data-testid="plugin-reload-{plugin.id}"
+          disabled={!plugin.enabled || reloadingPluginId === plugin.id}
+          onclick={() => reloadPlugin(plugin)}
+        >
+          <span class="inline-block" style="transform: {reloadingPluginId === plugin.id ? 'rotate(360deg)' : 'none'}; transition: transform 0.6s;">↻</span>
+        </button>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-          class="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
-          style="background: #fff; left: {plugin.enabled ? '22px' : '2px'}; box-shadow: 0 1px 2px rgba(0,0,0,0.2);"
-        ></div>
+          class="w-10 h-5 rounded-full cursor-pointer relative transition-colors"
+          style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'};"
+          onclick={() => togglePluginEnabled(plugin)}
+        >
+          <div
+            class="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
+            style="background: #fff; left: {plugin.enabled ? '22px' : '2px'}; box-shadow: 0 1px 2px rgba(0,0,0,0.2);"
+          ></div>
+        </div>
       </div>
     </div>
   </div>

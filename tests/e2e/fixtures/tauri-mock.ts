@@ -21,7 +21,17 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const createdFiles = [];
       const deletedFiles = [];
       const eventListeners = {};
-      const scaffoldedPlugins = [];
+      const scaffoldedPlugins = [
+        // Pre-registered built-in plugins so file-handler routing works in tests.
+        {
+          id: 'kanban', name: 'Kanban', version: '0.1.0',
+          description: 'Trello-style kanban board editor',
+          author: 'Novelist Team', enabled: true, builtin: true,
+          path: '/mock/home/.novelist/plugins/kanban',
+          permissions: ['read', 'write', 'ui'],
+          ui: { type: 'file-handler', entry: 'index.html', label: 'Kanban', file_extensions: ['.kanban'] },
+        },
+      ];
 
       function ensureMtime(entry) {
         if (entry && typeof entry.mtime !== 'number') entry.mtime = Date.now();
@@ -117,8 +127,32 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'start_file_watcher': case 'stop_file_watcher':
           case 'register_open_file': case 'unregister_open_file':
           case 'register_write_ignore': return null;
-          case 'get_recent_projects': return recentProjects;
+          case 'get_recent_projects': {
+            // Mirror Rust sort: pinned first, then sort_order asc, then last_opened desc.
+            const sorted = recentProjects.slice().sort((a, b) => {
+              if (!!b.pinned !== !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+              const ax = a.sort_order, bx = b.sort_order;
+              if (ax != null && bx != null) return ax - bx;
+              if (ax != null) return -1;
+              if (bx != null) return 1;
+              return String(b.last_opened).localeCompare(String(a.last_opened));
+            });
+            return sorted;
+          }
           case 'add_recent_project': case 'remove_recent_project': return null;
+          case 'set_project_pinned': {
+            const p = recentProjects.find(r => r.path === args.path);
+            if (p) p.pinned = !!args.pinned;
+            return null;
+          }
+          case 'reorder_recent_projects': {
+            const ordered = Array.isArray(args.orderedPaths) ? args.orderedPaths : [];
+            ordered.forEach((path, idx) => {
+              const p = recentProjects.find(r => r.path === path);
+              if (p) p.sort_order = idx;
+            });
+            return null;
+          }
           case 'check_pandoc': return { installed: false, version: null };
           case 'export_project': return 'mock-export.pdf';
           case 'list_plugins': return scaffoldedPlugins.slice();
@@ -134,7 +168,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             return p;
           }
           case 'get_plugins_dir': return '/mock/home/.novelist/plugins';
-          case 'load_plugin': case 'unload_plugin': case 'set_plugin_document_state': return null;
+          case 'load_plugin': case 'unload_plugin': case 'reload_plugin': case 'set_plugin_document_state': return null;
           case 'rope_open': return { file_id: 'mock-rope-id', total_lines: 100, total_chars: 5000 };
           case 'rope_get_lines': return { lines: 'Mock content\\n', first_line: args.startLine, line_count: args.endLine - args.startLine };
           case 'rope_close': case 'rope_save': return null;
