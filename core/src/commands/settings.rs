@@ -12,8 +12,8 @@
 use crate::error::AppError;
 use crate::models::project::ProjectConfig;
 use crate::models::settings::{
-    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, SnapshotConfig,
-    ViewConfig,
+    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, ResolvedSnapshot,
+    SnapshotConfig, ViewConfig,
 };
 use std::path::{Path, PathBuf};
 
@@ -80,6 +80,23 @@ async fn write_project_config(dir_path: &str, config: &ProjectConfig) -> Result<
 #[specta::specta]
 pub async fn get_global_settings() -> Result<GlobalSettings, AppError> {
     Ok(read_global_settings().await)
+}
+
+/// Internal helper used by the snapshot service to resolve max_count /
+/// min_interval_minutes for a specific project directory.
+pub async fn get_resolved_snapshot_config(project_dir: &str) -> ResolvedSnapshot {
+    let global = read_global_settings().await;
+    let project_snap = read_project_config_if_any(project_dir)
+        .await
+        .and_then(|p| p.snapshot);
+    resolve(
+        &global,
+        None,
+        None,
+        None,
+        project_snap.as_ref(),
+    )
+    .snapshot
 }
 
 /// Return effective settings, merging global defaults with an optional
