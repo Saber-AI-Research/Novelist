@@ -5,6 +5,8 @@ pub mod rope_benchmark;
 pub mod rope_document;
 pub mod snapshots;
 #[cfg(feature = "sync")]
+pub mod snapshot_webdav;
+#[cfg(feature = "sync")]
 pub mod sync;
 #[cfg(feature = "sync")]
 pub mod webdav;

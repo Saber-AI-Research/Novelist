@@ -5,6 +5,9 @@ use specta::Type;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+#[cfg(feature = "sync")]
+use crate::services::snapshot_webdav::{try_delete_snapshot_remote, try_upload_snapshot};
+
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
 pub struct SnapshotMeta {
     pub id: String,
@@ -193,6 +196,8 @@ pub async fn create_snapshot(project_dir: &str, name: &str) -> Result<SnapshotMe
     // Now safe to delete victim or prune cap.
     if let Some(v) = victim {
         delete_local(&base.join(&v.id)).await;
+        #[cfg(feature = "sync")]
+        try_delete_snapshot_remote(project_dir, &v.id).await;
         // Remove victim from the existing list so cap math is correct.
         existing.retain(|s| s.id != v.id);
     } else {
@@ -203,9 +208,15 @@ pub async fn create_snapshot(project_dir: &str, name: &str) -> Result<SnapshotMe
             // existing is newest-first; oldest are at the end.
             for old in existing.iter().rev().take(to_prune) {
                 delete_local(&base.join(&old.id)).await;
+                #[cfg(feature = "sync")]
+                try_delete_snapshot_remote(project_dir, &old.id).await;
             }
         }
     }
+
+    // Upload to WebDAV (best-effort, non-fatal).
+    #[cfg(feature = "sync")]
+    try_upload_snapshot(project_dir, &meta).await;
 
     Ok(meta)
 }
@@ -280,6 +291,8 @@ pub async fn delete_snapshot(project_dir: &str, snapshot_id: &str) -> Result<(),
     if snap_dir.exists() {
         tokio::fs::remove_dir_all(&snap_dir).await?;
     }
+    #[cfg(feature = "sync")]
+    try_delete_snapshot_remote(project_dir, snapshot_id).await;
     Ok(())
 }
 
