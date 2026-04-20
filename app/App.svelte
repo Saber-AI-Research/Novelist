@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Editor from '$lib/components/Editor.svelte';
@@ -47,8 +46,9 @@
   import { useAppLifecycle } from '$lib/composables/app-lifecycle.svelte';
   import { handleKeepMine, handleLoadTheirs } from '$lib/conflict-handlers';
   import { createKeydownHandler } from '$lib/composables/app-shortcuts.svelte';
+  import { createCloseTab } from '$lib/composables/close-tab.svelte';
   import { createScratchFile, createNewFileInProject, executeTemplate, requestSaveCurrentAsTemplate } from '$lib/services/new-file';
-  import { shortcutsStore, initShortcutsI18n } from '$lib/stores/shortcuts.svelte';
+  import { shortcutsStore, initShortcutsI18n, formatShortcut } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
   import type { HeadingItem } from '$lib/editor/outline';
   import type { EditorView } from '@codemirror/view';
@@ -224,34 +224,10 @@
     });
   }
 
-  // Guard: prevents Cmd+W from triggering both our handler AND native onCloseRequested
-  let closingTab = false;
-
-  async function handleCloseTab() {
-    if (closingTab) return;
-    closingTab = true;
-
-    try {
-      const tab = tabsStore.activeTab;
-
-      if (!tab) {
-        getCurrentWindow().destroy();
-        return;
-      }
-
-      await tabsStore.closeTab(tab.id);
-
-      const remainingTabs = tabsStore.activeTab;
-
-      if (!remainingTabs && projectStore.singleFileMode) {
-        projectStore.close();
-      } else if (!remainingTabs && !projectStore.dirPath) {
-        getCurrentWindow().destroy();
-      }
-    } finally {
-      closingTab = false;
-    }
-  }
+  // Close-tab pipeline + guard against Cmd+W vs native onCloseRequested
+  // double-firing. `closeTab.isClosing()` is read from useAppLifecycle below.
+  const closeTab = createCloseTab();
+  const handleCloseTab = closeTab.handleCloseTab;
 
   // --- Editor formatting helpers ---
   function getActiveEditorView(): EditorView | null {
@@ -371,7 +347,7 @@
 
     const unlistenLifecycle = useAppLifecycle({
       t,
-      isClosingTab: () => closingTab,
+      isClosingTab: () => closeTab.isClosing(),
     });
 
     startupMark('frontend.app.onMount.end');
@@ -634,7 +610,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.outlineVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.outlineVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleOutline()}
-          title="{t('command.toggleOutline')} ({shortcutsStore.get('toggle-outline')})"
+          title="{t('command.toggleOutline')} ({formatShortcut(shortcutsStore.get('toggle-outline'))})"
         >
           {t('outline.title')}
         </button>
@@ -643,7 +619,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.draftVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.draftVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleDraft()}
-          title="{t('command.toggleDraft')} ({shortcutsStore.get('toggle-draft')})"
+          title="{t('command.toggleDraft')} ({formatShortcut(shortcutsStore.get('toggle-draft'))})"
         >
           {t('draft.title')}
         </button>
@@ -652,7 +628,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.snapshotVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.snapshotVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleSnapshot()}
-          title="{t('command.toggleSnapshot')} ({shortcutsStore.get('toggle-snapshot')})"
+          title="{t('command.toggleSnapshot')} ({formatShortcut(shortcutsStore.get('toggle-snapshot'))})"
         >
           {t('snapshot.title')}
         </button>
@@ -661,7 +637,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.statsVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.statsVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleStats()}
-          title="{t('command.toggleStats')} ({shortcutsStore.get('toggle-stats')})"
+          title="{t('command.toggleStats')} ({formatShortcut(shortcutsStore.get('toggle-stats'))})"
         >
           {t('stats.title')}
         </button>
@@ -671,7 +647,7 @@
           data-testid="toggle-template"
           style="width: 20px; flex: 1; background: {uiStore.templateVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.templateVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleTemplate()}
-          title="{t('command.toggleTemplate')} ({shortcutsStore.get('toggle-template')})"
+          title="{t('command.toggleTemplate')} ({formatShortcut(shortcutsStore.get('toggle-template'))})"
         >
           {t('template.title')}
         </button>

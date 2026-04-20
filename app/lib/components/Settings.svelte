@@ -768,7 +768,7 @@
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
                       title={t('settings.shortcuts.clickToChange')}
-                    >{currentShortcut || '—'}</span>
+                    >{formatShortcut(currentShortcut) || '—'}</span>
                   {/if}
                   {#if isCustom && !isRecording}
                     <button
@@ -805,7 +805,7 @@
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
                       title={t('settings.shortcuts.clickToChange')}
-                    >{currentShortcut || '—'}</span>
+                    >{formatShortcut(currentShortcut) || '—'}</span>
                   {/if}
                   {#if isCustom && !isRecording}
                     <button

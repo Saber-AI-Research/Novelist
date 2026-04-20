@@ -101,7 +101,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    width: 200px;
+    width: 100%;
     border-left: 1px solid var(--novelist-border);
     background: var(--novelist-bg);
     overflow: hidden;

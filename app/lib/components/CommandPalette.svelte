@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { commandRegistry } from '$lib/stores/commands.svelte';
+  import { formatShortcut } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
 
   interface Props {
@@ -56,7 +57,7 @@
           >
             <span>{cmd.label}</span>
             {#if cmd.shortcut}
-              <span class="shortcut">{cmd.shortcut}</span>
+              <span class="shortcut">{formatShortcut(cmd.shortcut)}</span>
             {/if}
           </button>
         </li>
