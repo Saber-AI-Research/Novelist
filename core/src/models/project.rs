@@ -1,4 +1,4 @@
-use crate::models::settings::{NewFileConfig, PluginsConfig, ViewConfig};
+use crate::models::settings::{NewFileConfig, PluginsConfig, SnapshotConfig, ViewConfig};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -18,6 +18,9 @@ pub struct ProjectConfig {
     /// Per-plugin enable flags (deltas from the global default map).
     #[serde(default, skip_serializing_if = "is_default_plugins")]
     pub plugins: PluginsConfig,
+    /// Snapshot retention overrides. Overrides global snapshot config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotConfig>,
 }
 
 fn is_default_view(v: &ViewConfig) -> bool {
@@ -136,6 +139,7 @@ name = "Minimal"
             view: Default::default(),
             new_file: Default::default(),
             plugins: Default::default(),
+            snapshot: None,
         };
 
         let serialized = toml::to_string(&config).unwrap();
@@ -230,6 +234,7 @@ enabled = { mindmap = false }
             view: Default::default(),
             new_file: Default::default(),
             plugins: Default::default(),
+            snapshot: None,
         };
         let serialized = toml::to_string(&config).unwrap();
         assert!(

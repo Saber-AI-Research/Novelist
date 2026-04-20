@@ -12,7 +12,8 @@
 use crate::error::AppError;
 use crate::models::project::ProjectConfig;
 use crate::models::settings::{
-    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, ViewConfig,
+    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, SnapshotConfig,
+    ViewConfig,
 };
 use std::path::{Path, PathBuf};
 
@@ -89,21 +90,27 @@ pub async fn get_effective_settings(
     dir_path: Option<String>,
 ) -> Result<EffectiveSettings, AppError> {
     let global = read_global_settings().await;
-    let (view, new_file, plugins) = match dir_path {
+    let (view, new_file, plugins, snapshot): (
+        Option<ViewConfig>,
+        Option<NewFileConfig>,
+        Option<PluginsConfig>,
+        Option<SnapshotConfig>,
+    ) = match dir_path {
         Some(d) => {
             let project = read_project_config_if_any(&d).await;
             match project {
-                Some(p) => (Some(p.view), Some(p.new_file), Some(p.plugins)),
-                None => (None, None, None),
+                Some(p) => (Some(p.view), Some(p.new_file), Some(p.plugins), p.snapshot),
+                None => (None, None, None, None),
             }
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
     Ok(resolve(
         &global,
         view.as_ref(),
         new_file.as_ref(),
         plugins.as_ref(),
+        snapshot.as_ref(),
     ))
 }
 
