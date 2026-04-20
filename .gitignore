@@ -11,6 +11,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Git worktrees (isolated feature branches)
+.worktrees/
+
 # Environment and secrets
 .env
 .env.*
