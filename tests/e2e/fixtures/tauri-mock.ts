@@ -28,6 +28,8 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const createdFiles = [];
       const deletedFiles = [];
       const eventListeners = {};
+      let aiStreamCounter = 0;
+      let claudeCliDetectResult = null;
       // In-memory project snippet templates. Keyed by id.
       // Each entry: { summary: TemplateFileSummary, body: string }
       const mockTemplates = {};
@@ -384,6 +386,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               plugins: p?.plugins ?? { enabled: {} },
             };
           }
+          case 'ai_fetch_stream_start': return 'mock-stream-' + (++aiStreamCounter);
+          case 'ai_fetch_stream_cancel': return null;
+          case 'claude_cli_detect': return claudeCliDetectResult;
+          case 'claude_cli_spawn': return args.req?.session_uuid || 'mock-claude-session';
+          case 'claude_cli_send': return null;
+          case 'claude_cli_kill': return null;
           default:
             console.warn('[Tauri Mock] Unhandled command:', cmd, args);
             return null;
@@ -403,7 +411,14 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         },
         emitEvent(event, payload) {
           const listeners = eventListeners[event] || [];
-          listeners.forEach(cb => cb({ event, payload }));
+          for (const h of listeners) {
+            // listener handle is either a direct fn or a Tauri transformCallback id
+            if (typeof h === 'function') {
+              h({ event, payload });
+            } else if (typeof h === 'number' && typeof window['_' + h] === 'function') {
+              window['_' + h]({ event, payload });
+            }
+          }
         },
         openProject(dirPath, newFiles) {
           projectDir = dirPath;
@@ -436,6 +451,21 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           Object.keys(writtenFiles).forEach(k => delete writtenFiles[k]);
           createdFiles.length = 0;
           deletedFiles.length = 0;
+        },
+        // AI bridge test helpers — let specs simulate streamed responses
+        // and control whether the Claude CLI is "installed".
+        setClaudeCliDetectResult(v) { claudeCliDetectResult = v; },
+        emitAiChunk(streamId, text) {
+          this.emitEvent('ai-stream://' + streamId, { kind: 'chunk', data: JSON.stringify({ choices: [{ delta: { content: text } }] }) });
+        },
+        emitAiDone(streamId) {
+          this.emitEvent('ai-stream://' + streamId, { kind: 'done' });
+        },
+        emitAiError(streamId, message, status) {
+          this.emitEvent('ai-stream://' + streamId, { kind: 'error', message, status });
+        },
+        emitClaudeStdout(sessionId, data) {
+          this.emitEvent('claude-stream://' + sessionId, { kind: 'stdout-line', data });
         },
       };
 

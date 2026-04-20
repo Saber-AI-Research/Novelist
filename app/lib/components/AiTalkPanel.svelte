@@ -20,7 +20,7 @@
   });
 </script>
 
-<div class="ai-talk-wrapper">
+<div class="ai-talk-wrapper" data-testid="ai-talk-panel">
   {#if Impl}
     <Impl />
   {:else if loadError}

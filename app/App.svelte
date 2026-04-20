@@ -665,6 +665,7 @@
           <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
           <button
             class="flex items-center justify-center cursor-pointer"
+            data-testid="panel-toggle-{panel.pluginId}"
             style="width: 20px; flex: 1; background: {extensionStore.activePanelId === panel.pluginId ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {extensionStore.activePanelId === panel.pluginId ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
             onclick={() => extensionStore.togglePanel(panel.pluginId)}
             title="Toggle {panel.label}"

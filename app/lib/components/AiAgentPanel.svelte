@@ -19,7 +19,7 @@
   });
 </script>
 
-<div class="ai-agent-wrapper">
+<div class="ai-agent-wrapper" data-testid="ai-agent-panel">
   {#if Impl}
     <Impl />
   {:else if loadError}
