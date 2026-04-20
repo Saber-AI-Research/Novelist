@@ -15,6 +15,7 @@ import {
   type EffectiveSettings,
   type NewFileConfig,
   type PluginsConfig,
+  type SnapshotConfig,
   type ViewConfig,
 } from '$lib/ipc/commands';
 
@@ -28,6 +29,7 @@ const DEFAULT_EFFECTIVE: EffectiveSettings = {
     last_used_dir: null,
   },
   plugins: { enabled: {} },
+  snapshot: { max_count: 100, min_interval_minutes: 60 },
   is_project_scoped: false,
 };
 
@@ -95,6 +97,7 @@ class SettingsStore {
         dirPath,
         { sort_mode: legacySort, show_hidden_files: null },
         null,
+        null,
         null
       );
       if (res.status === 'ok') didMigrateSort = true;
@@ -113,7 +116,7 @@ class SettingsStore {
             typeof parsed.detectFromFolder === 'boolean' ? parsed.detectFromFolder : null,
           auto_rename_from_h1:
             typeof parsed.autoRenameFromH1 === 'boolean' ? parsed.autoRenameFromH1 : null,
-        }, null);
+        }, null, null);
         if (res.status === 'ok') didMigrateNewFile = true;
       } catch {
         // Malformed legacy value — drop silently; user can reconfigure.
@@ -143,8 +146,8 @@ class SettingsStore {
       show_hidden_files: patch.show_hidden_files ?? current.show_hidden_files,
     };
     const res = this.dirPath
-      ? await commands.writeProjectSettings(this.dirPath, next, null, null)
-      : await commands.writeGlobalSettings(next, null, null);
+      ? await commands.writeProjectSettings(this.dirPath, next, null, null, null)
+      : await commands.writeGlobalSettings(next, null, null, null);
     if (res.status !== 'ok') {
       console.error('[settings] writeView failed:', res.error);
       return;
@@ -166,8 +169,8 @@ class SettingsStore {
       auto_rename_from_h1: patch.auto_rename_from_h1 ?? current.auto_rename_from_h1,
     };
     const res = this.dirPath
-      ? await commands.writeProjectSettings(this.dirPath, null, next, null)
-      : await commands.writeGlobalSettings(null, next, null);
+      ? await commands.writeProjectSettings(this.dirPath, null, next, null, null)
+      : await commands.writeGlobalSettings(null, next, null, null);
     if (res.status !== 'ok') {
       console.error('[settings] writeNewFile failed:', res.error);
       return;
@@ -228,7 +231,7 @@ class SettingsStore {
         ...this.effective.plugins.enabled,
         [pluginId]: enabled,
       };
-      const res = await commands.writeGlobalSettings(null, null, { enabled: nextMap });
+      const res = await commands.writeGlobalSettings(null, null, { enabled: nextMap }, null);
       if (res.status !== 'ok') {
         console.error('[settings] writePluginEnabled (global) failed:', res.error);
         return;
@@ -259,7 +262,8 @@ class SettingsStore {
       this.dirPath,
       null,
       null,
-      { enabled: nextOverrides }
+      { enabled: nextOverrides },
+      null
     );
     if (res.status !== 'ok') {
       console.error('[settings] writePluginEnabled (project) failed:', res.error);
@@ -282,7 +286,7 @@ class SettingsStore {
     if (!(pluginId in current)) return;
     const next = { ...current };
     delete next[pluginId];
-    const res = await commands.writeProjectSettings(this.dirPath, null, null, { enabled: next });
+    const res = await commands.writeProjectSettings(this.dirPath, null, null, { enabled: next }, null);
     if (res.status !== 'ok') {
       console.error('[settings] resetPluginOverride failed:', res.error);
       return;
@@ -307,10 +311,33 @@ class SettingsStore {
       auto_rename_from_h1: this.effective.new_file.auto_rename_from_h1,
     };
     const p: PluginsConfig = { enabled: { ...this.effective.plugins.enabled } };
-    const res = await commands.writeGlobalSettings(v, n, p);
+    const res = await commands.writeGlobalSettings(v, n, p, null);
     if (res.status !== 'ok') {
       console.error('[settings] promoteToGlobal failed:', res.error);
     }
+  }
+
+  /** Patch snapshot retention settings for the current scope. */
+  async writeSnapshot(patch: Partial<SnapshotConfig>): Promise<void> {
+    const current = this.effective.snapshot;
+    const next: SnapshotConfig = {
+      max_count: patch.max_count ?? current.max_count,
+      min_interval_minutes: patch.min_interval_minutes ?? current.min_interval_minutes,
+    };
+    const res = this.dirPath
+      ? await commands.writeProjectSettings(this.dirPath, null, null, null, next)
+      : await commands.writeGlobalSettings(null, null, null, next);
+    if (res.status !== 'ok') {
+      console.error('[settings] writeSnapshot failed:', res.error);
+      return;
+    }
+    this.effective = {
+      ...this.effective,
+      snapshot: {
+        max_count: next.max_count ?? DEFAULT_EFFECTIVE.snapshot.max_count,
+        min_interval_minutes: next.min_interval_minutes ?? DEFAULT_EFFECTIVE.snapshot.min_interval_minutes,
+      },
+    };
   }
 }
 

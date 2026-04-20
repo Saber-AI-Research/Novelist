@@ -131,6 +131,18 @@ export const commands = {
 	revealInFileManager: (path: string) => typedError<null, string>(__TAURI_INVOKE("reveal_in_file_manager", { path })),
 	// Duplicate a file. Returns the path of the new copy.
 	duplicateFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("duplicate_file", { path })),
+	logStartupPhase: (phase: string, sinceStartMs: number) => typedError<null, string>(__TAURI_INVOKE("log_startup_phase", { phase, sinceStartMs })),
+	getEffectiveSettings: (dirPath: string | null) => typedError<EffectiveSettings, string>(__TAURI_INVOKE("get_effective_settings", { dirPath })),
+	getGlobalSettings: () => typedError<GlobalSettings, string>(__TAURI_INVOKE("get_global_settings")),
+	writeGlobalSettings: (view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null, snapshot: SnapshotConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins, snapshot })),
+	writeProjectSettings: (dirPath: string, view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null, snapshot: SnapshotConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins, snapshot })),
+	listTemplateFiles: (source: string, projectDir: string | null) => typedError<TemplateFileSummary[], string>(__TAURI_INVOKE("list_template_files", { source, projectDir })),
+	readTemplateFile: (source: string, id: string, projectDir: string | null) => typedError<TemplateFile, string>(__TAURI_INVOKE("read_template_file", { source, id, projectDir })),
+	writeTemplateFile: (id: string, name: string, body: string, mode: string, defaultFilename: string | null) => typedError<null, string>(__TAURI_INVOKE("write_template_file", { id, name, body, mode, defaultFilename })),
+	renameTemplateFile: (id: string, newName: string) => typedError<null, string>(__TAURI_INVOKE("rename_template_file", { id, newName })),
+	deleteTemplateFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_template_file", { id })),
+	duplicateBundledTemplate: (id: string) => typedError<null, string>(__TAURI_INVOKE("duplicate_bundled_template", { id })),
+	createFileWithBody: (parentDir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("create_file_with_body", { parentDir, filename, body })),
 };
 
 /* Types */
@@ -278,6 +290,81 @@ export type WritingStatsOverview = {
 	streak_days: number,
 	today_words: number,
 	today_minutes: number,
+};
+
+export type EffectiveSettings = {
+	view: ResolvedView,
+	new_file: ResolvedNewFile,
+	plugins: ResolvedPlugins,
+	snapshot: ResolvedSnapshot,
+	is_project_scoped: boolean,
+};
+
+export type GlobalSettings = {
+	view: ViewConfig,
+	new_file: NewFileConfig,
+	plugins: PluginsConfig,
+	snapshot: SnapshotConfig,
+};
+
+export type NewFileConfig = {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	default_dir?: string | null,
+	last_used_dir?: string | null,
+};
+
+export type PluginsConfig = {
+	enabled: Record<string, boolean>,
+};
+
+export type ResolvedNewFile = {
+	template: string,
+	detect_from_folder: boolean,
+	auto_rename_from_h1: boolean,
+	default_dir: string | null,
+	last_used_dir: string | null,
+};
+
+export type ResolvedPlugins = {
+	enabled: Record<string, boolean>,
+};
+
+export type ResolvedSnapshot = {
+	max_count: number,
+	min_interval_minutes: number,
+};
+
+export type ResolvedView = {
+	sort_mode: string,
+	show_hidden_files: boolean,
+};
+
+export type SnapshotConfig = {
+	max_count?: number | null,
+	min_interval_minutes?: number | null,
+};
+
+export type TemplateFile = {
+	id: string,
+	name: string,
+	body: string,
+	mode: string,
+	default_filename: string | null,
+};
+
+export type TemplateFileSummary = {
+	id: string,
+	name: string,
+	mode: string,
+	default_filename: string | null,
+	source: string,
+};
+
+export type ViewConfig = {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
 };
 
 /* Tauri Specta runtime */
