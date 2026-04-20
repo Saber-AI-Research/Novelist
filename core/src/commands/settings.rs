@@ -122,6 +122,7 @@ pub async fn write_global_settings(
     view: Option<ViewConfig>,
     new_file: Option<NewFileConfig>,
     plugins: Option<PluginsConfig>,
+    snapshot: Option<SnapshotConfig>,
 ) -> Result<(), AppError> {
     let mut current = read_global_settings().await;
     if let Some(v) = view {
@@ -132,6 +133,9 @@ pub async fn write_global_settings(
     }
     if let Some(p) = plugins {
         current.plugins = p;
+    }
+    if let Some(s) = snapshot {
+        current.snapshot = s;
     }
     write_global_settings_to_disk(&current).await
 }
@@ -145,6 +149,7 @@ pub async fn write_project_settings(
     view: Option<ViewConfig>,
     new_file: Option<NewFileConfig>,
     plugins: Option<PluginsConfig>,
+    snapshot: Option<SnapshotConfig>,
 ) -> Result<(), AppError> {
     let mut config = read_project_config_if_any(&dir_path)
         .await
@@ -157,6 +162,9 @@ pub async fn write_project_settings(
     }
     if let Some(p) = plugins {
         config.plugins = p;
+    }
+    if let Some(s) = snapshot {
+        config.snapshot = Some(s);
     }
     write_project_config(&dir_path, &config).await
 }
@@ -190,6 +198,7 @@ template = "Chapter {N}"
                 sort_mode: Some("name-desc".into()),
                 show_hidden_files: Some(true),
             }),
+            None,
             None,
             None,
         )
@@ -239,6 +248,7 @@ show_hidden_files = true
             Some(ViewConfig::default()),
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(AppError::FileNotFound(_))));
@@ -272,6 +282,7 @@ auto_save_minutes = 7
                 sort_mode: Some("mtime-desc".into()),
                 show_hidden_files: None,
             }),
+            None,
             None,
             None,
         )
