@@ -24,10 +24,13 @@ export const commands = {
 	 */
 	createScratchFile: () => typedError<string, string>(__TAURI_INVOKE("create_scratch_file")),
 	createDirectory: (parentDir: string, name: string) => typedError<string, string>(__TAURI_INVOKE("create_directory", { parentDir, name })),
-	renameItem: (oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName, allowCollisionBump })),
 	/**
-	 *  Emit a global Tauri event so other windows can update their tab state.
+	 *  Rename a file or folder in place.
+	 *  When `allow_collision_bump` is Some(true), appends " 2", " 3", … on collision.
+	 *  Defaults to error-on-collision when None or Some(false).
 	 */
+	renameItem: (oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName, allowCollisionBump })),
+	// Emit a global Tauri event so other windows can update their tab state.
 	broadcastFileRenamed: (oldPath: string, newPath: string) => typedError<null, string>(__TAURI_INVOKE("broadcast_file_renamed", { oldPath, newPath })),
 	/**
 	 *  Move a file or folder into `target_dir`. Auto-numbers on collision
@@ -56,9 +59,13 @@ export const commands = {
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
 	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
-	// Pin or unpin a recent project — pinned projects stay above unpinned.
+	// Pin or unpin a single project. Pinned projects always sort above unpinned.
 	setProjectPinned: (path: string, pinned: boolean) => typedError<null, string>(__TAURI_INVOKE("set_project_pinned", { path, pinned })),
-	// Reorder recent projects by the given path list; index becomes each project's sort_order.
+	/**
+	 *  Reorder recent projects by the given path list. Each path's index in
+	 *  `ordered_paths` becomes its new `sort_order`. Paths not in the list keep
+	 *  their existing `sort_order`.
+	 */
 	reorderRecentProjects: (orderedPaths: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_recent_projects", { orderedPaths })),
 	// Scan ~/.novelist/plugins/ and return info for each plugin found.
 	listPlugins: () => typedError<PluginInfo[], string>(__TAURI_INVOKE("list_plugins")),
@@ -66,7 +73,10 @@ export const commands = {
 	loadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("load_plugin", { pluginId })),
 	// Unload (deactivate) a plugin.
 	unloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("unload_plugin", { pluginId })),
-	// Unload then re-load a plugin from disk. Used to pick up edits to manifest.toml / index.js without restarting the app.
+	/**
+	 *  Unload then re-load a plugin from disk. Used to pick up edits to
+	 *  `manifest.toml` / `index.js` without restarting the app.
+	 */
 	reloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("reload_plugin", { pluginId })),
 	// Get all commands registered by active plugins.
 	getPluginCommands: () => typedError<RegisteredCommandInfo[], string>(__TAURI_INVOKE("get_plugin_commands")),
@@ -144,9 +154,38 @@ export const commands = {
 	deleteTemplateFile: (projectDir: string, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_template_file", { projectDir, id })),
 	duplicateBundledTemplate: (projectDir: string, bundledId: string, newId: string | null) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("duplicate_bundled_template", { projectDir, bundledId, newId })),
 	createFileWithBody: (dir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("create_file_with_body", { dir, filename, body })),
+	aiFetchStreamStart: (req: AiFetchRequest) => typedError<string, string>(__TAURI_INVOKE("ai_fetch_stream_start", { req })),
+	aiFetchStreamCancel: (streamId: string) => typedError<null, string>(__TAURI_INVOKE("ai_fetch_stream_cancel", { streamId })),
+	claudeCliDetect: () => __TAURI_INVOKE<{
+	path: string,
+	version: string | null,
+} | null>("claude_cli_detect"),
+	claudeCliSpawn: (req: ClaudeSpawnRequest) => typedError<string, string>(__TAURI_INVOKE("claude_cli_spawn", { req })),
+	claudeCliSend: (sessionId: string, line: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_send", { sessionId, line })),
+	claudeCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_kill", { sessionId })),
+	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
+	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
+	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
+	testSyncConnection: (webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { webdavUrl, username, password })),
 };
 
 /* Types */
+export type AiFetchRequest = {
+	/**
+	 *  Full URL. Must be https:// (http:// allowed only for localhost for
+	 *  self-hosted / ollama during development).
+	 */
+	url: string,
+	headers: ([string, string])[],
+	// Raw JSON body. The caller (plugin) owns the shape — we just POST it.
+	body: string,
+	/**
+	 *  When true, parse the response as SSE (split on `\n\n`, strip `data: `,
+	 *  skip `[DONE]`). When false, buffer the full body and emit one chunk.
+	 */
+	sse: boolean,
+};
+
 export type ChapterStats = {
 	file_name: string,
 	file_path: string,
@@ -159,10 +198,38 @@ export type ChapterStatsInput = {
 	word_count: number,
 };
 
+export type ClaudeSpawnRequest = {
+	// Override the auto-detected CLI path.
+	cli_path: string | null,
+	// Working directory for the spawned process. Default: inherit.
+	cwd: string | null,
+	system_prompt: string | null,
+	// Extra `--add-dir` values (plugin usually includes the project root).
+	add_dirs: string[],
+	/**
+	 *  One of: "acceptEdits", "auto", "bypassPermissions", "default",
+	 *  "dontAsk", "plan". Passed through as-is.
+	 */
+	permission_mode: string | null,
+	model: string | null,
+	// Plugin-owned UUID; must be a valid UUID string on the CLI side.
+	session_uuid: string,
+	/**
+	 *  Extra CLI args (escape hatch). Validated against a blocklist of
+	 *  flags we manage ourselves.
+	 */
+	extra_args: string[],
+};
+
 export type DailyStats = {
 	date: string,
 	words_written: number,
 	time_minutes: number,
+};
+
+export type DetectedCli = {
+	path: string,
+	version: string | null,
 };
 
 export type FileEntry = {
@@ -170,6 +237,8 @@ export type FileEntry = {
 	path: string,
 	is_dir: boolean,
 	size: number,
+	// Unix epoch milliseconds; None when filesystem doesn't expose mtime.
+	mtime: number | null,
 };
 
 export type OutlineConfig = {
@@ -275,8 +344,16 @@ export type RecentProject = {
 	path: string,
 	name: string,
 	last_opened: string,
-	pinned: boolean,
-	sort_order: number | null,
+	/**
+	 *  `true` keeps the project above all unpinned ones. Optional in the
+	 *  persisted JSON so pre-existing files deserialize cleanly.
+	 */
+	pinned?: boolean,
+	/**
+	 *  Manual rank within the pinned / unpinned group. Smaller = earlier.
+	 *  `None` falls back to `last_opened` order. Optional for back-compat.
+	 */
+	sort_order?: number | null,
 };
 
 export type RegisteredCommandInfo = {
@@ -306,6 +383,30 @@ export type SnapshotMeta = {
 	timestamp: number,
 	file_count: number,
 	total_bytes: number,
+};
+
+export type SyncConfig = {
+	enabled: boolean,
+	webdav_url: string,
+	username: string,
+	password: string,
+	interval_minutes: number,
+};
+
+export type SyncConfigMasked = {
+	enabled: boolean,
+	webdav_url: string,
+	username: string,
+	password: string,
+	interval_minutes: number,
+};
+
+export type SyncStatus = {
+	last_sync: string | null,
+	files_uploaded: number,
+	files_downloaded: number,
+	errors: string[],
+	in_progress: boolean,
 };
 
 // Info returned to the frontend for listing templates.

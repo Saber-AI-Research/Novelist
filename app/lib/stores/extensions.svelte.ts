@@ -5,25 +5,57 @@ export interface UIExtension {
   pluginId: string;
   type: 'panel' | 'file-handler';
   label: string;
+  /** Empty string for built-in panels; asset:// URL for iframe-loaded plugins. */
   entryUrl: string;
   width?: number;
   fileExtensions?: string[];
+  /** True for first-party panels rendered as native Svelte components. */
+  builtin?: boolean;
 }
 
+/**
+ * First-party panels that are always present, rendered as native Svelte
+ * components by `app/App.svelte` (no iframe). Hardcoded routing in App.svelte
+ * intercepts their pluginId and chooses the matching native shim.
+ */
+const BUILTIN_PANELS: UIExtension[] = [
+  {
+    pluginId: 'ai-talk',
+    type: 'panel',
+    label: 'AI Talk',
+    entryUrl: '',
+    builtin: true,
+  },
+  {
+    pluginId: 'ai-agent',
+    type: 'panel',
+    label: 'AI Agent',
+    entryUrl: '',
+    builtin: true,
+  },
+];
+
 class ExtensionStore {
-  panels = $state<UIExtension[]>([]);
+  panels = $state<UIExtension[]>([...BUILTIN_PANELS]);
   fileHandlers = $state<UIExtension[]>([]);
   activePanelId = $state<string | null>(null);
 
   async loadFromPlugins() {
     try {
       const result = await commands.listPlugins();
-      if (result.status === 'error') return;
-      this.panels = [];
-      this.fileHandlers = [];
+      if (result.status === 'error') {
+        // Built-ins still available even if disk discovery fails.
+        this.panels = [...BUILTIN_PANELS];
+        this.fileHandlers = [];
+        return;
+      }
+      const fromDisk: UIExtension[] = [];
+      const fileHandlers: UIExtension[] = [];
 
       for (const plugin of result.data) {
         if (!plugin.ui) continue;
+        // Skip if a built-in already owns this id (avoid double-listing).
+        if (BUILTIN_PANELS.some((p) => p.pluginId === plugin.id)) continue;
 
         const basePath = `${await this.getPluginsDir()}/${plugin.id}`;
         const entryUrl = convertFileSrc(`${basePath}/${plugin.ui.entry}`);
@@ -38,13 +70,18 @@ class ExtensionStore {
         };
 
         if (ext.type === 'panel') {
-          this.panels.push(ext);
+          fromDisk.push(ext);
         } else if (ext.type === 'file-handler') {
-          this.fileHandlers.push(ext);
+          fileHandlers.push(ext);
         }
       }
+
+      this.panels = [...BUILTIN_PANELS, ...fromDisk];
+      this.fileHandlers = fileHandlers;
     } catch (e) {
       console.warn('Failed to load UI extensions:', e);
+      this.panels = [...BUILTIN_PANELS];
+      this.fileHandlers = [];
     }
   }
 
@@ -61,11 +98,16 @@ class ExtensionStore {
     this.activePanelId = this.activePanelId === pluginId ? null : pluginId;
   }
 
+  /** Set the active panel to a specific id (vs. the toggle behavior). */
+  openPanel(pluginId: string) {
+    this.activePanelId = pluginId;
+  }
+
   getFileHandler(fileName: string): UIExtension | null {
     if (!fileName) return null;
     const lower = fileName.toLowerCase();
-    return this.fileHandlers.find(h =>
-      h.fileExtensions?.some(ext => lower.endsWith(ext))
+    return this.fileHandlers.find((h) =>
+      h.fileExtensions?.some((ext) => lower.endsWith(ext)),
     ) ?? null;
   }
 }

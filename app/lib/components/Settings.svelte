@@ -19,7 +19,27 @@
 
   let { onClose }: Props = $props();
 
-  let activeSection = $state<'editor' | 'theme' | 'shortcuts' | 'templates' | 'plugins' | 'sync'>('editor');
+  let activeSection = $state<string>('editor');
+  let pluginSettingsComponents = $state<Record<string, import('svelte').Component>>({});
+
+  async function ensurePluginSettingsLoaded(pluginId: string) {
+    if (pluginSettingsComponents[pluginId]) return;
+    const entry = pluginSettings.get(pluginId);
+    if (!entry) return;
+    try {
+      const mod = await entry.load();
+      pluginSettingsComponents = { ...pluginSettingsComponents, [pluginId]: mod.default };
+    } catch (e) {
+      console.error(`[settings] failed to load ${pluginId} settings:`, e);
+    }
+  }
+
+  $effect(() => {
+    if (activeSection.startsWith('plugin:')) {
+      const id = activeSection.slice('plugin:'.length);
+      void ensurePluginSettingsLoaded(id);
+    }
+  });
 
   // Editor settings
   const fontOptions = [
@@ -194,10 +214,44 @@
   import type { PluginInfo } from '$lib/ipc/commands';
   import PluginScaffoldDialog from '$lib/components/PluginScaffoldDialog.svelte';
   import HelpTooltip from '$lib/components/HelpTooltip.svelte';
+  import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-settings.svelte';
+  import { extensionStore } from '$lib/stores/extensions.svelte';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
 
-  let builtinPlugins = $derived(plugins.filter(p => p.builtin));
+  // Synthetic entries for first-party native panels — they don't live on
+  // disk so listPlugins() doesn't see them, but Settings should still
+  // surface them with the same row UI (toggle + Configure).
+  const NATIVE_PLUGINS: PluginInfo[] = [
+    {
+      id: 'ai-talk',
+      name: 'AI Talk',
+      version: '0.1.0',
+      description: 'Chat + inline rewrite via any OpenAI-compatible endpoint',
+      author: 'Novelist',
+      builtin: true,
+      enabled: true,
+      active: true,
+      icon: null,
+      ui: { type: 'panel', entry: 'native', label: 'AI Talk', file_extensions: null, width: null },
+      permissions: ['ai:http'],
+    },
+    {
+      id: 'ai-agent',
+      name: 'AI Agent',
+      version: '0.1.0',
+      description: 'Agentic chat backed by your local Claude Code CLI',
+      author: 'Novelist',
+      builtin: true,
+      enabled: true,
+      active: true,
+      icon: null,
+      ui: { type: 'panel', entry: 'native', label: 'AI Agent', file_extensions: null, width: null },
+      permissions: ['ai:claude-cli'],
+    },
+  ];
+
+  let builtinPlugins = $derived([...NATIVE_PLUGINS, ...plugins.filter(p => p.builtin)]);
   let communityPlugins = $derived(plugins.filter(p => !p.builtin));
 
   async function loadPlugins() {
@@ -206,6 +260,11 @@
       plugins = result.data;
     }
     pluginsLoaded = true;
+  }
+
+  function openPluginSettings(pluginId: string) {
+    if (!pluginSettings.has(pluginId)) return;
+    activeSection = `plugin:${pluginId}`;
   }
 
   async function togglePluginEnabled(plugin: PluginInfo) {
@@ -437,6 +496,17 @@
         </div>
       </div>
       <div class="shrink-0 flex items-center gap-2">
+        {#if pluginSettings.has(plugin.id)}
+          <button
+            type="button"
+            class="w-6 h-6 flex items-center justify-center rounded text-xs cursor-pointer transition-opacity"
+            style="background: var(--novelist-bg-tertiary, rgba(127,127,127,0.1)); color: var(--novelist-text-secondary);"
+            title="Configure"
+            aria-label="Configure {plugin.name}"
+            data-testid="plugin-configure-{plugin.id}"
+            onclick={() => openPluginSettings(plugin.id)}
+          >⚙</button>
+        {/if}
         <button
           type="button"
           class="w-6 h-6 flex items-center justify-center rounded text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 transition-opacity"
@@ -444,7 +514,7 @@
           title={t('settings.plugins.reload')}
           aria-label={t('settings.plugins.reload')}
           data-testid="plugin-reload-{plugin.id}"
-          disabled={!plugin.enabled || reloadingPluginId === plugin.id}
+          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.id === 'ai-agent'}
           onclick={() => reloadPlugin(plugin)}
         >
           <span class="inline-block" style="transform: {reloadingPluginId === plugin.id ? 'rotate(360deg)' : 'none'}; transition: transform 0.6s;">↻</span>
@@ -452,9 +522,11 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-          class="w-10 h-5 rounded-full cursor-pointer relative transition-colors"
-          style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'};"
-          onclick={() => togglePluginEnabled(plugin)}
+          class="w-10 h-5 rounded-full relative transition-colors"
+          class:cursor-pointer={plugin.id !== 'ai-talk' && plugin.id !== 'ai-agent'}
+          style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'}; opacity: {plugin.id === 'ai-talk' || plugin.id === 'ai-agent' ? 0.6 : 1};"
+          title={plugin.id === 'ai-talk' || plugin.id === 'ai-agent' ? 'Built-in panel — always on' : ''}
+          onclick={() => { if (plugin.id !== 'ai-talk' && plugin.id !== 'ai-agent') togglePluginEnabled(plugin); }}
         >
           <div
             class="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
@@ -491,9 +563,22 @@
           class="text-left px-4 py-2 text-sm cursor-pointer"
           data-testid="settings-section-{section.id}"
           style="background: {activeSection === section.id ? 'var(--novelist-sidebar-active)' : 'transparent'}; color: {activeSection === section.id ? 'var(--novelist-accent)' : 'var(--novelist-text)'}; border: none; font-weight: {activeSection === section.id ? '600' : '400'};"
-          onclick={() => activeSection = section.id as any}
+          onclick={() => activeSection = section.id}
         >{section.label}</button>
       {/each}
+
+      {#if pluginSettings.list().length > 0}
+        <div class="mt-2 px-4 py-1 text-[10px] uppercase tracking-wide" style="color: var(--novelist-text-secondary); opacity: 0.7;">Plugin settings</div>
+        {#each pluginSettings.list() as entry}
+          {@const sectionId = `plugin:${entry.pluginId}`}
+          <button
+            class="text-left px-4 py-2 text-sm cursor-pointer"
+            data-testid="settings-section-{sectionId}"
+            style="background: {activeSection === sectionId ? 'var(--novelist-sidebar-active)' : 'transparent'}; color: {activeSection === sectionId ? 'var(--novelist-accent)' : 'var(--novelist-text)'}; border: none; font-weight: {activeSection === sectionId ? '600' : '400'};"
+            onclick={() => activeSection = sectionId}
+          >{entry.label ?? entry.pluginId}</button>
+        {/each}
+      {/if}
 
       <div class="flex-1"></div>
       <button
@@ -1123,6 +1208,31 @@
           <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
             {t('settings.sync.syncPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist/<project-name>/"}</code>
           </div>
+        {/if}
+
+      {:else if activeSection.startsWith('plugin:')}
+        {@const pluginId = activeSection.slice('plugin:'.length)}
+        {@const entry = pluginSettings.get(pluginId)}
+        <div class="flex items-center gap-3 mb-4">
+          <h3 class="text-xs font-semibold uppercase tracking-wide flex-1" style="color: var(--novelist-text-secondary);">
+            {entry?.label ?? pluginId}
+          </h3>
+          {#if entry?.panelId}
+            <button
+              type="button"
+              class="text-xs px-2 py-1 rounded cursor-pointer"
+              style="border: 1px solid var(--novelist-border); background: var(--novelist-bg-secondary); color: var(--novelist-text);"
+              data-testid="open-in-panel-{pluginId}"
+              onclick={() => { if (entry?.panelId) { extensionStore.openPanel(entry.panelId); onClose(); } }}
+              title="Close this dialog and open the panel itself (settings are also embedded there)"
+            >Open in panel →</button>
+          {/if}
+        </div>
+        {#if pluginSettingsComponents[pluginId]}
+          {@const Comp = pluginSettingsComponents[pluginId]}
+          <Comp />
+        {:else}
+          <div class="text-xs" style="color: var(--novelist-text-secondary);">Loading settings…</div>
         {/if}
       {/if}
     </div>

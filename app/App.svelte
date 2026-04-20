@@ -24,6 +24,8 @@
   import ErrorBoundary from '$lib/components/ErrorBoundary.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import PluginPanel from '$lib/components/PluginPanel.svelte';
+  import AiTalkPanel from '$lib/components/AiTalkPanel.svelte';
+  import AiAgentPanel from '$lib/components/AiAgentPanel.svelte';
   import PluginFileEditor from '$lib/components/PluginFileEditor.svelte';
   import CanvasFileEditor from '$lib/components/CanvasFileEditor.svelte';
   import KanbanFileEditor from '$lib/components/KanbanFileEditor.svelte';
@@ -127,7 +129,7 @@
     uiStore.snapshotVisible ||
     uiStore.statsVisible ||
     uiStore.templateVisible ||
-    !!(extensionStore.activePanelId && tabsStore.activeTab)
+    !!extensionStore.activePanelId
   );
 
   // Recent projects cache for Cmd+Number switching (Notion-style)
@@ -596,9 +598,17 @@
             onDialogHandled={() => { templateDialogRequest = null; }}
           />
         </div>
-      {:else if extensionStore.activePanelId && tabsStore.activeTab}
+      {:else if extensionStore.activePanelId}
         {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
-        {#if activePanel}
+        {#if activePanel?.pluginId === 'ai-talk'}
+          <div style="width: {uiStore.rightPanelWidth}px;">
+            <ErrorBoundary><AiTalkPanel /></ErrorBoundary>
+          </div>
+        {:else if activePanel?.pluginId === 'ai-agent'}
+          <div style="width: {uiStore.rightPanelWidth}px;">
+            <ErrorBoundary><AiAgentPanel /></ErrorBoundary>
+          </div>
+        {:else if activePanel && tabsStore.activeTab}
           <div style="width: {uiStore.rightPanelWidth}px;">
             <PluginPanel extension={activePanel} onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} />
           </div>
@@ -655,6 +665,7 @@
           <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
           <button
             class="flex items-center justify-center cursor-pointer"
+            data-testid="panel-toggle-{panel.pluginId}"
             style="width: 20px; flex: 1; background: {extensionStore.activePanelId === panel.pluginId ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {extensionStore.activePanelId === panel.pluginId ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
             onclick={() => extensionStore.togglePanel(panel.pluginId)}
             title="Toggle {panel.label}"

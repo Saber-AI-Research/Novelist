@@ -7,7 +7,11 @@ pub use error::AppError;
 
 use std::sync::Mutex;
 
+use commands::ai_bridge::{ai_fetch_stream_cancel, ai_fetch_stream_start, AiBridgeState};
 use commands::bench::log_startup_phase;
+use commands::claude_bridge::{
+    claude_cli_detect, claude_cli_kill, claude_cli_send, claude_cli_spawn, ClaudeBridgeState,
+};
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
 use commands::export::{check_pandoc, export_project};
 use commands::file::{
@@ -167,6 +171,12 @@ pub fn run() {
         reveal_in_file_manager,
         duplicate_file,
         log_startup_phase,
+        ai_fetch_stream_start,
+        ai_fetch_stream_cancel,
+        claude_cli_detect,
+        claude_cli_spawn,
+        claude_cli_send,
+        claude_cli_kill,
         get_sync_config,
         save_sync_config,
         sync_now,
@@ -248,6 +258,12 @@ pub fn run() {
         reveal_in_file_manager,
         duplicate_file,
         log_startup_phase,
+        ai_fetch_stream_start,
+        ai_fetch_stream_cancel,
+        claude_cli_detect,
+        claude_cli_spawn,
+        claude_cli_send,
+        claude_cli_kill,
     ]);
 
     #[cfg(feature = "codegen")]
@@ -282,6 +298,8 @@ pub fn run() {
         .manage(RopeDocumentState::new())
         .manage(EncodingState::new())
         .manage(PendingOpenFiles::new())
+        .manage(AiBridgeState::new())
+        .manage(ClaudeBridgeState::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             tracing::info!(
