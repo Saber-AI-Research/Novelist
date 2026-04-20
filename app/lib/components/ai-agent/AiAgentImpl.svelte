@@ -258,10 +258,10 @@
       {/if}
     </div>
     <div class="actions">
-      <button class="ghost" title="New session" onclick={newSession} disabled={!sessionId && turns.length === 0}>
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title="New session" aria-label="New session" onclick={newSession} disabled={!sessionId && turns.length === 0}>
         ↺
       </button>
-      <button class="gear" title="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
     </div>
   </header>
 
@@ -345,7 +345,7 @@
         onkeydown={inputKeydown}
       ></textarea>
       <div class="composer-actions">
-        <button class="primary" onclick={send} disabled={!input.trim()}>Send</button>
+        <button class="novelist-btn novelist-btn-primary" onclick={send} disabled={!input.trim()}>Send</button>
       </div>
     </div>
   {/if}
@@ -391,17 +391,6 @@
   .actions {
     display: flex;
     gap: 4px;
-  }
-  .gear, .actions .ghost {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 14px;
-    color: var(--novelist-text-secondary);
-  }
-  .actions .ghost:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
   .settings-drawer {
     padding: 10px;
@@ -542,17 +531,5 @@
     justify-content: flex-end;
     gap: 6px;
   }
-  button.primary {
-    background: var(--novelist-accent);
-    color: #fff;
-    border: none;
-    padding: 5px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-  button.primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  /* Button styles live in app.css — .novelist-btn / -primary / -ghost. */
 </style>
