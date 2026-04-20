@@ -58,6 +58,8 @@ export const test = base.extend<{
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
     renameFile: (oldPath: string, newPath: string) => Promise<void>;
     reset: () => Promise<void>;
+    getSnapshots: () => Promise<{ id: string; name: string; timestamp: number }[]>;
+    setSnapshotRetention: (maxCount: number, minIntervalMinutes: number) => Promise<void>;
   };
 }>({
   app: async ({ page }, use) => {
@@ -117,6 +119,15 @@ export const test = base.extend<{
       },
       async reset() {
         await app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.reset());
+      },
+      async getSnapshots() {
+        return app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.snapshots);
+      },
+      async setSnapshotRetention(maxCount: number, minIntervalMinutes: number) {
+        await app.evaluate(
+          ([max, min]) => (window as any).__TAURI_MOCK_STATE__.setSnapshotRetention(max, min),
+          [maxCount, minIntervalMinutes] as const,
+        );
       },
     };
     await use(helpers);

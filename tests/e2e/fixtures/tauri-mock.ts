@@ -21,6 +21,52 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const createdFiles = [];
       const deletedFiles = [];
       const eventListeners = {};
+
+      // Stateful snapshot mock with retention rule simulation
+      let snapshotList = [];
+      let snapshotMaxCount = 100;
+      let snapshotMinIntervalMinutes = 60;
+      let snapshotCounter = 0;
+
+      function mockCreateSnapshot(name) {
+        const now = Date.now();
+        const minIntervalMs = snapshotMinIntervalMinutes * 60 * 1000;
+        const newest = snapshotList.length > 0 ? snapshotList[0] : null;
+        const shouldReplace = snapshotMinIntervalMinutes > 0
+          && newest
+          && (now - newest.timestamp) < minIntervalMs;
+
+        if (shouldReplace) {
+          // Replace: remove newest, insert new at head
+          snapshotList.shift();
+        } else {
+          // Prune oldest if at cap
+          while (snapshotList.length >= snapshotMaxCount) {
+            snapshotList.pop();
+          }
+        }
+
+        snapshotCounter++;
+        const meta = {
+          id: 'snap-' + snapshotCounter,
+          name,
+          timestamp: now,
+          file_count: 1,
+          total_bytes: 100,
+        };
+        snapshotList.unshift(meta);
+        return meta;
+      }
+
+      // Mock effective settings (snapshot section)
+      const mockEffectiveSettings = {
+        view: { sort_mode: 'numeric-asc', show_hidden_files: false },
+        new_file: { template: 'Untitled {N}', detect_from_folder: true, auto_rename_from_h1: true, default_dir: null, last_used_dir: null },
+        plugins: { enabled: {} },
+        snapshot: { max_count: snapshotMaxCount, min_interval_minutes: snapshotMinIntervalMinutes },
+        is_project_scoped: false,
+      };
+
       const scaffoldedPlugins = [
         // Pre-registered built-in plugins so file-handler routing works in tests.
         {
@@ -176,9 +222,29 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'write_draft_note': case 'delete_draft_note': return null;
           case 'has_draft_note': return false;
           case 'search_in_project': return [];
-          case 'list_snapshots': return [];
-          case 'create_snapshot': return { id: 'snap-1', name: args.name, timestamp: Date.now(), file_count: 3, total_bytes: 1024 };
-          case 'delete_snapshot': case 'restore_snapshot': return null;
+          case 'list_snapshots': return [...snapshotList];
+          case 'create_snapshot': return mockCreateSnapshot(args.name);
+          case 'delete_snapshot': {
+            snapshotList = snapshotList.filter(s => s.id !== args.snapshotId);
+            return null;
+          }
+          case 'restore_snapshot': return null;
+          case 'get_effective_settings': return { ...mockEffectiveSettings, snapshot: { max_count: snapshotMaxCount, min_interval_minutes: snapshotMinIntervalMinutes } };
+          case 'get_global_settings': return { view: {}, new_file: {}, plugins: { enabled: {} }, snapshot: { max_count: snapshotMaxCount, min_interval_minutes: snapshotMinIntervalMinutes } };
+          case 'write_global_settings': {
+            if (args.snapshot) {
+              if (args.snapshot.max_count != null) snapshotMaxCount = args.snapshot.max_count;
+              if (args.snapshot.min_interval_minutes != null) snapshotMinIntervalMinutes = args.snapshot.min_interval_minutes;
+            }
+            return null;
+          }
+          case 'write_project_settings': {
+            if (args.snapshot) {
+              if (args.snapshot.max_count != null) snapshotMaxCount = args.snapshot.max_count;
+              if (args.snapshot.min_interval_minutes != null) snapshotMinIntervalMinutes = args.snapshot.min_interval_minutes;
+            }
+            return null;
+          }
           case 'record_writing_stats': return null;
           case 'get_writing_stats': return { daily: [], total_words: 0, chapters: [], streak_days: 0, today_words: 0, today_minutes: 0 };
           case 'list_templates': return [];
@@ -198,6 +264,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get deletedFiles() { return [...deletedFiles]; },
         get files() { return files.map(f => ({ ...f })); },
         get projectDir() { return projectDir; },
+        get snapshots() { return [...snapshotList]; },
+        setSnapshotRetention(maxCount, minIntervalMinutes) {
+          snapshotMaxCount = maxCount;
+          snapshotMinIntervalMinutes = minIntervalMinutes;
+          snapshotList = [];
+        },
         emitEvent(event, payload) {
           const listeners = eventListeners[event] || [];
           listeners.forEach(cb => cb({ event, payload }));
