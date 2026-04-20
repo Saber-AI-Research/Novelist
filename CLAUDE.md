@@ -1,8 +1,10 @@
-# Novelist - Claude Code Instructions
+# Novelist — Claude Code Instructions
 
 ## Project Overview
 
-Novelist is a lightweight, WYSIWYG Markdown desktop writing app built with **Tauri v2 + Svelte 5 + Rust + CodeMirror 6**. Target: novelists who need a fast, CJK-aware editor with plugin support.
+Novelist is a lightweight, WYSIWYG Markdown desktop writing app built
+with **Tauri v2 + Svelte 5 + Rust + CodeMirror 6**. Target: novelists
+who need a fast, CJK-aware editor with plugin support.
 
 ## Tech Stack
 
@@ -25,189 +27,98 @@ pnpm check            # Svelte type checking
 
 # Testing
 pnpm test             # Frontend unit tests (vitest, ~1s)
-pnpm test:e2e:browser # Browser E2E tests (Playwright + mocked IPC, ~5s)
-pnpm test:e2e:ui      # Playwright interactive UI mode (for debugging)
+pnpm test:e2e:browser # Browser E2E (Playwright + mocked IPC, ~5s)
+pnpm test:e2e:ui      # Playwright interactive UI mode
 pnpm test:e2e:debug   # Playwright with step-through debugger
 pnpm test:rust        # Backend tests (cargo test in core/)
 pnpm test:all         # Unit + Rust tests
 ```
 
-## Architecture Rules
+## Critical Rules
 
-### IPC (Frontend <-> Backend)
-- All IPC commands are defined in `core/src/commands/` as Rust functions tagged with `#[tauri::command]` + `#[specta::specta]`
-- Commands are registered in `core/src/lib.rs` via `tauri_specta::Builder`
-- TypeScript bindings are auto-generated at `app/lib/ipc/commands.ts` -- **do NOT manually edit this file**
-- After adding/changing a Rust command, run `pnpm tauri dev` to regenerate bindings
-
-### Frontend Patterns
-- **Stores**: Svelte 5 rune stores in `app/lib/stores/` -- use `$state()` and `$derived()`, not legacy `writable()`/`readable()`
-- **Components**: `app/lib/components/` -- standard Svelte 5 components
-- **Editor extensions**: `app/lib/editor/` -- CodeMirror 6 extensions (WYSIWYG, zen mode, outline, viewport, IME guard)
-- **Themes**: Defined as CSS variable objects in `app/lib/themes.ts`
-- **Split view**: Each pane has its own tab state; use pane ID (`"left"` / `"right"`) to scope operations
-
-### Backend Patterns
-- **Commands**: `core/src/commands/` -- one file per domain (file, project, recent, draft, export, plugin)
-- **Services**: `core/src/services/` -- long-running services (file_watcher, rope_document, plugin_host)
-- **Models**: `core/src/models/` -- data structures with serde + specta derives
-- **Errors**: Use `AppError` from `core/src/error.rs` with `thiserror` -- all commands return `Result<T, AppError>`
-
-### Large File Handling
-Four tiers based on file size and line count:
-- **Normal** (< 1MB, ≤ 5000 lines): Full WYSIWYG + stats
-- **Tall doc** (< 1MB, > 5000 lines): No WYSIWYG decorations, flat heading sizes — prevents CM6 height-map drift that causes click-after-scroll jump bugs
-- **Large** (1-10MB): Stripped extensions, reduced stat frequency
-- **Huge** (> 10MB): Read-only via rope backend
-
-**Why tall doc mode exists**: CM6 estimates heights for off-screen lines. WYSIWYG decorations (heading font-size changes, blockquote styling, etc.) only apply within the viewport. The difference between estimated and actual heights accumulates as the user scrolls, causing `posAtCoords` (click → document position) to land on the wrong line. For documents > 5000 lines, this drift becomes user-visible. The fix: disable all height-changing decorations and use uniform heading font sizes via `flatNovelistHighlightStyle` in `app/lib/editor/setup.ts`.
-
-### CM6 Block Widget Decorations (Images)
-
-Image rendering uses `Decoration.replace({block: true, widget})` via a `StateField` in `app/lib/editor/wysiwyg.ts`. Key lessons learned:
-
-- **Use single block replace, not widget+hide**: A single `Decoration.replace({block: true, widget}).range(line.from, line.to)` produces one height-map entry. The old approach (3 decorations: widget + line class + inline replace) created misaligned height-map entries causing `posAtCoords` click offsets proportional to image height.
-- **Block decorations must NOT toggle on cursor position**: Toggling changes the height map between mousedown/mouseup, causing infinite cursor oscillation.
-- **Block decorations must be provided via StateField**: Only `StateField.provide(f => EditorView.decorations.from(f))` makes CM6 account for block widget heights in its height map. `ViewPlugin` decorations don't.
-- **No CSS vertical margin on block widgets**: CM6 cannot see CSS margin. Use `padding` inside the widget instead.
-- **CSS `zoom` breaks CM6**: The app's zoom feature must use `transform: scale()` (which CM6 detects via `scaleX`/`scaleY`), NOT `document.documentElement.style.zoom` (which CM6 doesn't understand). CSS zoom causes `posAtCoords` to return wrong positions because `getBoundingClientRect` and internal height-map coordinates become inconsistent. See `app/lib/stores/ui.svelte.ts` `setZoom()`.
-- **`requestMeasure()` after async image load**: When image loads asynchronously, call `view.requestMeasure()` followed by `view.dispatch({ effects: [] })` to force CM6 to re-measure block heights. `requestMeasure()` alone may skip height measurement if `contentDOMHeight` hasn't visibly changed.
-- **No duplicate gutter markers**: With `Decoration.replace({block: true})`, CM6's line number gutter automatically generates a line number for the replaced range. Do NOT add a `lineNumberWidgetMarker` — it creates duplicate line numbers.
-
-### Plugin System
-- Plugins live in `~/.novelist/plugins/<id>/` with `manifest.toml` + `index.js`
-- Sandboxed via QuickJS with permission tiers: read, write, execute
-- Plugin commands appear in the command palette
-- Built-in plugins (`canvas`, `mindmap`, `kanban`) are bundled via `core/build.rs` → `core/bundled-plugins/` → Tauri resources → installed to `~/.novelist/plugins/` on startup (version-gated by `ensure_bundled_plugins`)
-- **UI plugins use asset protocol**: `tauri.conf.json` enables `assetProtocol` with scope `$HOME/.novelist/plugins/**`. Every UI plugin's `vite.config.ts` **must** set `base: './'` — absolute `/assets/...` paths resolve outside the plugin dir and 403
-- **Iframes are un-sandboxed**: `PluginPanel.svelte` and `PluginFileEditor.svelte` intentionally omit the `sandbox` attribute. WKWebView blocks custom-protocol main-resource loads from sandboxed iframes, which breaks every asset://-served plugin
-- **`.kanban` is a file-handler extension**: `Sidebar.svelte`'s `textExtensions` list routes these to the kanban plugin via `extensionStore.getFileHandler()`
-
-### Recent projects: pin + manual order
-`core/src/commands/recent.rs` persists `~/.novelist/recent-projects.json`. Each `RecentProject` has optional `pinned: bool` and `sort_order: Option<i64>` (both `#[serde(default)]`, so legacy files deserialize cleanly). Canonical sort is `sort_projects()`: pinned before unpinned, then ascending `sort_order` (None after Some), then descending `last_opened` as tiebreaker. `set_project_pinned` toggles pin; `reorder_recent_projects(ordered_paths)` rewrites `sort_order` by position. `add_recent_project` preserves existing pin/sort_order when a user re-opens a project. The Welcome screen (`Welcome.svelte`) wires a drag handle + pin button per row; the Tauri mock mirrors the same sort for browser-mode E2E.
-
-### Mindmap overlay
-Built into the app (not a plugin panel). Trigger with `Cmd+Shift+M`. The overlay is implemented in `app/lib/components/MindmapOverlay.svelte`, consumes active-editor content, and renders via `markmap-lib` + `markmap-view` directly in Svelte (no iframe, so theme CSS variables propagate naturally). Fold logic lives in `app/lib/utils/mindmap.ts` (`applyFoldLevel`) and is unit-tested in `tests/unit/utils/mindmap.test.ts`. The plugin in `plugins/mindmap/` is retained as a reference implementation but is filtered out of the side-panel list in `App.svelte`.
-
-### Unified selection background
-CM6's `drawSelection` paints first-line and middle-line rects in different coordinate frames, leaving a ~19px stair-step on the left edge across heading lines. We neutralize this by making `.cm-selectionBackground` transparent (keeping it only for cursor/caret rendering) and painting each selected line via a `Decoration.line` (`cm-novelist-selected-line`) from `app/lib/editor/selection-line.ts`. Regression test in `tests/e2e/specs/selection-geometry.spec.ts`.
+- **`app/lib/ipc/commands.ts` is auto-generated** from Rust via
+  tauri-specta — never edit by hand. Re-run `pnpm tauri dev` after
+  changing any `#[tauri::command]`.
+- **`app/lib/app-commands.ts` is the sole `commandRegistry.register`
+  site.** Command palette and global keyboard router both dispatch
+  through `commandRegistry.execute()`. Don't reintroduce a parallel
+  `shortcutHandlers` map.
+- **Atomic file writes** (temp file + rename) for all user data.
+- **CJK text support is non-negotiable** — always consider CJK in word
+  counting, IME handling, and layout.
+- **File watcher uses BLAKE3 hashing** with self-write suppression — see
+  [docs/architecture/file-lifecycle.md](docs/architecture/file-lifecycle.md).
+- Plugins (canvas, mindmap, kanban) and the template panel are **core
+  product features** — no hiding or demoting.
 
 ## Design Philosophy
 
-**"Prompt as UI"**: Novelist is designed to be customized by AI coding assistants editing the source directly, rather than through complex configuration UIs. Keep the desktop app kernel lean -- no HTTP API calls or AI model integrations in the binary.
+**"Prompt as UI"**: Novelist is designed to be customized by AI coding
+assistants editing the source directly, rather than through complex
+configuration UIs. Keep the desktop app kernel lean — no HTTP API calls
+or AI model integrations in the binary.
 
-## Key Conventions
+## Module Layout (post 2026-04-20 refactor)
 
-- CJK text support is critical -- always consider CJK characters in word counting, IME handling, and layout
-- Atomic file writes (write to temp, then rename) for data safety
-- File watcher uses BLAKE3 hashing for change detection with self-write suppression
-- Auto-save interval: configurable (default 5 minutes, 0 = off) via Settings > Editor
-- Window title format: `{filename} - Novelist` or `Novelist` when no file open
+- `app/lib/stores/*.svelte.ts` — rune stores (one per domain)
+- `app/lib/composables/*.svelte.ts` — component-init hooks (own
+  `$state`/`$effect`, exposed as `createX` / `useX` / `wireX`)
+- `app/lib/services/*.ts` — IPC orchestration, no reactive state
+- `app/lib/utils/*.ts` — pure TS helpers
+- `app/lib/editor/*.ts` — CodeMirror 6 extensions + pure view helpers
+- `app/lib/components/*.svelte` — Svelte 5 components
+- `core/src/commands/` — one file per domain; all return
+  `Result<T, AppError>` (see `core/src/error.rs`)
+- `core/src/services/` — file watcher, rope, plugin host
+- `core/src/models/` — data structures with serde + specta derives
 
-## Testing
+## Architecture Deep Dives
 
-Three-tier automated testing — run all three before pushing:
+Detailed design docs live under `docs/architecture/` — load these when
+touching the relevant code:
 
-### Tier 1: Unit Tests (Vitest) — `pnpm test`
-- **301 tests** in `tests/unit/**/*.test.ts` (17 files)
-- Tests pure functions: word counting, markdown parsing, editor logic, store behavior
-- Naming convention: describe the behavior being tested, not the function name
+| Topic | File |
+|-------|------|
+| CM6 editor (WYSIWYG, slash menu, context menu, image blocks, selection, zoom, tall-doc mode) | [editor.md](docs/architecture/editor.md) |
+| Plugin system (WKWebView quirks, bundled plugins, mindmap overlay, `.kanban`/`.canvas` routing) | [plugin-system.md](docs/architecture/plugin-system.md) |
+| Settings (two-tier global+project overlay, plugin deltas, new-file location, sidebar menus) | [settings.md](docs/architecture/settings.md) |
+| File lifecycle (watcher, self-write suppression, rename broadcast, recent projects) | [file-lifecycle.md](docs/architecture/file-lifecycle.md) |
+| Testing (three-tier strategy, `data-testid`, `__test_api__`, mock IPC) | [testing.md](docs/architecture/testing.md) |
+| Startup instrumentation | [startup-instrumentation.md](docs/architecture/startup-instrumentation.md) |
+| Feature boundaries (core editor / core product / infrastructure / diagnostics) | [feature-boundaries.md](docs/architecture/feature-boundaries.md) |
+| Refactor plan (2026-04-20 App.svelte split + this consolidation) | [refactor-plan-2026-04-20.md](docs/architecture/refactor-plan-2026-04-20.md) |
 
-### Tier 2: Browser E2E (Playwright) — `pnpm test:e2e:browser`
-- **54 tests** in `tests/e2e/specs/*.spec.ts` (13 files)
-- Runs the full Svelte app in a real browser (Chromium) against the Vite dev server
-- Tauri IPC is mocked via `tests/e2e/fixtures/tauri-mock.ts` (`window.__TAURI_INTERNALS__`)
-- Uses `data-testid` attributes for stable element selection (not CSS classes or coordinates)
-- Uses `waitFor` / `toBeVisible` for synchronization (not `sleep`)
-- Browser-intercepted shortcuts (Meta+B, Meta+S, F11) use `window.__test_api__` bridge
-
-**When adding new features:**
-1. Add `data-testid="..."` to new interactive elements in Svelte components
-2. Add IPC command handlers to `tests/e2e/fixtures/tauri-mock.ts` if new Rust commands are needed
-3. Create a new `.spec.ts` file in `tests/e2e/specs/` or extend an existing one
-4. If the feature uses a keyboard shortcut that browsers intercept, add a method to `__test_api__` in `App.svelte`'s onMount
-
-**Test fixture API:**
-- `app` — Playwright Page with mock IPC pre-injected
-- `mockState.getWrittenFiles()` — check what files were saved
-- `mockState.getCreatedFiles()` — check what files were created
-- `mockState.emitEvent(name, payload)` — simulate Tauri events
-
-### Tier 3: Full E2E (tauri-plugin-playwright) — `pnpm test:e2e:tauri`
-- Same test specs as Tier 2 but running against the real Tauri app with actual Rust backend
-- Requires `e2e-testing` cargo feature flag: `cargo build --features e2e-testing`
-- Uses socket bridge to drive WKWebView on macOS
-- Run before releases for full integration validation
-
-### Backend Tests (Rust) — `pnpm test:rust`
-- **171 tests** in `core/src/` via `#[cfg(test)]` modules
-- Tests file I/O, encoding, rope data structure, plugin sandbox, project config
-
-### Legacy
-- Old bash+cliclick GUI tests archived in `tests/e2e/old/` (deprecated, do not use)
+Huge-file scroll stabilizer details: `docs/design/scroll-stabilizer-bug.md`.
+Pre-implementation feature specs: `docs/superpowers/specs/`.
 
 ## File Layout
 
 ```
-app/                          # Frontend (Svelte 5 + TypeScript)
-  lib/components/             # Svelte components (Editor, Sidebar, Settings, ProjectSearch, etc.)
-  lib/editor/                 # CodeMirror extensions
-  lib/stores/                 # Svelte 5 rune stores (ui, tabs, project, commands, shortcuts)
-  lib/ipc/commands.ts         # Auto-generated IPC bindings (DO NOT EDIT)
-  lib/themes.ts               # Theme definitions
-  lib/utils/                  # Utilities (wordcount, etc.)
-  App.svelte                  # Root layout
-core/                         # Backend (Rust + Tauri v2)
-  src/commands/               # Tauri IPC commands (file, project, recent, draft, export, plugin)
-  src/services/               # File watcher, rope, plugins
-  src/models/                 # Data structures
-  src/lib.rs                  # App entry + command registration
-  src/error.rs                # Error types
-docs/                         # Documentation
-  design/                     # Architecture & design docs
-  research/                   # Competitive analysis
-  plans/                      # Implementation phase plans
-assets/                       # Build & branding assets
-  dmg/                        # DMG background images
-  branding/                   # Logo & icon source files
-plugins/                      # Plugin templates (canvas, mindmap)
-scripts/                      # Build scripts (create-dmg.sh)
-tests/                        # Tests
-  unit/                       # Vitest unit tests (editor, stores, utils)
-  e2e/
-    fixtures/                 # Playwright test fixtures + Tauri IPC mock
-    specs/                    # Playwright E2E test specs (*.spec.ts)
-    old/                      # Archived bash scripts (deprecated)
-  bench/                      # Performance benchmarks
-playwright.config.ts          # Playwright config (browser-mode E2E)
-.github/workflows/            # CI: svelte-check + vitest + playwright + cargo test
+app/                    # Frontend (Svelte 5 + TypeScript)
+  lib/{components,composables,services,editor,stores,utils}/
+  lib/ipc/commands.ts   # Auto-generated — DO NOT EDIT
+  lib/app-commands.ts   # Sole commandRegistry.register site
+  App.svelte            # Root layout (thin composition)
+core/                   # Backend (Rust + Tauri v2)
+  src/{commands,services,models}/
+  src/lib.rs            # App entry + command registration
+docs/
+  architecture/         # Deep dives (see table above)
+  superpowers/specs/    # Feature specs (written before implementation)
+plugins/                # Bundled plugin templates
+tests/{unit,e2e,bench}/
 ```
 
-## Recent Additions (v0.1.0+)
+## Recent Notable Additions
 
-- **Smart new file naming**: project-mode "New file" infers the next chapter number from sibling filenames (recognizes `第{N}章`, `Chapter {N}`, `{N}-{title}`, etc. including bracket/quote wraps); falls back to a user-configurable template in Settings > Editor > New file in project. Saving a placeholder file with an H1 renames it to match (one-shot, only while filename is still placeholder). Pipeline: `app/lib/utils/{numbering,h1,filename,placeholder}.ts`.
-- **Numeric-aware sidebar sort**: file tree orders `第二章 < 第十章` numerically by default (leftmost digit or CJK numeral run). Sort dropdown in sidebar header offers name/number/mtime asc/desc; choice persists per project via `novelist.sortMode.<path>` in localStorage. Comparator: `app/lib/utils/file-sort.ts`.
-- **Save flow auto-rename**: `tabsStore.tryRenameAfterSave(filePath, content)` runs after every successful writeFile; uses `rename_item(..., allow_collision_bump: true)` with ` 2`/` 3` suffix on collision. Cross-window consistency via `broadcast_file_renamed` IPC → `file-renamed` Tauri event → `tabsStore.updatePath` in every window. File watcher has `register_rename_ignore(old, new)` to suppress the rename's own FS events.
-- **Sidebar folder tree**: `FileTreeNode.svelte` renders a recursive, collapsible tree of the opened folder; `FileNode` model lives in `projectStore`; tree auto-refreshes on file-watcher events
-- **Sidebar drag-drop**: HTML5 drag-drop reorders files/folders across the tree; root drop zone moves items back to the project root; backed by `move_item` Rust command (rejects moving a folder into its own descendant and rejects no-op moves)
-- **Plugin scaffolding**: `scaffold_plugin(id, display_name?)` Rust command creates `~/.novelist/plugins/<id>/` with a starter `manifest.toml` + `index.js`; triggered from Settings > Plugins via the "+" button and `PluginScaffoldDialog.svelte`; ID pattern `[a-z0-9][a-z0-9-]*`
-- **Help tooltip**: `HelpTooltip.svelte` used in Settings > Plugins to explain the manifest/permissions model inline
-- **Language picker scoped to Editor**: Moved from a global setting into Settings > Editor so it sits alongside the other editor-scoped preferences
-- **Error boundary**: `ErrorBoundary.svelte` wraps Editor components to prevent white-screen crashes
-- **Multi-window**: `Cmd+Shift+N` opens new independent window via `WebviewWindow`
-- **Project search**: `Cmd+Shift+F` opens project-wide search (Rust `walkdir` backend, `ProjectSearch.svelte`)
-- **File drag-drop**: Drop `.md/.markdown/.txt` files onto window to open
-- **Undo history persistence**: EditorState saved/restored across tab switches
-- **Keyboard shortcuts**: Customizable via Settings > Shortcuts, stored in localStorage
-- **Auto-save config**: Adjustable interval in Settings > Editor (0 = off)
-- **Theme transitions**: Smooth CSS transitions on theme switch
-- **Status bar**: Shows file name, file size, daily goal progress
-- **Recent projects cleanup**: Filters non-existent paths on load
-- **Export progress**: Animated progress bar during Pandoc export
-- **CSP security**: Content Security Policy configured in `tauri.conf.json`
-- **Updater signing**: Updater key loaded from `.env` (regenerated without password)
-- **CI/CD**: GitHub Actions workflow for type-check + vitest + Playwright E2E + cargo test
-- **Playwright E2E**: 44 browser-mode tests replacing old bash+cliclick GUI tests
-- **Test API bridge**: `window.__test_api__` for testing browser-intercepted shortcuts
-- **Image block decoration fix**: Single `Decoration.replace({block: true})` for images, CSS zoom→transform migration, async height refresh, gutter dedup
-- **Image block tests**: 21 tests in `tests/unit/editor/image-block-deco.test.ts` covering decoration strategy, height map, coordinate mapping, zoom impact
+See `git log` for full history. Recent highlights (2026-04):
+
+- App.svelte refactor (1475 → ~741 lines); composables + services split.
+- Template files panel with bundled defaults + `$|$` caret anchor.
+- Settings two-tier overlay (global + per-project) on Rust side.
+- Startup instrumentation (`log_startup_phase` + `startup-timing.ts`),
+  lazy QuickJS runtime, async recent-projects cleanup.
+- Canvas / kanban file-type editors (native, not plugin-shimmed).
+- `Cmd+Shift+M` move-file palette; sidebar + editor context menus.
+- Smart project-mode new-file naming with H1 auto-rename.
+- Numeric-aware sidebar sort (第二章 < 第十章).
