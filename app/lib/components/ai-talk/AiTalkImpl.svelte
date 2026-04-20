@@ -302,7 +302,7 @@
       <button class:active={activeTab === 'chat'} onclick={() => (activeTab = 'chat')}>Chat</button>
       <button class:active={activeTab === 'rewrite'} onclick={() => (activeTab = 'rewrite')}>Rewrite</button>
     </div>
-    <button class="gear" title="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+    <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
   </header>
 
   {#if settingsOpen}
@@ -351,18 +351,18 @@
         onkeydown={chatKeydown}
       ></textarea>
       <div class="composer-actions">
-        <button class="ghost" onclick={clearChat} disabled={chatStreaming}>Clear</button>
+        <button class="novelist-btn novelist-btn-ghost" onclick={clearChat} disabled={chatStreaming}>Clear</button>
         {#if chatStreaming}
-          <button class="primary" data-testid="ai-talk-stop" onclick={cancelChat}>Stop</button>
+          <button class="novelist-btn novelist-btn-primary" data-testid="ai-talk-stop" onclick={cancelChat}>Stop</button>
         {:else}
-          <button class="primary" data-testid="ai-talk-send" onclick={sendChat} disabled={!chatInput.trim()}>Send</button>
+          <button class="novelist-btn novelist-btn-primary" data-testid="ai-talk-send" onclick={sendChat} disabled={!chatInput.trim()}>Send</button>
         {/if}
       </div>
     </div>
   {:else}
     <div class="rewrite">
       <div class="row">
-        <button class="primary" onclick={captureSelection}>Use current selection</button>
+        <button class="novelist-btn novelist-btn-primary" onclick={captureSelection}>Use current selection</button>
         {#if rewriteSnap}
           <span class="meta">{rewriteSnap.original.length} chars</span>
         {/if}
@@ -380,9 +380,9 @@
         ></textarea>
         <div class="row">
           {#if rewriteStreaming}
-            <button class="primary" onclick={cancelRewrite}>Stop</button>
+            <button class="novelist-btn novelist-btn-primary" onclick={cancelRewrite}>Stop</button>
           {:else}
-            <button class="primary" onclick={runRewrite} disabled={!rewriteInstr.trim()}>Rewrite</button>
+            <button class="novelist-btn novelist-btn-primary" onclick={runRewrite} disabled={!rewriteInstr.trim()}>Rewrite</button>
           {/if}
         </div>
       {/if}
@@ -392,8 +392,8 @@
           <pre>{rewriteOutput}</pre>
         </details>
         <div class="row">
-          <button class="primary" onclick={acceptRewrite} disabled={rewriteStreaming}>Accept &amp; replace</button>
-          <button class="ghost" onclick={rejectRewrite} disabled={rewriteStreaming}>Discard</button>
+          <button class="novelist-btn novelist-btn-primary" onclick={acceptRewrite} disabled={rewriteStreaming}>Accept &amp; replace</button>
+          <button class="novelist-btn novelist-btn-ghost" onclick={rejectRewrite} disabled={rewriteStreaming}>Discard</button>
         </div>
       {/if}
       {#if rewriteError}
@@ -439,13 +439,6 @@
     color: var(--novelist-text);
     border-color: var(--novelist-border);
     background: var(--novelist-bg);
-  }
-  .gear {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 16px;
-    color: var(--novelist-text-secondary);
   }
   .settings-drawer {
     padding: 10px;
@@ -564,28 +557,7 @@
     justify-content: flex-end;
     gap: 6px;
   }
-  button.primary {
-    background: var(--novelist-accent);
-    color: #fff;
-    border: none;
-    padding: 5px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-  button.primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  button.ghost {
-    background: none;
-    color: var(--novelist-text-secondary);
-    border: 1px solid var(--novelist-border);
-    padding: 5px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-  }
+  /* Button styles live in app.css — .novelist-btn / -primary / -ghost. */
   .rewrite {
     flex: 1;
     overflow-y: auto;
