@@ -25,6 +25,13 @@ pub struct PluginMeta {
     pub id: String,
     pub name: String,
     pub version: String,
+    /// Free-form permission tokens declared by the plugin manifest.
+    ///
+    /// QuickJS sandbox tiers use `read` / `write` / `fs` / `net`
+    /// (see `services::plugin_host::permissions::check_tier`). The
+    /// IPC plugin bridge gates `ai.*` and `claude.*` methods on
+    /// `ai:http` and `ai:claude-cli` respectively (see
+    /// `app/lib/services/plugin-panel-bridge.ts`).
     #[serde(default)]
     pub permissions: Vec<String>,
     #[serde(default)]
@@ -74,6 +81,32 @@ permissions = ["read"]
         assert_eq!(manifest.plugin.id, "word-counter");
         assert_eq!(manifest.plugin.name, "Word Counter");
         assert_eq!(manifest.plugin.permissions, vec!["read"]);
+    }
+
+    #[test]
+    fn test_manifest_accepts_ai_bridge_tokens() {
+        let toml_str = r#"
+[plugin]
+id = "yolo"
+name = "YOLO"
+version = "0.1.0"
+permissions = ["read", "write", "ui", "ai:http"]
+"#;
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.plugin.permissions.contains(&"ai:http".to_string()));
+
+        let toml_str = r#"
+[plugin]
+id = "claudian"
+name = "Claudian"
+version = "0.1.0"
+permissions = ["read", "write", "ui", "ai:claude-cli"]
+"#;
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest
+            .plugin
+            .permissions
+            .contains(&"ai:claude-cli".to_string()));
     }
 
     #[test]
