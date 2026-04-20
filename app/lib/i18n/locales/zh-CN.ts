@@ -383,4 +383,13 @@ export const zhCN: TranslationMap = {
   'settings.sync.connectionFailed': '连接失败，请检查地址和凭据。',
   'settings.sync.lastSync': '上次同步：{time}',
   'settings.sync.syncPath': '文件同步到 <webdav-url>/novelist/<project-name>/。',
+
+  // --- 快照保留 ---
+  'settings.snapshot': '快照',
+  'settings.snapshot.maxCount': '最多快照数',
+  'settings.snapshot.maxCountHint': '超出上限时自动删除最旧的快照。',
+  'settings.snapshot.minInterval': '最小间隔',
+  'settings.snapshot.minIntervalUnit': '分钟',
+  'settings.snapshot.minIntervalHint': '在此间隔内创建的新快照会替换最近的旧快照。设为 0 则每次都追加。',
+  'settings.snapshot.webdavHint': '已配置同步时，每个快照也会上传到 WebDAV。',
 };

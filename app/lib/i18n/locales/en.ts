@@ -383,4 +383,13 @@ export const en: TranslationMap = {
   'settings.sync.connectionFailed': 'Connection failed. Check URL and credentials.',
   'settings.sync.lastSync': 'Last sync: {time}',
   'settings.sync.syncPath': 'Files are synced to <webdav-url>/novelist/<project-name>/.',
+
+  // --- Snapshot retention ---
+  'settings.snapshot': 'Snapshots',
+  'settings.snapshot.maxCount': 'Max snapshots',
+  'settings.snapshot.maxCountHint': 'Oldest snapshots are deleted automatically when the cap is reached.',
+  'settings.snapshot.minInterval': 'Min interval',
+  'settings.snapshot.minIntervalUnit': 'minutes',
+  'settings.snapshot.minIntervalHint': 'If two snapshots are created within this interval, the newer one replaces the older. Set 0 to always append.',
+  'settings.snapshot.webdavHint': 'When sync is configured, each snapshot is also uploaded to WebDAV.',
 };

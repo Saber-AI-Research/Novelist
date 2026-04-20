@@ -690,6 +690,61 @@
           </div>
         </div>
 
+        <!-- Snapshot retention -->
+        <div class="mt-6 pt-4" style="border-top: 1px solid var(--novelist-border);">
+          <h4 class="text-xs font-semibold uppercase tracking-wide mb-3" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot')}
+          </h4>
+
+          <div class="flex items-center gap-3 mb-3">
+            <label class="text-sm flex-1" for="settings-snapshot-maxcount">{t('settings.snapshot.maxCount')}</label>
+            <input
+              id="settings-snapshot-maxcount"
+              type="number"
+              min="1"
+              max="10000"
+              data-testid="settings-snapshot-maxcount"
+              value={settingsStore.effective.snapshot.max_count}
+              onchange={(e) => {
+                const v = parseInt((e.target as HTMLInputElement).value, 10);
+                if (v >= 1 && v <= 10000) void settingsStore.writeSnapshot({ max_count: v });
+              }}
+              class="w-24 px-2 py-1 rounded text-right"
+              style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+            />
+          </div>
+          <div class="text-xs mb-4" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.maxCountHint')}
+          </div>
+
+          <div class="flex items-center gap-3 mb-3">
+            <label class="text-sm flex-1" for="settings-snapshot-mininterval">{t('settings.snapshot.minInterval')}</label>
+            <div class="flex items-center gap-1">
+              <input
+                id="settings-snapshot-mininterval"
+                type="number"
+                min="0"
+                max="10080"
+                data-testid="settings-snapshot-mininterval"
+                value={settingsStore.effective.snapshot.min_interval_minutes}
+                onchange={(e) => {
+                  const v = parseInt((e.target as HTMLInputElement).value, 10);
+                  if (v >= 0 && v <= 10080) void settingsStore.writeSnapshot({ min_interval_minutes: v });
+                }}
+                class="w-24 px-2 py-1 rounded text-right"
+                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              />
+              <span class="text-xs" style="color: var(--novelist-text-secondary);">{t('settings.snapshot.minIntervalUnit')}</span>
+            </div>
+          </div>
+          <div class="text-xs mb-3" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.minIntervalHint')}
+          </div>
+          <div class="text-xs" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.webdavHint')}
+          </div>
+        </div>
+
       {:else if activeSection === 'theme'}
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.theme')}</h3>
 
