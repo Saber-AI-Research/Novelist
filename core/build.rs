@@ -60,7 +60,25 @@ fn prepare_bundled_plugins() {
     println!("cargo:rerun-if-changed=../plugins/kanban/dist/");
 }
 
+fn prepare_bundled_templates() {
+    // Bundled snippet-templates live under `core/bundled-templates/` and are
+    // declared as Tauri resources in `tauri.conf.json`. We keep them in the
+    // crate directory (checked into git) so there's no copy step, but still
+    // re-run the build script when any of them change.
+    let dir = Path::new("bundled-templates");
+    if !dir.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            println!("cargo:rerun-if-changed={}", p.display());
+        }
+    }
+}
+
 fn main() {
     prepare_bundled_plugins();
+    prepare_bundled_templates();
     tauri_build::build()
 }

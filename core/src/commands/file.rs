@@ -217,6 +217,20 @@ pub(crate) async fn write_file_inner(
         content.lines().count()
     );
 
+    // Parent directory must exist before we attempt the atomic write.
+    // Without this check, tokio::fs::write surfaces a generic ENOENT with no
+    // path, which is what produced "IO error: No such file or directory
+    // (os error 2)" in the wild when a project folder was moved/deleted while
+    // a tab was still open.
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(AppError::FileNotFound(format!(
+                "Parent directory does not exist: {}",
+                parent.display()
+            )));
+        }
+    }
+
     // Check if this file was originally read in a non-UTF-8 encoding
     let canonical = p
         .canonicalize()
@@ -239,8 +253,12 @@ pub(crate) async fn write_file_inner(
     };
 
     let temp_path = format!("{}.novelist-tmp", p.display());
-    tokio::fs::write(&temp_path, &bytes).await?;
-    tokio::fs::rename(&temp_path, &p).await?;
+    tokio::fs::write(&temp_path, &bytes)
+        .await
+        .map_err(|e| AppError::Custom(format!("write {}: {}", temp_path, e)))?;
+    tokio::fs::rename(&temp_path, &p)
+        .await
+        .map_err(|e| AppError::Custom(format!("rename {} -> {}: {}", temp_path, p.display(), e)))?;
     Ok(())
 }
 
@@ -277,20 +295,26 @@ pub async fn get_file_encoding(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_directory(path: String) -> Result<Vec<FileEntry>, AppError> {
+pub async fn list_directory(
+    path: String,
+    show_hidden: Option<bool>,
+) -> Result<Vec<FileEntry>, AppError> {
     let p = validate_path(&path)?;
     if !p.is_dir() {
         return Err(AppError::NotADirectory(path));
     }
 
+    let show_hidden = show_hidden.unwrap_or(false);
     let mut entries = Vec::new();
     let mut read_dir = tokio::fs::read_dir(&path).await?;
 
     while let Some(entry) = read_dir.next_entry().await? {
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip hidden files/dirs, except .novelist
-        if name.starts_with('.') && name != ".novelist" {
+        // Hidden filter: skip every dotfile (including `.novelist`) unless
+        // `show_hidden`. Users who want to see or edit project config turn
+        // the toggle on from the sidebar view menu.
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
 
@@ -728,10 +752,23 @@ pub async fn write_binary_file(path: String, base64_data: String) -> Result<(), 
         .decode(&base64_data)
         .map_err(|e| AppError::InvalidInput(format!("Invalid base64: {}", e)))?;
 
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(AppError::FileNotFound(format!(
+                "Parent directory does not exist: {}",
+                parent.display()
+            )));
+        }
+    }
+
     // Atomic write: temp file then rename
     let temp_path = format!("{}.novelist-tmp", p.display());
-    tokio::fs::write(&temp_path, &bytes).await?;
-    tokio::fs::rename(&temp_path, &p).await?;
+    tokio::fs::write(&temp_path, &bytes)
+        .await
+        .map_err(|e| AppError::Custom(format!("write {}: {}", temp_path, e)))?;
+    tokio::fs::rename(&temp_path, &p)
+        .await
+        .map_err(|e| AppError::Custom(format!("rename {} -> {}: {}", temp_path, p.display(), e)))?;
     Ok(())
 }
 
@@ -819,7 +856,7 @@ mod tests {
         fs::write(dir.path().join("a.md"), "").unwrap();
         fs::create_dir(dir.path().join("chapters")).unwrap();
         fs::write(dir.path().join(".hidden"), "").unwrap();
-        let entries = list_directory(dir.path().to_string_lossy().to_string())
+        let entries = list_directory(dir.path().to_string_lossy().to_string(), None)
             .await
             .unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -846,7 +883,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("z.md"), "").unwrap();
         fs::write(dir.path().join("a.md"), "").unwrap();
-        let result = list_directory(dir.path().to_string_lossy().to_string())
+        let result = list_directory(dir.path().to_string_lossy().to_string(), None)
             .await
             .unwrap();
         let names: Vec<&str> = result.iter().map(|e| e.name.as_str()).collect();
@@ -856,20 +893,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_directory_shows_novelist_dir() {
+    async fn test_list_directory_hides_dot_novelist_by_default() {
+        // `.novelist` used to be exempt from the hidden filter. We now hide
+        // every dotfile unless show_hidden=true — keeps the sidebar clean;
+        // users toggle visibility via the view menu.
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join(".novelist")).unwrap();
         fs::write(dir.path().join(".other_hidden"), "").unwrap();
-        let entries = list_directory(dir.path().to_string_lossy().to_string())
+        fs::write(dir.path().join("visible.md"), "").unwrap();
+
+        let hidden = list_directory(dir.path().to_string_lossy().to_string(), None)
             .await
             .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, ".novelist");
+        let hidden_names: Vec<&str> = hidden.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(hidden_names, vec!["visible.md"]);
+
+        let shown = list_directory(dir.path().to_string_lossy().to_string(), Some(true))
+            .await
+            .unwrap();
+        let shown_names: Vec<&str> = shown.iter().map(|e| e.name.as_str()).collect();
+        assert!(shown_names.contains(&".novelist"));
+        assert!(shown_names.contains(&".other_hidden"));
+        assert!(shown_names.contains(&"visible.md"));
     }
 
     #[tokio::test]
     async fn test_list_directory_not_found() {
-        let result = list_directory("/nonexistent/dir".to_string()).await;
+        let result = list_directory("/nonexistent/dir".to_string(), None).await;
         assert!(result.is_err());
     }
 
@@ -878,8 +928,47 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("file.txt");
         fs::write(&file_path, "").unwrap();
-        let result = list_directory(file_path.to_string_lossy().to_string()).await;
+        let result = list_directory(file_path.to_string_lossy().to_string(), None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_show_hidden_true_includes_dotfiles() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("visible.md"), "").unwrap();
+        fs::write(dir.path().join(".hidden"), "").unwrap();
+        fs::create_dir(dir.path().join(".DS_Store_dir")).unwrap();
+        fs::create_dir(dir.path().join(".novelist")).unwrap();
+
+        let entries = list_directory(dir.path().to_string_lossy().to_string(), Some(true))
+            .await
+            .unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"visible.md"));
+        assert!(names.contains(&".hidden"));
+        assert!(names.contains(&".DS_Store_dir"));
+        assert!(names.contains(&".novelist"));
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_show_hidden_false_is_default() {
+        // Omitting the flag (None) must behave exactly like show_hidden=false
+        // for backward compatibility.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.md"), "").unwrap();
+        fs::write(dir.path().join(".hidden"), "").unwrap();
+        let none_entries =
+            list_directory(dir.path().to_string_lossy().to_string(), None)
+                .await
+                .unwrap();
+        let false_entries =
+            list_directory(dir.path().to_string_lossy().to_string(), Some(false))
+                .await
+                .unwrap();
+        let n: Vec<&str> = none_entries.iter().map(|e| e.name.as_str()).collect();
+        let f: Vec<&str> = false_entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(n, f);
+        assert!(!n.contains(&".hidden"));
     }
 
     #[tokio::test]
@@ -1176,6 +1265,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "# Title\n\nBody");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_missing_parent_returns_file_not_found() {
+        // Regression: tokio::fs::write used to surface a pathless ENOENT when
+        // the parent dir was gone (project folder moved/deleted while tab
+        // still open). We now catch that case explicitly with the parent path.
+        let dir = TempDir::new().unwrap();
+        let missing_parent = dir.path().join("does-not-exist");
+        let file_path = missing_parent.join("file.md");
+        let err = write_file_inner(&file_path.to_string_lossy(), "x", &enc())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, AppError::FileNotFound(_)),
+            "expected FileNotFound, got: {msg}"
+        );
+        assert!(
+            msg.contains("Parent directory does not exist"),
+            "message should name the problem: {msg}"
+        );
+        assert!(
+            msg.contains(&missing_parent.to_string_lossy().to_string()),
+            "message should include the missing parent path: {msg}"
+        );
     }
 
     #[tokio::test]

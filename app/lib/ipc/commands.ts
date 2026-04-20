@@ -14,7 +14,7 @@ export const commands = {
 	 *  Returns `"UTF-8"` if the file is UTF-8 (or was never read).
 	 */
 	getFileEncoding: (path: string) => typedError<string, string>(__TAURI_INVOKE("get_file_encoding", { path })),
-	listDirectory: (path: string) => typedError<FileEntry[], string>(__TAURI_INVOKE("list_directory", { path })),
+	listDirectory: (path: string, showHidden: boolean | null) => typedError<FileEntry[], string>(__TAURI_INVOKE("list_directory", { path, showHidden })),
 	createFile: (parentDir: string, filename: string) => typedError<string, string>(__TAURI_INVOKE("create_file", { parentDir, filename })),
 	/**
 	 *  Create a scratch file in ~/.cache/novelist/ for single-file mode.
@@ -43,6 +43,11 @@ export const commands = {
 	writing?: WritingConfig,
 } | null, string>(__TAURI_INVOKE("detect_project", { dirPath })),
 	readProjectConfig: (dirPath: string) => typedError<ProjectConfig, string>(__TAURI_INVOKE("read_project_config", { dirPath })),
+	getEffectiveSettings: (dirPath: string | null) => typedError<EffectiveSettings, string>(__TAURI_INVOKE("get_effective_settings", { dirPath })),
+	getGlobalSettings: () => typedError<GlobalSettings, string>(__TAURI_INVOKE("get_global_settings")),
+	writeGlobalSettings: (view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins })),
+	writeProjectSettings: (dirPath: string, view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins })),
+	logStartupPhase: (name: string, sinceStartMs: number) => typedError<null, string>(__TAURI_INVOKE("log_startup_phase", { name, sinceStartMs })),
 	startFileWatcher: (dirPath: string) => typedError<null, string>(__TAURI_INVOKE("start_file_watcher", { dirPath })),
 	stopFileWatcher: () => typedError<null, string>(__TAURI_INVOKE("stop_file_watcher")),
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
@@ -131,6 +136,14 @@ export const commands = {
 	revealInFileManager: (path: string) => typedError<null, string>(__TAURI_INVOKE("reveal_in_file_manager", { path })),
 	// Duplicate a file. Returns the path of the new copy.
 	duplicateFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("duplicate_file", { path })),
+	// Snippet-template commands (bundled + project-scoped .md files with YAML front-matter).
+	listTemplateFiles: (projectDir: string | null) => typedError<TemplateFileSummary[], string>(__TAURI_INVOKE("list_template_files", { projectDir })),
+	readTemplateFile: (source: TemplateSource, id: string, projectDir: string | null) => typedError<TemplateFile, string>(__TAURI_INVOKE("read_template_file", { source, id, projectDir })),
+	writeTemplateFile: (projectDir: string, id: string, frontMatter: TemplateFrontMatterInput, body: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("write_template_file", { projectDir, id, frontMatter, body })),
+	renameTemplateFile: (projectDir: string, oldId: string, newId: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("rename_template_file", { projectDir, oldId, newId })),
+	deleteTemplateFile: (projectDir: string, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_template_file", { projectDir, id })),
+	duplicateBundledTemplate: (projectDir: string, bundledId: string, newId: string | null) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("duplicate_bundled_template", { projectDir, bundledId, newId })),
+	createFileWithBody: (dir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("create_file_with_body", { dir, filename, body })),
 };
 
 /* Types */
@@ -200,6 +213,56 @@ export type ProjectConfig = {
 	project: ProjectMeta,
 	outline?: OutlineConfig,
 	writing?: WritingConfig,
+	view?: ViewConfig,
+	new_file?: NewFileConfig,
+	plugins?: PluginsConfig,
+};
+
+export type ViewConfig = {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
+};
+
+export type NewFileConfig = {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	default_dir?: string | null,
+	last_used_dir?: string | null,
+};
+
+export type PluginsConfig = {
+	enabled: { [key: string]: boolean },
+};
+
+export type GlobalSettings = {
+	view?: ViewConfig,
+	new_file?: NewFileConfig,
+	plugins?: PluginsConfig,
+};
+
+export type ResolvedView = {
+	sort_mode: string,
+	show_hidden_files: boolean,
+};
+
+export type ResolvedNewFile = {
+	template: string,
+	detect_from_folder: boolean,
+	auto_rename_from_h1: boolean,
+	default_dir: string | null,
+	last_used_dir: string | null,
+};
+
+export type ResolvedPlugins = {
+	enabled: { [key: string]: boolean },
+};
+
+export type EffectiveSettings = {
+	view: ResolvedView,
+	new_file: ResolvedNewFile,
+	plugins: ResolvedPlugins,
+	is_project_scoped: boolean,
 };
 
 export type ProjectMeta = {
@@ -253,6 +316,30 @@ export type TemplateInfo = {
 	category: string,
 	// Whether this is a built-in template (cannot be deleted).
 	builtin: boolean,
+};
+
+export type TemplateSource = "bundled" | "project";
+export type TemplateMode = "insert" | "new-file";
+
+export type TemplateFileSummary = {
+	id: string,
+	source: TemplateSource,
+	name: string,
+	mode: TemplateMode,
+	description: string | null,
+	defaultFilename: string | null,
+};
+
+export type TemplateFile = {
+	summary: TemplateFileSummary,
+	body: string,
+};
+
+export type TemplateFrontMatterInput = {
+	name: string,
+	mode: TemplateMode,
+	description: string | null,
+	defaultFilename: string | null,
 };
 
 export type ViewportContent = {

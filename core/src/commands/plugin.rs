@@ -58,6 +58,11 @@ async fn write_plugin_settings(settings: &PluginSettings) -> Result<(), AppError
 
 /// Install bundled plugins to ~/.novelist/plugins/ if they don't already exist.
 /// Bundled plugin assets are embedded via include_dir at compile time.
+///
+/// Startup-perf caveat: this used to re-read three manifests on every boot.
+/// Now we cache a hash of the bundled version tuple in
+/// `~/.novelist/plugins/.bundled-version` and skip the full scan when it
+/// matches — the fast path touches one file instead of six.
 async fn ensure_bundled_plugins(app_handle: &tauri::AppHandle) -> Result<(), AppError> {
     let target = plugins_dir();
     if !target.exists() {
@@ -73,6 +78,20 @@ async fn ensure_bundled_plugins(app_handle: &tauri::AppHandle) -> Result<(), App
 
     if !bundled_dir.exists() {
         return Ok(());
+    }
+
+    // Compute the bundled-version fingerprint once. Used to skip redundant
+    // manifest scans on warm starts.
+    let version_cache_path = target.join(".bundled-version");
+    let fingerprint = compute_bundled_fingerprint(&bundled_dir).await;
+
+    if let Some(fp) = fingerprint.as_deref() {
+        if let Ok(cached) = tokio::fs::read_to_string(&version_cache_path).await {
+            if cached.trim() == fp {
+                // Fast path — versions match, nothing to do.
+                return Ok(());
+            }
+        }
     }
 
     for plugin_id in BUILTIN_PLUGIN_IDS {
@@ -108,7 +127,34 @@ async fn ensure_bundled_plugins(app_handle: &tauri::AppHandle) -> Result<(), App
         copy_dir_recursive(&src, &dest).await?;
     }
 
+    // Write the fingerprint so the next boot can hit the fast path.
+    if let Some(fp) = fingerprint {
+        let _ = tokio::fs::write(&version_cache_path, fp).await;
+    }
+
     Ok(())
+}
+
+/// Produce a stable fingerprint of "which versions of the bundled plugins
+/// are currently shipping." Reads one manifest.toml per bundled plugin and
+/// joins the plugin_id/version pairs. Returns None if any read fails (in
+/// which case we fall back to the legacy full-scan path, same as before).
+async fn compute_bundled_fingerprint(bundled_dir: &PathBuf) -> Option<String> {
+    let mut parts = Vec::with_capacity(BUILTIN_PLUGIN_IDS.len());
+    for plugin_id in BUILTIN_PLUGIN_IDS {
+        let manifest_path = bundled_dir.join(plugin_id).join("manifest.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let content = tokio::fs::read_to_string(&manifest_path).await.ok()?;
+        let manifest: PluginManifest = toml::from_str(&content).ok()?;
+        parts.push(format!("{}={}", plugin_id, manifest.plugin.version));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    Some(parts.join("|"))
 }
 
 async fn copy_dir_recursive(src: &PathBuf, dest: &PathBuf) -> Result<(), AppError> {

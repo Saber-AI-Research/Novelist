@@ -69,18 +69,29 @@ async fn write_projects(projects: &[RecentProject]) -> Result<(), AppError> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_recent_projects() -> Result<Vec<RecentProject>, AppError> {
+pub async fn get_recent_projects(app: tauri::AppHandle) -> Result<Vec<RecentProject>, AppError> {
+    // Fast path: read + sort, no per-project `Path::exists()` stat.
+    // Previously this did a blocking stat per entry on every boot (dozens of
+    // syscalls for users with many projects), blocking App.svelte's onMount.
     let mut projects = read_projects().await;
-    let before_len = projects.len();
-
-    // Filter out projects whose directories no longer exist.
-    projects.retain(|p| std::path::Path::new(&p.path).exists());
-
     sort_projects(&mut projects);
 
-    if projects.len() != before_len {
-        let _ = write_projects(&projects).await;
-    }
+    // Fire-and-forget cleanup: verify each path exists off the critical
+    // path, then rewrite + emit "recent-projects-updated" if anything
+    // changed. The UI listens for that event and refreshes its list.
+    let projects_clone = projects.clone();
+    tokio::spawn(async move {
+        let before_len = projects_clone.len();
+        let mut filtered = projects_clone;
+        filtered.retain(|p| std::path::Path::new(&p.path).exists());
+        if filtered.len() != before_len {
+            sort_projects(&mut filtered);
+            if write_projects(&filtered).await.is_ok() {
+                use tauri::Emitter;
+                let _ = app.emit("recent-projects-updated", &filtered);
+            }
+        }
+    });
 
     Ok(projects)
 }

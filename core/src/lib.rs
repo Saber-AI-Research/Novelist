@@ -7,6 +7,7 @@ pub use error::AppError;
 
 use std::sync::Mutex;
 
+use commands::bench::log_startup_phase;
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
 use commands::export::{check_pandoc, export_project};
 use commands::file::{
@@ -24,6 +25,9 @@ use commands::recent::{
     add_recent_project, get_recent_projects, remove_recent_project, reorder_recent_projects,
     set_project_pinned,
 };
+use commands::settings::{
+    get_effective_settings, get_global_settings, write_global_settings, write_project_settings,
+};
 use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
 use commands::stats::{get_writing_stats, record_writing_stats};
 #[cfg(feature = "sync")]
@@ -31,6 +35,10 @@ use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_conn
 use commands::template::{
     create_project_from_template, delete_template, import_template_zip, list_templates,
     save_project_as_template,
+};
+use commands::template_files::{
+    create_file_with_body, delete_template_file, duplicate_bundled_template, list_template_files,
+    read_template_file, rename_template_file, write_template_file,
 };
 use services::file_watcher::{
     register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
@@ -69,12 +77,19 @@ fn get_pending_open_files(state: tauri::State<'_, PendingOpenFiles>) -> Vec<Stri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let t0 = std::time::Instant::now();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "novelist=debug".into()),
         )
         .init();
+    tracing::info!(
+        target: "novelist::startup",
+        phase = "backend.run.begin",
+        since_start_ms = 0.0_f64,
+        "backend phase"
+    );
 
     #[cfg(feature = "sync")]
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
@@ -93,6 +108,10 @@ pub fn run() {
         export_project,
         detect_project,
         read_project_config,
+        get_effective_settings,
+        get_global_settings,
+        write_global_settings,
+        write_project_settings,
         start_file_watcher,
         stop_file_watcher,
         register_open_file,
@@ -135,11 +154,19 @@ pub fn run() {
         save_project_as_template,
         delete_template,
         import_template_zip,
+        list_template_files,
+        read_template_file,
+        write_template_file,
+        rename_template_file,
+        delete_template_file,
+        duplicate_bundled_template,
+        create_file_with_body,
         get_pending_open_files,
         read_image_data_uri,
         write_binary_file,
         reveal_in_file_manager,
         duplicate_file,
+        log_startup_phase,
         get_sync_config,
         save_sync_config,
         sync_now,
@@ -162,6 +189,10 @@ pub fn run() {
         export_project,
         detect_project,
         read_project_config,
+        get_effective_settings,
+        get_global_settings,
+        write_global_settings,
+        write_project_settings,
         start_file_watcher,
         stop_file_watcher,
         register_open_file,
@@ -204,11 +235,19 @@ pub fn run() {
         save_project_as_template,
         delete_template,
         import_template_zip,
+        list_template_files,
+        read_template_file,
+        write_template_file,
+        rename_template_file,
+        delete_template_file,
+        duplicate_bundled_template,
+        create_file_with_body,
         get_pending_open_files,
         read_image_data_uri,
         write_binary_file,
         reveal_in_file_manager,
         duplicate_file,
+        log_startup_phase,
     ]);
 
     #[cfg(feature = "codegen")]
@@ -231,6 +270,12 @@ pub fn run() {
         app_builder = app_builder.plugin(tauri_plugin_playwright::init());
     }
 
+    tracing::info!(
+        target: "novelist::startup",
+        phase = "backend.specta.ready",
+        since_start_ms = t0.elapsed().as_secs_f64() * 1000.0,
+        "backend phase"
+    );
     app_builder
         .manage(FileWatcherState::new())
         .manage(PluginHostState::new())
@@ -239,6 +284,12 @@ pub fn run() {
         .manage(PendingOpenFiles::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
+            tracing::info!(
+                target: "novelist::startup",
+                phase = "backend.setup.begin",
+                since_start_ms = t0.elapsed().as_secs_f64() * 1000.0,
+                "backend phase"
+            );
             builder.mount_events(app);
 
             // Check CLI args for a file path to open in single-file mode.
@@ -263,6 +314,12 @@ pub fn run() {
                 }
             }
 
+            tracing::info!(
+                target: "novelist::startup",
+                phase = "backend.setup.end",
+                since_start_ms = t0.elapsed().as_secs_f64() * 1000.0,
+                "backend phase"
+            );
             Ok(())
         })
         .build(tauri::generate_context!())

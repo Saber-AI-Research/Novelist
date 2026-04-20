@@ -21,12 +21,25 @@ struct RegisteredCommand {
 }
 
 struct PluginHostInner {
-    runtime: Runtime,
+    /// Lazily constructed — startup-critical path doesn't pay for QuickJS
+    /// initialization until the first plugin load/exec.
+    runtime: Option<Runtime>,
     plugins: HashMap<String, PluginInstance>,
     document_content: String,
     selection: (usize, usize),
     word_count: usize,
     registered_commands: Vec<RegisteredCommand>,
+}
+
+impl PluginHostInner {
+    /// Create the runtime on first demand.
+    fn ensure_runtime(&mut self) -> Result<&Runtime, String> {
+        if self.runtime.is_none() {
+            let rt = Runtime::new().map_err(|e| format!("Failed to create QuickJS runtime: {e}"))?;
+            self.runtime = Some(rt);
+        }
+        Ok(self.runtime.as_ref().expect("runtime just set"))
+    }
 }
 
 /// A text replacement produced by a plugin command (replaceSelection / replaceRange).
@@ -53,10 +66,12 @@ pub struct PluginHostState {
 
 impl PluginHostState {
     pub fn new() -> Self {
-        let runtime = Runtime::new().expect("Failed to create QuickJS runtime");
+        // Runtime is deferred — see `PluginHostInner::ensure_runtime`.
+        // Startup-critical path used to pay ~10-30 ms for Runtime::new()
+        // even when no plugin was ever invoked.
         Self {
             inner: Mutex::new(PluginHostInner {
-                runtime,
+                runtime: None,
                 plugins: HashMap::new(),
                 document_content: String::new(),
                 selection: (0, 0),
@@ -85,9 +100,10 @@ impl PluginHostState {
         let mut inner = lock_inner!(self)?;
         let plugin_id = manifest.plugin.id.clone();
 
-        // Create a new context for this plugin
+        // Create a new context for this plugin (spins up QuickJS on first load).
+        let runtime = inner.ensure_runtime()?;
         let context =
-            Context::full(&inner.runtime).map_err(|e| format!("QuickJS context error: {e}"))?;
+            Context::full(runtime).map_err(|e| format!("QuickJS context error: {e}"))?;
 
         // Inject the novelist API and run plugin code
         let pid = plugin_id.clone();
