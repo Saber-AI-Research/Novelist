@@ -57,12 +57,14 @@
     ondrop={(e) => onDrop(e, node)}
     draggable="true"
     ondragstart={(e) => onDragStart(e, node)}
+    ondblclick={(e) => { e.preventDefault(); toggleFolder(); }}
     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleFolder(); } }}
   >
     <button
       class="tree-chevron"
       aria-label={node.expanded ? 'Collapse' : 'Expand'}
       onclick={toggleFolder}
+      ondblclick={(e) => e.stopPropagation()}
     >
       <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
         <path d={node.expanded ? 'M4 6l4 4 4-4' : 'M6 4l4 4-4 4'} />
@@ -148,6 +150,7 @@
     cursor: default;
     color: var(--novelist-text-secondary);
     font-size: 0.92rem;
+    user-select: none;
   }
   .tree-chevron {
     display: flex;

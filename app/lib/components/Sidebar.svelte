@@ -3,7 +3,9 @@
   import { commands } from '$lib/ipc/commands';
   import type { RecentProject } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
+  import { settingsStore } from '$lib/stores/settings.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { extensionStore } from '$lib/stores/extensions.svelte';
   import { t } from '$lib/i18n';
   import FileTreeNode from '$lib/components/FileTreeNode.svelte';
   import { compareByMode, type SortMode } from '$lib/utils/file-sort';
@@ -44,8 +46,31 @@
     onOpenProjectFromPath?: (path: string) => void;
     recentProjects?: RecentProject[];
     onRemoveRecentProject?: (path: string) => void;
+    onRefreshRecentProjects?: () => void;
+    openSwitcherTrigger?: number;
   }
-  let { onOpenProjectFromPath, recentProjects = [], onRemoveRecentProject }: Props = $props();
+  let {
+    onOpenProjectFromPath,
+    recentProjects = [],
+    onRemoveRecentProject,
+    onRefreshRecentProjects,
+    openSwitcherTrigger = 0,
+  }: Props = $props();
+
+  // External trigger: when `openSwitcherTrigger` changes, open the popup.
+  // Skip the initial run so the popup doesn't auto-open on mount.
+  let lastSeenTrigger = $state<number | null>(null);
+  $effect(() => {
+    const current = openSwitcherTrigger;
+    if (lastSeenTrigger === null) {
+      lastSeenTrigger = current;
+      return;
+    }
+    if (current !== lastSeenTrigger) {
+      lastSeenTrigger = current;
+      switcherOpen = true;
+    }
+  });
 
   function toggleSwitcher(e: MouseEvent) {
     // Stop propagation so the window-level onclick handler (which closes
@@ -66,6 +91,12 @@
     onRemoveRecentProject?.(path);
   }
 
+  async function togglePinProject(e: Event, project: RecentProject) {
+    e.stopPropagation();
+    await commands.setProjectPinned(project.path, !project.pinned);
+    onRefreshRecentProjects?.();
+  }
+
   async function openProjectFromPath(dirPath: string) {
     if (onOpenProjectFromPath) {
       onOpenProjectFromPath(dirPath);
@@ -84,7 +115,9 @@
     await commands.stopFileWatcher();
     const configResult = await commands.detectProject(dirPath);
     const config = configResult.status === 'ok' ? configResult.data : null;
-    const filesResult = await commands.listDirectory(dirPath);
+    // Load per-project settings before listDirectory so show_hidden_files is respected on first render.
+    await settingsStore.load(dirPath);
+    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
     const files = filesResult.status === 'ok' ? filesResult.data : [];
     projectStore.setProject(dirPath, config, files);
     tabsStore.closeAll();
@@ -121,7 +154,7 @@
   // --- Refresh file list ---
   async function refreshFiles() {
     if (!projectStore.dirPath) return;
-    const result = await commands.listDirectory(projectStore.dirPath);
+    const result = await commands.listDirectory(projectStore.dirPath, projectStore.showHiddenFiles);
     if (result.status === 'ok') {
       projectStore.updateFiles(result.data);
     }
@@ -140,7 +173,9 @@
     await commands.stopFileWatcher();
     const configResult = await commands.detectProject(dirPath);
     const config = configResult.status === 'ok' ? configResult.data : null;
-    const filesResult = await commands.listDirectory(dirPath);
+    // Load per-project settings before listDirectory so show_hidden_files is respected on first render.
+    await settingsStore.load(dirPath);
+    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
     const files = filesResult.status === 'ok' ? filesResult.data : [];
     projectStore.setProject(dirPath, config, files);
     tabsStore.closeAll();
@@ -222,11 +257,12 @@
     if (creatingFile) {
       const result = await commands.createFile(projectStore.dirPath, newItemName.trim());
       if (result.status === 'ok') {
+        void settingsStore.recordLastUsedDir(projectStore.dirPath);
         await refreshFiles();
         // Open the new file
         const readResult = await commands.readFile(result.data);
         if (readResult.status === 'ok') {
-          tabsStore.openTab(result.data, readResult.data);
+          tabsStore.openTab(result.data, readResult.data, { justCreated: true });
           await commands.registerOpenFile(result.data);
         }
       } else {
@@ -249,6 +285,74 @@
     newItemName = '';
   }
 
+  /**
+   * Create a file directly inside `targetDir` with an auto-numbered default
+   * name, then kick off inline rename on the new node so the user can type
+   * the real name. `targetDir` may be the project root or any folder.
+   */
+  async function createFileAt(targetDir: string, ext: string = '.md') {
+    closeContextMenu();
+    closeViewMenu();
+    const result = await commands.createFile(targetDir, `untitled${ext}`);
+    if (result.status !== 'ok') {
+      console.error('Failed to create file:', result.error);
+      return;
+    }
+    void settingsStore.recordLastUsedDir(targetDir);
+    if (targetDir !== projectStore.dirPath) {
+      await projectStore.expandFolder(targetDir);
+    }
+    await projectStore.refreshFolder(targetDir);
+    const newNode = findTreeNodeByPath(result.data);
+    if (newNode) startRename(newNode);
+  }
+
+  /**
+   * File-handler plugins registered via extension manifest (e.g. canvas, kanban).
+   * Each entry yields a "New {label}" item in the sidebar right-click menus,
+   * creating an empty file with the plugin's primary registered extension.
+   */
+  const pluginFileCreators = $derived.by(() => {
+    return extensionStore.fileHandlers
+      .filter(h => h.fileExtensions && h.fileExtensions.length > 0)
+      .map(h => ({
+        pluginId: h.pluginId,
+        label: h.label,
+        ext: h.fileExtensions![0],
+      }));
+  });
+
+  async function createFolderAt(targetDir: string) {
+    closeContextMenu();
+    closeViewMenu();
+    const result = await commands.createDirectory(targetDir, 'new-folder');
+    if (result.status !== 'ok') {
+      console.error('Failed to create folder:', result.error);
+      return;
+    }
+    if (targetDir !== projectStore.dirPath) {
+      await projectStore.expandFolder(targetDir);
+    }
+    await projectStore.refreshFolder(targetDir);
+    const newNode = findTreeNodeByPath(result.data);
+    if (newNode) startRename(newNode);
+  }
+
+  /** DFS through projectStore.files to locate a node by exact path. */
+  function findTreeNodeByPath(path: string): FileNode | null {
+    function walk(nodes: FileNode[]): FileNode | null {
+      for (const n of nodes) {
+        if (n.path === path) return n;
+        if (n.children) {
+          const hit = walk(n.children);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    }
+    return walk(projectStore.files);
+  }
+
   function handleCreateKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -266,6 +370,36 @@
         node.remove();
       }
     };
+  }
+
+  // --- Blank-area view menu (right-click on empty sidebar space) ---
+  let viewMenu = $state<{ x: number; y: number } | null>(null);
+
+  function handleViewContextMenu(e: MouseEvent) {
+    // Only fire when the click lands on the empty sidebar region, not on a
+    // file row or any interactive element. Each file row has its own
+    // `oncontextmenu` handler that already stops propagation.
+    const target = e.target as HTMLElement;
+    if (target.closest('.sidebar-input-row, .tree-row')) return;
+    e.preventDefault();
+    closeContextMenu();
+    const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
+    viewMenu = { x: e.clientX / zoom, y: e.clientY / zoom };
+  }
+
+  function closeViewMenu() {
+    viewMenu = null;
+  }
+
+  async function toggleHiddenFiles() {
+    await settingsStore.writeView({
+      show_hidden_files: !settingsStore.effective.view.show_hidden_files,
+    });
+    closeViewMenu();
+    // Re-fetch root so the tree reflects the new filter immediately.
+    if (projectStore.dirPath) {
+      await projectStore.refreshFolder(projectStore.dirPath);
+    }
   }
 
   // --- Context menu ---
@@ -523,7 +657,7 @@
 
 <!-- Close context menu and project switcher on click anywhere -->
 <svelte:window
-  onclick={() => { closeContextMenu(); switcherOpen = false; sortMenuOpen = false; }}
+  onclick={() => { closeContextMenu(); closeViewMenu(); switcherOpen = false; sortMenuOpen = false; }}
   ondragend={handleDragEnd}
 />
 
@@ -589,11 +723,13 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="sidebar-files"
+      data-testid="sidebar-files"
       class:drag-over-root={rootDragOver}
       bind:this={filesContainer}
       ondragover={handleDragOverRoot}
       ondragleave={handleDragLeaveRoot}
       ondrop={handleDropOnRoot}
+      oncontextmenu={handleViewContextMenu}
     >
       {#if creatingFile || creatingFolder}
         <div class="sidebar-input-row">
@@ -652,23 +788,36 @@
           <div class="project-switcher-header">
             <span>{t('sidebar.projects')}</span>
           </div>
-          {#each recentProjects.slice(0, 9) as project, i}
+          {#each recentProjects as project, i (project.path)}
             <div class="project-switcher-row">
               <button
                 class="project-switcher-item"
                 class:project-switcher-item-active={project.path === projectStore.dirPath}
                 onclick={() => switchToProject(project.path)}
               >
-                <span class="project-switcher-num">{i + 1}</span>
+                <span class="project-switcher-num">{i < 9 ? i + 1 : '·'}</span>
                 <span class="project-switcher-name">{project.name}</span>
                 {#if project.path === projectStore.dirPath}
                   <span class="project-switcher-check">&#x2713;</span>
                 {/if}
               </button>
               <button
-                class="project-switcher-remove-btn"
+                class="project-switcher-action-btn"
+                class:active={project.pinned}
+                data-testid="project-switcher-pin-{i}"
+                onclick={(e) => togglePinProject(e, project)}
+                title={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
+                aria-label={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
+              >
+                <svg width="11" height="11" viewBox="0 0 16 16" fill={project.pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 2l4 4-3 1-1 4-4-4 4-1 0-4zM6 10l-3 4"/>
+                </svg>
+              </button>
+              <button
+                class="project-switcher-action-btn project-switcher-remove-btn"
                 onclick={(e) => removeProject(e, project.path)}
                 title={t('sidebar.removeProject')}
+                aria-label={t('sidebar.removeProject')}
               >
                 <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
               </button>
@@ -690,6 +839,50 @@
   {/if}
 </aside>
 
+{#if viewMenu}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    role="menu"
+    tabindex="-1"
+    class="context-menu"
+    data-testid="sidebar-view-menu"
+    use:portal
+    style="left: {viewMenu.x}px; top: {viewMenu.y}px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    {#if projectStore.dirPath}
+      <button
+        role="menuitem"
+        class="context-menu-item"
+        data-testid="sidebar-view-new-file"
+        onclick={() => createFileAt(projectStore.dirPath!)}
+      >{t('sidebar.menu.newFile')}</button>
+      {#each pluginFileCreators as creator (creator.pluginId)}
+        <button
+          role="menuitem"
+          class="context-menu-item"
+          data-testid="sidebar-view-new-{creator.pluginId}"
+          onclick={() => createFileAt(projectStore.dirPath!, creator.ext)}
+        >{t('sidebar.menu.newFileOfType', { type: creator.label })}</button>
+      {/each}
+      <button
+        role="menuitem"
+        class="context-menu-item"
+        data-testid="sidebar-view-new-folder"
+        onclick={() => createFolderAt(projectStore.dirPath!)}
+      >{t('sidebar.menu.newFolder')}</button>
+      <div class="context-menu-separator"></div>
+    {/if}
+    <button
+      role="menuitem"
+      class="context-menu-item"
+      data-testid="sidebar-view-toggle-hidden"
+      onclick={toggleHiddenFiles}
+    >{settingsStore.effective.view.show_hidden_files ? t('sidebar.view.hideHidden') : t('sidebar.view.showHidden')}</button>
+  </div>
+{/if}
+
 {#if contextMenu}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -702,6 +895,19 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
+    {#if contextMenu.entry.is_dir}
+      <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-file" onclick={() => createFileAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFileHere')}</button>
+      {#each pluginFileCreators as creator (creator.pluginId)}
+        <button
+          role="menuitem"
+          class="context-menu-item"
+          data-testid="context-menu-new-{creator.pluginId}"
+          onclick={() => createFileAt(contextMenu!.entry.path, creator.ext)}
+        >{t('sidebar.menu.newFileOfTypeHere', { type: creator.label })}</button>
+      {/each}
+      <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-folder" onclick={() => createFolderAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFolderHere')}</button>
+      <div class="context-menu-separator"></div>
+    {/if}
     {#if !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
       <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
     {/if}
@@ -879,42 +1085,9 @@
     font-size: 0.78rem;
   }
 
-  :global(.context-menu) {
-    position: fixed;
-    z-index: 9999;
-    min-width: 140px;
-    padding: 4px;
-    border-radius: 8px;
-    background: var(--novelist-bg);
-    border: 1px solid var(--novelist-border);
-    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-    color: var(--novelist-text);
-  }
-  :global(.context-menu-item) {
-    display: block;
-    width: 100%;
-    padding: 6px 12px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--novelist-text);
-    font-size: 0.78rem;
-    text-align: left;
-    cursor: pointer;
-    transition: background 80ms;
-  }
-  :global(.context-menu-item:hover) {
-    background: var(--novelist-sidebar-hover);
-  }
-  :global(.context-menu-item-danger:hover) {
-    background: #e5484d18;
-    color: #e5484d;
-  }
-  :global(.context-menu-separator) {
-    height: 1px;
-    margin: 4px 8px;
-    background: var(--novelist-border-subtle, var(--novelist-border));
-  }
+  /* .context-menu, .context-menu-item, .context-menu-separator styles
+     live in app/app.css so they are available everywhere, including
+     zen mode where the sidebar isn't mounted. */
 
   /* Bottom project switch bar */
   .sidebar-bottom {
@@ -982,29 +1155,35 @@
     display: flex;
     align-items: center;
     position: relative;
+    padding-right: 4px;
   }
 
-  .project-switcher-remove-btn {
+  .project-switcher-action-btn {
     display: flex;
     align-items: center;
     justify-content: center;
     width: 20px;
     height: 20px;
-    position: absolute;
-    right: 6px;
-    top: 50%;
-    transform: translateY(-50%);
     border: none;
     border-radius: 4px;
     background: transparent;
     color: var(--novelist-text-tertiary, #b0b0b0);
     cursor: pointer;
     flex-shrink: 0;
+    margin-left: 1px;
     opacity: 0;
     transition: opacity 0.15s, color 0.15s, background 0.15s;
   }
-  .project-switcher-row:hover .project-switcher-remove-btn {
+  .project-switcher-row:hover .project-switcher-action-btn,
+  .project-switcher-action-btn.active {
     opacity: 1;
+  }
+  .project-switcher-action-btn:hover {
+    background: color-mix(in srgb, var(--novelist-text) 8%, transparent);
+    color: var(--novelist-text);
+  }
+  .project-switcher-action-btn.active {
+    color: var(--novelist-accent);
   }
   .project-switcher-remove-btn:hover {
     color: #e5484d;
@@ -1015,7 +1194,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 6px 10px;
     border: none;
     border-radius: 5px;
