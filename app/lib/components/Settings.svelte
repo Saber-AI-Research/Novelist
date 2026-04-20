@@ -194,10 +194,44 @@
   import type { PluginInfo } from '$lib/ipc/commands';
   import PluginScaffoldDialog from '$lib/components/PluginScaffoldDialog.svelte';
   import HelpTooltip from '$lib/components/HelpTooltip.svelte';
+  import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-settings.svelte';
+  import { extensionStore } from '$lib/stores/extensions.svelte';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
 
-  let builtinPlugins = $derived(plugins.filter(p => p.builtin));
+  // Synthetic entries for first-party native panels — they don't live on
+  // disk so listPlugins() doesn't see them, but Settings should still
+  // surface them with the same row UI (toggle + Configure).
+  const NATIVE_PLUGINS: PluginInfo[] = [
+    {
+      id: 'ai-talk',
+      name: 'AI Talk',
+      version: '0.1.0',
+      description: 'Chat + inline rewrite via any OpenAI-compatible endpoint',
+      author: 'Novelist',
+      builtin: true,
+      enabled: true,
+      active: true,
+      icon: null,
+      ui: { type: 'panel', entry: 'native', label: 'AI Talk', file_extensions: null, width: null },
+      permissions: ['ai:http'],
+    },
+    {
+      id: 'ai-agent',
+      name: 'AI Agent',
+      version: '0.1.0',
+      description: 'Agentic chat backed by your local Claude Code CLI',
+      author: 'Novelist',
+      builtin: true,
+      enabled: true,
+      active: true,
+      icon: null,
+      ui: { type: 'panel', entry: 'native', label: 'AI Agent', file_extensions: null, width: null },
+      permissions: ['ai:claude-cli'],
+    },
+  ];
+
+  let builtinPlugins = $derived([...NATIVE_PLUGINS, ...plugins.filter(p => p.builtin)]);
   let communityPlugins = $derived(plugins.filter(p => !p.builtin));
 
   async function loadPlugins() {
@@ -206,6 +240,13 @@
       plugins = result.data;
     }
     pluginsLoaded = true;
+  }
+
+  function openPluginSettings(pluginId: string) {
+    if (!pluginSettings.has(pluginId)) return;
+    requestOpenPanelSettings(pluginId);
+    extensionStore.openPanel(pluginId);
+    onClose();
   }
 
   async function togglePluginEnabled(plugin: PluginInfo) {
@@ -437,6 +478,17 @@
         </div>
       </div>
       <div class="shrink-0 flex items-center gap-2">
+        {#if pluginSettings.has(plugin.id)}
+          <button
+            type="button"
+            class="w-6 h-6 flex items-center justify-center rounded text-xs cursor-pointer transition-opacity"
+            style="background: var(--novelist-bg-tertiary, rgba(127,127,127,0.1)); color: var(--novelist-text-secondary);"
+            title="Configure"
+            aria-label="Configure {plugin.name}"
+            data-testid="plugin-configure-{plugin.id}"
+            onclick={() => openPluginSettings(plugin.id)}
+          >⚙</button>
+        {/if}
         <button
           type="button"
           class="w-6 h-6 flex items-center justify-center rounded text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 transition-opacity"
@@ -444,7 +496,7 @@
           title={t('settings.plugins.reload')}
           aria-label={t('settings.plugins.reload')}
           data-testid="plugin-reload-{plugin.id}"
-          disabled={!plugin.enabled || reloadingPluginId === plugin.id}
+          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.id === 'ai-agent'}
           onclick={() => reloadPlugin(plugin)}
         >
           <span class="inline-block" style="transform: {reloadingPluginId === plugin.id ? 'rotate(360deg)' : 'none'}; transition: transform 0.6s;">↻</span>
@@ -452,9 +504,11 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-          class="w-10 h-5 rounded-full cursor-pointer relative transition-colors"
-          style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'};"
-          onclick={() => togglePluginEnabled(plugin)}
+          class="w-10 h-5 rounded-full relative transition-colors"
+          class:cursor-pointer={plugin.id !== 'ai-talk' && plugin.id !== 'ai-agent'}
+          style="background: {plugin.enabled ? 'var(--novelist-accent)' : 'var(--novelist-bg-tertiary, #555)'}; opacity: {plugin.id === 'ai-talk' || plugin.id === 'ai-agent' ? 0.6 : 1};"
+          title={plugin.id === 'ai-talk' || plugin.id === 'ai-agent' ? 'Built-in panel — always on' : ''}
+          onclick={() => { if (plugin.id !== 'ai-talk' && plugin.id !== 'ai-agent') togglePluginEnabled(plugin); }}
         >
           <div
             class="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
