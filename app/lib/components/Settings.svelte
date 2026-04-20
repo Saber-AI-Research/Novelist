@@ -5,6 +5,7 @@
   import { commands } from '$lib/ipc/commands';
   import { shortcutsStore, editorCommandIds } from '$lib/stores/shortcuts.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { settingsStore } from '$lib/stores/settings.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { convertTyporaTheme } from '$lib/utils/typora-theme';
   import { t, i18n } from '$lib/i18n';
@@ -170,6 +171,19 @@
     }
   }
 
+  async function pickNewFileDefaultDir() {
+    const seed = settingsStore.effective.new_file.default_dir
+      ?? projectStore.dirPath
+      ?? undefined;
+    const picked = await openDialog({ directory: true, multiple: false, defaultPath: seed });
+    if (typeof picked !== 'string') return;
+    await settingsStore.setDefaultDir(picked);
+  }
+
+  async function clearNewFileDefaultDir() {
+    await settingsStore.setDefaultDir(null);
+  }
+
   function selectNewFilePreset(p: string) {
     if (!p) return; // "Custom..." → leave input alone
     newFileTemplateInput = p;
@@ -196,7 +210,14 @@
 
   async function togglePluginEnabled(plugin: PluginInfo) {
     const newEnabled = !plugin.enabled;
+    // Legacy path handles plugin host load/unload + global persistence.
     await commands.setPluginEnabled(plugin.id, newEnabled);
+    // Also mirror into the unified settings layer. When a project is open
+    // this records the delta in project.toml; otherwise it no-ops (global
+    // already handled above).
+    if (projectStore.dirPath) {
+      await settingsStore.writePluginEnabled(plugin.id, newEnabled);
+    }
     await loadPlugins();
   }
 
@@ -634,6 +655,39 @@
               </div>
             </div>
           </label>
+
+          <div class="mt-4" data-testid="settings-newfile-defaultdir">
+            <div class="text-sm mb-1">{t('settings.editor.newFile.defaultDir')}</div>
+            <div class="flex gap-2 items-center">
+              <input
+                type="text"
+                readonly
+                data-testid="settings-newfile-defaultdir-display"
+                value={settingsStore.effective.new_file.default_dir ?? t('settings.editor.newFile.defaultDirFollowLastUsed')}
+                class="flex-1 px-2 py-1 rounded"
+                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              />
+              <button
+                type="button"
+                class="px-2 py-1 rounded"
+                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+                data-testid="settings-newfile-defaultdir-pick"
+                onclick={pickNewFileDefaultDir}
+              >{t('settings.editor.newFile.defaultDirPick')}</button>
+              {#if settingsStore.effective.new_file.default_dir}
+                <button
+                  type="button"
+                  class="px-2 py-1 rounded"
+                  style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+                  data-testid="settings-newfile-defaultdir-clear"
+                  onclick={clearNewFileDefaultDir}
+                >{t('settings.editor.newFile.defaultDirClear')}</button>
+              {/if}
+            </div>
+            <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
+              {t('settings.editor.newFile.defaultDirHint')}
+            </div>
+          </div>
         </div>
 
       {:else if activeSection === 'theme'}
@@ -874,6 +928,15 @@
             onCreated={onPluginScaffolded}
           />
         {/if}
+
+        <div
+          class="rounded text-xs mb-3 px-2 py-1.5"
+          style="background: var(--novelist-bg-secondary); color: var(--novelist-text-secondary); border: 1px solid var(--novelist-border);"
+        >
+          {projectStore.dirPath
+            ? t('settings.plugins.scopeProject', { name: projectStore.name })
+            : t('settings.plugins.scopeGlobal')}
+        </div>
 
         {#if !pluginsLoaded}
           <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>

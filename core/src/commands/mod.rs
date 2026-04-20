@@ -1,11 +1,14 @@
+pub mod bench;
 pub mod draft;
 pub mod export;
 pub mod file;
 pub mod plugin;
 pub mod project;
 pub mod recent;
+pub mod settings;
 pub mod snapshot;
 pub mod stats;
 #[cfg(feature = "sync")]
 pub mod sync;
 pub mod template;
+pub mod template_files;

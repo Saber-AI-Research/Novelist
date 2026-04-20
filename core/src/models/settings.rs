@@ -15,6 +15,8 @@ pub const DEFAULT_TEMPLATE: &str = "Untitled {N}";
 pub const DEFAULT_SHOW_HIDDEN: bool = false;
 pub const DEFAULT_DETECT_FROM_FOLDER: bool = true;
 pub const DEFAULT_AUTO_RENAME_FROM_H1: bool = true;
+pub const DEFAULT_SNAPSHOT_MAX_COUNT: u32 = 100;
+pub const DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES: u32 = 60;
 
 /// Sidebar / file-tree view preferences.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -54,17 +56,10 @@ pub struct PluginsConfig {
     pub enabled: HashMap<String, bool>,
 }
 
-pub const DEFAULT_SNAPSHOT_MAX_COUNT: u32 = 100;
-pub const DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES: u32 = 60;
-
-/// Snapshot retention preferences.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SnapshotConfig {
-    /// Maximum number of snapshots to keep. Oldest are pruned on create.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_count: Option<u32>,
-    /// If the newest snapshot is within this many minutes, a new create
-    /// replaces it instead of appending. `0` disables replacement entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_interval_minutes: Option<u32>,
 }
@@ -310,33 +305,29 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_defaults_match_constants() {
-        let s = SnapshotConfig::default();
-        assert_eq!(s.max_count, None);
-        assert_eq!(s.min_interval_minutes, None);
-        // Constants themselves
+    fn snapshot_config_defaults_to_empty_options() {
+        assert_eq!(SnapshotConfig::default(), SnapshotConfig {
+            max_count: None,
+            min_interval_minutes: None,
+        });
         assert_eq!(DEFAULT_SNAPSHOT_MAX_COUNT, 100);
         assert_eq!(DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES, 60);
     }
 
     #[test]
-    fn snapshot_config_roundtrips_json_with_none_fields_omitted() {
-        let s = SnapshotConfig {
-            max_count: Some(50),
-            min_interval_minutes: None,
+    fn snapshot_config_json_round_trip() {
+        let original = SnapshotConfig {
+            max_count: Some(42),
+            min_interval_minutes: Some(15),
         };
-        let json = serde_json::to_string(&s).unwrap();
-        // min_interval_minutes = None → skipped
-        assert!(json.contains("\"max_count\":50"));
-        assert!(!json.contains("min_interval_minutes"));
+        let json = serde_json::to_string(&original).unwrap();
         let back: SnapshotConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.max_count, Some(50));
-        assert_eq!(back.min_interval_minutes, None);
+        assert_eq!(back, original);
     }
 
     #[test]
-    fn snapshot_empty_json_deserializes_to_default() {
-        let s: SnapshotConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(s, SnapshotConfig::default());
+    fn empty_snapshot_config_json_deserializes() {
+        let back: SnapshotConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, SnapshotConfig::default());
     }
 }

@@ -1,75 +1,38 @@
+/**
+ * Thin compatibility shim over `settingsStore`.
+ *
+ * The legacy surface (`newFileSettings.template`, `.detectFromFolder`,
+ * `.autoRenameFromH1`) is kept so call sites don't all need to change at
+ * once. All reads/writes go through the unified settings store.
+ */
 import { parseTemplate } from '$lib/utils/placeholder';
+import { settingsStore } from '$lib/stores/settings.svelte';
 
-const STORAGE_KEY = 'novelist.newFileSettings.v1';
-
-interface SettingsShape {
-  template: string;
-  detectFromFolder: boolean;
-  autoRenameFromH1: boolean;
-}
-
-const DEFAULTS: SettingsShape = {
-  template: 'Untitled {N}',
-  detectFromFolder: true,
-  autoRenameFromH1: true,
-};
-
-class NewFileSettingsStore {
-  template = $state<string>(DEFAULTS.template);
-  detectFromFolder = $state<boolean>(DEFAULTS.detectFromFolder);
-  autoRenameFromH1 = $state<boolean>(DEFAULTS.autoRenameFromH1);
-
-  load(): void {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        this.template = DEFAULTS.template;
-        this.detectFromFolder = DEFAULTS.detectFromFolder;
-        this.autoRenameFromH1 = DEFAULTS.autoRenameFromH1;
-        return;
-      }
-      const parsed = JSON.parse(raw) as Partial<SettingsShape>;
-      this.template = parsed.template ?? DEFAULTS.template;
-      this.detectFromFolder = parsed.detectFromFolder ?? DEFAULTS.detectFromFolder;
-      this.autoRenameFromH1 = parsed.autoRenameFromH1 ?? DEFAULTS.autoRenameFromH1;
-    } catch {
-      this.template = DEFAULTS.template;
-      this.detectFromFolder = DEFAULTS.detectFromFolder;
-      this.autoRenameFromH1 = DEFAULTS.autoRenameFromH1;
-    }
+class NewFileSettingsShim {
+  get template(): string {
+    return settingsStore.effective.new_file.template;
   }
-
-  private persist(): void {
-    const data: SettingsShape = {
-      template: this.template,
-      detectFromFolder: this.detectFromFolder,
-      autoRenameFromH1: this.autoRenameFromH1,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  get detectFromFolder(): boolean {
+    return settingsStore.effective.new_file.detect_from_folder;
+  }
+  get autoRenameFromH1(): boolean {
+    return settingsStore.effective.new_file.auto_rename_from_h1;
   }
 
   setTemplate(template: string): void {
     if (!parseTemplate(template)) {
       throw new Error(`Invalid template: ${template}`);
     }
-    this.template = template;
-    this.persist();
+    void settingsStore.writeNewFile({ template });
   }
 
   setDetectFromFolder(value: boolean): void {
-    this.detectFromFolder = value;
-    this.persist();
+    void settingsStore.writeNewFile({ detect_from_folder: value });
   }
 
   setAutoRenameFromH1(value: boolean): void {
-    this.autoRenameFromH1 = value;
-    this.persist();
+    void settingsStore.writeNewFile({ auto_rename_from_h1: value });
   }
 }
 
-export const newFileSettings = new NewFileSettingsStore();
-
-// Auto-load on module init
-if (typeof localStorage !== 'undefined') {
-  newFileSettings.load();
-}
+export const newFileSettings = new NewFileSettingsShim();

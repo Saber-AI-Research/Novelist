@@ -1,3 +1,4 @@
+use crate::models::settings::{NewFileConfig, PluginsConfig, ViewConfig};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -8,6 +9,25 @@ pub struct ProjectConfig {
     pub outline: OutlineConfig,
     #[serde(default)]
     pub writing: WritingConfig,
+    /// Sidebar/file-tree view preferences. Overrides global `~/.novelist/settings.json`.
+    #[serde(default, skip_serializing_if = "is_default_view")]
+    pub view: ViewConfig,
+    /// New-file template preferences. Overrides global.
+    #[serde(default, skip_serializing_if = "is_default_new_file", rename = "new_file")]
+    pub new_file: NewFileConfig,
+    /// Per-plugin enable flags (deltas from the global default map).
+    #[serde(default, skip_serializing_if = "is_default_plugins")]
+    pub plugins: PluginsConfig,
+}
+
+fn is_default_view(v: &ViewConfig) -> bool {
+    v == &ViewConfig::default()
+}
+fn is_default_new_file(v: &NewFileConfig) -> bool {
+    v == &NewFileConfig::default()
+}
+fn is_default_plugins(v: &PluginsConfig) -> bool {
+    v.enabled.is_empty()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
@@ -113,6 +133,9 @@ name = "Minimal"
                 daily_goal: 1500,
                 auto_save_minutes: 3,
             },
+            view: Default::default(),
+            new_file: Default::default(),
+            plugins: Default::default(),
         };
 
         let serialized = toml::to_string(&config).unwrap();
@@ -141,6 +164,86 @@ daily_goal = 500
         let config: ProjectConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.writing.daily_goal, 500);
         assert_eq!(config.writing.auto_save_minutes, 5); // default
+    }
+
+    #[test]
+    fn test_legacy_project_toml_deserializes_with_empty_overlay() {
+        // A pre-migration project.toml without view/new_file/plugins must still parse.
+        let toml_str = r#"
+[project]
+name = "Legacy"
+
+[writing]
+daily_goal = 1000
+"#;
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.view, crate::models::settings::ViewConfig::default());
+        assert_eq!(config.new_file, crate::models::settings::NewFileConfig::default());
+        assert!(config.plugins.enabled.is_empty());
+    }
+
+    #[test]
+    fn test_project_toml_roundtrip_with_overlay() {
+        let toml_str = r#"
+[project]
+name = "With Overlay"
+
+[view]
+sort_mode = "numeric-asc"
+show_hidden_files = true
+
+[new_file]
+template = "第{N}章"
+auto_rename_from_h1 = false
+
+[plugins]
+enabled = { mindmap = false }
+"#;
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.view.sort_mode.as_deref(), Some("numeric-asc"));
+        assert_eq!(config.view.show_hidden_files, Some(true));
+        assert_eq!(config.new_file.template.as_deref(), Some("第{N}章"));
+        assert_eq!(config.new_file.auto_rename_from_h1, Some(false));
+        // detect_from_folder is None (not in TOML) — correct
+        assert_eq!(config.new_file.detect_from_folder, None);
+        assert_eq!(config.plugins.enabled.get("mindmap"), Some(&false));
+
+        // Round-trip: serialize then parse again — sections must survive.
+        let serialized = toml::to_string(&config).unwrap();
+        let back: ProjectConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.view.show_hidden_files, Some(true));
+        assert_eq!(back.new_file.template.as_deref(), Some("第{N}章"));
+        assert_eq!(back.plugins.enabled.get("mindmap"), Some(&false));
+    }
+
+    #[test]
+    fn test_empty_overlay_sections_omitted_from_serialized_toml() {
+        // If no overlay is set, don't write empty sections to disk.
+        let config = ProjectConfig {
+            project: ProjectMeta {
+                name: "Bare".into(),
+                project_type: "novel".into(),
+                version: "0.1.0".into(),
+            },
+            outline: OutlineConfig::default(),
+            writing: WritingConfig::default(),
+            view: Default::default(),
+            new_file: Default::default(),
+            plugins: Default::default(),
+        };
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains("[view]"),
+            "empty view section should not be serialized"
+        );
+        assert!(
+            !serialized.contains("[new_file]"),
+            "empty new_file section should not be serialized"
+        );
+        assert!(
+            !serialized.contains("[plugins]"),
+            "empty plugins section should not be serialized"
+        );
     }
 
     #[test]

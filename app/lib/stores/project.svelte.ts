@@ -1,17 +1,16 @@
 import type { FileEntry, ProjectConfig } from '$lib/ipc/commands';
 import { commands } from '$lib/ipc/commands';
 import type { SortMode } from '$lib/utils/file-sort';
+import { settingsStore } from '$lib/stores/settings.svelte';
 
-const SORT_KEY_PREFIX = 'novelist.sortMode.';
+const VALID_SORT_MODES: readonly SortMode[] = [
+  'name-asc', 'name-desc', 'numeric-asc', 'numeric-desc', 'mtime-asc', 'mtime-desc',
+];
 
-function readPersistedSort(dirPath: string): SortMode {
-  if (typeof localStorage === 'undefined') return 'numeric-asc';
-  const raw = localStorage.getItem(SORT_KEY_PREFIX + dirPath);
-  if (raw === 'name-asc' || raw === 'name-desc' || raw === 'numeric-asc' ||
-      raw === 'numeric-desc' || raw === 'mtime-asc' || raw === 'mtime-desc') {
-    return raw;
-  }
-  return 'numeric-asc';
+function coerceSortMode(value: string): SortMode {
+  return (VALID_SORT_MODES as readonly string[]).includes(value)
+    ? (value as SortMode)
+    : 'numeric-asc';
 }
 
 export interface FileNode extends FileEntry {
@@ -45,15 +44,21 @@ class ProjectStore {
   files = $state<FileNode[]>([]);
   isLoading = $state(false);
   singleFileMode = $state(false);
-  sortMode = $state<SortMode>('numeric-asc');
+
+  /** Reads from the unified settings store so project/global overlay is respected. */
+  get sortMode(): SortMode {
+    return coerceSortMode(settingsStore.effective.view.sort_mode);
+  }
+
+  get showHiddenFiles(): boolean {
+    return settingsStore.effective.view.show_hidden_files;
+  }
 
   get isOpen() { return this.dirPath !== null || this.singleFileMode; }
 
+  /** Persists to the current scope (project file if open, global otherwise). */
   setSortMode(mode: SortMode) {
-    this.sortMode = mode;
-    if (this.dirPath && typeof localStorage !== 'undefined') {
-      localStorage.setItem(SORT_KEY_PREFIX + this.dirPath, mode);
-    }
+    void settingsStore.writeView({ sort_mode: mode });
   }
 
   get name() {
@@ -78,7 +83,9 @@ class ProjectStore {
     this.files = files.map(toNode);
     this.isLoading = false;
     this.singleFileMode = false;
-    this.sortMode = readPersistedSort(dirPath);
+    // Kick off the settings load; UI reads reactively from `settingsStore`
+    // so no awaiting is needed here.
+    void settingsStore.load(dirPath);
   }
 
   /** Replace the project-root children. Used by legacy callers; preserves expansion state of still-present folders. */
@@ -98,7 +105,8 @@ class ProjectStore {
     this.config = null;
     this.files = [];
     this.singleFileMode = false;
-    this.sortMode = 'numeric-asc';
+    // Drop back to global-only settings.
+    void settingsStore.load(null);
   }
 
   /** Find a folder node anywhere in the tree. */
@@ -113,7 +121,7 @@ class ProjectStore {
     if (!node) return;
     if (node.children === undefined) {
       node.loading = true;
-      const result = await commands.listDirectory(path);
+      const result = await commands.listDirectory(path, this.showHiddenFiles);
       if (result.status === 'ok') {
         node.children = result.data.map(toNode);
       } else {
@@ -133,13 +141,13 @@ class ProjectStore {
   async refreshFolder(path: string): Promise<void> {
     // Project root is represented by `this.files` (no wrapper node).
     if (path === this.dirPath) {
-      const result = await commands.listDirectory(path);
+      const result = await commands.listDirectory(path, this.showHiddenFiles);
       if (result.status === 'ok') this.updateFiles(result.data);
       return;
     }
     const node = this.findFolder(path);
     if (!node || node.children === undefined) return; // not loaded -> nothing to refresh
-    const result = await commands.listDirectory(path);
+    const result = await commands.listDirectory(path, this.showHiddenFiles);
     if (result.status !== 'ok') return;
     const prev = new Map(node.children.map(n => [n.path, n]));
     node.children = result.data.map(e => {
