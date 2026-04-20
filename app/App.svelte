@@ -1,8 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
-  import { open, ask } from '@tauri-apps/plugin-dialog';
+  import { open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -13,28 +11,44 @@
   import Outline from '$lib/components/Outline.svelte';
   import ZenMode from '$lib/components/ZenMode.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import MoveFilePalette from '$lib/components/MoveFilePalette.svelte';
   import ExportDialog from '$lib/components/ExportDialog.svelte';
   import Settings from '$lib/components/Settings.svelte';
   import Welcome from '$lib/components/Welcome.svelte';
   import DraftNote from '$lib/components/DraftNote.svelte';
   import SnapshotPanel from '$lib/components/SnapshotPanel.svelte';
   import StatsPanel from '$lib/components/StatsPanel.svelte';
+  import TemplatePanel from '$lib/components/TemplatePanel.svelte';
+  import type { TemplateFileSummary } from '$lib/ipc/commands';
   import ProjectSearch from '$lib/components/ProjectSearch.svelte';
   import NewProjectDialog from '$lib/components/NewProjectDialog.svelte';
   import ErrorBoundary from '$lib/components/ErrorBoundary.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import PluginPanel from '$lib/components/PluginPanel.svelte';
   import PluginFileEditor from '$lib/components/PluginFileEditor.svelte';
+  import CanvasFileEditor from '$lib/components/CanvasFileEditor.svelte';
+  import KanbanFileEditor from '$lib/components/KanbanFileEditor.svelte';
   import MindmapOverlay from '$lib/components/MindmapOverlay.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
-  import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
-  import { parseTemplate, inferNextName } from '$lib/utils/placeholder';
+  import { settingsStore } from '$lib/stores/settings.svelte';
+  import { startupMark, startupReport } from '$lib/utils/startup-timing';
   import { moveSection } from '$lib/editor/section-move';
-  import { commandRegistry } from '$lib/stores/commands.svelte';
-  import { shortcutsStore, matchesShortcut, initShortcutsI18n } from '$lib/stores/shortcuts.svelte';
+  import { createEditorContextMenu } from '$lib/composables/editor-context-menu.svelte';
+  import * as fmt from '$lib/editor/formatting';
+  import { makeResizeHandler } from '$lib/utils/resize-drag';
+  import { handleTitlebarDrag } from '$lib/utils/window-drag';
+  import { useWindowTitle } from '$lib/composables/window-title.svelte';
+  import { promptGoToLine } from '$lib/utils/go-to-line';
+  import { registerAppCommands } from '$lib/app-commands';
+  import { wireAppEvents } from '$lib/composables/app-events.svelte';
+  import { useAppLifecycle } from '$lib/composables/app-lifecycle.svelte';
+  import { handleKeepMine, handleLoadTheirs } from '$lib/conflict-handlers';
+  import { createKeydownHandler } from '$lib/composables/app-shortcuts.svelte';
+  import { createScratchFile, createNewFileInProject, executeTemplate, requestSaveCurrentAsTemplate } from '$lib/services/new-file';
+  import { shortcutsStore, initShortcutsI18n } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
   import type { HeadingItem } from '$lib/editor/outline';
   import type { EditorView } from '@codemirror/view';
@@ -66,77 +80,43 @@
   );
 
   let paletteOpen = $state(false);
+  let movePaletteOpen = $state(false);
   let exportDialogOpen = $state(false);
   let mindmapOverlayOpen = $state(false);
   let projectSearchOpen = $state(false);
   let newProjectDialogOpen = $state(false);
+  // Opening the template dialog from outside TemplatePanel (e.g. from the
+  // command palette) — the panel consumes this object then calls back to clear.
+  let templateDialogRequest = $state<{ id: string | null; prefill?: { name?: string; body?: string } } | null>(null);
 
-  // Split divider drag state
+  // Drag state flags — kept here so the template can bind cursor styles etc.
   let isDraggingSplit = $state(false);
+  let isDraggingLeftSidebar = $state(false);
+  let isDraggingRightPanel = $state(false);
   let splitContainerRef: HTMLDivElement | undefined = $state(undefined);
 
-  function startSplitDrag(e: MouseEvent) {
-    if (!tabsStore.splitActive) return;
-    e.preventDefault();
-    isDraggingSplit = true;
-
-    const onMove = (ev: MouseEvent) => {
+  const startSplitDrag = makeResizeHandler({
+    shouldStart: () => tabsStore.splitActive,
+    setDragging: (v) => { isDraggingSplit = v; },
+    onMove: (ev) => {
       if (!splitContainerRef) return;
       const rect = splitContainerRef.getBoundingClientRect();
-      const ratio = (ev.clientX - rect.left) / rect.width;
-      uiStore.setSplitRatio(ratio);
-    };
-    const onUp = () => {
-      isDraggingSplit = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }
+      uiStore.setSplitRatio((ev.clientX - rect.left) / rect.width);
+    },
+  });
 
-  // Sidebar resize drag state
-  let isDraggingLeftSidebar = $state(false);
+  const startLeftSidebarDrag = makeResizeHandler({
+    setDragging: (v) => { isDraggingLeftSidebar = v; },
+    init: (e) => ({ x: e.clientX, w: uiStore.sidebarWidth }),
+    onMove: (ev, s) => uiStore.setSidebarWidth(s.w + (ev.clientX - s.x)),
+  });
 
-  function startLeftSidebarDrag(e: MouseEvent) {
-    e.preventDefault();
-    isDraggingLeftSidebar = true;
-    const startX = e.clientX;
-    const startWidth = uiStore.sidebarWidth;
-
-    const onMove = (ev: MouseEvent) => {
-      uiStore.setSidebarWidth(startWidth + (ev.clientX - startX));
-    };
-    const onUp = () => {
-      isDraggingLeftSidebar = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }
-
-  // Right panel resize drag state
-  let isDraggingRightPanel = $state(false);
-
-  function startRightPanelDrag(e: MouseEvent) {
-    e.preventDefault();
-    isDraggingRightPanel = true;
-    const startX = e.clientX;
-    const startWidth = uiStore.rightPanelWidth;
-
-    const onMove = (ev: MouseEvent) => {
-      // Dragging left increases width (right panel grows leftward)
-      uiStore.setRightPanelWidth(startWidth - (ev.clientX - startX));
-    };
-    const onUp = () => {
-      isDraggingRightPanel = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }
+  const startRightPanelDrag = makeResizeHandler({
+    setDragging: (v) => { isDraggingRightPanel = v; },
+    init: (e) => ({ x: e.clientX, w: uiStore.rightPanelWidth }),
+    // Dragging left increases width (right panel grows leftward)
+    onMove: (ev, s) => uiStore.setRightPanelWidth(s.w - (ev.clientX - s.x)),
+  });
 
   let isDraggingAny = $derived(isDraggingSplit || isDraggingLeftSidebar || isDraggingRightPanel);
 
@@ -146,29 +126,16 @@
     uiStore.draftVisible ||
     uiStore.snapshotVisible ||
     uiStore.statsVisible ||
+    uiStore.templateVisible ||
     !!(extensionStore.activePanelId && tabsStore.activeTab)
   );
 
   // Recent projects cache for Cmd+Number switching (Notion-style)
   import type { RecentProject } from '$lib/ipc/commands';
   let recentProjects = $state<RecentProject[]>([]);
+  let projectSwitcherTrigger = $state(0);
 
-  // Dynamic window title
-  $effect(() => {
-    const tab = tabsStore.activeTab;
-    const project = projectStore.name;
-    let title = t('app.name');
-    if (tab) {
-      if (projectStore.singleFileMode) {
-        title = `${tab.isDirty ? '● ' : ''}${tab.fileName} — ${t('app.name')}`;
-      } else {
-        title = `${tab.isDirty ? '● ' : ''}${tab.fileName} — ${project} — ${t('app.name')}`;
-      }
-    } else if (projectStore.isOpen && !projectStore.singleFileMode) {
-      title = `${project} — ${t('app.name')}`;
-    }
-    getCurrentWindow().setTitle(title);
-  });
+  useWindowTitle(t);
 
   // Conflict dialog state
   let conflictFilePath = $state<string | null>(null);
@@ -195,7 +162,13 @@
     const configResult = await commands.detectProject(dirPath);
     const config = configResult.status === 'ok' ? configResult.data : null;
 
-    const filesResult = await commands.listDirectory(dirPath);
+    // Load the per-project settings overlay BEFORE the initial listDirectory
+    // so the user's saved `show_hidden_files` preference applies to the first
+    // tree render. `projectStore.setProject` also kicks a load, but awaiting
+    // here guarantees the preference is known before we fetch files.
+    await settingsStore.load(dirPath);
+
+    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
     const files = filesResult.status === 'ok' ? filesResult.data : [];
 
     projectStore.setProject(dirPath, config, files);
@@ -242,63 +215,13 @@
     await openProjectFromPath(path);
   }
 
-  async function handleNewScratchFile() {
-    const result = await commands.createScratchFile();
-    if (result.status === 'ok') {
-      const filePath = result.data;
-      const readResult = await commands.readFile(filePath);
-      if (readResult.status === 'ok') {
-        projectStore.enterSingleFileMode();
-        uiStore.sidebarVisible = false;
-        tabsStore.openTab(filePath, readResult.data);
-        await commands.registerOpenFile(filePath);
-      }
-    }
-  }
-
-  async function handleNewFile() {
-    if (!projectStore.dirPath) return;
-
-    // For v1: target folder = project root. Subfolder targeting is a later enhancement.
-    const targetDir = projectStore.dirPath;
-
-    // List sibling files (only .md-ish basenames matter for pattern inference)
-    const filesResult = await commands.listDirectory(targetDir);
-    const siblings = filesResult.status === 'ok'
-      ? filesResult.data.filter(e => !e.is_dir).map(e => e.name)
-      : [];
-
-    // Resolve template — fall back to "Untitled {N}" if the configured one is invalid
-    const userTemplate = parseTemplate(newFileSettings.template) ?? parseTemplate('Untitled {N}')!;
-
-    const proposedName = newFileSettings.detectFromFolder
-      ? inferNextName(siblings, userTemplate)
-      : inferNextName([], userTemplate); // no folder scan → default template at N=1
-
-    const result = await commands.createFile(targetDir, proposedName);
-    if (result.status !== 'ok') return;
-
-    // Refresh sidebar (the file watcher will also trigger, but do it eagerly)
-    const after = await commands.listDirectory(targetDir);
-    if (after.status === 'ok') projectStore.updateFiles(after.data);
-
-    const readResult = await commands.readFile(result.data);
-    if (readResult.status === 'ok') {
-      tabsStore.openTab(result.data, readResult.data);
-      await commands.registerOpenFile(result.data);
-    }
-  }
-
-  function handleDragMouseDown(e: MouseEvent) {
-    const target = e.target as HTMLElement;
-    // Don't interfere with interactive elements or the editor
-    if (target.closest('button, input, a, [role="button"], select, textarea, .cm-editor, [contenteditable]')) return;
-    // Initiate drag if click is on a drag region or in the top titlebar area
-    const TITLEBAR_HEIGHT = 38;
-    if (target.closest('[data-tauri-drag-region]') || e.clientY <= TITLEBAR_HEIGHT) {
-      e.preventDefault();
-      getCurrentWindow().startDragging();
-    }
+  const handleNewScratchFile = () => createScratchFile();
+  const handleNewFile = () => createNewFileInProject();
+  const executeTemplateWrapper = (summary: TemplateFileSummary) => executeTemplate(summary, getActiveEditorView, t);
+  function saveCurrentFileAsTemplate() {
+    requestSaveCurrentAsTemplate(getActiveEditorView, t, (prefill) => {
+      templateDialogRequest = { id: null, prefill };
+    });
   }
 
   // Guard: prevents Cmd+W from triggering both our handler AND native onCloseRequested
@@ -337,142 +260,38 @@
     return getEditorView(tabId) ?? null;
   }
 
+  // --- Editor context menu (right-click inside .cm-content) ---
+  const editorCtx = createEditorContextMenu(getActiveEditorView);
+  // Read-alias so markup expressions like `editorCtxMenu.x` stay byte-identical.
+  // Writes (oncontextmenu handler below) go through `editorCtx.state = ...`.
+  const editorCtxMenu = $derived(editorCtx.state);
+  const closeEditorCtxMenu = () => editorCtx.close();
+  const editorCtxCut = () => editorCtx.cut();
+  const editorCtxCopy = () => editorCtx.copy();
+  const editorCtxPaste = () => editorCtx.paste();
+  const editorCtxSelectAll = () => editorCtx.selectAll();
+  const editorCtxRunCommand = (id: string) => editorCtx.runCommand(id);
+
   function wrapSelection(before: string, after: string) {
     const view = getActiveEditorView();
-    if (!view) return;
-    const { from, to } = view.state.selection.main;
-    const selectedText = view.state.sliceDoc(from, to);
-    view.dispatch({
-      changes: { from, to, insert: before + selectedText + after },
-      selection: { anchor: from + before.length, head: to + before.length },
-    });
+    if (view) fmt.wrapSelection(view, before, after);
   }
-
+  function toggleWrap(marker: string) {
+    const view = getActiveEditorView();
+    if (view) fmt.toggleWrap(view, marker);
+  }
   function toggleLinePrefix(prefix: string) {
     const view = getActiveEditorView();
-    if (!view) return;
-    const { from, to } = view.state.selection.main;
-    const line = view.state.doc.lineAt(from);
-    const text = line.text;
-    if (text.startsWith(prefix + ' ')) {
-      // Remove prefix
-      view.dispatch({
-        changes: { from: line.from, to: line.from + prefix.length + 1, insert: '' },
-        selection: { anchor: from - (prefix.length + 1), head: Math.max(line.from, to - (prefix.length + 1)) },
-      });
-    } else {
-      // Add prefix (strip existing # prefix if present)
-      const existingMatch = text.match(/^(#{1,6})\s*/);
-      const removeLen = existingMatch ? existingMatch[0].length : 0;
-      view.dispatch({
-        changes: { from: line.from, to: line.from + removeLen, insert: prefix + ' ' },
-        selection: { anchor: from + (prefix.length + 1 - removeLen), head: Math.max(line.from, to + (prefix.length + 1 - removeLen)) },
-      });
-    }
+    if (view) fmt.toggleLinePrefix(view, prefix);
   }
 
-  // Map of customizable commandId → handler
-  const shortcutHandlers: Record<string, () => void> = {
-    'toggle-sidebar': () => uiStore.toggleSidebar(),
-    'toggle-outline': () => uiStore.toggleOutline(),
-    'toggle-draft': () => uiStore.toggleDraft(),
-    'toggle-snapshot': () => uiStore.toggleSnapshot(),
-    'toggle-stats': () => uiStore.toggleStats(),
-    'toggle-zen': () => uiStore.toggleZen(),
-    'command-palette': () => { paletteOpen = !paletteOpen; },
-    'toggle-split': () => tabsStore.toggleSplit(),
-    'new-file': () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); },
-    'open-directory': () => handleOpenDirectory(),
-    'export-project': () => { exportDialogOpen = true; },
-    'close-tab': () => handleCloseTab(),
-    'rename-file': () => { activeEditorRef?.renameCurrentFile(); },
-    'open-settings': () => uiStore.toggleSettings(),
-    'go-to-line': () => handleGoToLine(),
-    'toggle-mindmap': () => { mindmapOverlayOpen = !mindmapOverlayOpen; },
-
-    // Editor formatting
-    'editor-bold': () => wrapSelection('**', '**'),
-    'editor-italic': () => wrapSelection('*', '*'),
-    'editor-link': () => wrapSelection('[', '](url)'),
-    'editor-heading': () => toggleLinePrefix('#'),
-    'editor-code-inline': () => wrapSelection('`', '`'),
-    'editor-strikethrough': () => wrapSelection('~~', '~~'),
-  };
-
-  function handleKeydown(e: KeyboardEvent) {
-    const mod = e.metaKey || e.ctrlKey;
-
-    // Non-customizable shortcuts: new window, zoom, project switch, escape
-
-    // Cmd+Shift+N: new window (non-customizable)
-    if (mod && e.shiftKey && e.key === 'N') {
-      e.preventDefault();
-      openNewWindow();
-      return;
-    }
-
-    // Cmd+S: save current file (non-customizable)
-    // Handled globally so save works even when editor is not focused.
-    if (mod && !e.shiftKey && e.key === 's') {
-      e.preventDefault();
-      activeEditorRef?.saveCurrentFile();
-      return;
-    }
-
-    // Cmd+Shift+F: project search (non-customizable)
-    if (mod && e.shiftKey && e.key === 'F') {
-      e.preventDefault();
-      projectSearchOpen = !projectSearchOpen;
-      return;
-    }
-
-    // Escape: exit zen mode (non-customizable)
-    if (e.key === 'Escape' && uiStore.zenMode) {
-      e.preventDefault();
-      uiStore.toggleZen();
-      return;
-    }
-
-    // Zoom (non-customizable)
-    if (mod && (e.key === '=' || e.key === '+')) {
-      e.preventDefault();
-      uiStore.zoomIn();
-      return;
-    }
-    if (mod && e.key === '-') {
-      e.preventDefault();
-      uiStore.zoomOut();
-      return;
-    }
-    if (mod && e.key === '0') {
-      e.preventDefault();
-      uiStore.resetZoom();
-      return;
-    }
-
-    // Cmd+1~9: switch to recent project (non-customizable)
-    if (mod && !e.shiftKey && e.key >= '1' && e.key <= '9') {
-      const idx = parseInt(e.key) - 1;
-      if (idx < recentProjects.length) {
-        const target = recentProjects[idx];
-        if (target.path !== projectStore.dirPath) {
-          e.preventDefault();
-          openProjectFromPath(target.path);
-        }
-      }
-      return;
-    }
-
-    // Customizable shortcuts — match against shortcutsStore
-    for (const cmdId of shortcutsStore.allCommandIds) {
-      const shortcut = shortcutsStore.get(cmdId);
-      if (shortcut && matchesShortcut(e, shortcut)) {
-        e.preventDefault();
-        shortcutHandlers[cmdId]?.();
-        return;
-      }
-    }
-  }
+  const handleKeydown = createKeydownHandler({
+    openNewWindow: () => openNewWindow(),
+    saveActiveFile: () => { void activeEditorRef?.saveCurrentFile(); },
+    toggleProjectSearch: () => { projectSearchOpen = !projectSearchOpen; },
+    getRecentProjects: () => recentProjects,
+    openProjectFromPath: (path) => { void openProjectFromPath(path); },
+  });
 
   function handleMoveSection(sourceFrom: number, targetFrom: number) {
     const tabId = tabsStore.activeTab?.id;
@@ -483,41 +302,18 @@
   }
 
   function handleGoToLine() {
-    const input = prompt(t('gotoline.prompt'));
-    if (!input) return;
-    const line = parseInt(input, 10);
-    if (isNaN(line) || line < 1) return;
     const ref = tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef;
-    ref?.jumpToAbsoluteLine(line);
-  }
-
-  async function handleKeepMine(filePath: string) {
-    const tab = tabsStore.findByPath(filePath);
-    if (!tab) return;
-    await commands.registerWriteIgnore(filePath);
-    const result = await commands.writeFile(filePath, tab.content);
-    if (result.status === 'ok') {
-      await tabsStore.tryRenameAfterSave(filePath, tab.content);
-      tabsStore.markSaved(tab.id);
-    } else {
-      console.error('Failed to save (keep mine):', result.error);
-    }
-  }
-
-  async function handleLoadTheirs(filePath: string) {
-    const tab = tabsStore.findByPath(filePath);
-    if (!tab) return;
-    const result = await commands.readFile(filePath);
-    if (result.status === 'ok') {
-      tabsStore.reloadContent(tab.id, result.data);
-    } else {
-      console.error('Failed to read file (load theirs):', result.error);
-    }
+    promptGoToLine(t('gotoline.prompt'), (line) => ref?.jumpToAbsoluteLine(line));
   }
 
   onMount(() => {
+    startupMark('frontend.app.onMount.begin');
     // Wire up i18n for shortcuts store (needs Svelte compile context)
     initShortcutsI18n(t);
+    // Kick off global settings load so reactive consumers see real values
+    // as soon as IPC answers. Safe if no project is open — falls back to
+    // ~/.novelist/settings.json defaults.
+    void settingsStore.load(null);
 
     // Expose test API when running in browser-mode E2E tests
     if ((window as any).__TAURI_MOCK_STATE__) {
@@ -537,123 +333,25 @@
     // Load UI extensions from installed plugins
     extensionStore.loadFromPlugins();
 
-    commandRegistry.register({ id: 'new-window', label: t('command.newWindow'), shortcut: 'Cmd+Shift+N', handler: () => openNewWindow() });
-    commandRegistry.register({ id: 'toggle-sidebar', label: t('command.toggleSidebar'), shortcut: shortcutsStore.get('toggle-sidebar'), handler: () => uiStore.toggleSidebar() });
-    commandRegistry.register({ id: 'toggle-outline', label: t('command.toggleOutline'), shortcut: shortcutsStore.get('toggle-outline'), handler: () => uiStore.toggleOutline() });
-    commandRegistry.register({ id: 'toggle-zen', label: t('command.toggleZen'), shortcut: shortcutsStore.get('toggle-zen'), handler: () => uiStore.toggleZen() });
-    commandRegistry.register({ id: 'toggle-draft', label: t('command.toggleDraft'), shortcut: shortcutsStore.get('toggle-draft'), handler: () => uiStore.toggleDraft() });
-    commandRegistry.register({ id: 'toggle-snapshot', label: t('command.toggleSnapshot'), shortcut: shortcutsStore.get('toggle-snapshot'), handler: () => uiStore.toggleSnapshot() });
-    commandRegistry.register({ id: 'toggle-stats', label: t('command.toggleStats'), shortcut: shortcutsStore.get('toggle-stats'), handler: () => uiStore.toggleStats() });
-    commandRegistry.register({ id: 'command-palette', label: t('command.commandPalette'), shortcut: shortcutsStore.get('command-palette'), handler: () => { paletteOpen = !paletteOpen; } });
-    commandRegistry.register({ id: 'project-search', label: t('command.projectSearch'), shortcut: 'Cmd+Shift+F', handler: () => { projectSearchOpen = !projectSearchOpen; } });
-    commandRegistry.register({ id: 'toggle-split', label: t('command.toggleSplit'), shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
-    commandRegistry.register({ id: 'new-file', label: t('command.newFile'), shortcut: shortcutsStore.get('new-file'), handler: () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); } });
-    commandRegistry.register({ id: 'new-project', label: t('command.newProject'), handler: () => { newProjectDialogOpen = true; } });
-    commandRegistry.register({ id: 'open-directory', label: t('command.openDirectory'), shortcut: shortcutsStore.get('open-directory'), handler: () => handleOpenDirectory() });
-    commandRegistry.register({ id: 'export-project', label: t('command.exportProject'), shortcut: shortcutsStore.get('export-project'), handler: () => { exportDialogOpen = true; } });
-    commandRegistry.register({ id: 'close-tab', label: t('command.closeTab'), shortcut: shortcutsStore.get('close-tab'), handler: () => handleCloseTab() });
-    commandRegistry.register({ id: 'rename-file', label: t('command.renameFile'), shortcut: shortcutsStore.get('rename-file'), handler: () => { activeEditorRef?.renameCurrentFile(); } });
-    commandRegistry.register({ id: 'open-settings', label: t('command.openSettings'), shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
-    commandRegistry.register({ id: 'go-to-line', label: t('command.goToLine'), shortcut: shortcutsStore.get('go-to-line'), handler: () => handleGoToLine() });
-    commandRegistry.register({ id: 'toggle-mindmap', label: t('command.toggleMindmap'), shortcut: shortcutsStore.get('toggle-mindmap'), handler: () => { mindmapOverlayOpen = !mindmapOverlayOpen; } });
-    // Editor formatting commands
-    commandRegistry.register({ id: 'editor-bold', label: t('command.bold'), shortcut: shortcutsStore.get('editor-bold'), handler: () => wrapSelection('**', '**') });
-    commandRegistry.register({ id: 'editor-italic', label: t('command.italic'), shortcut: shortcutsStore.get('editor-italic'), handler: () => wrapSelection('*', '*') });
-    commandRegistry.register({ id: 'editor-link', label: t('command.insertLink'), shortcut: shortcutsStore.get('editor-link'), handler: () => wrapSelection('[', '](url)') });
-    commandRegistry.register({ id: 'editor-heading', label: t('command.toggleHeading'), shortcut: shortcutsStore.get('editor-heading'), handler: () => toggleLinePrefix('#') });
-    commandRegistry.register({ id: 'editor-code-inline', label: t('command.inlineCode'), shortcut: shortcutsStore.get('editor-code-inline'), handler: () => wrapSelection('`', '`') });
-    commandRegistry.register({ id: 'editor-strikethrough', label: t('command.strikethrough'), shortcut: shortcutsStore.get('editor-strikethrough'), handler: () => wrapSelection('~~', '~~') });
-    // Chinese text tools
-    commandRegistry.register({ id: 'chinese-s2t', label: t('command.simplifiedToTraditional'), handler: async () => {
-      const view = getActiveEditorView();
-      if (!view) return;
-      const { from, to } = view.state.selection.main;
-      const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
-      const { simplifiedToTraditional } = await import('$lib/utils/chinese');
-      const converted = await simplifiedToTraditional(text);
-      if (from === to) {
-        // Replace entire document
-        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: converted } });
-      } else {
-        view.dispatch({
-          changes: { from, to, insert: converted },
-          selection: { anchor: from, head: from + converted.length },
-        });
-      }
-    }});
-    commandRegistry.register({ id: 'chinese-t2s', label: t('command.traditionalToSimplified'), handler: async () => {
-      const view = getActiveEditorView();
-      if (!view) return;
-      const { from, to } = view.state.selection.main;
-      const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
-      const { traditionalToSimplified } = await import('$lib/utils/chinese');
-      const converted = await traditionalToSimplified(text);
-      if (from === to) {
-        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: converted } });
-      } else {
-        view.dispatch({
-          changes: { from, to, insert: converted },
-          selection: { anchor: from, head: from + converted.length },
-        });
-      }
-    }});
-    commandRegistry.register({ id: 'chinese-pinyin', label: t('command.generatePinyin'), handler: async () => {
-      const view = getActiveEditorView();
-      if (!view) return;
-      const { from, to } = view.state.selection.main;
-      if (from === to) return; // Require a selection for pinyin
-      const text = view.state.sliceDoc(from, to);
-      const { toPinyin } = await import('$lib/utils/chinese');
-      const pinyinText = await toPinyin(text);
-      await navigator.clipboard.writeText(pinyinText);
-    }});
-    commandRegistry.register({ id: 'copy-rich-text', label: t('command.copyRichText'), handler: async () => {
-      const view = getActiveEditorView();
-      if (!view) return;
-      const { from, to } = view.state.selection.main;
-      const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
-      const { markdownToHtml } = await import('$lib/utils/markdown-copy');
-      const html = markdownToHtml(text);
-      try {
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            'text/html': new Blob([html], { type: 'text/html' }),
-            'text/plain': new Blob([text], { type: 'text/plain' }),
-          }),
-        ]);
-      } catch {
-        // Fallback: copy as plain text if rich clipboard fails
-        await navigator.clipboard.writeText(text);
-      }
-    }});
-    commandRegistry.register({ id: 'copy-plain-text', label: t('command.copyPlainText'), handler: async () => {
-      const view = getActiveEditorView();
-      if (!view) return;
-      const { from, to } = view.state.selection.main;
-      const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
-      const { markdownToPlainText } = await import('$lib/utils/markdown-copy');
-      const plain = markdownToPlainText(text);
-      await navigator.clipboard.writeText(plain);
-    }});
-    commandRegistry.register({ id: 'run-benchmark', label: t('command.runBenchmark'), handler: async () => {
-      const { runBenchmark } = await import('$lib/utils/benchmark');
-      const result = await runBenchmark(150000);
-      alert(result);
-    }});
-    commandRegistry.register({ id: 'run-release-benchmark', label: t('command.runReleaseBenchmark'), handler: async () => {
-      const { runReleaseBenchmark } = await import('$lib/utils/benchmark');
-      const result = await runReleaseBenchmark();
-      alert(result);
-    }});
-    commandRegistry.register({ id: 'run-scroll-test', label: t('command.runScrollTest'), handler: async () => {
-      const { runScrollEditTest } = await import('$lib/utils/scroll-edit-test');
-      const result = await runScrollEditTest();
-      alert(result);
-    }});
-    commandRegistry.register({ id: 'check-for-updates', label: t('command.checkForUpdates'), handler: async () => {
-      const { checkForUpdates } = await import('$lib/updater');
-      checkForUpdates(false);
-    }});
+    registerAppCommands({
+      t,
+      getActiveEditorView,
+      renameCurrentFile: () => activeEditorRef?.renameCurrentFile(),
+      openNewWindow,
+      handleNewFile,
+      handleNewScratchFile,
+      handleOpenDirectory,
+      handleCloseTab,
+      handleGoToLine,
+      saveCurrentFileAsTemplate,
+      togglePalette: () => { paletteOpen = !paletteOpen; },
+      openMovePalette: () => { movePaletteOpen = true; },
+      toggleProjectSearch: () => { projectSearchOpen = !projectSearchOpen; },
+      openExportDialog: () => { exportDialogOpen = true; },
+      openNewProjectDialog: () => { newProjectDialogOpen = true; },
+      toggleMindmapOverlay: () => { mindmapOverlayOpen = !mindmapOverlayOpen; },
+      requestProjectSwitcher: () => { uiStore.sidebarVisible = true; projectSwitcherTrigger++; },
+    });
 
     // Check for updates silently after startup (5s delay to not block UI)
     setTimeout(async () => {
@@ -661,196 +359,95 @@
       checkForUpdates(true);
     }, 5000);
 
-    // Async event listeners — store refs for cleanup
-    let unlistenFileChanged: (() => void) | null = null;
-    let unlistenDragDrop: (() => void) | null = null;
-    let unlistenCloseRequested: (() => void) | null = null;
-    let unlistenOpenFile: (() => void) | null = null;
-    let unlistenFileRenamed: (() => void) | null = null;
-
-    // Shared helper: open a file by path (single-file mode if no project open)
-    async function openFileByPath(filePath: string) {
-      const lower = filePath.toLowerCase();
-      const textExtensions = ['.md', '.markdown', '.txt', '.json', '.jsonl', '.csv'];
-      if (!textExtensions.some(ext => lower.endsWith(ext))) return;
-
-      const result = await commands.readFile(filePath);
-      if (result.status === 'ok') {
-        if (!projectStore.isOpen) {
-          projectStore.enterSingleFileMode();
-          uiStore.sidebarVisible = false;
-        }
-        tabsStore.openTab(filePath, result.data);
-        await commands.registerOpenFile(filePath);
-      }
-    }
-
-    // Drain any files queued before the frontend was ready
-    // (CLI args, macOS "Open With" on cold start)
-    (async () => {
-      try {
-        const pending = await invoke<string[]>('get_pending_open_files');
-        for (const filePath of pending) {
-          await openFileByPath(filePath);
-        }
-      } catch (_) {
-        // ignore — command may not exist on older builds
-      }
-    })();
-
-    // Listen for open-file events from Rust (macOS Finder "Open With" while running)
-    listen<string>('open-file', async (event) => {
-      await openFileByPath(event.payload);
-    }).then(fn => { unlistenOpenFile = fn; });
-
-    listen<{ path: string }>('file-changed', async (event) => {
-      const { path } = event.payload;
-
-      // Refresh tab content if a currently-open file changed on disk.
-      const tab = tabsStore.findByPath(path);
-      if (tab) {
-        if (!tab.isDirty) {
-          const result = await commands.readFile(path);
-          if (result.status === 'ok') {
-            tabsStore.reloadContent(tab.id, result.data);
-          }
-        } else {
-          conflictFilePath = path;
-        }
-      }
-
-      // Also refresh the sidebar folder containing the changed path, IF it's
-      // been loaded (expanded at least once). refreshFolder is a no-op for
-      // folders whose children are still undefined.
-      const slashIdx = path.lastIndexOf('/');
-      if (slashIdx > 0) {
-        await projectStore.refreshFolder(path.slice(0, slashIdx));
-      }
-    }).then(fn => { unlistenFileChanged = fn; });
-
-    // Cross-window file rename broadcast: another window auto-renamed a file we
-    // may have open. Update our tab paths and refresh the affected sidebar folder.
-    listen<{ old_path: string; new_path: string }>('file-renamed', (event) => {
-      const { old_path, new_path } = event.payload;
-      tabsStore.updatePath(old_path, new_path);
-      const parentIdx = new_path.lastIndexOf('/');
-      if (parentIdx > 0) {
-        const parent = new_path.slice(0, parentIdx);
-        projectStore.refreshFolder(parent).catch(() => {});
-      }
-    }).then(fn => { unlistenFileRenamed = fn; });
-
-    // Drag-and-drop: open .md/.markdown/.txt files dropped onto the window
-    getCurrentWindow().onDragDropEvent(async (event) => {
-      if (event.payload.type === 'drop') {
-        for (const filePath of event.payload.paths) {
-          await openFileByPath(filePath);
-        }
-      }
-    }).then(fn => { unlistenDragDrop = fn; });
-
-    // WebDAV auto-sync timer
-    let syncIntervalId: ReturnType<typeof setInterval> | null = null;
-
-    async function setupSyncTimer() {
-      if (syncIntervalId) { clearInterval(syncIntervalId); syncIntervalId = null; }
-      if (!projectStore.dirPath) return;
-      try {
-        const config = await invoke('get_sync_config', { projectDir: projectStore.dirPath }) as {
-          enabled: boolean;
-          interval_minutes: number;
-        };
-        if (config.enabled && config.interval_minutes > 0) {
-          syncIntervalId = setInterval(async () => {
-            if (!projectStore.dirPath) return;
-            try {
-              await invoke('sync_now', { projectDir: projectStore.dirPath });
-            } catch (e) {
-              console.error('Auto-sync failed:', e);
-            }
-          }, config.interval_minutes * 60 * 1000);
-        }
-      } catch (e) {
-        // Sync not configured — that's fine
-      }
-    }
-
-    // Set up sync timer for the current project
-    setupSyncTimer();
-
-    // Window close (Cmd+Q or title-bar close button).
-    // If there are unsaved files, prompt the user before closing.
-    // NOTE: Cmd+W also triggers this on macOS — guard with closingTab flag.
-    getCurrentWindow().onCloseRequested(async (event) => {
-      // If our tab-close handler is already running, suppress the native close
-      if (closingTab) {
-        event.preventDefault();
-        return;
-      }
-
-      const dirty = tabsStore.dirtyTabs;
-      if (dirty.length > 0) {
-        event.preventDefault();
-        const names = dirty.map(dt => dt.fileName).join(', ');
-        const shouldSave = await ask(
-          t('dialog.unsavedBeforeClose', { names }),
-          { title: t('dialog.unsavedChanges'), kind: 'warning', okLabel: t('dialog.save'), cancelLabel: t('dialog.dontSave') }
-        );
-        if (shouldSave) {
-          await tabsStore.saveAllDirty();
-        }
-        // Use destroy() to force-close without re-triggering onCloseRequested
-        await getCurrentWindow().destroy();
-      }
-      // No dirty tabs — let the window close normally
-    }).then(fn => { unlistenCloseRequested = fn; });
-
-    // Sync on app close
-    function handleBeforeUnload() {
-      if (projectStore.dirPath) {
-        // Fire-and-forget final sync — navigator.sendBeacon won't work for Tauri,
-        // but invoke is still dispatched synchronously enough for beforeunload
-        invoke('sync_now', { projectDir: projectStore.dirPath }).catch(() => {});
-      }
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    // Listen for goto-line events from ProjectSearch
-    function handleGotoLine(e: Event) {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.line) {
+    // Async event listeners — consolidated in $lib/composables/app-events.
+    const unlistenAppEvents = wireAppEvents({
+      onConflict: (path) => { conflictFilePath = path; },
+      onRecentProjectsUpdated: (list) => { recentProjects = list; },
+      onGotoLine: (line) => {
         const ref = tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef;
-        ref?.jumpToAbsoluteLine(detail.line);
-      }
-    }
-    window.addEventListener('novelist-goto-line', handleGotoLine);
+        ref?.jumpToAbsoluteLine(line);
+      },
+    });
+
+    const unlistenLifecycle = useAppLifecycle({
+      t,
+      isClosingTab: () => closingTab,
+    });
+
+    startupMark('frontend.app.onMount.end');
+    // Wait one frame so "first-paint" reflects the actual paint after mount.
+    requestAnimationFrame(() => {
+      startupMark('frontend.app.first-paint');
+      void startupReport();
+    });
 
     return () => {
-      unlistenFileChanged?.();
-      unlistenDragDrop?.();
-      unlistenCloseRequested?.();
-      unlistenOpenFile?.();
-      unlistenFileRenamed?.();
-      window.removeEventListener('novelist-goto-line', handleGotoLine);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      if (syncIntervalId) clearInterval(syncIntervalId);
+      unlistenAppEvents();
+      unlistenLifecycle();
     };
   });
 </script>
 
 <svelte:window
-  onkeydown={handleKeydown}
-  onmousedown={handleDragMouseDown}
+  onkeydown={(e) => {
+    if (editorCtxMenu && e.key === 'Escape') { closeEditorCtxMenu(); e.preventDefault(); return; }
+    handleKeydown(e);
+  }}
+  onmousedown={handleTitlebarDrag}
+  onclick={closeEditorCtxMenu}
   oncontextmenu={(e: MouseEvent) => {
-    // Suppress the native WKWebView "Reload / Inspect Element" menu. Editable
-    // text surfaces keep their native copy/paste menu so OS text-editing
-    // affordances (suggestions, Look Up, etc.) stay usable.
-    const t = e.target as HTMLElement | null;
-    if (!t) { e.preventDefault(); return; }
-    const editable = t.closest('input, textarea, [contenteditable="true"], .cm-content') !== null;
+    const target = e.target as HTMLElement | null;
+    if (!target) { e.preventDefault(); return; }
+    // Inside the editor: show a styled custom menu (matches the app theme)
+    // instead of the native WKWebView one.
+    if (target.closest('.cm-content')) {
+      e.preventDefault();
+      const view = getActiveEditorView();
+      if (!view) { editorCtx.state = null; return; }
+      const { from, to } = view.state.selection.main;
+      const scaleMatch = document.documentElement.style.transform.match(/scale\(([^)]+)\)/);
+      const zoom = scaleMatch ? parseFloat(scaleMatch[1]) || 1 : 1;
+      editorCtx.state = {
+        x: e.clientX / zoom,
+        y: e.clientY / zoom,
+        hasSelection: from !== to,
+        from,
+        to,
+      };
+      return;
+    }
+    // Other editable surfaces (inputs, textareas, contenteditable widgets)
+    // keep their native context menu for OS text-editing affordances.
+    const editable = target.closest('input, textarea, [contenteditable="true"]') !== null;
     if (!editable) e.preventDefault();
   }}
 />
+
+{#if editorCtxMenu}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    role="menu"
+    tabindex="-1"
+    class="context-menu"
+    data-testid="editor-context-menu"
+    style="left: {editorCtxMenu.x}px; top: {editorCtxMenu.y}px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.preventDefault()}
+  >
+    {#if editorCtxMenu.hasSelection}
+      <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-cut" onclick={() => { editorCtxCut(); closeEditorCtxMenu(); }}>{t('editor.menu.cut')}</button>
+      <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-copy" onclick={() => { editorCtxCopy(); closeEditorCtxMenu(); }}>{t('editor.menu.copy')}</button>
+      <div class="context-menu-separator"></div>
+      <button role="menuitem" class="context-menu-item" onclick={() => { editorCtxRunCommand('copy-rich-text'); closeEditorCtxMenu(); }}>{t('command.copyRichText')}</button>
+      <button role="menuitem" class="context-menu-item" onclick={() => { editorCtxRunCommand('copy-plain-text'); closeEditorCtxMenu(); }}>{t('command.copyPlainText')}</button>
+      <div class="context-menu-separator"></div>
+    {/if}
+    <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-paste" onclick={() => { editorCtxPaste(); closeEditorCtxMenu(); }}>{t('editor.menu.paste')}</button>
+    <div class="context-menu-separator"></div>
+    <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-select-all" onclick={() => { editorCtxSelectAll(); closeEditorCtxMenu(); }}>{t('editor.menu.selectAll')}</button>
+  </div>
+{/if}
 
 {#if !projectStore.isOpen}
   <Welcome onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} onNewFile={handleNewScratchFile} onNewProject={() => { newProjectDialogOpen = true; }} />
@@ -881,6 +478,8 @@
           onOpenProjectFromPath={openProjectFromPath}
           {recentProjects}
           onRemoveRecentProject={(path) => { recentProjects = recentProjects.filter(p => p.path !== path); }}
+          onRefreshRecentProjects={refreshRecentProjects}
+          openSwitcherTrigger={projectSwitcherTrigger}
         />
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -907,11 +506,19 @@
 
           <div class="flex-1 min-h-0 overflow-hidden">
             {#if tabsStore.getPaneActiveTab('pane-1')}
-              {@const fileHandler1 = extensionStore.getFileHandler(tabsStore.getPaneActiveTab('pane-1')?.fileName ?? '')}
-              {#if fileHandler1}
-                <ErrorBoundary><PluginFileEditor extension={fileHandler1} paneId="pane-1" /></ErrorBoundary>
+              {@const fileName1 = tabsStore.getPaneActiveTab('pane-1')?.fileName ?? ''}
+              {@const lower1 = fileName1.toLowerCase()}
+              {#if lower1.endsWith('.canvas')}
+                <ErrorBoundary><CanvasFileEditor paneId="pane-1" /></ErrorBoundary>
+              {:else if lower1.endsWith('.kanban')}
+                <ErrorBoundary><KanbanFileEditor paneId="pane-1" /></ErrorBoundary>
               {:else}
-                <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
+                {@const fileHandler1 = extensionStore.getFileHandler(fileName1)}
+                {#if fileHandler1}
+                  <ErrorBoundary><PluginFileEditor extension={fileHandler1} paneId="pane-1" /></ErrorBoundary>
+                {:else}
+                  <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
+                {/if}
               {/if}
             {:else}
               <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
@@ -946,11 +553,19 @@
 
             <div class="flex-1 min-h-0 overflow-hidden">
               {#if tabsStore.getPaneActiveTab('pane-2')}
-                {@const fileHandler2 = extensionStore.getFileHandler(tabsStore.getPaneActiveTab('pane-2')?.fileName ?? '')}
-                {#if fileHandler2}
-                  <ErrorBoundary><PluginFileEditor extension={fileHandler2} paneId="pane-2" /></ErrorBoundary>
+                {@const fileName2 = tabsStore.getPaneActiveTab('pane-2')?.fileName ?? ''}
+                {@const lower2 = fileName2.toLowerCase()}
+                {#if lower2.endsWith('.canvas')}
+                  <ErrorBoundary><CanvasFileEditor paneId="pane-2" /></ErrorBoundary>
+                {:else if lower2.endsWith('.kanban')}
+                  <ErrorBoundary><KanbanFileEditor paneId="pane-2" /></ErrorBoundary>
                 {:else}
-                  <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
+                  {@const fileHandler2 = extensionStore.getFileHandler(fileName2)}
+                  {#if fileHandler2}
+                    <ErrorBoundary><PluginFileEditor extension={fileHandler2} paneId="pane-2" /></ErrorBoundary>
+                  {:else}
+                    <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
+                  {/if}
                 {/if}
               {:else}
                 <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
@@ -997,6 +612,14 @@
             chapters={projectChapters}
           />
         </div>
+      {:else if uiStore.templateVisible}
+        <div style="width: {uiStore.rightPanelWidth}px;">
+          <TemplatePanel
+            onExecute={executeTemplateWrapper}
+            openDialogRequest={templateDialogRequest}
+            onDialogHandled={() => { templateDialogRequest = null; }}
+          />
+        </div>
       {:else if extensionStore.activePanelId && tabsStore.activeTab}
         {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
         {#if activePanel}
@@ -1011,7 +634,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.outlineVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.outlineVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleOutline()}
-          title="Toggle Outline (Cmd+Shift+O)"
+          title="{t('command.toggleOutline')} ({shortcutsStore.get('toggle-outline')})"
         >
           {t('outline.title')}
         </button>
@@ -1020,7 +643,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.draftVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.draftVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleDraft()}
-          title="Toggle Draft Note (Cmd+Shift+D)"
+          title="{t('command.toggleDraft')} ({shortcutsStore.get('toggle-draft')})"
         >
           {t('draft.title')}
         </button>
@@ -1029,7 +652,7 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.snapshotVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.snapshotVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleSnapshot()}
-          title="Toggle Snapshots (Cmd+Shift+S)"
+          title="{t('command.toggleSnapshot')} ({shortcutsStore.get('toggle-snapshot')})"
         >
           {t('snapshot.title')}
         </button>
@@ -1038,9 +661,19 @@
           class="flex items-center justify-center cursor-pointer"
           style="width: 20px; flex: 1; background: {uiStore.statsVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.statsVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
           onclick={() => uiStore.toggleStats()}
-          title="Toggle Writing Stats (Cmd+Shift+T)"
+          title="{t('command.toggleStats')} ({shortcutsStore.get('toggle-stats')})"
         >
           {t('stats.title')}
+        </button>
+        <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
+        <button
+          class="flex items-center justify-center cursor-pointer"
+          data-testid="toggle-template"
+          style="width: 20px; flex: 1; background: {uiStore.templateVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.templateVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
+          onclick={() => uiStore.toggleTemplate()}
+          title="{t('command.toggleTemplate')} ({shortcutsStore.get('toggle-template')})"
+        >
+          {t('template.title')}
         </button>
         {#each extensionStore.panels.filter(p => p.pluginId !== 'mindmap') as panel}
           <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
@@ -1069,6 +702,16 @@
 
 {#if paletteOpen}
   <CommandPalette onClose={() => { paletteOpen = false; }} />
+{/if}
+
+{#if movePaletteOpen}
+  <MoveFilePalette onClose={() => {
+    movePaletteOpen = false;
+    // Return focus to the editor on the next frame so typing resumes without
+    // a manual click. rAF waits for the palette's input to unmount first.
+    const tabId = tabsStore.activeTab?.id;
+    if (tabId) requestAnimationFrame(() => getEditorView(tabId)?.focus());
+  }} />
 {/if}
 
 {#if exportDialogOpen}
