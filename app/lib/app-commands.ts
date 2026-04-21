@@ -4,6 +4,9 @@ import { shortcutsStore } from '$lib/stores/shortcuts.svelte';
 import { uiStore } from '$lib/stores/ui.svelte';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 import { projectStore } from '$lib/stores/project.svelte';
+import { extensionStore } from '$lib/stores/extensions.svelte';
+import { aiTalkSessions } from '$lib/components/ai-talk/sessions.svelte';
+import { aiAgentSessions } from '$lib/components/ai-agent/sessions.svelte';
 import * as fmt from '$lib/editor/formatting';
 
 /**
@@ -66,6 +69,50 @@ export function registerAppCommands(ctx: AppCommandContext) {
   commandRegistry.register({ id: 'open-settings', label: t('command.openSettings'), shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
   commandRegistry.register({ id: 'go-to-line', label: t('command.goToLine'), shortcut: shortcutsStore.get('go-to-line'), handler: ctx.handleGoToLine });
   commandRegistry.register({ id: 'toggle-mindmap', label: t('command.toggleMindmap'), shortcut: shortcutsStore.get('toggle-mindmap'), handler: ctx.toggleMindmapOverlay });
+
+  // AI panels — toggle the right-side panel; session helpers open the
+  // panel first, then perform the action. Save-chat dispatches a DOM
+  // event the active panel listens for (keeps the save flow inside the
+  // Impl component so its status toast fires as usual).
+  commandRegistry.register({
+    id: 'toggle-ai-talk',
+    label: t('command.toggleAiTalk'),
+    shortcut: shortcutsStore.get('toggle-ai-talk'),
+    handler: () => extensionStore.togglePanel('ai-talk'),
+  });
+  commandRegistry.register({
+    id: 'toggle-ai-agent',
+    label: t('command.toggleAiAgent'),
+    shortcut: shortcutsStore.get('toggle-ai-agent'),
+    handler: () => extensionStore.togglePanel('ai-agent'),
+  });
+  commandRegistry.register({
+    id: 'ai-talk-new-session',
+    label: t('command.aiTalkNewSession'),
+    shortcut: shortcutsStore.get('ai-talk-new-session'),
+    handler: () => {
+      if (extensionStore.activePanelId !== 'ai-talk') extensionStore.openPanel('ai-talk');
+      aiTalkSessions.create();
+    },
+  });
+  commandRegistry.register({
+    id: 'ai-agent-new-session',
+    label: t('command.aiAgentNewSession'),
+    shortcut: shortcutsStore.get('ai-agent-new-session'),
+    handler: () => {
+      if (extensionStore.activePanelId !== 'ai-agent') extensionStore.openPanel('ai-agent');
+      aiAgentSessions.create();
+    },
+  });
+  commandRegistry.register({
+    id: 'ai-talk-save-chat',
+    label: t('command.aiTalkSaveChat'),
+    shortcut: shortcutsStore.get('ai-talk-save-chat'),
+    handler: () => {
+      // Delegate to the panel so its save-status toast fires.
+      window.dispatchEvent(new CustomEvent('novelist:ai-talk:save-chat'));
+    },
+  });
 
   // Editor formatting commands
   commandRegistry.register({ id: 'editor-bold', label: t('command.bold'), shortcut: shortcutsStore.get('editor-bold'), handler: () => {

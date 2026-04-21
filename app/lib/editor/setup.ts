@@ -297,13 +297,33 @@ const novelistTheme = EditorView.theme({
   // two different coordinate frames: the first line's rect is anchored to
   // `.cm-line` while middle/last lines are anchored to `.cm-content`, which
   // leaves a ~19.75px stair-step on the left edge. We suppress those rects
-  // and let `.cm-novelist-selected-line` (a line decoration) paint a
-  // uniformly-aligned background on `.cm-line` instead.
+  // and paint backgrounds ourselves: `.cm-novelist-selected-line` (a
+  // `Decoration.line`) for fully-covered lines, and native browser
+  // `::selection` for partial ranges. Native selection handles wrapped
+  // partial selections correctly (continuation rows fill to the right
+  // edge) — an inline-span background would end at each wrapped row's
+  // last glyph, producing a ragged per-word highlight.
   '.cm-selectionBackground, .cm-selectionBackground:focus': {
     backgroundColor: 'transparent !important',
   },
-  '::selection': {
-    backgroundColor: 'color-mix(in srgb, var(--novelist-accent) 30%, transparent)',
+  // Native ::selection tint for partial selections. drawSelection installs
+  // an internal `hideNativeSelection` theme at Prec.highest with
+  // `.cm-line ::selection { background: transparent !important }` — we
+  // beat it with higher CSS specificity (an added `.cm-content` ancestor
+  // takes us from (0,2,1) to (0,3,1)) plus our own `!important`. This
+  // lets the browser's text engine paint partial selections, which
+  // correctly fills continuation visual rows to the container's right
+  // edge — a wrap-aware behavior that an inline-span `Decoration.mark`
+  // background cannot reproduce.
+  '.cm-content .cm-line ::selection, .cm-content .cm-line::selection': {
+    backgroundColor: 'color-mix(in srgb, var(--novelist-accent) 18%, transparent) !important',
+  },
+  // Fully-selected lines already get 18% accent from the line decoration
+  // that paints across the entire `.cm-line`. Suppress ::selection here
+  // (higher specificity than the rule above: (0,4,1) > (0,3,1)) so the
+  // two layers don't stack and double the tint on characters.
+  '.cm-content .cm-line.cm-novelist-selected-line ::selection, .cm-content .cm-line.cm-novelist-selected-line::selection': {
+    backgroundColor: 'transparent !important',
   },
   '.cm-line': {
     padding: '0 0.25rem',

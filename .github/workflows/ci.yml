@@ -47,8 +47,16 @@ jobs:
       - name: Svelte type check
         run: pnpm check
 
-      - name: Vitest
-        run: pnpm test
+      - name: Vitest (with coverage)
+        run: pnpm test:coverage
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-coverage
+          path: coverage/
+          retention-days: 14
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps webkit

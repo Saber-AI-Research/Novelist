@@ -13,33 +13,36 @@
   } from './host';
   import { projectStore } from '$lib/stores/project.svelte';
   import AiAgentSettings from './AiAgentSettings.svelte';
+  import SessionTabs from '$lib/components/ai-shared/SessionTabs.svelte';
+  import { aiAgentSessions, type Turn } from './sessions.svelte';
+  import { commands } from '$lib/ipc/commands';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-
-  type ToolCard = { kind: 'tool'; name: string; input: unknown };
-  type ToolResultCard = { kind: 'tool-result'; content: string };
-  type Card = ToolCard | ToolResultCard;
-
-  type Turn =
-    | { role: 'user'; text: string }
-    | { role: 'assistant'; text: string; cards: Card[]; cost?: number };
 
   let detected = $state<DetectedCli | null>(null);
   let detecting = $state(true);
 
-  let sessionId: string | null = $state(null);
-  let starting = $state(false);
-  let unlisten: UnlistenFn | null = null;
+  // A session is "live" (CLI spawned + listener attached) iff its
+  // sessionUuid has an entry here. This is purely component-local —
+  // sessions persist across reloads, the live subprocess state does not.
+  const liveSessions = new Map<string, UnlistenFn>();
+  // Sessions currently mid-spawn, keyed by session.id. Prevents racing
+  // spawns when send() is called twice in rapid succession.
+  const spawning = new Set<string>();
 
-  let turns = $state<Turn[]>([]);
   let input = $state('');
   let error = $state<string | null>(null);
   let scroller = $state<HTMLDivElement | undefined>(undefined);
-
   let settingsOpen = $state(false);
+  let saveStatus = $state<string | null>(null);
 
-  // ----------- bring up the session lazily on first send ---------------
+  // Active session turns — re-derived on session switch.
+  let activeSession = $derived(aiAgentSessions.active);
+  let activeId = $derived(aiAgentSessions.activeId);
+  let turns = $derived<Turn[]>(activeSession?.turns ?? []);
+  let isLive = $derived(activeSession ? liveSessions.has(activeSession.sessionUuid) : false);
 
   onMount(async () => {
+    aiAgentSessions.ensureOne();
     detected = await detectClaudeCli();
     detecting = false;
     if (sessionStorage.getItem('novelist:ai-agent:open-settings') === '1') {
@@ -49,50 +52,45 @@
   });
 
   onDestroy(async () => {
-    unlisten?.();
-    if (sessionId) {
-      await killClaudeSession(sessionId).catch(() => {});
+    for (const [uuid, unlisten] of liveSessions.entries()) {
+      try { unlisten(); } catch { /* ignore */ }
+      await killClaudeSession(uuid).catch(() => {});
     }
+    liveSessions.clear();
   });
 
-  function uuid(): string {
-    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-      return crypto.randomUUID();
-    }
-    return `ai-agent-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
-  }
-
-  function appendUserTurn(text: string) {
-    turns = [...turns, { role: 'user', text }];
-    scrollDown();
-  }
-
-  function ensureAssistantTurn(): number {
-    const last = turns[turns.length - 1];
+  function ensureAssistantTurn(current: Turn[]): { idx: number; turns: Turn[] } {
+    const last = current[current.length - 1];
     if (last && last.role === 'assistant') {
-      return turns.length - 1;
+      return { idx: current.length - 1, turns: current };
     }
-    turns = [...turns, { role: 'assistant', text: '', cards: [] }];
-    return turns.length - 1;
+    const next = [...current, { role: 'assistant' as const, text: '', cards: [] }];
+    return { idx: next.length - 1, turns: next };
   }
 
-  function applyTextDelta(text: string) {
-    const idx = ensureAssistantTurn();
-    const cur = turns[idx] as Extract<Turn, { role: 'assistant' }>;
-    turns[idx] = { ...cur, text: cur.text + text };
+  function applyTextDelta(sessionId: string, text: string) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const { idx, turns: base } = ensureAssistantTurn(s.turns);
+    const cur = base[idx] as Extract<Turn, { role: 'assistant' }>;
+    base[idx] = { ...cur, text: cur.text + text };
+    aiAgentSessions.updateTurns(sessionId, base);
     scrollDown();
   }
 
-  function applyAssistantBlocks(blocks: Array<{ type: 'text'; text: string } | { type: 'tool_use'; name: string; input: unknown }>) {
-    const idx = ensureAssistantTurn();
-    const cur = turns[idx] as Extract<Turn, { role: 'assistant' }>;
+  function applyAssistantBlocks(
+    sessionId: string,
+    blocks: Array<{ type: 'text'; text: string } | { type: 'tool_use'; name: string; input: unknown }>,
+  ) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const { idx, turns: base } = ensureAssistantTurn(s.turns);
+    const cur = base[idx] as Extract<Turn, { role: 'assistant' }>;
     let text = cur.text;
     const cards = [...cur.cards];
     let textChanged = false;
     for (const b of blocks) {
       if (b.type === 'text') {
-        // Replace if non-empty and different — full block usually arrives once
-        // at end of streaming, may be redundant with deltas. Prefer the longer.
         if (b.text.length >= text.length) {
           text = b.text;
           textChanged = true;
@@ -101,22 +99,29 @@
         cards.push({ kind: 'tool', name: b.name, input: b.input });
       }
     }
-    turns[idx] = { ...cur, text: textChanged ? text : cur.text, cards };
+    base[idx] = { ...cur, text: textChanged ? text : cur.text, cards };
+    aiAgentSessions.updateTurns(sessionId, base);
     scrollDown();
   }
 
-  function applyToolResult(content: string) {
-    const idx = ensureAssistantTurn();
-    const cur = turns[idx] as Extract<Turn, { role: 'assistant' }>;
-    turns[idx] = { ...cur, cards: [...cur.cards, { kind: 'tool-result', content }] };
+  function applyToolResult(sessionId: string, content: string) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const { idx, turns: base } = ensureAssistantTurn(s.turns);
+    const cur = base[idx] as Extract<Turn, { role: 'assistant' }>;
+    base[idx] = { ...cur, cards: [...cur.cards, { kind: 'tool-result', content }] };
+    aiAgentSessions.updateTurns(sessionId, base);
     scrollDown();
   }
 
-  function applyResult(text: string, cost?: number) {
-    const idx = ensureAssistantTurn();
-    const cur = turns[idx] as Extract<Turn, { role: 'assistant' }>;
+  function applyResult(sessionId: string, text: string, cost?: number) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const { idx, turns: base } = ensureAssistantTurn(s.turns);
+    const cur = base[idx] as Extract<Turn, { role: 'assistant' }>;
     const finalText = text && text.length > cur.text.length ? text : cur.text;
-    turns[idx] = { ...cur, text: finalText, cost };
+    base[idx] = { ...cur, text: finalText, cost };
+    aiAgentSessions.updateTurns(sessionId, base, cost);
     scrollDown();
   }
 
@@ -126,22 +131,28 @@
     });
   }
 
-  async function ensureSession(): Promise<string> {
-    if (sessionId) return sessionId;
-    if (starting) {
-      // Already starting — wait briefly
-      while (starting && !sessionId) {
+  /**
+   * Ensure the given UI session has a live Claude CLI process + listener.
+   * Re-spawns across panel reloads (the store keeps the sessionUuid stable
+   * but the OS process dies with the host).
+   */
+  async function ensureLive(sessionId: string): Promise<string | null> {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return null;
+    if (liveSessions.has(s.sessionUuid)) return s.sessionUuid;
+    if (spawning.has(sessionId)) {
+      // Another caller is mid-spawn for this same session — poll briefly.
+      while (spawning.has(sessionId) && !liveSessions.has(s.sessionUuid)) {
         await new Promise((r) => setTimeout(r, 50));
       }
-      if (sessionId) return sessionId;
+      return liveSessions.has(s.sessionUuid) ? s.sessionUuid : null;
     }
-    starting = true;
+    spawning.add(sessionId);
     try {
-      const id = uuid();
       const settings = aiAgentSettings.value;
       const cwd = projectStore.dirPath ?? null;
-      const newId = await spawnClaudeSession({
-        sessionUuid: id,
+      await spawnClaudeSession({
+        sessionUuid: s.sessionUuid,
         cwd,
         cliPath: settings.cliPath || undefined,
         systemPrompt: settings.systemPrompt || undefined,
@@ -149,25 +160,33 @@
         permissionMode: settings.permissionMode,
         addDirs: settings.attachProjectRoot && cwd ? [cwd] : [],
       });
-      sessionId = newId;
-      unlisten = await listenClaudeStream(newId, handleStreamEvent);
-      return newId;
+      const unlisten = await listenClaudeStream(s.sessionUuid, (ev) =>
+        handleStreamEvent(sessionId, ev),
+      );
+      liveSessions.set(s.sessionUuid, unlisten);
+      return s.sessionUuid;
     } finally {
-      starting = false;
+      spawning.delete(sessionId);
     }
   }
 
-  function handleStreamEvent(ev: Parameters<Parameters<typeof listenClaudeStream>[1]>[0]) {
+  function handleStreamEvent(
+    sessionId: string,
+    ev: Parameters<Parameters<typeof listenClaudeStream>[1]>[0],
+  ) {
     if (ev.kind === 'stderr-line') {
-      // Surface stderr in the error banner — but only for non-empty interesting lines.
       if (ev.data.trim()) error = ev.data.trim();
       return;
     }
     if (ev.kind === 'exit') {
-      // Session ended; mark closed so next send starts a new one.
-      sessionId = null;
-      unlisten?.();
-      unlisten = null;
+      // The CLI for this session exited. Drop the listener; the next
+      // send() will re-spawn with the same sessionUuid.
+      const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+      if (s) {
+        const fn = liveSessions.get(s.sessionUuid);
+        fn?.();
+        liveSessions.delete(s.sessionUuid);
+      }
       return;
     }
     if (ev.kind === 'error') {
@@ -179,22 +198,21 @@
       if (!parsed) return;
       switch (parsed.kind) {
         case 'text-delta':
-          applyTextDelta(parsed.text);
+          applyTextDelta(sessionId, parsed.text);
           break;
         case 'assistant-block':
-          applyAssistantBlocks(parsed.blocks);
+          applyAssistantBlocks(sessionId, parsed.blocks);
           break;
         case 'tool-use':
-          applyAssistantBlocks([{ type: 'tool_use', name: parsed.name, input: parsed.input }]);
+          applyAssistantBlocks(sessionId, [{ type: 'tool_use', name: parsed.name, input: parsed.input }]);
           break;
         case 'tool-result':
-          applyToolResult(parsed.content);
+          applyToolResult(sessionId, parsed.content);
           break;
         case 'result':
-          applyResult(parsed.text, parsed.cost);
+          applyResult(sessionId, parsed.text, parsed.cost);
           break;
         case 'system':
-          // ignore boot-up info for now
           break;
       }
     }
@@ -205,24 +223,100 @@
     if (!text) return;
     error = null;
     input = '';
-    appendUserTurn(text);
+    const sessionId = aiAgentSessions.ensureOne();
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    // Append user turn immediately (snappy UX).
+    aiAgentSessions.updateTurns(sessionId, [...s.turns, { role: 'user', text }]);
+    scrollDown();
     try {
-      const id = await ensureSession();
-      await sendToClaude(id, userInputLine(text));
+      const uuid = await ensureLive(sessionId);
+      if (!uuid) throw new Error('Failed to spawn Claude CLI');
+      await sendToClaude(uuid, userInputLine(text));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
   }
 
-  async function newSession() {
-    if (sessionId) {
-      await killClaudeSession(sessionId).catch(() => {});
-      sessionId = null;
-      unlisten?.();
-      unlisten = null;
-    }
-    turns = [];
+  async function newSessionClicked() {
+    aiAgentSessions.create();
     error = null;
+  }
+
+  function handleSessionSelect(id: string) {
+    aiAgentSessions.setActive(id);
+    error = null;
+  }
+
+  async function handleSessionDelete(id: string) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === id);
+    if (s) {
+      const fn = liveSessions.get(s.sessionUuid);
+      fn?.();
+      liveSessions.delete(s.sessionUuid);
+    }
+    await aiAgentSessions.delete(id);
+    if (aiAgentSessions.sessions.length === 0) aiAgentSessions.create();
+  }
+
+  function handleSessionRename(id: string, title: string) {
+    aiAgentSessions.rename(id, title);
+  }
+
+  // -------- Save current session to project as markdown --------
+
+  function safeFilename(raw: string): string {
+    return raw.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || 'agent';
+  }
+
+  function turnsToMarkdown(title: string, list: Turn[]): string {
+    const iso = new Date().toISOString();
+    const lines: string[] = [`# ${title}`, '', `_Exported from AI Agent · ${iso}_`, ''];
+    for (const t of list) {
+      if (t.role === 'user') {
+        lines.push('## You', '', t.text, '');
+      } else {
+        lines.push('## Claude', '');
+        if (t.text) lines.push(t.text, '');
+        for (const c of t.cards) {
+          if (c.kind === 'tool') {
+            const inputStr = typeof c.input === 'string' ? c.input : JSON.stringify(c.input, null, 2);
+            lines.push(`> 🔧 **${c.name}**`, '', '```', inputStr, '```', '');
+          } else {
+            const body = c.content.length > 4000 ? c.content.slice(0, 4000) + '\n…' : c.content;
+            lines.push('> ↳ tool result', '', '```', body, '```', '');
+          }
+        }
+        if (t.cost != null) lines.push(`_Cost: $${t.cost.toFixed(4)}_`, '');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  async function saveAgentToProject() {
+    const s = activeSession;
+    if (!s || s.turns.length === 0) {
+      saveStatus = 'Nothing to save.';
+      setTimeout(() => (saveStatus = null), 2500);
+      return;
+    }
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) {
+      saveStatus = 'Open a project first.';
+      setTimeout(() => (saveStatus = null), 3000);
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+$/, '');
+    const filename = `${safeFilename(s.title)}-${stamp}.md`;
+    const body = turnsToMarkdown(s.title, s.turns);
+    try {
+      const result = await commands.createFileWithBody(`${projectDir}/.novelist/chats`, filename, body);
+      if (result.status === 'error') throw new Error(result.error);
+      saveStatus = `Saved · .novelist/chats/${filename}`;
+    } catch (e) {
+      saveStatus = `Save failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    setTimeout(() => (saveStatus = null), 4000);
   }
 
   function inputKeydown(e: KeyboardEvent) {
@@ -244,26 +338,45 @@
 </script>
 
 <main>
+  <SessionTabs
+    items={aiAgentSessions.sessions}
+    activeId={activeId}
+    onSelect={handleSessionSelect}
+    onNew={newSessionClicked}
+    onDelete={handleSessionDelete}
+    onRename={handleSessionRename}
+    testidPrefix="ai-agent-session"
+    newLabel="New agent session"
+  />
   <header>
     <div class="title">
       <span>AI Agent</span>
-      {#if sessionId}
-        <span class="badge live" title={`session ${sessionId.slice(0, 8)}`}>● live</span>
+      {#if isLive}
+        <span class="badge live" title={activeSession?.sessionUuid.slice(0, 8)}>● live</span>
       {:else if detecting}
         <span class="badge pending">detecting</span>
-      {:else if !detected}
+      {:else if !detected && !aiAgentSettings.value.cliPath}
         <span class="badge bad">no CLI</span>
       {:else}
         <span class="badge idle">idle</span>
       {/if}
     </div>
     <div class="actions">
-      <button class="novelist-btn novelist-btn-quiet icon-btn" title="New session" aria-label="New session" onclick={newSession} disabled={!sessionId && turns.length === 0}>
-        ↺
-      </button>
+      <button
+        class="novelist-btn novelist-btn-quiet icon-btn"
+        title="Save chat as markdown into &lt;project&gt;/.novelist/chats/"
+        aria-label="Save chat"
+        data-testid="ai-agent-save"
+        onclick={saveAgentToProject}
+        disabled={turns.length === 0}
+      >💾</button>
       <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
     </div>
   </header>
+
+  {#if saveStatus}
+    <div class="banner" data-testid="ai-agent-save-status">{saveStatus}</div>
+  {/if}
 
   {#if settingsOpen}
     <section class="settings-drawer">

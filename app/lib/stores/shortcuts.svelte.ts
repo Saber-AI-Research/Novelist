@@ -29,6 +29,11 @@ const commandI18nKeys: Record<string, string> = {
   'editor-code-inline': 'command.inlineCode',
   'editor-strikethrough': 'command.strikethrough',
   'toggle-mindmap': 'command.toggleMindmap',
+  'toggle-ai-talk': 'command.toggleAiTalk',
+  'toggle-ai-agent': 'command.toggleAiAgent',
+  'ai-talk-new-session': 'command.aiTalkNewSession',
+  'ai-agent-new-session': 'command.aiAgentNewSession',
+  'ai-talk-save-chat': 'command.aiTalkSaveChat',
 };
 
 /**
@@ -67,6 +72,19 @@ const defaultShortcuts: Record<string, string> = {
   'open-settings': 'Cmd+,',
   'go-to-line': 'Cmd+G',
   'toggle-mindmap': 'Cmd+Shift+M',
+
+  // AI panels — native built-in right-side panels.
+  // Letters chosen to avoid OS/browser conflicts:
+  //   Cmd+Shift+L (talk/Language/Letters) for AI Talk
+  //   Cmd+Shift+I (agent/Intelligence)    for AI Agent
+  'toggle-ai-talk': 'Cmd+Shift+L',
+  'toggle-ai-agent': 'Cmd+Shift+I',
+  // Panel-internal session shortcuts (only fire while the panel owns focus
+  // — router checks this in app-shortcuts). Using Cmd+Alt+N keeps Cmd+N
+  // (new file) free.
+  'ai-talk-new-session': 'Cmd+Alt+N',
+  'ai-agent-new-session': 'Cmd+Alt+Shift+N',
+  'ai-talk-save-chat': 'Cmd+Alt+S',
 
   // Editor formatting shortcuts
   'editor-bold': 'Cmd+B',

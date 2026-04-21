@@ -155,7 +155,7 @@ function buildGutterEntries(heightMap: HeightMap, lineNumbers: Map<number, numbe
 // Tests
 // ════════════════════════════════════════════════════════════════
 
-describe('image block decoration strategy', () => {
+describe('[precision] image block decoration strategy', () => {
   it('old strategy produces 3 decorations', () => {
     const decos = buildOldImageDecos(0, 25, 342);
     expect(decos).toHaveLength(3);
@@ -172,7 +172,7 @@ describe('image block decoration strategy', () => {
   });
 });
 
-describe('height map with single block replace', () => {
+describe('[precision] height map with single block replace', () => {
   // Real data: 20-line document, line 1 = image (342px), lines 2-20 = text (27px each)
   const LINE_HEIGHT = 27;
   const IMAGE_HEIGHT = 342;
@@ -214,7 +214,7 @@ describe('height map with single block replace', () => {
   });
 });
 
-describe('height map: old vs new strategy comparison', () => {
+describe('[precision] height map: old vs new strategy comparison', () => {
   const LINE_HEIGHT = 27;
   const IMAGE_HEIGHT = 342;
 
@@ -246,7 +246,7 @@ describe('height map: old vs new strategy comparison', () => {
   });
 });
 
-describe('posAtCoords without zoom', () => {
+describe('[precision] posAtCoords without zoom', () => {
   const LINE_HEIGHT = 27;
   const IMAGE_HEIGHT = 342;
   const PADDING_TOP = 39;
@@ -303,7 +303,7 @@ describe('posAtCoords without zoom', () => {
   });
 });
 
-describe('CSS zoom vs transform: coordinate impact', () => {
+describe('[precision] CSS zoom vs transform: coordinate impact', () => {
   const LINE_HEIGHT = 27;
   const IMAGE_HEIGHT = 342;
   const PADDING_TOP = 39;
@@ -408,7 +408,7 @@ describe('CSS zoom vs transform: coordinate impact', () => {
   });
 });
 
-describe('gutter line numbers for image blocks', () => {
+describe('[precision] gutter line numbers for image blocks', () => {
   it('block replace produces exactly one gutter entry per image line', () => {
     const hm = new HeightMap();
     hm.addBlock(0, 25, 342, 'widget');  // line 1 (image)
@@ -445,7 +445,7 @@ describe('gutter line numbers for image blocks', () => {
   });
 });
 
-describe('gutter alignment with content', () => {
+describe('[precision] gutter alignment with content', () => {
   it('gutter and content positions match (delta=0)', () => {
     // From real logs: delta(g4-l4)=0
     const hm = new HeightMap();
@@ -468,7 +468,7 @@ describe('gutter alignment with content', () => {
   });
 });
 
-describe('image widget height update', () => {
+describe('[precision] image widget height update', () => {
   it('height map updates when image loads (estimated → actual)', () => {
     const ESTIMATED = 200;
     const ACTUAL = 342;
@@ -493,7 +493,7 @@ describe('image widget height update', () => {
   });
 });
 
-describe('zoom implementation: CSS zoom vs transform', () => {
+describe('[precision] zoom implementation: CSS zoom vs transform', () => {
   it('CSS zoom property sets zoom on document element', () => {
     // Old implementation (BROKEN with CM6):
     // document.documentElement.style.zoom = `${level}`

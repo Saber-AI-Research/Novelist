@@ -11,6 +11,20 @@ async function enterProject(app: Page) {
   await app.getByTestId('app-layout').waitFor({ state: 'visible', timeout: 5000 });
 }
 
+async function clearAiTalkStorage(app: Page) {
+  // Wipe session + preset persistence so each test starts with the default
+  // "one empty chat" state regardless of what a previous test left behind.
+  await app.evaluate(() => {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('novelist:ai-talk:') || k.startsWith('novelist:ai-agent:')) {
+        localStorage.removeItem(k);
+      }
+    }
+  });
+  await app.reload();
+  await app.waitForSelector('#app > *');
+}
+
 test.describe('AI Talk panel', () => {
   test('toggle button appears and opens the panel', async ({ app }) => {
     await enterProject(app);
@@ -62,6 +76,177 @@ test.describe('AI Talk panel', () => {
 
     const assistant = app.getByTestId('ai-talk-msg-assistant');
     await expect(assistant).toContainText('Hello world!');
+  });
+});
+
+test.describe('AI Talk — sessions', () => {
+  test('tab bar renders with one default session', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+
+    const tabs = app.getByTestId('ai-talk-session-tabs');
+    await expect(tabs).toBeVisible();
+    // ensureOne() in onMount → always at least one tab
+    await expect(tabs.locator('[data-testid^="ai-talk-session-tab-"]')).toHaveCount(1);
+  });
+
+  test('clicking + creates a new session tab and activates it', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+
+    await app.getByTestId('ai-talk-session-new').click();
+    const tabs = app.locator('[data-testid^="ai-talk-session-tab-"]');
+    await expect(tabs).toHaveCount(2);
+  });
+
+  test('× deletes a session; panel keeps at least one tab', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+
+    await app.getByTestId('ai-talk-session-new').click();
+    const tabs = app.locator('[data-testid^="ai-talk-session-tab-"]');
+    await expect(tabs).toHaveCount(2);
+
+    // Delete one — hover the tab to reveal the × button
+    const firstTab = tabs.first();
+    await firstTab.hover();
+    await firstTab.locator('[data-testid^="ai-talk-session-tab-close-"]').click();
+    await expect(tabs).toHaveCount(1);
+
+    // Delete the remaining one — the component auto-creates a fresh session
+    const last = tabs.first();
+    await last.hover();
+    await last.locator('[data-testid^="ai-talk-session-tab-close-"]').click();
+    await expect(tabs).toHaveCount(1);
+  });
+
+  test('preset picker lists built-in presets', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+
+    const picker = app.getByTestId('ai-talk-preset-picker');
+    await expect(picker).toBeVisible();
+    const values = await picker.locator('option').evaluateAll((opts) =>
+      (opts as HTMLOptionElement[]).map((o) => o.value),
+    );
+    expect(values).toContain('none');
+    expect(values).toContain('builtin:default');
+    expect(values).toContain('builtin:editor');
+  });
+
+  test('selecting a preset persists to the active session', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+
+    await app.getByTestId('ai-talk-preset-picker').selectOption('builtin:editor');
+    const stored = await app.evaluate(() =>
+      JSON.parse(localStorage.getItem('novelist:ai-talk:sessions:v1') || 'null'),
+    );
+    expect(stored?.sessions?.[0]?.presetId).toBe('builtin:editor');
+  });
+});
+
+test.describe('AI Talk — save chat', () => {
+  test('save button is disabled when no messages exist', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-talk').click();
+    await expect(app.getByTestId('ai-talk-save')).toBeDisabled();
+  });
+
+  test('save writes a markdown file under .novelist/chats/', async ({ app, mockState }) => {
+    await app.evaluate(() => {
+      localStorage.setItem(
+        'novelist:ai-talk:settings:v1',
+        JSON.stringify({
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'sk-test',
+          model: 'gpt-4o-mini',
+          temperature: 0.7,
+          systemPrompt: '',
+          includeCurrentFile: false,
+          includeSelection: false,
+        }),
+      );
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('novelist:ai-talk:sessions') || k.startsWith('novelist:ai-talk:prompt-presets')) {
+          localStorage.removeItem(k);
+        }
+      }
+    });
+    await app.reload();
+    await app.waitForSelector('#app > *');
+    await enterProject(app);
+
+    await app.getByTestId('panel-toggle-ai-talk').click();
+    await app.getByTestId('ai-talk-input').fill('Hi there');
+    await app.getByTestId('ai-talk-send').click();
+
+    await app.evaluate(() => {
+      const mock = (window as any).__TAURI_MOCK_STATE__;
+      mock.emitAiChunk('mock-stream-1', 'Reply text');
+      mock.emitAiDone('mock-stream-1');
+    });
+
+    // Wait for stream completion before hitting save
+    await expect(app.getByTestId('ai-talk-msg-assistant')).toContainText('Reply text');
+
+    await app.getByTestId('ai-talk-save').click();
+    await expect(app.getByTestId('ai-talk-save-status')).toContainText(/Saved|保存/i);
+
+    const created = await mockState.getCreatedFiles();
+    const chat = created.find((p) => p.includes('/.novelist/chats/') && p.endsWith('.md'));
+    expect(chat).toBeTruthy();
+  });
+});
+
+test.describe('AI Agent — sessions', () => {
+  test('tab bar renders in the Agent panel', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await app.evaluate(() => {
+      (window as any).__TAURI_MOCK_STATE__.setClaudeCliDetectResult({
+        path: '/opt/homebrew/bin/claude',
+        version: '1.0.0',
+      });
+    });
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-agent').click();
+
+    await expect(app.getByTestId('ai-agent-session-tabs')).toBeVisible();
+    await expect(app.locator('[data-testid^="ai-agent-session-tab-"]')).toHaveCount(1);
+  });
+
+  test('clicking + on agent tabs creates a second session', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await app.evaluate(() => {
+      (window as any).__TAURI_MOCK_STATE__.setClaudeCliDetectResult({
+        path: '/opt/homebrew/bin/claude',
+        version: '1.0.0',
+      });
+    });
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-agent').click();
+
+    await app.getByTestId('ai-agent-session-new').click();
+    await expect(app.locator('[data-testid^="ai-agent-session-tab-"]')).toHaveCount(2);
+  });
+
+  test('save button is disabled when there are no turns yet', async ({ app }) => {
+    await clearAiTalkStorage(app);
+    await app.evaluate(() => {
+      (window as any).__TAURI_MOCK_STATE__.setClaudeCliDetectResult({
+        path: '/opt/homebrew/bin/claude',
+        version: '1.0.0',
+      });
+    });
+    await enterProject(app);
+    await app.getByTestId('panel-toggle-ai-agent').click();
+    await expect(app.getByTestId('ai-agent-save')).toBeDisabled();
   });
 });
 

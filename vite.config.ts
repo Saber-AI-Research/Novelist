@@ -66,8 +66,4 @@ export default defineConfig(async () => ({
       },
     },
   },
-  test: {
-    include: ["tests/unit/**/*.test.ts"],
-    environment: "happy-dom",
-  },
 }));

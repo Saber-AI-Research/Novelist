@@ -43,7 +43,7 @@ async function flushTimers() {
   await new Promise(r => setTimeout(r, 10));
 }
 
-describe('slash runtime integration', () => {
+describe('[contract] slash runtime integration', () => {
   let container: HTMLElement;
 
   beforeEach(() => {
@@ -179,7 +179,7 @@ describe('slash runtime integration', () => {
   });
 });
 
-describe('slash menu widget lifecycle', () => {
+describe('[contract] slash menu widget lifecycle', () => {
   let container: HTMLElement;
 
   beforeEach(() => {

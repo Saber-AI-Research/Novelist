@@ -87,6 +87,9 @@ touching the relevant code:
 | Startup instrumentation | [startup-instrumentation.md](docs/architecture/startup-instrumentation.md) |
 | Feature boundaries (core editor / core product / infrastructure / diagnostics) | [feature-boundaries.md](docs/architecture/feature-boundaries.md) |
 | Refactor plan (2026-04-20 App.svelte split + this consolidation) | [refactor-plan-2026-04-20.md](docs/architecture/refactor-plan-2026-04-20.md) |
+| Testing precision & describe-tag convention | [testing-precision.md](docs/architecture/testing-precision.md) |
+| Coverage policy & waiver registry | [COVERAGE.md](tests/COVERAGE.md) |
+| Coverage baseline numbers | [COVERAGE-BASELINE.md](tests/COVERAGE-BASELINE.md) |
 
 Huge-file scroll stabilizer details: `docs/design/scroll-stabilizer-bug.md`.
 Pre-implementation feature specs: `docs/superpowers/specs/`.

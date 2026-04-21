@@ -10,11 +10,18 @@
     type EditorSnapshot,
   } from './host';
   import { buildChatRequest, parseChatDelta, type ChatMessage } from './openai';
+  import { cancelPendingStreams } from './cleanup';
   import AiTalkSettings from './AiTalkSettings.svelte';
+  import SessionTabs from '$lib/components/ai-shared/SessionTabs.svelte';
+  import { aiTalkSessions, type DisplayMessage } from './sessions.svelte';
+  import { promptPresets } from './presets.svelte';
+  import { commands } from '$lib/ipc/commands';
+  import { projectStore } from '$lib/stores/project.svelte';
 
   type Tab = 'chat' | 'rewrite';
   let activeTab = $state<Tab>('chat');
   let settingsOpen = $state(false);
+  let saveStatus = $state<string | null>(null); // brief toast after saving
 
   // -------- Live editor selection (poll 300ms) --------
   // Shows a selection chip above the composer so the user knows their
@@ -38,39 +45,43 @@
 
   // ------------------------------- Chat -------------------------------
 
-  type DisplayMessage = { role: 'user' | 'assistant'; content: string };
-  const HISTORY_KEY = 'novelist:ai-talk:history:v1';
+  // Messages / history / cost all live in the session store now. These
+  // derived values re-track whenever the active session id changes (tab
+  // switch) or when the active session's content changes (message append).
+  let messages = $derived<DisplayMessage[]>(aiTalkSessions.active?.messages ?? []);
+  let activeSessionId = $derived(aiTalkSessions.activeId);
 
-  let messages = $state<DisplayMessage[]>(loadHistory());
   let chatInput = $state('');
   let chatStreaming = $state(false);
   let chatStreamId: string | null = null;
   let chatScroller = $state<HTMLDivElement | undefined>(undefined);
 
-  function loadHistory(): DisplayMessage[] {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (!raw) return [];
-      const data = JSON.parse(raw);
-      return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function saveHistory() {
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
-    } catch {
-      /* ignore */
-    }
+  /**
+   * Resolves the effective system prompt / model / temperature for the
+   * active session, preferring the session's assigned preset over the
+   * global AI Talk settings.
+   */
+  function activeConfig(): {
+    systemPrompt: string;
+    model: string;
+    temperature: number;
+  } {
+    const s = aiTalkSettings.value;
+    const presetId = aiTalkSessions.active?.presetId;
+    const preset = presetId ? promptPresets.get(presetId) : null;
+    return {
+      systemPrompt: preset?.systemPrompt ?? s.systemPrompt,
+      model: preset?.model ?? s.model,
+      temperature: preset?.temperature ?? s.temperature,
+    };
   }
 
   function buildChatContext(userText: string): ChatMessage[] {
     const ctx: ChatMessage[] = [];
     const s = aiTalkSettings.value;
-    if (s.systemPrompt.trim()) {
-      ctx.push({ role: 'system', content: s.systemPrompt });
+    const cfg = activeConfig();
+    if (cfg.systemPrompt.trim()) {
+      ctx.push({ role: 'system', content: cfg.systemPrompt });
     }
 
     const snap = getEditorSnapshot();
@@ -101,27 +112,38 @@
   async function sendChat() {
     const text = chatInput.trim();
     if (!text || chatStreaming) return;
+    // Make sure we have a session to write into.
+    const sessionId = aiTalkSessions.ensureOne();
+
     if (!aiTalkSettings.value.apiKey) {
-      messages = [...messages, { role: 'assistant', content: '⚠️ Set an API key in Settings first.' }];
-      saveHistory();
+      aiTalkSessions.updateMessages(sessionId, [
+        ...messages,
+        { role: 'assistant', content: '⚠️ Set an API key in Settings first.' },
+      ]);
       return;
     }
-    messages = [...messages, { role: 'user', content: text }];
+
+    // Snapshot messages through this turn locally so we can index into
+    // the assistant slot as deltas arrive; we push the full array back
+    // into the store after each update.
+    const base: DisplayMessage[] = [...messages, { role: 'user', content: text }];
     chatInput = '';
-    saveHistory();
+    aiTalkSessions.updateMessages(sessionId, base);
     scrollChat();
 
-    const assistantIdx = messages.length;
-    messages = [...messages, { role: 'assistant', content: '' }];
+    const assistantIdx = base.length;
+    const working: DisplayMessage[] = [...base, { role: 'assistant', content: '' }];
+    aiTalkSessions.updateMessages(sessionId, working);
     chatStreaming = true;
 
     let buffered = '';
     try {
+      const cfg = activeConfig();
       const req = buildChatRequest({
         baseUrl: aiTalkSettings.value.baseUrl,
         apiKey: aiTalkSettings.value.apiKey,
-        model: aiTalkSettings.value.model,
-        temperature: aiTalkSettings.value.temperature,
+        model: cfg.model,
+        temperature: cfg.temperature,
         messages: buildChatContext(text),
       });
       chatStreamId = await startAiStream(req);
@@ -130,25 +152,27 @@
           const delta = parseChatDelta(ev.data);
           if (delta) {
             buffered += delta;
-            messages[assistantIdx] = { role: 'assistant', content: buffered };
+            working[assistantIdx] = { role: 'assistant', content: buffered };
+            aiTalkSessions.updateMessages(sessionId, [...working]);
             scrollChat();
           }
         } else if (ev.kind === 'error') {
-          messages[assistantIdx] = {
+          working[assistantIdx] = {
             role: 'assistant',
             content: `${buffered}\n\n⚠️ ${ev.message}${ev.status ? ` (HTTP ${ev.status})` : ''}`,
           };
+          aiTalkSessions.updateMessages(sessionId, [...working]);
         }
       }
     } catch (e) {
-      messages[assistantIdx] = {
+      working[assistantIdx] = {
         role: 'assistant',
         content: `${buffered}\n\n⚠️ ${e instanceof Error ? e.message : String(e)}`,
       };
+      aiTalkSessions.updateMessages(sessionId, [...working]);
     } finally {
       chatStreaming = false;
       chatStreamId = null;
-      saveHistory();
     }
   }
 
@@ -162,8 +186,62 @@
   }
 
   function clearChat() {
-    messages = [];
-    saveHistory();
+    if (activeSessionId) aiTalkSessions.clearMessages(activeSessionId);
+  }
+
+  // -------- Save current session to project as markdown --------
+
+  function messagesToMarkdown(title: string, msgs: DisplayMessage[]): string {
+    const iso = new Date().toISOString();
+    const lines: string[] = [];
+    lines.push(`# ${title}`);
+    lines.push('');
+    lines.push(`_Exported from AI Talk · ${iso}_`);
+    lines.push('');
+    for (const m of msgs) {
+      lines.push(m.role === 'user' ? '## You' : '## Assistant');
+      lines.push('');
+      lines.push(m.content);
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  function safeFilename(raw: string): string {
+    return raw.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || 'chat';
+  }
+
+  async function saveChatToProject() {
+    const session = aiTalkSessions.active;
+    if (!session) {
+      saveStatus = 'No active chat to save.';
+      setTimeout(() => (saveStatus = null), 2500);
+      return;
+    }
+    if (messages.length === 0) {
+      saveStatus = 'This chat is empty.';
+      setTimeout(() => (saveStatus = null), 2500);
+      return;
+    }
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) {
+      saveStatus = 'Open a project first.';
+      setTimeout(() => (saveStatus = null), 3000);
+      return;
+    }
+    const chatsDir = `${projectDir}/.novelist/chats`;
+    const stamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+$/, '');
+    const filename = `${safeFilename(session.title)}-${stamp}.md`;
+    const body = messagesToMarkdown(session.title, messages);
+    try {
+      // createFileWithBody handles mkdir -p of the parent dir.
+      const result = await commands.createFileWithBody(chatsDir, filename, body);
+      if (result.status === 'error') throw new Error(result.error);
+      saveStatus = `Saved · .novelist/chats/${filename}`;
+    } catch (e) {
+      saveStatus = `Save failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    setTimeout(() => (saveStatus = null), 4000);
   }
 
   function scrollChat() {
@@ -283,26 +361,89 @@
       sessionStorage.removeItem('novelist:ai-talk:open-settings');
       settingsOpen = true;
     }
+    aiTalkSessions.ensureOne();
     refreshLiveSnapshot();
     selectionTimer = setInterval(refreshLiveSnapshot, 300);
+    window.addEventListener('novelist:ai-talk:save-chat', saveChatToProject);
   });
+
+  // ---- Session + preset helpers wired to SessionTabs / preset picker ----
+
+  function handleSessionSelect(id: string) {
+    // Cancel any in-flight stream on the previous session before switching.
+    if (chatStreaming) void cancelChat();
+    aiTalkSessions.setActive(id);
+  }
+
+  function handleSessionDelete(id: string) {
+    if (aiTalkSessions.activeId === id && chatStreaming) void cancelChat();
+    aiTalkSessions.delete(id);
+    // Always keep at least one session so the UI doesn't collapse to empty.
+    if (aiTalkSessions.sessions.length === 0) aiTalkSessions.create();
+  }
+
+  function handleSessionNew() {
+    if (chatStreaming) void cancelChat();
+    aiTalkSessions.create();
+  }
+
+  function handleSessionRename(id: string, title: string) {
+    aiTalkSessions.rename(id, title);
+  }
+
+  function handlePresetChange(presetId: string) {
+    if (!activeSessionId) return;
+    aiTalkSessions.setPreset(activeSessionId, presetId === 'none' ? undefined : presetId);
+  }
+
+  let activePresetId = $derived(aiTalkSessions.active?.presetId ?? 'none');
 
   // Cancel any in-flight streams when the panel unmounts so the Rust task
   // exits and the Tauri listener gets cleaned up via the iterator's finally.
   onDestroy(() => {
-    if (chatStreamId) void cancelAiStream(chatStreamId).catch(() => {});
-    if (rewriteStreamId) void cancelAiStream(rewriteStreamId).catch(() => {});
+    cancelPendingStreams([chatStreamId, rewriteStreamId], cancelAiStream);
     if (selectionTimer) clearInterval(selectionTimer);
+    window.removeEventListener('novelist:ai-talk:save-chat', saveChatToProject);
   });
 </script>
 
 <main>
+  {#if activeTab === 'chat'}
+    <SessionTabs
+      items={aiTalkSessions.sessions}
+      activeId={aiTalkSessions.activeId}
+      onSelect={handleSessionSelect}
+      onNew={handleSessionNew}
+      onDelete={handleSessionDelete}
+      onRename={handleSessionRename}
+      testidPrefix="ai-talk-session"
+      newLabel="New chat"
+    />
+  {/if}
+
   <header>
     <div class="tabs">
       <button class:active={activeTab === 'chat'} onclick={() => (activeTab = 'chat')}>Chat</button>
       <button class:active={activeTab === 'rewrite'} onclick={() => (activeTab = 'rewrite')}>Rewrite</button>
     </div>
-    <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+    <div class="header-right">
+      {#if activeTab === 'chat'}
+        <select
+          class="preset-picker"
+          data-testid="ai-talk-preset-picker"
+          value={activePresetId}
+          onchange={(e) => handlePresetChange(e.currentTarget.value)}
+          aria-label="Apply prompt preset"
+          title="Prompt preset"
+        >
+          <option value="none">No preset</option>
+          {#each promptPresets.all as p (p.id)}
+            <option value={p.id}>{p.icon ? `${p.icon} ` : ''}{p.name}</option>
+          {/each}
+        </select>
+      {/if}
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+    </div>
   </header>
 
   {#if settingsOpen}
@@ -351,7 +492,23 @@
         onkeydown={chatKeydown}
       ></textarea>
       <div class="composer-actions">
-        <button class="novelist-btn novelist-btn-ghost" onclick={clearChat} disabled={chatStreaming}>Clear</button>
+        {#if saveStatus}
+          <span class="save-status" data-testid="ai-talk-save-status">{saveStatus}</span>
+        {/if}
+        <button
+          class="novelist-btn novelist-btn-ghost"
+          data-testid="ai-talk-clear"
+          onclick={clearChat}
+          disabled={chatStreaming}
+          title="Clear current chat"
+        >Clear</button>
+        <button
+          class="novelist-btn novelist-btn-ghost"
+          data-testid="ai-talk-save"
+          onclick={saveChatToProject}
+          disabled={chatStreaming || messages.length === 0}
+          title="Save chat as markdown into &lt;project&gt;/.novelist/chats/"
+        >Save</button>
         {#if chatStreaming}
           <button class="novelist-btn novelist-btn-primary" data-testid="ai-talk-stop" onclick={cancelChat}>Stop</button>
         {:else}
@@ -439,6 +596,28 @@
     color: var(--novelist-text);
     border-color: var(--novelist-border);
     background: var(--novelist-bg);
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .preset-picker {
+    background: var(--novelist-bg);
+    border: 1px solid var(--novelist-border);
+    color: var(--novelist-text);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font: inherit;
+    font-size: 11px;
+    max-width: 160px;
+  }
+  .save-status {
+    font-size: 11px;
+    color: var(--novelist-text-secondary);
+    margin-right: auto;
+    align-self: center;
+    font-variant-numeric: tabular-nums;
   }
   .settings-drawer {
     padding: 10px;

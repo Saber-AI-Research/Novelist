@@ -145,10 +145,22 @@ no self-destroy on null coords), and keyboard close behavior.
 CM6's `drawSelection` paints first-line and middle-line rects in different
 coordinate frames, leaving a ~19px stair-step on the left edge across
 heading lines. We neutralize this by making `.cm-selectionBackground`
-transparent (keeping it only for cursor/caret rendering) and painting each
-selected line via a `Decoration.line` (`cm-novelist-selected-line`) from
-`app/lib/editor/selection-line.ts`. Regression test in
-`tests/e2e/specs/selection-geometry.spec.ts`.
+transparent (keeping it only for cursor/caret rendering) and painting
+selections ourselves in `app/lib/editor/selection-line.ts` via a hybrid:
+
+- **Fully-covered lines** → `Decoration.line`
+  (`cm-novelist-selected-line`) — uniform full-line background, handles
+  middle lines and empty lines inside the range.
+- **Partial lines** → no decoration; the theme's native `::selection`
+  rule (same 18% accent tint) paints the selected text. This matters for
+  wrapped lines: native selection fills continuation visual rows to the
+  container's right edge, while an inline-span `Decoration.mark` would
+  end each wrapped row at its last glyph and look ragged. To stop the
+  two layers stacking on fully-selected lines that contain text,
+  `::selection` is forced transparent inside `.cm-novelist-selected-line`.
+
+Regression tests in `tests/e2e/specs/selection-geometry.spec.ts` and
+`tests/unit/editor/selection-line.test.ts`.
 
 ## Editor right-click menu
 

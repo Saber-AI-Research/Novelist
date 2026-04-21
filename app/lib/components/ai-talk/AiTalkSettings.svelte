@@ -1,33 +1,20 @@
 <script lang="ts">
   import { aiTalkSettings } from './settings.svelte';
+  import { AI_TALK_PRESETS, applyAiTalkPreset } from './presets';
+  import PromptPresetManager from './PromptPresetManager.svelte';
 
   let { compact = false }: { compact?: boolean } = $props();
-
-  const PRESETS = [
-    { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-    { id: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-5' },
-    { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-    { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
-    { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
-    { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', model: 'llama3.2' },
-  ];
-
-  function applyPreset(id: string) {
-    const p = PRESETS.find((x) => x.id === id);
-    if (!p) return;
-    aiTalkSettings.update({ baseUrl: p.baseUrl, model: p.model });
-  }
 </script>
 
 <div class="ai-talk-settings" class:compact>
   <div class="presets full">
-    <span class="preset-label">Quick preset:</span>
-    {#each PRESETS as p}
+    <span class="preset-label">Provider preset:</span>
+    {#each AI_TALK_PRESETS as p}
       <button
         type="button"
         class="preset-chip"
         data-testid="ai-talk-preset-{p.id}"
-        onclick={() => applyPreset(p.id)}
+        onclick={() => applyAiTalkPreset(p.id)}
         title="{p.baseUrl} · {p.model}"
       >{p.label}</button>
     {/each}
@@ -99,7 +86,16 @@
   </p>
 </div>
 
+<div class="prompt-presets-wrap">
+  <PromptPresetManager />
+</div>
+
 <style>
+  .prompt-presets-wrap {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--novelist-border);
+  }
   .ai-talk-settings {
     display: grid;
     grid-template-columns: 1fr 1fr;
