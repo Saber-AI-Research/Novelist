@@ -42,3 +42,6 @@ research/notesnook/
 test-results/
 playwright-report/
 blob-report/
+
+# Test coverage
+coverage/
