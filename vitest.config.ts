@@ -37,7 +37,8 @@ export default defineConfig(async (env) => {
           "tests/**",
           "node_modules/**",
         ],
-        // Thresholds enabled in Task 14 after baseline capture.
+        // Thresholds deferred — P1 ships reports-only (see tests/COVERAGE-BASELINE.md).
+        // Enforcement will land once baseline closes per-module gaps (P2+).
       },
     },
   });
