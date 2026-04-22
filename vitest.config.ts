@@ -52,8 +52,16 @@ export default defineConfig(async (env) => {
           "app/lib/utils/window-drag.ts",
           "app/lib/utils/startup-timing.ts",
         ],
-        // Thresholds deferred — P1 ships reports-only (see tests/COVERAGE-BASELINE.md).
-        // Enforcement will land once baseline closes per-module gaps (P2+).
+        // Enforced thresholds (2026-04-22 campaign baseline − 2pt per metric).
+        // See tests/COVERAGE.md for the story; raise the floor when we have
+        // headroom, never lower it. If these fail, the failing tests (not the
+        // thresholds) are what needs fixing.
+        thresholds: {
+          statements: 73,
+          branches: 67,
+          functions: 75,
+          lines: 75,
+        },
       },
     },
   });
