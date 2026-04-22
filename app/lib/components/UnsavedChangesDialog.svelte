@@ -29,19 +29,21 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="fixed inset-0 z-50 flex items-center justify-center"
   style="background: rgba(0, 0, 0, 0.5);"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="unsaved-dialog-title"
   onclick={handleBackdropClick}
   data-testid="unsaved-changes-dialog"
 >
   <div
     class="rounded-lg shadow-xl p-6 max-w-md w-full mx-4"
     style="background: var(--novelist-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
-    role="document"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="unsaved-dialog-title"
+    tabindex="-1"
   >
     <h2 id="unsaved-dialog-title" class="text-base font-semibold mb-3">
       {t('dialog.unsavedChanges')}
