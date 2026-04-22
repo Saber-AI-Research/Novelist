@@ -17,6 +17,7 @@
   import { aiAgentSessions, type Turn } from './sessions.svelte';
   import { commands } from '$lib/ipc/commands';
   import type { UnlistenFn } from '@tauri-apps/api/event';
+  import { IconGear, IconTool, IconArrowInsert } from '../icons';
 
   let detected = $state<DetectedCli | null>(null);
   let detecting = $state(true);
@@ -362,21 +363,9 @@
       {/if}
     </div>
     <div class="actions">
-      <button
-        class="novelist-btn novelist-btn-quiet icon-btn"
-        title="Save chat as markdown into &lt;project&gt;/.novelist/chats/"
-        aria-label="Save chat"
-        data-testid="ai-agent-save"
-        onclick={saveAgentToProject}
-        disabled={turns.length === 0}
-      >💾</button>
-      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}><IconGear size={14} /></button>
     </div>
   </header>
-
-  {#if saveStatus}
-    <div class="banner" data-testid="ai-agent-save-status">{saveStatus}</div>
-  {/if}
 
   {#if settingsOpen}
     <section class="settings-drawer">
@@ -419,12 +408,12 @@
             {#each turn.cards as c, ci (ci)}
               {#if c.kind === 'tool'}
                 <details class="card tool">
-                  <summary>🔧 {c.name}</summary>
+                  <summary><span class="summary-icon"><IconTool size={12} /></span> {c.name}</summary>
                   <pre>{summarizeInput(c.input)}</pre>
                 </details>
               {:else}
                 <details class="card tool-result">
-                  <summary>↳ result</summary>
+                  <summary><span class="summary-icon"><IconArrowInsert size={12} /></span> result</summary>
                   <pre>{c.content.length > 4000 ? c.content.slice(0, 4000) + '\n…' : c.content}</pre>
                 </details>
               {/if}
@@ -458,6 +447,16 @@
         onkeydown={inputKeydown}
       ></textarea>
       <div class="composer-actions">
+        {#if saveStatus}
+          <span class="save-status" data-testid="ai-agent-save-status">{saveStatus}</span>
+        {/if}
+        <button
+          class="novelist-btn novelist-btn-ghost"
+          data-testid="ai-agent-save"
+          onclick={saveAgentToProject}
+          disabled={turns.length === 0}
+          title="Save chat as markdown into &lt;project&gt;/.novelist/chats/"
+        >Save</button>
         <button class="novelist-btn novelist-btn-primary" onclick={send} disabled={!input.trim()}>Send</button>
       </div>
     </div>
@@ -588,6 +587,11 @@
     color: var(--novelist-text-secondary);
     user-select: none;
   }
+  .card summary .summary-icon {
+    display: inline-flex;
+    vertical-align: -1px;
+    margin-right: 2px;
+  }
   .card pre {
     margin: 0;
     padding: 6px 10px;
@@ -643,6 +647,13 @@
     display: flex;
     justify-content: flex-end;
     gap: 6px;
+  }
+  .save-status {
+    font-size: 11px;
+    color: var(--novelist-text-secondary);
+    margin-right: auto;
+    align-self: center;
+    font-variant-numeric: tabular-nums;
   }
   /* Button styles live in app.css — .novelist-btn / -primary / -ghost. */
 </style>
