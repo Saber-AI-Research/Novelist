@@ -2,13 +2,13 @@
 
 Coverage is measured by `pnpm test:coverage` (Vitest 4 + v8 provider).
 Reports land in `coverage/` (git-ignored). See
-`tests/COVERAGE-BASELINE.md` for current numbers and aspirational
-Phase-1 targets.
+`tests/COVERAGE-BASELINE.md` for the current enforced floors.
 
-**Phase-1 stance:** reports-only, no CI hard threshold. Per-module
-coverage enforcement is deferred to a later phase. Waivers listed
-below apply regardless: these paths should never be counted toward
-any future threshold.
+**Enforcement stance (post-2026-04-22 campaign):** `pnpm test:coverage`
+fails locally and in CI when any of the four thresholds regresses below
+floor (lines 75 / branches 67 / functions 75 / statements 73). Floors
+sit 2 pp under achieved to absorb noise; raise them as headroom grows.
+Waivers below remove paths from the denominator entirely.
 
 ## Waiver Policy
 

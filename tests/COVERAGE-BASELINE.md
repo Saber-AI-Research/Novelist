@@ -1,16 +1,20 @@
 # Coverage Baseline
 
-Captured **2026-04-21** on branch `test/phase-1-hierarchy` after the
-P1 hierarchy split (commits `c7c0393` and earlier). These numbers represent
-the current baseline coverage — P1 ships reports-only; threshold enforcement
-is deferred to later phases.
+Captured **2026-04-22** on branch `test/coverage-campaign` after the
+2026-04-22 one-shot coverage campaign (C3–C9). These numbers represent
+the enforced baseline; `vitest.config.ts` fails the build whenever any
+metric dips below the floor.
 
-| Metric      | Baseline |
-|-------------|----------|
-| Lines       | 24.21 %  |
-| Functions   | 16.14 %  |
-| Branches    | 23.34 %  |
-| Statements  | 19.64 %  |
+| Metric      | Achieved | Enforced floor |
+|-------------|----------|----------------|
+| Lines       | 77.25 %  | 75 %           |
+| Functions   | 77.84 %  | 75 %           |
+| Branches    | 69.67 %  | 67 %           |
+| Statements  | 76.02 %  | 73 %           |
+
+Floors sit 2 pp below the achieved numbers so a typical refactor doesn't
+trip the gate, but meaningful regressions will. Raise the floor when we
+have headroom. Never lower it — if these fail, fix the tests.
 
 ## How to reproduce
 
@@ -18,40 +22,42 @@ is deferred to later phases.
 pnpm test:coverage
 ```
 
-Text reporter prints the summary; HTML output lands in `coverage/index.html`
-(git-ignored).
+Text summary prints to the terminal. HTML output lands in
+`coverage/index.html` (git-ignored).
 
-## Phase-1 target — deferred to later phases
+## Campaign history
 
-Phase-1 ships **reports-only**: `pnpm test:coverage` runs in CI and
-uploads coverage as a build artifact, but does NOT fail the build on
-threshold breach. Aspirational targets remain:
+| Date       | Lines    | Branches | Functions | Statements | Notes |
+|------------|----------|----------|-----------|------------|-------|
+| 2026-04-21 | 24.21 %  | 23.34 %  | 16.14 %   | 19.64 %    | P1 hierarchy split baseline (reports-only) |
+| 2026-04-22 | 77.25 %  | 69.67 %  | 77.84 %   | 76.02 %    | Post-campaign baseline (thresholds live) |
 
-| Metric      | Aspirational target |
-|-------------|---------------------|
-| Lines       | 80 %                |
-| Functions   | 85 %                |
-| Branches    | 70 %                |
-| Statements  | 80 %                |
+## Per-module headroom (post-campaign)
 
-The baseline above (≈20 %) is far below those targets. Closing the
-gap requires writing tests against the 0-coverage modules first
-(services/new-file.ts, canvas/kanban components, viewport.ts, zen.ts,
-outline.ts, multiple utils). That work is scoped into P2–P7 (see
-`docs/superpowers/specs/2026-04-21-test-hierarchy-and-coverage-design.md`).
+The 2026-04-22 campaign hit every source file except a small set that
+remains hard to reach from Vitest. These show up in the `% Lines` column
+below their siblings — the uplift is real; the residual lives where
+Vitest cannot follow without a full CM6 environment.
 
-Once a later phase brings baseline to within ~5 pt of an aspirational
-target, enable the vitest threshold for that metric in
-`vitest.config.ts` and delete its row from the "Deferred Gaps"
-section below.
+| Area               | Lines  | Next uplift idea |
+|--------------------|--------|------------------|
+| `lib/services`     | 100 %  | — |
+| `lib/i18n`         | 100 %  | — |
+| `lib/utils`        | 96.7 % | Scroll-edit / benchmark are waived. |
+| `lib/composables`  | 93.0 % | `window-title` `$effect` needs Svelte runtime. |
+| `lib/stores`       | 90.7 % | Hot paths covered; residual is edge-case branches. |
+| `lib/editor`       | 61.9 % | `wysiwyg.ts` / `setup.ts` / `mermaid.ts` / `viewport.ts` — large CM6-coupled modules best tested via E2E. |
+| `ai-agent` panel   | 45.9 % | `sessions.svelte.ts` — Svelte runtime / Tauri event round-trip. |
+| `ai-talk` panel    | 88.8 % | — |
 
-## Deferred Gaps
+See `tests/COVERAGE.md` for the per-category waiver table.
 
-All four metrics currently gap their aspirational targets:
+## Running the enforcement gate locally
 
-| Metric      | Baseline | Target | Gap       | Closing work |
-|-------------|----------|--------|-----------|--------------|
-| Lines       | 24.21 %  | 80 %   | –56 pt    | P2–P7 per-module tests |
-| Functions   | 16.14 %  | 85 %   | –69 pt    | P2–P7 per-module tests |
-| Branches    | 23.34 %  | 70 %   | –47 pt    | P2–P7 per-module tests |
-| Statements  | 19.64 %  | 80 %   | –60 pt    | P2–P7 per-module tests |
+```
+pnpm test:coverage
+```
+
+A non-zero exit means one of the four thresholds breached. Re-run with
+`--reporter=html` and open `coverage/index.html` to inspect which file
+regressed.
