@@ -1,5 +1,6 @@
 import { commands } from '$lib/ipc/commands';
-import { ask, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
 import { isScratchFile, nextScratchDisplayName } from '$lib/utils/scratch';
 import { isPlaceholder, renameFromH1 } from '$lib/utils/placeholder';
 import { extractFirstH1 } from '$lib/utils/h1';
@@ -316,14 +317,15 @@ class TabsStore {
       if (idx === -1) continue;
       const tab = pane.tabs[idx];
 
-      // Prompt for unsaved changes
+      // Prompt for unsaved changes (Save / Don't Save / Cancel)
       if (tab.isDirty) {
         const scratch = isScratchFile(tab.filePath);
-        const shouldSave = await ask(
-          t('dialog.unsavedBeforeClose', { names: tab.fileName }),
-          { title: t('dialog.unsavedChanges'), kind: 'warning', okLabel: scratch ? t('dialog.saveAs') : t('dialog.save'), cancelLabel: t('dialog.dontSave') }
-        );
-        if (shouldSave) {
+        const choice = await confirmUnsavedChanges({
+          fileNames: tab.fileName,
+          saveLabel: scratch ? t('dialog.saveAs') : t('dialog.save'),
+        });
+        if (choice === 'cancel') return;
+        if (choice === 'save') {
           this.syncFromView(tab.id);
           const fresh = this.findByPath(tab.filePath);
           if (fresh?.content) {
@@ -336,6 +338,9 @@ class TabsStore {
                 await commands.registerWriteIgnore(savePath);
                 const result = await commands.writeFile(savePath, fresh.content);
                 if (result.status === 'ok') this.markSaved(fresh.id);
+              } else {
+                // User cancelled the Save-As native picker — abort the close.
+                return;
               }
             } else {
               await commands.registerWriteIgnore(fresh.filePath);
@@ -347,6 +352,7 @@ class TabsStore {
             }
           }
         }
+        // choice === 'discard' falls through: close without saving.
       }
 
       commands.unregisterOpenFile(tab.filePath).catch(() => {});
