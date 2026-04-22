@@ -101,4 +101,38 @@ Second paragraph here.`;
   it("handles hyphenated words as one", () => {
     expect(countWords("well-known")).toBe(1);
   });
+
+  // Surrogate pairs + supplementary-plane CJK (exercises isCJK branches
+  // at lines 63-76 — Extension B..G code points).
+  it("counts a supplementary-plane CJK character (Extension B) as 1", () => {
+    // U+20000 CJK Unified Ideographs Extension B — surrogate pair D840 DC00
+    expect(countWords("\uD840\uDC00")).toBe(1);
+  });
+
+  it("counts supplementary-plane CJK adjacent to Latin correctly", () => {
+    // "hi" (1 latin word) + U+20000 (1 CJK) + "x" (1 latin word) = 3
+    expect(countWords("hi\uD840\uDC00x")).toBe(3);
+  });
+
+  it("counts multiple supplementary-plane CJK characters each as 1", () => {
+    // U+20000 + U+2A700 + U+2B740 — three pairs, each 1 word
+    expect(countWords("\uD840\uDC00\uD869\uDF00\uD86D\uDF40")).toBe(3);
+  });
+
+  it("treats non-CJK surrogate-pair codepoints as Latin-word characters", () => {
+    // U+1F600 Emoji (😀) — not in any CJK range; combined with letters
+    // the whole run reads as one Latin word.
+    expect(countWords("hi\uD83D\uDE00there")).toBe(1);
+  });
+
+  it("treats a lone high surrogate with no follower as a Latin-word char", () => {
+    // Broken UTF-16 — lone D800 without a low surrogate; must not crash
+    // and must not count as CJK.
+    expect(countWords("a\uD800b")).toBe(1);
+  });
+
+  it("treats accented Latin (non-ASCII BMP, non-CJK) as Latin-word chars", () => {
+    // Exercises the line-42 "Other non-ASCII" branch.
+    expect(countWords("café résumé")).toBe(2);
+  });
 });

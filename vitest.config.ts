@@ -30,15 +30,38 @@ export default defineConfig(async (env) => {
       coverage: {
         provider: "v8",
         reporter: ["text", "html", "json"],
-        include: ["app/lib/**/*.{ts,svelte}"],
+        // TS-only: all .svelte files are UI and covered by Playwright e2e, not
+        // Vitest. Including them here would only drag the denominator down.
+        // See tests/COVERAGE.md for the per-category waiver rationale.
+        include: ["app/lib/**/*.ts"],
         exclude: [
           "app/lib/ipc/commands.ts",
           "app/lib/**/*.d.ts",
           "tests/**",
           "node_modules/**",
+          // Campaign waivers (2026-04-22) — see tests/COVERAGE.md
+          "app/lib/components/icons/index.ts",
+          "app/lib/i18n/index.ts",
+          "app/lib/i18n/types.ts",
+          "app/lib/i18n/locales/en.ts",
+          "app/lib/i18n/locales/zh-CN.ts",
+          "app/lib/updater.ts",
+          "app/lib/utils/benchmark.ts",
+          "app/lib/utils/scroll-edit-test.ts",
+          "app/lib/utils/resize-drag.ts",
+          "app/lib/utils/window-drag.ts",
+          "app/lib/utils/startup-timing.ts",
         ],
-        // Thresholds deferred — P1 ships reports-only (see tests/COVERAGE-BASELINE.md).
-        // Enforcement will land once baseline closes per-module gaps (P2+).
+        // Enforced thresholds (2026-04-22 campaign baseline − 2pt per metric).
+        // See tests/COVERAGE.md for the story; raise the floor when we have
+        // headroom, never lower it. If these fail, the failing tests (not the
+        // thresholds) are what needs fixing.
+        thresholds: {
+          statements: 73,
+          branches: 67,
+          functions: 75,
+          lines: 75,
+        },
       },
     },
   });

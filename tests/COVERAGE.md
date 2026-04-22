@@ -2,13 +2,13 @@
 
 Coverage is measured by `pnpm test:coverage` (Vitest 4 + v8 provider).
 Reports land in `coverage/` (git-ignored). See
-`tests/COVERAGE-BASELINE.md` for current numbers and aspirational
-Phase-1 targets.
+`tests/COVERAGE-BASELINE.md` for the current enforced floors.
 
-**Phase-1 stance:** reports-only, no CI hard threshold. Per-module
-coverage enforcement is deferred to a later phase. Waivers listed
-below apply regardless: these paths should never be counted toward
-any future threshold.
+**Enforcement stance (post-2026-04-22 campaign):** `pnpm test:coverage`
+fails locally and in CI when any of the four thresholds regresses below
+floor (lines 75 / branches 67 / functions 75 / statements 73). Floors
+sit 2 pp under achieved to absorb noise; raise them as headroom grows.
+Waivers below remove paths from the denominator entirely.
 
 ## Waiver Policy
 
@@ -45,6 +45,18 @@ Anything else must be tested (or waived with an explicit entry here).
 | `app/lib/**/*.d.ts` | Auto-generated | Type-only declarations, no runtime code. | permanent |
 | `tests/**` | N/A (tests themselves) | Excluded from self-coverage. | permanent |
 | `node_modules/**` | Third-party | Not our code. | permanent |
+| `app/lib/**/*.svelte` | UI | Svelte components are UI — covered by Playwright e2e, not Vitest. `coverage.include` is TS-only. | permanent |
+| `app/lib/components/icons/index.ts` | Auto-generated (barrel) | Re-exports only; zero logic. See `tests/COVERAGE-AUDIT.md`. | permanent |
+| `app/lib/i18n/index.ts` | Auto-generated (barrel) | Re-exports only. See `tests/COVERAGE-AUDIT.md`. | permanent |
+| `app/lib/i18n/types.ts` | Auto-generated (types) | Types-only, no runtime code. | permanent |
+| `app/lib/i18n/locales/en.ts` | Data | Pure translation table; 100% literal data. | permanent |
+| `app/lib/i18n/locales/zh-CN.ts` | Data | Pure translation table; 100% literal data. | permanent |
+| `app/lib/updater.ts` | Platform | Loads `@tauri-apps/plugin-updater` + `plugin-dialog` at module init; requires real Tauri runtime. | permanent |
+| `app/lib/utils/benchmark.ts` | Dev harness | Constructs real `EditorView` for in-app perf benchmark; not a product code path. | permanent |
+| `app/lib/utils/scroll-edit-test.ts` | Dev harness | Manual scroll+edit stability runner; grabs `window.__novelist_view`. | permanent |
+| `app/lib/utils/resize-drag.ts` | Platform glue | `window` mousemove/mouseup listener factory; no logic beyond listener wiring. | permanent |
+| `app/lib/utils/window-drag.ts` | Platform | `getCurrentWindow().startDragging()` + DOM `closest` checks — Tauri-only. | permanent |
+| `app/lib/utils/startup-timing.ts` | Dev instrumentation | `performance.mark` + `invoke('log_startup_phase')`; no business logic. | permanent |
 
 ## Retired Waivers
 

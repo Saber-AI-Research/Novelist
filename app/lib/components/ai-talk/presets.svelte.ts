@@ -11,11 +11,22 @@
  * AI Talk settings when applied to a session.
  */
 
+import type { Component } from 'svelte';
+import {
+  IconChat,
+  IconPen,
+  IconDocument,
+  IconGlobe,
+  IconClipboard,
+  IconLightbulb,
+} from '../icons';
+
 export type PromptPreset = {
   id: string;
   name: string;
   systemPrompt: string;
-  icon?: string;
+  /** Component for built-ins (rendered inline); string for user presets (emoji/text). */
+  icon?: Component | string;
   /** Optional overrides that take precedence over global settings. */
   temperature?: number;
   model?: string;
@@ -30,14 +41,14 @@ export const BUILTIN_PRESETS: PromptPreset[] = [
   {
     id: 'builtin:default',
     name: 'Default',
-    icon: '💬',
+    icon: IconChat,
     systemPrompt: 'You are a helpful writing assistant for novelists.',
     builtin: true,
   },
   {
     id: 'builtin:novelist-zh',
     name: '小说助手',
-    icon: '✍️',
+    icon: IconPen,
     systemPrompt:
       '你是一位中文小说写作助手。用户正在创作小说，你需要在情节、人物、对白、节奏、世界观等方面提供具体、可落地的建议。\n\n回复原则：\n- 中文回复，保持作者语气\n- 给具体改写示例，不要只给抽象评论\n- 尊重作者既有设定，提出改动先解释理由\n- 不自我审查，陪作者探索黑暗、复杂的题材',
     builtin: true,
@@ -45,7 +56,7 @@ export const BUILTIN_PRESETS: PromptPreset[] = [
   {
     id: 'builtin:editor',
     name: 'Editor',
-    icon: '📝',
+    icon: IconDocument,
     systemPrompt:
       'You are a rigorous line editor. Given prose, suggest edits for clarity, rhythm, word choice, and continuity. Return a numbered list of concrete changes with the original→suggested text shown side by side. Do not rewrite wholesale.',
     temperature: 0.3,
@@ -54,7 +65,7 @@ export const BUILTIN_PRESETS: PromptPreset[] = [
   {
     id: 'builtin:translator',
     name: 'Translator',
-    icon: '🌐',
+    icon: IconGlobe,
     systemPrompt:
       'You are a literary translator. Translate faithfully, preserving tone, register, and rhythm. If the target language is ambiguous, infer from the most recent user message. Return ONLY the translation.',
     temperature: 0.2,
@@ -63,7 +74,7 @@ export const BUILTIN_PRESETS: PromptPreset[] = [
   {
     id: 'builtin:summarizer',
     name: 'Summarizer',
-    icon: '📋',
+    icon: IconClipboard,
     systemPrompt:
       'Summarize the given material in crisp, plain prose. Preserve names, numbers, and causality; drop adjectives, qualifiers, and repetition. 3 paragraphs max unless asked otherwise.',
     temperature: 0.2,
@@ -72,7 +83,7 @@ export const BUILTIN_PRESETS: PromptPreset[] = [
   {
     id: 'builtin:brainstorm',
     name: 'Brainstorm',
-    icon: '💡',
+    icon: IconLightbulb,
     systemPrompt:
       'You are a fast brainstorming partner. For any prompt, return 8–12 distinct angles, one line each, no preamble. Range from obvious to wild. Quantity over polish.',
     temperature: 0.9,
