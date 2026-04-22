@@ -408,6 +408,8 @@ export const en: TranslationMap = {
   'settings.shortcuts.reset': 'reset',
   'settings.shortcuts.resetAll': 'Reset All to Defaults',
   'settings.shortcuts.hint': 'Click a shortcut badge to record a new key combination. Press Esc to cancel recording.',
+  'settings.shortcuts.searchPlaceholder': 'Search by name or key (e.g. "outline", "⌘P", "Cmd+B")',
+  'settings.shortcuts.noMatches': 'No shortcuts match your search.',
 
   'settings.templates': 'Templates',
   'settings.templates.noTemplates': 'No custom templates yet. Save a project as template or import a zip.',

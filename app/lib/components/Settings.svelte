@@ -3,7 +3,7 @@
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
   import { commands } from '$lib/ipc/commands';
-  import { shortcutsStore, editorCommandIds, formatShortcut } from '$lib/stores/shortcuts.svelte';
+  import { shortcutsStore, editorCommandIds, formatShortcut, buildShortcutString, matchesShortcutQuery } from '$lib/stores/shortcuts.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -216,6 +216,7 @@
   import HelpTooltip from '$lib/components/HelpTooltip.svelte';
   import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-settings.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
+  import { IconGear } from './icons';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
 
@@ -402,39 +403,33 @@
   // Shortcut recording state
   let recordingCommandId = $state<string | null>(null);
 
-  function startRecording(commandId: string) {
-    recordingCommandId = commandId;
+  // Shortcut search — matches against label, canonical ("Cmd+Shift+P"), and
+  // display form ("⇧⌘P"). Case-insensitive substring match; spaces ignored so
+  // "⌘ P" and "cmd+shift+p" both work.
+  let shortcutSearch = $state('');
+
+  function matchesSearch(cmdId: string, query: string): boolean {
+    const canonical = shortcutsStore.get(cmdId);
+    return matchesShortcutQuery(
+      shortcutsStore.labels[cmdId] ?? '',
+      canonical,
+      formatShortcut(canonical),
+      query,
+    );
   }
 
-  function buildShortcutString(e: KeyboardEvent): string | null {
-    // Ignore bare modifier keys
-    if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return null;
+  let filteredAppCommandIds = $derived(
+    shortcutsStore.appCommandIds.filter(id => matchesSearch(id, shortcutSearch))
+  );
+  let filteredEditorCommandIds = $derived(
+    editorCommandIds.filter(id => matchesSearch(id, shortcutSearch))
+  );
+  let shortcutSearchHasResults = $derived(
+    filteredAppCommandIds.length + filteredEditorCommandIds.length > 0
+  );
 
-    const parts: string[] = [];
-    if (e.metaKey || e.ctrlKey) parts.push('Cmd');
-    if (e.altKey) parts.push('Alt');
-    if (e.shiftKey) parts.push('Shift');
-
-    // Normalize the key
-    let key = e.key;
-    if (key === ' ') key = 'Space';
-    else if (key.length === 1) key = key.toUpperCase();
-    // Function keys and special keys stay as-is (F11, Escape, etc.)
-
-    // macOS Option+<digit/letter> mangles e.key ("¡", "å", …). Recover the
-    // physical key from e.code so the stored canonical form is correct.
-    const code = (e as KeyboardEvent & { code?: string }).code;
-    if (e.altKey && code) {
-      const digit = code.match(/^Digit([0-9])$/);
-      if (digit) key = digit[1];
-      else {
-        const letter = code.match(/^Key([A-Z])$/);
-        if (letter) key = letter[1];
-      }
-    }
-
-    parts.push(key);
-    return parts.join('+');
+  function startRecording(commandId: string) {
+    recordingCommandId = commandId;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -505,7 +500,7 @@
             aria-label="Configure {plugin.name}"
             data-testid="plugin-configure-{plugin.id}"
             onclick={() => openPluginSettings(plugin.id)}
-          >⚙</button>
+          ><IconGear size={12} /></button>
         {/if}
         <button
           type="button"
@@ -832,11 +827,38 @@
       {:else if activeSection === 'shortcuts'}
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.shortcuts')}</h3>
 
+        <!-- Search -->
+        <div class="mb-4 relative">
+          <input
+            type="text"
+            class="w-full text-sm px-3 py-2 pr-8 rounded"
+            style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border); outline: none;"
+            placeholder={t('settings.shortcuts.searchPlaceholder')}
+            bind:value={shortcutSearch}
+            data-testid="shortcut-search-input"
+          />
+          {#if shortcutSearch}
+            <button
+              class="absolute top-1/2 right-2 -translate-y-1/2 text-xs px-1 cursor-pointer"
+              style="background: none; border: none; color: var(--novelist-text-secondary);"
+              onclick={() => { shortcutSearch = ''; }}
+              aria-label="clear"
+            >×</button>
+          {/if}
+        </div>
+
+        {#if !shortcutSearchHasResults}
+          <div class="text-sm py-6 text-center" style="color: var(--novelist-text-secondary);" data-testid="shortcut-search-empty">
+            {t('settings.shortcuts.noMatches')}
+          </div>
+        {/if}
+
         <!-- App shortcuts -->
+        {#if filteredAppCommandIds.length > 0}
         <div class="mb-4">
           <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.shortcuts.application')}</div>
           <div class="space-y-1">
-            {#each shortcutsStore.appCommandIds as cmdId}
+            {#each filteredAppCommandIds as cmdId}
               {@const currentShortcut = shortcutsStore.get(cmdId)}
               {@const isCustom = shortcutsStore.isCustomized(cmdId)}
               {@const isRecording = recordingCommandId === cmdId}
@@ -868,12 +890,14 @@
             {/each}
           </div>
         </div>
+        {/if}
 
         <!-- Editor shortcuts -->
+        {#if filteredEditorCommandIds.length > 0}
         <div class="mb-4">
           <div class="text-xs font-semibold mb-2" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); text-transform: uppercase; letter-spacing: 0.05em;">{t('settings.shortcuts.editorFormatting')}</div>
           <div class="space-y-1">
-            {#each editorCommandIds as cmdId}
+            {#each filteredEditorCommandIds as cmdId}
               {@const currentShortcut = shortcutsStore.get(cmdId)}
               {@const isCustom = shortcutsStore.isCustomized(cmdId)}
               {@const isRecording = recordingCommandId === cmdId}
@@ -905,6 +929,7 @@
             {/each}
           </div>
         </div>
+        {/if}
 
         <div class="mt-4 flex justify-end">
           <button

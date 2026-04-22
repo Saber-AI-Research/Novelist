@@ -408,6 +408,8 @@ export const zhCN: TranslationMap = {
   'settings.shortcuts.reset': '重置',
   'settings.shortcuts.resetAll': '全部恢复默认',
   'settings.shortcuts.hint': '点击快捷键徽章录制新的组合键。按 Esc 取消录制。',
+  'settings.shortcuts.searchPlaceholder': '按名称或按键搜索（例如"大纲"、"⌘P"、"Cmd+B"）',
+  'settings.shortcuts.noMatches': '没有匹配的快捷键。',
 
   'settings.templates': '模板',
   'settings.templates.noTemplates': '暂无自定义模板。可将项目保存为模板或导入 zip 文件。',

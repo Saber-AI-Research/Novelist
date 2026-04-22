@@ -154,8 +154,66 @@ export function matchesShortcut(e: KeyboardEvent, shortcut: string): boolean {
   return false;
 }
 
-const IS_MAC = typeof navigator !== 'undefined'
-  && /mac|iphone|ipad|ipod/i.test(navigator.userAgent || '');
+/**
+ * Case-insensitive substring match of a query against a command's label,
+ * canonical shortcut ("Cmd+Shift+P"), and display shortcut ("⇧⌘P"). Whitespace
+ * is ignored so "⌘ P" and "cmd + shift + p" both hit the same entry.
+ *
+ * Empty query matches everything.
+ */
+export function matchesShortcutQuery(
+  label: string,
+  canonical: string,
+  display: string,
+  query: string,
+): boolean {
+  if (!query.trim()) return true;
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, '');
+  const q = norm(query);
+  return norm(label).includes(q) || norm(canonical).includes(q) || norm(display).includes(q);
+}
+
+/** Platform-detection seam. Tests override this via `platformInfo.isMac = …`. */
+export const platformInfo = {
+  isMac:
+    typeof navigator !== 'undefined'
+    && /mac|iphone|ipad|ipod/i.test(navigator.userAgent || ''),
+};
+
+/**
+ * Build the canonical shortcut string ("Cmd+Shift+P") from a KeyboardEvent
+ * captured while recording a new binding.
+ *
+ * Returns `null` for bare modifier presses (Meta/Ctrl/Alt/Shift alone) so the
+ * caller can keep listening until a real key is hit.
+ */
+export function buildShortcutString(e: KeyboardEvent): string | null {
+  if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return null;
+
+  const parts: string[] = [];
+  if (e.metaKey || e.ctrlKey) parts.push('Cmd');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+
+  let key = e.key;
+  if (key === ' ') key = 'Space';
+  else if (key.length === 1) key = key.toUpperCase();
+
+  // macOS Option+<digit/letter> mangles e.key ("¡", "å", …). Recover the
+  // physical key from e.code so the stored canonical form is correct.
+  const code = (e as KeyboardEvent & { code?: string }).code;
+  if (e.altKey && code) {
+    const digit = code.match(/^Digit([0-9])$/);
+    if (digit) key = digit[1];
+    else {
+      const letter = code.match(/^Key([A-Z])$/);
+      if (letter) key = letter[1];
+    }
+  }
+
+  parts.push(key);
+  return parts.join('+');
+}
 
 /**
  * Render a canonical shortcut string ("Cmd+Alt+1") in a platform-native way:
@@ -163,9 +221,9 @@ const IS_MAC = typeof navigator !== 'undefined'
  *   - Other: Cmd is shown as "Ctrl" — "Ctrl+Alt+1"
  *
  * Shortcuts are always STORED in the canonical "Cmd+Alt+Key" form; this
- * helper is only for display.
+ * helper is only for display. Tests pass `opts.isMac` to pin the platform.
  */
-export function formatShortcut(shortcut: string): string {
+export function formatShortcut(shortcut: string, opts?: { isMac?: boolean }): string {
   if (!shortcut) return '';
   const parts = shortcut.split('+');
   const rawKey = parts[parts.length - 1];
@@ -180,7 +238,8 @@ export function formatShortcut(shortcut: string): string {
     rawKey === 'Escape' ? 'Esc' :
     rawKey;
 
-  if (IS_MAC) {
+  const isMac = opts?.isMac ?? platformInfo.isMac;
+  if (isMac) {
     // Apple order: Control ⌃ · Option ⌥ · Shift ⇧ · Command ⌘ · Key — no separators
     let s = '';
     if (mods.has('ctrl')) s += '⌃';
