@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { ask } from '@tauri-apps/plugin-dialog';
+import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { projectStore } from '$lib/stores/project.svelte';
 import { tabsStore } from '$lib/stores/tabs.svelte';
@@ -64,11 +64,12 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
     if (dirty.length > 0) {
       event.preventDefault();
       const names = dirty.map(dt => dt.fileName).join(', ');
-      const shouldSave = await ask(
-        ctx.t('dialog.unsavedBeforeClose', { names }),
-        { title: ctx.t('dialog.unsavedChanges'), kind: 'warning', okLabel: ctx.t('dialog.save'), cancelLabel: ctx.t('dialog.dontSave') },
-      );
-      if (shouldSave) {
+      const choice = await confirmUnsavedChanges({
+        fileNames: names,
+        saveLabel: ctx.t('dialog.save'),
+      });
+      if (choice === 'cancel') return;
+      if (choice === 'save') {
         await tabsStore.saveAllDirty();
       }
       for (const tab of tabsStore.dirtyTabs) tabsStore.markSaved(tab.id);
