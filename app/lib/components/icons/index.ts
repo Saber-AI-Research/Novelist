@@ -1,0 +1,13 @@
+export { default as IconChat } from './IconChat.svelte';
+export { default as IconPen } from './IconPen.svelte';
+export { default as IconDocument } from './IconDocument.svelte';
+export { default as IconGlobe } from './IconGlobe.svelte';
+export { default as IconClipboard } from './IconClipboard.svelte';
+export { default as IconLightbulb } from './IconLightbulb.svelte';
+export { default as IconPackage } from './IconPackage.svelte';
+export { default as IconArrowInsert } from './IconArrowInsert.svelte';
+export { default as IconClose } from './IconClose.svelte';
+export { default as IconGear } from './IconGear.svelte';
+export { default as IconWarning } from './IconWarning.svelte';
+export { default as IconMap } from './IconMap.svelte';
+export { default as IconTool } from './IconTool.svelte';

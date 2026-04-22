@@ -4,6 +4,7 @@
   import { Markmap } from 'markmap-view';
   import { t } from '$lib/i18n';
   import { applyFoldLevel, type MindmapNode } from '$lib/utils/mindmap';
+  import { IconMap, IconClose } from './icons';
 
   interface Props {
     content: string;
@@ -112,9 +113,9 @@
           title={t('mindmap.miniMap')}
           aria-label={t('mindmap.miniMap')}
           data-testid="mindmap-minimap-toggle"
-        >🗺</button>
+        ><IconMap size={14} /></button>
         <span class="sep"></span>
-        <button type="button" class="btn" onclick={onClose} title={t('mindmap.close')} aria-label={t('mindmap.close')} data-testid="mindmap-close">✕</button>
+        <button type="button" class="btn" onclick={onClose} title={t('mindmap.close')} aria-label={t('mindmap.close')} data-testid="mindmap-close"><IconClose size={14} /></button>
       </div>
     </div>
     <div class="content">

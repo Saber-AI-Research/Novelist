@@ -17,6 +17,7 @@
   import { promptPresets } from './presets.svelte';
   import { commands } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { IconGear, IconClose, IconDocument } from '../icons';
 
   type Tab = 'chat' | 'rewrite';
   let activeTab = $state<Tab>('chat');
@@ -438,11 +439,11 @@
         >
           <option value="none">No preset</option>
           {#each promptPresets.all as p (p.id)}
-            <option value={p.id}>{p.icon ? `${p.icon} ` : ''}{p.name}</option>
+            <option value={p.id}>{typeof p.icon === 'string' && p.icon ? `${p.icon} ` : ''}{p.name}</option>
           {/each}
         </select>
       {/if}
-      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}>⚙</button>
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}><IconGear size={14} /></button>
     </div>
   </header>
 
@@ -469,7 +470,7 @@
     <div class="composer" data-testid="ai-talk-composer">
       {#if liveSnapshot && !suppressSelectionOnce && aiTalkSettings.value.includeSelection}
         <div class="selection-chip" data-testid="selection-chip">
-          <span class="chip-icon">📝</span>
+          <span class="chip-icon"><IconDocument size={12} /></span>
           <span class="chip-label">
             Selection · {liveSnapshot.text.length} chars
           </span>
@@ -480,7 +481,7 @@
             title="Don't use this selection for the next message"
             aria-label="Remove selection context"
             onclick={clearSelectionContextOnce}
-          >✕</button>
+          ><IconClose size={12} /></button>
         </div>
       {/if}
       <textarea

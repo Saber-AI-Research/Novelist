@@ -4,6 +4,7 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { IconClose } from '../icons';
 
   let { paneId = 'pane-1' }: { paneId?: string } = $props();
 
@@ -170,7 +171,7 @@
             <h3 class="col-name" ondblclick={() => { editingColumnId = col.id; }}>{col.name}</h3>
           {/if}
           <span class="col-count">{col.cards.length}</span>
-          <button class="col-del" title={t('kanban.deleteColumn')} onclick={() => deleteColumn(col.id)}>✕</button>
+          <button class="col-del" title={t('kanban.deleteColumn')} onclick={() => deleteColumn(col.id)}><IconClose size={12} /></button>
         </header>
 
         <div
@@ -182,7 +183,7 @@
           {#each col.cards as card (card.id)}
             <div class="card">
               <span class="card-text">{card.text}</span>
-              <button class="card-del" title={t('kanban.deleteCard')} onclick={() => deleteCard(col.id, card.id)}>✕</button>
+              <button class="card-del" title={t('kanban.deleteCard')} onclick={() => deleteCard(col.id, card.id)}><IconClose size={12} /></button>
             </div>
           {/each}
         </div>

@@ -3,6 +3,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { templatesStore } from '$lib/stores/templates.svelte';
   import type { TemplateMode } from '$lib/ipc/commands';
+  import { IconClose } from './icons';
 
   interface Props {
     /** If set, the dialog edits an existing template; otherwise it creates. */
@@ -97,7 +98,7 @@
   <div class="tmpl-card" onclick={(e) => e.stopPropagation()}>
     <div class="tmpl-head">
       <span>{isEditing ? t('template.dialogEditTitle') : t('template.dialogNewTitle')}</span>
-      <button type="button" class="tmpl-x" onclick={onClose} aria-label={t('template.dialogCancel')}>✕</button>
+      <button type="button" class="tmpl-x" onclick={onClose} aria-label={t('template.dialogCancel')}><IconClose size={14} /></button>
     </div>
 
     <div class="tmpl-body">

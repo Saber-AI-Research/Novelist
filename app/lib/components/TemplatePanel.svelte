@@ -5,6 +5,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import type { TemplateFileSummary, TemplateSource } from '$lib/ipc/commands';
   import TemplateDialog from '$lib/components/TemplateDialog.svelte';
+  import { IconArrowInsert, IconDocument } from './icons';
 
   interface Props {
     /**
@@ -126,10 +127,6 @@
     }
   }
 
-  function modeBadge(mode: string): string {
-    return mode === 'insert' ? '↳' : '📄';
-  }
-
   function sourceLabel(src: TemplateSource): string {
     return src === 'bundled' ? t('template.groupBuiltin') : t('template.groupProject');
   }
@@ -197,7 +194,13 @@
             onkeydown={(e) => { if (e.key === 'Enter') onRowClick(s); }}
             oncontextmenu={(e) => showCtxMenu(e, s)}
           >
-            <span class="template-mode" aria-hidden="true">{modeBadge(s.mode)}</span>
+            <span class="template-mode" aria-hidden="true">
+              {#if s.mode === 'insert'}
+                <IconArrowInsert size={12} />
+              {:else}
+                <IconDocument size={12} />
+              {/if}
+            </span>
             <span class="template-name">{s.name}</span>
             {#if s.description}
               <span class="template-desc">{s.description}</span>
@@ -227,7 +230,13 @@
               onkeydown={(e) => { if (e.key === 'Enter') onRowClick(s); }}
               oncontextmenu={(e) => showCtxMenu(e, s)}
             >
-              <span class="template-mode" aria-hidden="true">{modeBadge(s.mode)}</span>
+              <span class="template-mode" aria-hidden="true">
+              {#if s.mode === 'insert'}
+                <IconArrowInsert size={12} />
+              {:else}
+                <IconDocument size={12} />
+              {/if}
+            </span>
               <span class="template-name">{s.name}</span>
               {#if s.description}
                 <span class="template-desc">{s.description}</span>
@@ -299,11 +308,13 @@
     border-left-color: var(--novelist-accent);
   }
   .template-mode {
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     opacity: 0.75;
     width: 14px;
     flex-shrink: 0;
-    text-align: center;
+    color: var(--novelist-text-secondary);
   }
   .template-name {
     font-size: 12px;

@@ -4,6 +4,7 @@
    * user presets, allows add/edit/delete, and soft-hide for built-ins.
    */
   import { promptPresets, BUILTIN_PRESETS, type PromptPreset } from './presets.svelte';
+  import { IconPackage, IconDocument } from '../icons';
 
   type EditorState = {
     id: string | null;   // null when creating
@@ -35,7 +36,7 @@
     editor = {
       id: p.id,
       name: p.name,
-      icon: p.icon ?? '',
+      icon: typeof p.icon === 'string' ? p.icon : '',
       systemPrompt: p.systemPrompt,
       temperature: p.temperature != null ? String(p.temperature) : '',
       model: p.model ?? '',
@@ -109,7 +110,20 @@
     <ul class="list">
       {#each promptPresets.all as p (p.id)}
         <li class="item" data-testid="prompt-preset-row-{p.id}">
-          <span class="icon">{p.icon ?? (p.builtin ? '📦' : '📝')}</span>
+          <span class="icon">
+            {#if !p.icon}
+              {#if p.builtin}
+                <IconPackage size={14} />
+              {:else}
+                <IconDocument size={14} />
+              {/if}
+            {:else if typeof p.icon === 'string'}
+              {p.icon}
+            {:else}
+              {@const Icon = p.icon}
+              <Icon size={14} />
+            {/if}
+          </span>
           <div class="meta">
             <div class="name">
               <span>{p.name}</span>
@@ -143,7 +157,16 @@
       <ul class="list hidden-list">
         {#each hiddenBuiltins as p (p.id)}
           <li class="item faded">
-            <span class="icon">{p.icon ?? '📦'}</span>
+            <span class="icon">
+              {#if !p.icon}
+                <IconPackage size={14} />
+              {:else if typeof p.icon === 'string'}
+                {p.icon}
+              {:else}
+                {@const Icon = p.icon}
+                <Icon size={14} />
+              {/if}
+            </span>
             <div class="meta">
               <div class="name">{p.name}</div>
             </div>
