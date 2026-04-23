@@ -29,6 +29,7 @@ jobs:
 
       - name: Create styled DMG
         if: always()
+        continue-on-error: true
         run: |
           APP="core/target/release/bundle/macos/Novelist.app"
           DMG="core/target/release/bundle/dmg/Novelist_${{ github.ref_name }}_aarch64.dmg"
@@ -51,8 +52,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-13        # Intel
-            target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - platform: windows-latest
@@ -97,7 +96,7 @@ jobs:
         run: pnpm test && cd core && cargo test
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
