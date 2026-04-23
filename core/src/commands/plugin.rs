@@ -530,7 +530,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.ends_with("/.novelist/plugins/sentence-counter"));
+        assert!(Path::new(&result).ends_with(Path::new(".novelist/plugins/sentence-counter")));
         let dir = std::path::PathBuf::from(&result);
         assert!(dir.join("manifest.toml").is_file());
         assert!(dir.join("index.js").is_file());

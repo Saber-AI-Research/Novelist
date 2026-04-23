@@ -1143,7 +1143,7 @@ mod tests {
         assert!(!src_file.exists());
         assert!(Path::new(&new_path).exists());
         assert_eq!(fs::read_to_string(&new_path).unwrap(), "hello");
-        assert!(new_path.ends_with("sub/a.md"));
+        assert!(Path::new(&new_path).ends_with(Path::new("sub/a.md")));
     }
 
     #[tokio::test]

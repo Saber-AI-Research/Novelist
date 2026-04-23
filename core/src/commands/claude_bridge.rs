@@ -540,11 +540,12 @@ mod tests {
 
     #[test]
     fn candidate_paths_includes_node_manager_dirs() {
+        use std::path::Path;
         let c = candidate_paths();
-        let strs: Vec<String> = c.iter().map(|p| p.to_string_lossy().to_string()).collect();
         // Spot-check that we scan common Node version manager locations.
-        assert!(strs.iter().any(|s| s.contains(".volta/bin/claude")));
-        assert!(strs.iter().any(|s| s.contains(".bun/bin/claude")));
-        assert!(strs.iter().any(|s| s.contains(".asdf/shims/claude")));
+        // Use Path::ends_with so it compares components (cross-platform).
+        assert!(c.iter().any(|p| p.ends_with(Path::new(".volta/bin/claude"))));
+        assert!(c.iter().any(|p| p.ends_with(Path::new(".bun/bin/claude"))));
+        assert!(c.iter().any(|p| p.ends_with(Path::new(".asdf/shims/claude"))));
     }
 }
