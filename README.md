@@ -29,15 +29,15 @@
 
 ## Download / 下载
 
-Latest release: **[v0.2.0](https://github.com/Saber-AI-Research/Novelist/releases/tag/v0.2.0)** · 最新版本
+Latest release: **[v0.2.2](https://github.com/Saber-AI-Research/Novelist/releases/tag/v0.2.2)** · 最新版本
 
 | Platform / 平台 | File / 文件 |
 |---|---|
-| macOS (Apple Silicon) | [`Novelist_0.2.0_aarch64.dmg`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist_0.2.0_aarch64.dmg) |
-| Windows | [`Novelist_0.2.0_x64_en-US.msi`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist_0.2.0_x64_en-US.msi) · [`x64-setup.exe`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist_0.2.0_x64-setup.exe) |
-| Linux (deb) | [`Novelist_0.2.0_amd64.deb`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist_0.2.0_amd64.deb) |
-| Linux (rpm) | [`Novelist-0.2.0-1.x86_64.rpm`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist-0.2.0-1.x86_64.rpm) |
-| Linux (AppImage) | [`Novelist_0.2.0_amd64.AppImage`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.0/Novelist_0.2.0_amd64.AppImage) |
+| macOS (Apple Silicon) | [`Novelist_0.2.2_aarch64.dmg`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist_0.2.2_aarch64.dmg) |
+| Windows | [`Novelist_0.2.2_x64_en-US.msi`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist_0.2.2_x64_en-US.msi) · [`x64-setup.exe`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist_0.2.2_x64-setup.exe) |
+| Linux (deb) | [`Novelist_0.2.2_amd64.deb`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist_0.2.2_amd64.deb) |
+| Linux (rpm) | [`Novelist-0.2.2-1.x86_64.rpm`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist-0.2.2-1.x86_64.rpm) |
+| Linux (AppImage) | [`Novelist_0.2.2_amd64.AppImage`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.2.2/Novelist_0.2.2_amd64.AppImage) |
 
 System requirements / 系统要求 — macOS 11+ · Windows 10+ (64-bit) · Linux glibc 2.31+
 
