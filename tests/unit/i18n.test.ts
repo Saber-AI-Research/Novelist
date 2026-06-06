@@ -38,6 +38,15 @@ describe('[contract] i18n basic translation', () => {
     const out = i18n.t('{x} and {x}', { x: 'HI' });
     expect(out).toBe('HI and HI');
   });
+
+  it('renders platform-provided shortcut labels in visible hints', () => {
+    expect(i18n.t('sidebar.newFile', { shortcut: 'Ctrl+N' })).toBe('New File (Ctrl+N)');
+    expect(i18n.t('sidebar.switchProject', { shortcut: 'Ctrl+1~9' })).toBe('Switch Project (Ctrl+1~9)');
+    expect(i18n.t('sidebar.revealInExplorer')).toBe('Show in Explorer');
+    expect(i18n.t('sidebar.revealInFileManager')).toBe('Show in File Manager');
+    expect(i18n.t('welcome.moreProjectsHint', { count: 2, shortcut: 'Ctrl+Shift+P' })).toContain('Ctrl+Shift+P');
+    expect(i18n.t('settings.editor.newFile.defaultDirHint', { shortcut: 'Ctrl+N' })).toContain('Ctrl+N');
+  });
 });
 
 describe('[contract] i18n locale switching', () => {
@@ -51,6 +60,16 @@ describe('[contract] i18n locale switching', () => {
     i18n.setLocale('zh-CN');
     // Invented key: zh-CN map shouldn't have it, en doesn't either → returns key.
     expect(i18n.t('__missing__')).toBe('__missing__');
+  });
+
+  it('renders platform-provided shortcut labels in Chinese hints', async () => {
+    await i18n.setLocale('zh-CN');
+    expect(i18n.t('sidebar.newFile', { shortcut: 'Ctrl+N' })).toBe('新建文件 (Ctrl+N)');
+    expect(i18n.t('sidebar.switchProject', { shortcut: 'Ctrl+1~9' })).toBe('切换项目 (Ctrl+1~9)');
+    expect(i18n.t('sidebar.revealInExplorer')).toBe('在资源管理器中显示');
+    expect(i18n.t('sidebar.revealInFileManager')).toBe('在文件管理器中显示');
+    expect(i18n.t('welcome.moreProjectsHint', { count: 2, shortcut: 'Ctrl+Shift+P' })).toContain('Ctrl+Shift+P');
+    expect(i18n.t('settings.editor.newFile.defaultDirHint', { shortcut: 'Ctrl+N' })).toContain('Ctrl+N');
   });
 });
 

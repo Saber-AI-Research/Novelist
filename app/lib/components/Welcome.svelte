@@ -3,6 +3,7 @@
   import { commands } from '$lib/ipc/commands';
   import type { RecentProject } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
 
   interface Props {
     onOpenDirectory: () => void;
@@ -20,6 +21,7 @@
 
   let visibleProjects = $derived(recentProjects.slice(0, MAX_RECENT_DISPLAY));
   let overflowCount = $derived(Math.max(0, recentProjects.length - MAX_RECENT_DISPLAY));
+  let switchProjectShortcutLabel = $derived(formatShortcut(shortcutsStore.get('command-palette')));
 
   onMount(async () => {
     await refresh();
@@ -173,7 +175,7 @@
         </ul>
         {#if overflowCount > 0}
           <p class="recent-overflow" data-testid="recent-overflow-hint">
-            {t('welcome.moreProjectsHint', { count: overflowCount })}
+            {t('welcome.moreProjectsHint', { count: overflowCount, shortcut: switchProjectShortcutLabel })}
           </p>
         {/if}
       </div>

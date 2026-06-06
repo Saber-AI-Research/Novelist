@@ -187,6 +187,14 @@ fn custom<R: Runtime>(
     item_with_accel(app, id, label, None)
 }
 
+fn non_macos_accel(accelerator: &'static str) -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        None
+    } else {
+        Some(accelerator)
+    }
+}
+
 /// Build the full application menu. Called at startup with the English
 /// fallback and re-called via the `refresh_menu` IPC whenever the
 /// locale or recent-projects list changes.
@@ -263,9 +271,14 @@ pub fn build_menu<R: Runtime>(
                 &labels.rename_file,
                 Some("CmdOrCtrl+Shift+R"),
             )?,
-            // No accelerator: default Cmd+M conflicts with macOS Minimize.
-            // Users can still invoke via JS shortcut handler or command palette.
-            &custom(app, "move-file", &labels.move_file)?,
+            // Cmd+M conflicts with macOS Minimize, but Windows/Linux users
+            // should still see the native Ctrl+M menu accelerator.
+            &item_with_accel(
+                app,
+                "move-file",
+                &labels.move_file,
+                non_macos_accel("CmdOrCtrl+M"),
+            )?,
             &custom(app, "save-current-as-template", &labels.save_as_template)?,
             &PredefinedMenuItem::separator(app)?,
             &custom(app, "export-project", &labels.export_project)?,

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { detectDesktopPlatform, fileManagerLabel } from '$lib/utils/platform-labels';
 
 /**
  * Image rendering feature tests.
@@ -243,10 +244,14 @@ describe('image drop filename generation', () => {
 // ── Image context menu logic ──
 
 describe('image context menu: source classification for menu items', () => {
-  function getContextMenuItems(src: string, projectDir: string): string[] {
+  function getContextMenuItems(
+    src: string,
+    projectDir: string,
+    userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+  ): string[] {
     const isLocal = !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:');
     const items: string[] = ['Copy Image Path'];
-    if (isLocal && projectDir) items.push('Reveal in Finder');
+    if (isLocal && projectDir) items.push(fileManagerLabel(detectDesktopPlatform(userAgent)));
     if (src.startsWith('http://') || src.startsWith('https://')) items.push('Open in Browser');
     items.push('Edit Caption', 'Delete Image');
     return items;
@@ -256,6 +261,12 @@ describe('image context menu: source classification for menu items', () => {
     const items = getContextMenuItems('./assets/photo.png', '/project');
     expect(items).toContain('Reveal in Finder');
     expect(items).not.toContain('Open in Browser');
+  });
+
+  it('local image shows Show in Explorer on Windows', () => {
+    const items = getContextMenuItems('./assets/photo.png', '/project', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    expect(items).toContain('Show in Explorer');
+    expect(items).not.toContain('Reveal in Finder');
   });
 
   it('HTTP image shows Open in Browser', () => {

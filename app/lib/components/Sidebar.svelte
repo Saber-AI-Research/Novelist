@@ -7,12 +7,14 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
+  import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
   import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
   import FileTreeNode from '$lib/components/FileTreeNode.svelte';
   import { compareByMode, type SortMode } from '$lib/utils/file-sort';
   import { proposeNewFileName } from '$lib/services/new-file';
   import { SIDEBAR_PATH_MIME } from '$lib/services/pane-drop';
+  import { fileManagerLabelKey } from '$lib/utils/platform-labels';
   import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
 
   // --- Project switcher popup (Notion-style) ---
@@ -31,6 +33,9 @@
     { id: 'ctime-desc', labelKey: 'sidebar.sort.ctimeDesc' },
     { id: 'ctime-asc', labelKey: 'sidebar.sort.ctimeAsc' },
   ];
+  let newFileShortcutLabel = $derived(formatShortcut(shortcutsStore.get('new-file')));
+  let switchProjectShortcutLabel = $derived(`${formatShortcut('Cmd+1')}~9`);
+  let revealInFileManagerLabelKey = $derived(fileManagerLabelKey());
 
   function selectSort(mode: SortMode) {
     projectStore.setSortMode(mode);
@@ -743,7 +748,7 @@
             </div>
           {/if}
         </div>
-        <button class="sidebar-icon-btn" data-testid="sidebar-new-file" onclick={startCreateFile} title={t('sidebar.newFile')}>
+        <button class="sidebar-icon-btn" data-testid="sidebar-new-file" onclick={startCreateFile} title={t('sidebar.newFile', { shortcut: newFileShortcutLabel })}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v10M3 8h10"/></svg>
         </button>
         <button class="sidebar-icon-btn" data-testid="sidebar-new-folder" onclick={startCreateFolder} title={t('sidebar.newFolder')}>
@@ -804,7 +809,7 @@
 
     <!-- Bottom bar: Notion-style project switcher -->
     <div class="sidebar-bottom" style="position: relative;">
-      <button class="sidebar-switch-btn" data-testid="sidebar-switch-btn" onclick={toggleSwitcher} title={t('sidebar.switchProject')}>
+      <button class="sidebar-switch-btn" data-testid="sidebar-switch-btn" onclick={toggleSwitcher} title={t('sidebar.switchProject', { shortcut: switchProjectShortcutLabel })}>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h4l2 2h6v7H2z"/></svg>
         <span>{projectStore.dirPath ? (pathBasename(projectStore.dirPath) || 'Project') : 'Project'}</span>
         <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: auto; opacity: 0.5;"><path d="{switcherOpen ? 'M4 10l4-4 4 4' : 'M4 6l4 4 4-4'}"/></svg>
@@ -960,7 +965,7 @@
     {#if !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
       <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
     {/if}
-    <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t('sidebar.revealInFinder')}</button>
+    <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t(revealInFileManagerLabelKey)}</button>
     <button role="menuitem" class="context-menu-item" onclick={() => copyPath(contextMenu!.entry)}>{t('sidebar.copyPath')}</button>
     <button role="menuitem" class="context-menu-item" onclick={() => copyRelativePath(contextMenu!.entry)}>{t('sidebar.copyRelativePath')}</button>
     {#if !contextMenu.entry.is_dir}

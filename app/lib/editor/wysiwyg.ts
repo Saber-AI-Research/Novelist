@@ -4,6 +4,7 @@ import { type EditorState, type Extension, type Range, StateField } from '@codem
 import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { imeComposingField } from './ime-guard';
+import { fileManagerLabel } from '$lib/utils/platform-labels';
 
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -168,7 +169,7 @@ class ImageContextMenu {
 
     if (this.isLocal && this.projectDir) {
       items.push({
-        label: 'Reveal in Finder',
+        label: fileManagerLabel(),
         action: () => {
           const fullPath = `${this.projectDir}/${this.imgSrc}`;
           invoke('reveal_in_file_manager', { path: fullPath }).catch(console.error);

@@ -33,6 +33,9 @@
 
   let activeSection = $state<string>('editor');
   let pluginSettingsComponents = $state<Record<string, import('svelte').Component>>({});
+  let newFileShortcutLabel = $derived(formatShortcut(shortcutsStore.get('new-file')));
+  let paletteShortcutExample = $derived(formatShortcut(shortcutsStore.get('command-palette')));
+  let boldShortcutExample = $derived(formatShortcut(shortcutsStore.get('editor-bold')));
 
   // --- Settings search (v0.2.4) ---
   let searchQuery = $state('');
@@ -913,7 +916,7 @@
               {/if}
             </div>
             <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
-              {t('settings.editor.newFile.defaultDirHint')}
+              {t('settings.editor.newFile.defaultDirHint', { shortcut: newFileShortcutLabel })}
             </div>
           </div>
         </div>
@@ -969,7 +972,7 @@
             type="text"
             class="w-full text-sm px-3 py-2 pr-8 rounded"
             style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border); outline: none;"
-            placeholder={t('settings.shortcuts.searchPlaceholder')}
+            placeholder={t('settings.shortcuts.searchPlaceholder', { paletteShortcut: paletteShortcutExample, boldShortcut: boldShortcutExample })}
             bind:value={shortcutSearch}
             data-testid="shortcut-search-input"
           />
