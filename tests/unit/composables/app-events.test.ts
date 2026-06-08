@@ -21,7 +21,7 @@ const { hoisted } = vi.hoisted(() => {
     dragDropHandlers.push(handler);
     return unlisten;
   });
-  const getCurrentWindow = vi.fn(() => ({ onDragDropEvent }));
+  const getCurrentWindow = vi.fn(() => ({ onDragDropEvent, label: 'main' }));
 
   const readFile = vi.fn();
   const registerOpenFile = vi.fn(async () => ({ status: 'ok' }));
@@ -248,7 +248,7 @@ describe('[contract] pending-files drain', () => {
 describe('[contract] open-file event → cross-window routing', () => {
   it('forwards macOS Finder Open-With events to the router', async () => {
     await wire();
-    await hoisted.listeners.get('open-file')!({ payload: '/tmp/x.md' });
+    await hoisted.listeners.get('open-file')!({ payload: { path: '/tmp/x.md', target_label: 'main' } });
     expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/tmp/x.md');
     expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
   });
@@ -303,6 +303,27 @@ describe('[contract] open-file-deliver event (router→winner)', () => {
       payload: { path: '/tmp/x.md', line: null, col: null },
     });
     expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
+  });
+
+  // On Windows `emit_to` broadcasts to every webview; the target_label guard
+  // keeps the file from opening in windows it was not addressed to.
+  it('ignores delivery addressed to a different window', async () => {
+    hoisted.readFile.mockResolvedValue({ status: 'ok', data: 'body' });
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('open-file-deliver')!({
+      payload: { path: '/proj/story.md', line: null, col: null, target_label: 'novelist-99' },
+    });
+    expect(hoisted.readFile).not.toHaveBeenCalled();
+    expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
+  });
+
+  it('opens when delivery is addressed to this window', async () => {
+    hoisted.readFile.mockResolvedValue({ status: 'ok', data: 'body' });
+    await wire();
+    await hoisted.listeners.get('open-file-deliver')!({
+      payload: { path: '/proj/story.md', line: null, col: null, target_label: 'main' },
+    });
+    expect(hoisted.tabsState.openTab).toHaveBeenCalledWith('/proj/story.md', 'body');
   });
 });
 

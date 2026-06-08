@@ -51,11 +51,15 @@ import { handleCliOpen, consumeWindowSeed, openProjectInThisWindow, openFileInNe
 import type { CliOpenPayload } from '$lib/ipc/commands';
 
 function payload(overrides: Partial<CliOpenPayload> = {}): CliOpenPayload {
+  // `target_label` is added to CliOpenPayload by the Rust struct; the generated
+  // binding picks it up on the next codegen run. The cast keeps this helper
+  // compiling both before and after that regeneration.
   return {
     files: overrides.files ?? [],
     folders: overrides.folders ?? [],
     force_new_window: overrides.force_new_window ?? false,
-  };
+    target_label: (overrides as { target_label?: string }).target_label ?? 'main',
+  } as CliOpenPayload;
 }
 
 function lastWindowHash(): string | null {

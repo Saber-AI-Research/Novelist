@@ -173,6 +173,10 @@ pub struct CliOpenPayload {
     pub files: Vec<PendingFile>,
     pub folders: Vec<String>,
     pub force_new_window: bool,
+    /// Label of the single window meant to handle this event. On Windows,
+    /// `emit_to` broadcasts to every webview, so the frontend filters on this
+    /// to keep the "single coordinator" semantics (see app-events listeners).
+    pub target_label: String,
 }
 
 impl CliOpenPayload {
@@ -185,8 +189,21 @@ impl CliOpenPayload {
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
             force_new_window: req.force_new_window,
+            // Filled in by the caller once the coordinator window is chosen.
+            target_label: String::new(),
         }
     }
+}
+
+/// Payload for the macOS `open-file` hot-path event (Finder "Open With" while
+/// running). Carries `target_label` for the same reason as [`CliOpenPayload`]:
+/// `emit_to` broadcasts on Windows, so the frontend filters on it.
+/// macOS-only: the only emitter is the `RunEvent::Opened` handler below.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct OpenFilePayload {
+    pub path: String,
+    pub target_label: String,
 }
 
 fn open_event_target_label(app: &tauri::AppHandle) -> Option<String> {
@@ -545,12 +562,15 @@ pub fn run() {
             );
             let cwd_path = std::path::PathBuf::from(&cwd);
             let req = parse_argv(&argv, &cwd_path);
-            let payload = CliOpenPayload::from_request(&req);
+            let mut payload = CliOpenPayload::from_request(&req);
             match open_event_target_label(app) {
                 Some(label) => {
                     // Bring the coordinator to the front so the user sees the
                     // routed result, whether it lands there or in a new window.
                     focus_open_event_target(app, &label);
+                    // On Windows `emit_to` broadcasts to every webview, so stamp
+                    // the intended window's label and let the frontend filter.
+                    payload.target_label = label.clone();
                     if let Err(e) = app.emit_to(label.as_str(), "cli-open", payload) {
                         tracing::warn!(
                             target: "novelist::cli",
@@ -700,8 +720,12 @@ pub fn run() {
                                 // listener active)
                                 match open_event_target_label(app) {
                                     Some(label) => {
+                                        let payload = OpenFilePayload {
+                                            path: file_path,
+                                            target_label: label.clone(),
+                                        };
                                         if let Err(e) =
-                                            app.emit_to(label.as_str(), "open-file", file_path)
+                                            app.emit_to(label.as_str(), "open-file", payload)
                                         {
                                             tracing::warn!(
                                                 target: "novelist::cli",

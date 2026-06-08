@@ -43,6 +43,9 @@ pub struct OpenFileDeliver {
     pub path: String,
     pub line: Option<u32>,
     pub col: Option<u32>,
+    /// Winner window label. On Windows `emit_to` broadcasts to every webview,
+    /// so the frontend filters delivery on this to open the file in exactly one.
+    pub target_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -190,7 +193,12 @@ pub async fn route_single_file_open(
             let _ = win.unminimize();
             let _ = win.set_focus();
         }
-        let payload = OpenFileDeliver { path, line, col };
+        let payload = OpenFileDeliver {
+            path,
+            line,
+            col,
+            target_label: label.clone(),
+        };
         if let Err(e) = app.emit_to(label.as_str(), "open-file-deliver", payload) {
             tracing::warn!(
                 target: "novelist::file-routing",
