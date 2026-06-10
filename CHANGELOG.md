@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-06-10
+
+### Fixed
+
+- **Windows: opening a file from Explorer or the `novelist` CLI no longer
+  opens it in every window.** On Windows/WebView2, Tauri's `emit_to`
+  broadcasts to all webviews instead of targeting one, so each open window ran
+  its own routing round for the same external-open request — duplicating the
+  file across windows. External-open events now carry the target window's
+  label and other windows ignore them. Verified end-to-end on a real Windows
+  machine via WebView2 remote debugging.
+- **H1-driven filename sync (`{title}`) works again.** Two stacked bugs:
+  the v0.2.6 release prep accidentally re-gated the rename on the legacy
+  `auto_rename_from_h1` checkbox (which has had no Settings UI since the
+  template became the gate), and the default template `第{N}章-{title}`
+  renders placeholders (`第1章-Untitled.md`) the built-in pattern list never
+  recognized — so out-of-the-box new files never followed their H1. The gate
+  is back on "template contains `{title}`", and a template-derived matcher now
+  fills the `{title}` slot from the H1 (`第1章-Untitled.md` + `# 开篇` →
+  `第1章-开篇.md`).
+
+### Changed
+
+- Settings UI polish: dedicated toggle-switch component, settings search
+  coverage, AI Talk / AI Agent settings tidy-up.
+- Windows builds now use platform-appropriate UI labels and shortcut hints
+  (e.g. "Show in Explorer", Ctrl-based keybinding hints) instead of
+  macOS-flavored ones.
+
+### Internal
+
+- Repaired the tauri-specta typescript bindings codegen (broken by stricter
+  serde validation): bumped tauri-specta to 2.0.0-rc.25, regenerated
+  `commands.ts` (types with phase-asymmetric serde now split into
+  `_Serialize`/`_Deserialize` variants), and made the app's tauri default
+  features explicit.
+- New contract tests pin the `target_label` wire key on all three
+  external-open payloads; browser E2E now exercises the production default
+  new-file template instead of a divergent mock default.
+
 ## [0.2.8] - 2026-05-28
 
 ### Fixed
