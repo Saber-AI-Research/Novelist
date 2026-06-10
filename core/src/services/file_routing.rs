@@ -43,6 +43,9 @@ pub struct OpenFileDeliver {
     pub path: String,
     pub line: Option<u32>,
     pub col: Option<u32>,
+    /// Winner window label. On Windows `emit_to` broadcasts to every webview,
+    /// so the frontend filters delivery on this to open the file in exactly one.
+    pub target_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -190,7 +193,12 @@ pub async fn route_single_file_open(
             let _ = win.unminimize();
             let _ = win.set_focus();
         }
-        let payload = OpenFileDeliver { path, line, col };
+        let payload = OpenFileDeliver {
+            path,
+            line,
+            col,
+            target_label: label.clone(),
+        };
         if let Err(e) = app.emit_to(label.as_str(), "open-file-deliver", payload) {
             tracing::warn!(
                 target: "novelist::file-routing",
@@ -322,5 +330,21 @@ mod tests {
     fn open_event_target_returns_none_without_windows() {
         let labels: Vec<String> = vec![];
         assert_eq!(pick_open_event_target(labels), None);
+    }
+
+    // The frontend filters `open-file-deliver` on this exact JSON key because
+    // Windows' `emit_to` broadcasts to every webview. A rename or serde
+    // attribute change would make every window treat the event as legacy
+    // unaddressed and reintroduce the duplicate-open bug.
+    #[test]
+    fn open_file_deliver_serializes_target_label_for_frontend_filter() {
+        let payload = OpenFileDeliver {
+            path: "/tmp/a.md".into(),
+            line: None,
+            col: None,
+            target_label: "novelist-2".into(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "novelist-2");
     }
 }

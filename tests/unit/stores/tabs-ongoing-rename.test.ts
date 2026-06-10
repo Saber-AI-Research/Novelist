@@ -16,8 +16,11 @@ vi.mock('$lib/ipc/commands', () => ({
   },
 }));
 
+// `autoRenameFromH1: false` is deliberate: the rename gate is the `{title}`
+// placeholder in the template, NOT the legacy checkbox (which has no UI since
+// 1e0ab6e). A regression back to the checkbox gate makes every test here fail.
 vi.mock('$lib/stores/new-file-settings.svelte', () => ({
-  newFileSettings: { template: '第{N}章-{title}', autoRenameFromH1: true },
+  newFileSettings: { template: '第{N}章-{title}', autoRenameFromH1: false },
 }));
 
 vi.mock('$lib/i18n', () => ({
@@ -128,10 +131,12 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
     expect(commands.renameItem).not.toHaveBeenCalled();
   });
 
-  it('does not rename when auto_rename_from_h1 is off (gate honored)', async () => {
-    // The default mock has it on; flip it for this case.
+  it('does not rename when the template has no {title} (gate honored)', async () => {
+    // The gate is the template placeholder, not the legacy autoRenameFromH1
+    // checkbox (no UI since 1e0ab6e). Strip {title} for this case.
     const settingsMod = await import('$lib/stores/new-file-settings.svelte');
-    (settingsMod.newFileSettings as any).autoRenameFromH1 = false;
+    const original = settingsMod.newFileSettings.template;
+    (settingsMod.newFileSettings as { template: string }).template = '第{N}章';
     try {
       tabsStore.openTab(`${PROJECT}/第1章-开篇.md`, '# 开篇');
       const newPath = await tabsStore.tryRenameAfterSave(
@@ -141,7 +146,7 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
       expect(newPath).toBe(`${PROJECT}/第1章-开篇.md`);
       expect(commands.renameItem).not.toHaveBeenCalled();
     } finally {
-      (settingsMod.newFileSettings as any).autoRenameFromH1 = true;
+      (settingsMod.newFileSettings as { template: string }).template = original;
     }
   });
 

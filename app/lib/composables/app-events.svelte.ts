@@ -125,16 +125,25 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     }
   }
 
+  // On Windows `emit_to` broadcasts to every webview, so the backend stamps the
+  // single intended window's label on each external-open event. Skip events not
+  // addressed to us. Defensive form (only when present) keeps older/cached
+  // frontends and existing tests working.
+  const notForThisWindow = (targetLabel: string | undefined): boolean =>
+    !!targetLabel && targetLabel !== getCurrentWindow().label;
+
   // Listen for open-file events from Rust (macOS Finder "Open With" while running).
   // Goes through the cross-window router — may end up in a different window.
-  bindEvent<string>('open-file', async (event) => {
-    await routeSingleFileOpen(event.payload);
+  bindEvent<{ path: string; target_label?: string }>('open-file', async (event) => {
+    if (notForThisWindow(event.payload.target_label)) return;
+    await routeSingleFileOpen(event.payload.path);
   }, fn => { unlistenOpenFile = fn; });
 
   // Router delivered this file *to this window*. Open it locally.
-  bindEvent<{ path: string; line: number | null; col: number | null }>(
+  bindEvent<{ path: string; line: number | null; col: number | null; target_label?: string }>(
     'open-file-deliver',
     async (event) => {
+      if (notForThisWindow(event.payload.target_label)) return;
       await openFileByPath(event.payload.path, event.payload.line ?? null);
     },
     fn => { unlistenOpenFileDeliver = fn; },
@@ -148,7 +157,8 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   // Hot-path CLI invocations: a second `novelist ...` process forwarded its
   // args via tauri-plugin-single-instance. Folders spawn new windows; files
   // go through the cross-window router.
-  bindEvent<CliOpenPayload>('cli-open', async (event) => {
+  bindEvent<CliOpenPayload & { target_label?: string }>('cli-open', async (event) => {
+    if (notForThisWindow(event.payload.target_label)) return;
     await handleCliOpen(event.payload);
   }, fn => { unlistenCliOpen = fn; });
 

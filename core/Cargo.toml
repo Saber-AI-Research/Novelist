@@ -13,7 +13,11 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", default-features = false, features = ["protocol-asset"] }
+# Default features (wry, compression, common-controls-v6, dynamic-acl, x11)
+# must stay enabled explicitly: tauri-specta <= rc.24 enabled them
+# transitively, rc.25 stopped — without `wry` the build loses
+# `tauri::Wry`/windowing entirely.
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
@@ -27,8 +31,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # TODO: upgrade to stable when tauri-specta 2.0.0 is released
-tauri-specta = { version = "=2.0.0-rc.24", features = ["typescript"] }
-specta = { version = "=2.0.0-rc.24", features = ["function", "derive", "tokio"] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
+specta = { version = "=2.0.0-rc.25", features = ["function", "derive", "tokio"] }
 notify = { version = "7", features = ["macos_fsevent"] }
 blake3 = "1"
 ropey = "1"
@@ -50,7 +54,7 @@ urlencoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 png = "0.17"
-specta-typescript = { version = "0.0.11", optional = true }
+specta-typescript = { version = "0.0.12", optional = true }
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 

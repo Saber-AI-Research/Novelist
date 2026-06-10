@@ -30,7 +30,7 @@ export const commands = {
 	 *  Defaults to error-on-collision when None or Some(false).
 	 */
 	renameItem: (oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName, allowCollisionBump })),
-	// Emit a global Tauri event so other windows can update their tab state.
+	/**  Emit a global Tauri event so other windows can update their tab state. */
 	broadcastFileRenamed: (oldPath: string, newPath: string) => typedError<null, string>(__TAURI_INVOKE("broadcast_file_renamed", { oldPath, newPath })),
 	/**
 	 *  Move a file or folder into `target_dir`. Auto-numbers on collision
@@ -38,20 +38,98 @@ export const commands = {
 	 */
 	moveItem: (sourcePath: string, targetDir: string) => typedError<string, string>(__TAURI_INVOKE("move_item", { sourcePath, targetDir })),
 	deleteItem: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { path })),
-	checkPandoc: () => typedError<PandocStatus, string>(__TAURI_INVOKE("check_pandoc")),
+	checkPandoc: () => typedError<PandocStatus_Serialize, string>(__TAURI_INVOKE("check_pandoc")),
+	/**
+	 *  Persist the user's pandoc binary override. `None` clears it (revert
+	 *  to auto-detection). Empty string is treated as `None`.
+	 */
 	setPandocPath: (path: string | null) => typedError<null, string>(__TAURI_INVOKE("set_pandoc_path", { path })),
 	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[]) => typedError<string, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs })),
 	detectProject: (dirPath: string) => typedError<{
 	project: ProjectMeta,
-	outline?: OutlineConfig,
-	writing?: WritingConfig,
+	outline: OutlineConfig,
+	writing: WritingConfig,
+	/**  Sidebar/file-tree view preferences. Overrides global `~/.novelist/settings.json`. */
+	view?: ViewConfig_Serialize,
+	/**  New-file template preferences. Overrides global. */
+	new_file?: NewFileConfig_Serialize,
+	/**  Per-plugin enable flags (deltas from the global default map). */
+	plugins?: PluginsConfig,
+	/**
+	 *  Per-project override for which image host is active. Credentials
+	 *  stay in global settings — only the pointer to a configured host
+	 *  can be overridden here.
+	 */
+	active_image_host_id?: string | null,
 } | null, string>(__TAURI_INVOKE("detect_project", { dirPath })),
-	readProjectConfig: (dirPath: string) => typedError<ProjectConfig, string>(__TAURI_INVOKE("read_project_config", { dirPath })),
+	readProjectConfig: (dirPath: string) => typedError<ProjectConfig_Serialize, string>(__TAURI_INVOKE("read_project_config", { dirPath })),
+	/**
+	 *  Return effective settings, merging global defaults with an optional
+	 *  project overlay. `dir_path = None` returns global-only (scratch mode).
+	 */
 	getEffectiveSettings: (dirPath: string | null) => typedError<EffectiveSettings, string>(__TAURI_INVOKE("get_effective_settings", { dirPath })),
-	getGlobalSettings: () => typedError<GlobalSettings, string>(__TAURI_INVOKE("get_global_settings")),
-	writeGlobalSettings: (view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins })),
-	writeProjectSettings: (dirPath: string, view: ViewConfig | null, newFile: NewFileConfig | null, plugins: PluginsConfig | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins })),
-	logStartupPhase: (name: string, sinceStartMs: number) => typedError<null, string>(__TAURI_INVOKE("log_startup_phase", { name, sinceStartMs })),
+	/**
+	 *  Return raw global defaults from `~/.novelist/settings.json` without
+	 *  merging in any project overlay. Used by the frontend to compute plugin
+	 *  delta overrides (only entries differing from global are persisted).
+	 */
+	getGlobalSettings: () => typedError<GlobalSettings_Serialize, string>(__TAURI_INVOKE("get_global_settings")),
+	/**
+	 *  Patch the global `~/.novelist/settings.json`. Only the `Some(..)` sections
+	 *  are replaced; unspecified sections keep their current value on disk.
+	 */
+	writeGlobalSettings: (view: {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
+	wrap_file_names?: boolean | null,
+	sidebar_font_size?: number | null,
+} | null, newFile: {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	/**
+	 *  User-pinned default location for new files. Absolute path. When set,
+	 *  Cmd+N always creates here regardless of the recent activity pointer.
+	 *  `None` means "follow the last-used tracker."
+	 */
+	default_dir?: string | null,
+	/**
+	 *  Live pointer: directory of the most recently created file. Updated
+	 *  after every successful create (header button, Cmd+N, per-folder
+	 *  context menu). Seeded to the project root on first open.
+	 */
+	last_used_dir?: string | null,
+} | null, plugins: {
+	enabled?: { [key in string]: boolean },
+} | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins })),
+	/**
+	 *  Patch `<dir>/.novelist/project.toml`. Only the provided sections are replaced.
+	 *  Requires that a `project.toml` already exists (i.e. `dir` is a Novelist project).
+	 */
+	writeProjectSettings: (dirPath: string, view: {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
+	wrap_file_names?: boolean | null,
+	sidebar_font_size?: number | null,
+} | null, newFile: {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	/**
+	 *  User-pinned default location for new files. Absolute path. When set,
+	 *  Cmd+N always creates here regardless of the recent activity pointer.
+	 *  `None` means "follow the last-used tracker."
+	 */
+	default_dir?: string | null,
+	/**
+	 *  Live pointer: directory of the most recently created file. Updated
+	 *  after every successful create (header button, Cmd+N, per-folder
+	 *  context menu). Seeded to the project root on first open.
+	 */
+	last_used_dir?: string | null,
+} | null, plugins: {
+	enabled?: { [key in string]: boolean },
+} | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins })),
 	startFileWatcher: (dirPath: string) => typedError<null, string>(__TAURI_INVOKE("start_file_watcher", { dirPath })),
 	stopFileWatcher: () => typedError<null, string>(__TAURI_INVOKE("stop_file_watcher")),
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
@@ -60,7 +138,7 @@ export const commands = {
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
 	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
-	// Pin or unpin a single project. Pinned projects always sort above unpinned.
+	/**  Pin or unpin a single project. Pinned projects always sort above unpinned. */
 	setProjectPinned: (path: string, pinned: boolean) => typedError<null, string>(__TAURI_INVOKE("set_project_pinned", { path, pinned })),
 	/**
 	 *  Reorder recent projects by the given path list. Each path's index in
@@ -68,22 +146,22 @@ export const commands = {
 	 *  their existing `sort_order`.
 	 */
 	reorderRecentProjects: (orderedPaths: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_recent_projects", { orderedPaths })),
-	// Scan ~/.novelist/plugins/ and return info for each plugin found.
+	/**  Scan ~/.novelist/plugins/ and return info for each plugin found. */
 	listPlugins: () => typedError<PluginInfo[], string>(__TAURI_INVOKE("list_plugins")),
-	// Load and activate a plugin by its ID.
+	/**  Load and activate a plugin by its ID. */
 	loadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("load_plugin", { pluginId })),
-	// Unload (deactivate) a plugin.
+	/**  Unload (deactivate) a plugin. */
 	unloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("unload_plugin", { pluginId })),
 	/**
 	 *  Unload then re-load a plugin from disk. Used to pick up edits to
 	 *  `manifest.toml` / `index.js` without restarting the app.
 	 */
 	reloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("reload_plugin", { pluginId })),
-	// Get all commands registered by active plugins.
+	/**  Get all commands registered by active plugins. */
 	getPluginCommands: () => typedError<RegisteredCommandInfo[], string>(__TAURI_INVOKE("get_plugin_commands")),
-	// Execute a registered plugin command. Returns any text replacements the plugin wants to make.
+	/**  Execute a registered plugin command. Returns any text replacements the plugin wants to make. */
 	invokePluginCommand: (pluginId: string, commandId: string) => typedError<PluginReplacementResult[], string>(__TAURI_INVOKE("invoke_plugin_command", { pluginId, commandId })),
-	// Update the document state that plugins can read.
+	/**  Update the document state that plugins can read. */
 	setPluginDocumentState: (content: string, selectionFrom: number, selectionTo: number, wordCount: number) => typedError<null, string>(__TAURI_INVOKE("set_plugin_document_state", { content, selectionFrom, selectionTo, wordCount })),
 	/**
 	 *  Enable or disable a plugin (persists to settings file).
@@ -95,11 +173,10 @@ export const commands = {
 	 *  ID must match `[a-z0-9][a-z0-9-]*`. display_name defaults to id.
 	 */
 	scaffoldPlugin: (id: string, displayName: string | null) => typedError<string, string>(__TAURI_INVOKE("scaffold_plugin", { id, displayName })),
-	// Return the absolute path of ~/.novelist/plugins/, creating it if missing.
+	/**  Return the absolute path of ~/.novelist/plugins/, creating it if missing. */
 	getPluginsDir: () => typedError<string, string>(__TAURI_INVOKE("get_plugins_dir")),
-	// Portable mode introspection — manually maintained until codegen pipeline is fixed.
 	isPortableMode: () => __TAURI_INVOKE<PortableModeInfo>("is_portable_mode"),
-	// Open a large file into a Rope. Returns metadata.
+	/**  Open a large file into a Rope. Returns metadata. */
 	ropeOpen: (path: string) => typedError<RopeDocumentMeta, string>(__TAURI_INVOKE("rope_open", { path })),
 	/**
 	 *  Get text for a range of lines. Lines are 0-indexed.
@@ -112,11 +189,11 @@ export const commands = {
 	 *  `insert` is the replacement text (empty string = deletion).
 	 */
 	ropeApplyEdit: (fileId: string, fromChar: number, toChar: number, insert: string) => typedError<number, string>(__TAURI_INVOKE("rope_apply_edit", { fileId, fromChar, toChar, insert })),
-	// Save the Rope to disk atomically.
+	/**  Save the Rope to disk atomically. */
 	ropeSave: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_save", { fileId })),
-	// Close a Rope document and release memory.
+	/**  Close a Rope document and release memory. */
 	ropeClose: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_close", { fileId })),
-	// Get the character offset for a given line number (0-indexed).
+	/**  Get the character offset for a given line number (0-indexed). */
 	ropeLineToChar: (fileId: string, line: number) => typedError<number, string>(__TAURI_INVOKE("rope_line_to_char", { fileId, line })),
 	readDraftNote: (projectDir: string, filePath: string) => typedError<string | null, string>(__TAURI_INVOKE("read_draft_note", { projectDir, filePath })),
 	writeDraftNote: (projectDir: string, filePath: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_draft_note", { projectDir, filePath, content })),
@@ -134,9 +211,28 @@ export const commands = {
 	saveProjectAsTemplate: (projectDir: string, templateName: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("save_project_as_template", { projectDir, templateName })),
 	deleteTemplate: (templateId: string) => typedError<null, string>(__TAURI_INVOKE("delete_template", { templateId })),
 	importTemplateZip: (zipPath: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("import_template_zip", { zipPath })),
+	listTemplateFiles: (projectDir: string | null) => typedError<TemplateFileSummary[], string>(__TAURI_INVOKE("list_template_files", { projectDir })),
+	readTemplateFile: (source: TemplateSource, id: string, projectDir: string | null) => typedError<TemplateFile, string>(__TAURI_INVOKE("read_template_file", { source, id, projectDir })),
+	writeTemplateFile: (projectDir: string, id: string, frontMatter: TemplateFrontMatterInput, body: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("write_template_file", { projectDir, id, frontMatter, body })),
+	renameTemplateFile: (projectDir: string, oldId: string, newId: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("rename_template_file", { projectDir, oldId, newId })),
+	deleteTemplateFile: (projectDir: string, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_template_file", { projectDir, id })),
+	duplicateBundledTemplate: (projectDir: string, bundledId: string, newId: string | null) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("duplicate_bundled_template", { projectDir, bundledId, newId })),
+	/**
+	 *  Create a new file in `dir` with `body`. If `filename` already exists,
+	 *  auto-bump `stem 2.ext`, `stem 3.ext`, … just like the existing file-tree
+	 *  "New file" flow. Returns the resolved absolute path. Used by new-file-mode
+	 *  template execution so the frontend does not need to orchestrate sanitize +
+	 *  bump + write itself.
+	 */
+	createFileWithBody: (dir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("create_file_with_body", { dir, filename, body })),
 	getPendingOpenFiles: () => __TAURI_INVOKE<PendingFile[]>("get_pending_open_files"),
 	getPendingOpenProjects: () => __TAURI_INVOKE<string[]>("get_pending_open_projects"),
+	/**  Tauri command — FE wrapper around `route_single_file_open`. */
 	routeSingleFileOpenCmd: (sourceLabel: string | null, path: string, line: number | null, col: number | null, forceNew: boolean) => __TAURI_INVOKE<RouteResult>("route_single_file_open_cmd", { sourceLabel, path, line, col, forceNew }),
+	/**
+	 *  Tauri command — each window reports its bid in response to a
+	 *  `file-open-bid-request` event.
+	 */
 	submitFileOpenBid: (bidId: number, windowLabel: string, canClaim: boolean, hasProject: boolean) => typedError<null, string>(__TAURI_INVOKE("submit_file_open_bid", { bidId, windowLabel, canClaim, hasProject })),
 	cliShimStatus: () => typedError<CliShimStatus, string>(__TAURI_INVOKE("cli_shim_status")),
 	installCliShim: () => typedError<CliShimStatus, string>(__TAURI_INVOKE("install_cli_shim")),
@@ -146,49 +242,73 @@ export const commands = {
 	 */
 	readImageDataUri: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_image_data_uri", { path })),
 	/**
-	 *  Write raw bytes (passed as base64) to a file. Used by the frontend to save
-	 *  pasted/dropped images without UTF-8 encoding corruption.
+	 *  Read a file as raw bytes for upload. The frontend uses this to load
+	 *  local image files referenced in Markdown into memory before handing
+	 *  them to one of the `upload_image_*` commands.
 	 */
-	writeBinaryFile: (path: string, base64Data: string) => typedError<null, string>(__TAURI_INVOKE("write_binary_file", { path, base64Data })),
-	// Image hosting (v0.2.4) — manually maintained until codegen pipeline is fixed.
 	readImageBytes: (path: string) => typedError<number[], string>(__TAURI_INVOKE("read_image_bytes", { path })),
-	uploadImageQiniu: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_qiniu", { bytes, filename, mime, config })),
-	uploadImageAliyunOss: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_aliyun_oss", { bytes, filename, mime, config })),
-	uploadImageS3: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_s3", { bytes, filename, mime, config })),
-	uploadImageImgur: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_imgur", { bytes, filename, mime, config })),
-	uploadImageSmms: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_smms", { bytes, filename, mime, config })),
-	uploadImageCustom: (bytes: number[], filename: string, mime: string, config: ProviderConfig) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_custom", { bytes, filename, mime, config })),
-	getImageHostSettings: () => typedError<ImageHostSettings, string>(__TAURI_INVOKE("get_image_host_settings")),
-	setImageHostSettings: (settings: ImageHostSettings) => typedError<null, string>(__TAURI_INVOKE("set_image_host_settings", { settings })),
-	// Publishing (v0.2.4) — manually maintained.
-	publishToGhost: (input: PublishInput, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_ghost", { input, config })),
-	publishToWordpressSelfHosted: (input: PublishInput, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_self_hosted", { input, config })),
-	publishToWordpressCom: (input: PublishInput, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_com", { input, config })),
-	publishToMedium: (input: PublishInput, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_medium", { input, config })),
+	uploadImageQiniu: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_qiniu", { bytes, filename, mime, config })),
+	uploadImageAliyunOss: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_aliyun_oss", { bytes, filename, mime, config })),
+	uploadImageS3: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_s3", { bytes, filename, mime, config })),
+	uploadImageImgur: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_imgur", { bytes, filename, mime, config })),
+	uploadImageSmms: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_smms", { bytes, filename, mime, config })),
+	uploadImageCustom: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_custom", { bytes, filename, mime, config })),
+	/**  Read the global `image_hosts` settings block. */
+	getImageHostSettings: () => typedError<ImageHostSettings_Serialize, string>(__TAURI_INVOKE("get_image_host_settings")),
+	/**  Replace the global `image_hosts` settings block atomically. */
+	setImageHostSettings: (settings: ImageHostSettings_Deserialize) => typedError<null, string>(__TAURI_INVOKE("set_image_host_settings", { settings })),
+	publishToGhost: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_ghost", { input, config })),
+	publishToWordpressSelfHosted: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_self_hosted", { input, config })),
+	publishToWordpressCom: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_com", { input, config })),
+	publishToMedium: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_medium", { input, config })),
 	uploadPostImageGhost: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_ghost", { bytes, filename, mime, config })),
 	uploadPostImageWordpressSelfHosted: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_wordpress_self_hosted", { bytes, filename, mime, config })),
 	uploadPostImageWordpressCom: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_wordpress_com", { bytes, filename, mime, config })),
 	uploadPostImageMedium: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_medium", { bytes, filename, mime, config })),
+	/**
+	 *  Convert Markdown to HTML via the bundled / system Pandoc binary.
+	 *  Used by the frontend orchestrator before submitting to Ghost / WP /
+	 *  WP.com (Medium consumes Markdown directly).
+	 */
 	convertMarkdownToHtml: (markdown: string) => typedError<string, string>(__TAURI_INVOKE("convert_markdown_to_html", { markdown })),
+	/**
+	 *  Read-only credentials check per platform. Returns a short
+	 *  human-friendly status line like "Connected as alice" on success;
+	 *  errors propagate with the platform's response body included.
+	 */
 	verifyPublishChannel: (config: PlatformConfig) => typedError<string, string>(__TAURI_INVOKE("verify_publish_channel", { config })),
+	/**
+	 *  Fetch existing tag names for the channel (used by the Publish
+	 *  dialog's tag autocomplete). Returns an empty vec for platforms
+	 *  that don't expose a tag-list API in v0.2.4 (Medium, WordPress —
+	 *  can be added later by extending the relevant adapter).
+	 */
 	listPublishTags: (config: PlatformConfig) => typedError<string[], string>(__TAURI_INVOKE("list_publish_tags", { config })),
 	readClipboardImage: () => typedError<ClipboardImage, string>(__TAURI_INVOKE("read_clipboard_image")),
 	getPublishSettings: () => typedError<PublishSettings, string>(__TAURI_INVOKE("get_publish_settings")),
 	setPublishSettings: (settings: PublishSettings) => typedError<null, string>(__TAURI_INVOKE("set_publish_settings", { settings })),
-	// Reveal a file or folder in the platform's file manager (Finder on macOS).
+	/**
+	 *  Write raw bytes (passed as base64) to a file. Used by the frontend to save
+	 *  pasted/dropped images without UTF-8 encoding corruption.
+	 */
+	writeBinaryFile: (path: string, base64Data: string) => typedError<null, string>(__TAURI_INVOKE("write_binary_file", { path, base64Data })),
+	/**  Reveal a file or folder in the platform's file manager (Finder on macOS). */
 	revealInFileManager: (path: string) => typedError<null, string>(__TAURI_INVOKE("reveal_in_file_manager", { path })),
-	// Duplicate a file. Returns the path of the new copy.
+	/**  Duplicate a file. Returns the path of the new copy. */
 	duplicateFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("duplicate_file", { path })),
-	// Snippet-template commands (bundled + project-scoped .md files with YAML front-matter).
-	listTemplateFiles: (projectDir: string | null) => typedError<TemplateFileSummary[], string>(__TAURI_INVOKE("list_template_files", { projectDir })),
-	readTemplateFile: (source: TemplateSource, id: string, projectDir: string | null) => typedError<TemplateFile, string>(__TAURI_INVOKE("read_template_file", { source, id, projectDir })),
-	writeTemplateFile: (projectDir: string, id: string, frontMatter: TemplateFrontMatterInput, body: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("write_template_file", { projectDir, id, frontMatter, body })),
-	renameTemplateFile: (projectDir: string, oldId: string, newId: string) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("rename_template_file", { projectDir, oldId, newId })),
-	deleteTemplateFile: (projectDir: string, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_template_file", { projectDir, id })),
-	duplicateBundledTemplate: (projectDir: string, bundledId: string, newId: string | null) => typedError<TemplateFileSummary, string>(__TAURI_INVOKE("duplicate_bundled_template", { projectDir, bundledId, newId })),
-	createFileWithBody: (dir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("create_file_with_body", { dir, filename, body })),
+	/**
+	 *  Record a frontend startup phase in the backend tracing log.
+	 *  `since_start_ms` is the frontend-observed time relative to the first mark.
+	 */
+	logStartupPhase: (name: string, sinceStartMs: number | null) => __TAURI_INVOKE<void>("log_startup_phase", { name, sinceStartMs }),
 	aiFetchStreamStart: (req: AiFetchRequest) => typedError<string, string>(__TAURI_INVOKE("ai_fetch_stream_start", { req })),
 	aiFetchStreamCancel: (streamId: string) => typedError<null, string>(__TAURI_INVOKE("ai_fetch_stream_cancel", { streamId })),
+	listAiSessions: (projectDir: string, kind: AiSessionKind) => typedError<AiSessionFile[], string>(__TAURI_INVOKE("list_ai_sessions", { projectDir, kind })),
+	readAiSession: (projectDir: string, kind: AiSessionKind, id: string) => typedError<string | null, string>(__TAURI_INVOKE("read_ai_session", { projectDir, kind, id })),
+	writeAiSession: (projectDir: string, kind: AiSessionKind, id: string, bodyJson: string) => typedError<null, string>(__TAURI_INVOKE("write_ai_session", { projectDir, kind, id, bodyJson })),
+	deleteAiSession: (projectDir: string, kind: AiSessionKind, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_ai_session", { projectDir, kind, id })),
+	listAiPromptAssets: (projectDir: string) => typedError<AiPromptAssets, string>(__TAURI_INVOKE("list_ai_prompt_assets", { projectDir })),
+	writeAiMemory: (projectDir: string, body: string) => typedError<null, string>(__TAURI_INVOKE("write_ai_memory", { projectDir, body })),
 	claudeCliDetect: () => __TAURI_INVOKE<{
 	path: string,
 	version: string | null,
@@ -197,6 +317,17 @@ export const commands = {
 	claudeCliSend: (sessionId: string, line: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_send", { sessionId, line })),
 	claudeCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_kill", { sessionId })),
 	refreshMenu: (labels: MenuLabels, recent: RecentEntry[]) => typedError<null, string>(__TAURI_INVOKE("refresh_menu", { labels, recent })),
+	/**
+	 *  Match the NSWindow's appearance to the app theme so the system-drawn
+	 *  title-bar chrome (top-edge highlight, traffic-light hover states) blends
+	 *  in. Without this, a dark-themed app on a default-appearance NSWindow gets
+	 *  a bright 1px highlight at the very top, because macOS draws the highlight
+	 *  for *light* windows.
+	 * 
+	 *  No-op on non-macOS and on macOS versions predating `NSAppearance` (which
+	 *  effectively means no-op if the selector doesn't exist).
+	 */
+	setWindowAppearance: (dark: boolean) => __TAURI_INVOKE<void>("set_window_appearance", { dark }),
 	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
 	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
 	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
@@ -204,29 +335,6 @@ export const commands = {
 };
 
 /* Types */
-export type PendingFile = {
-	path: string,
-	line: number | null,
-	col: number | null,
-};
-
-export type CliOpenPayload = {
-	files: PendingFile[],
-	folders: string[],
-	force_new_window: boolean,
-};
-
-export type RouteResult = {
-	winner_label: string | null,
-};
-
-export type CliShimStatus = {
-	install_path: string,
-	installed: boolean,
-	up_to_date: boolean,
-	source_path: string,
-};
-
 export type AiFetchRequest = {
 	/**
 	 *  Full URL. Must be https:// (http:// allowed only for localhost for
@@ -234,7 +342,7 @@ export type AiFetchRequest = {
 	 */
 	url: string,
 	headers: ([string, string])[],
-	// Raw JSON body. The caller (plugin) owns the shape — we just POST it.
+	/**  Raw JSON body. The caller (plugin) owns the shape — we just POST it. */
 	body: string,
 	/**
 	 *  When true, parse the response as SSE (split on `\n\n`, strip `data: `,
@@ -243,6 +351,42 @@ export type AiFetchRequest = {
 	sse: boolean,
 };
 
+export type AiPromptAsset = {
+	id: string,
+	kind: string,
+	path: string,
+	name: string,
+	content: string,
+};
+
+export type AiPromptAssets = {
+	commands: AiPromptAsset[],
+	skills: AiPromptAsset[],
+	memory: AiPromptAsset | null,
+};
+
+export type AiSessionFile = {
+	id: string,
+	kind: AiSessionKind,
+	path: string,
+	updatedAt: number | null,
+};
+
+export type AiSessionKind = "talk" | "agent";
+
+/**
+ *  Body format selector. Ghost / WordPress consume HTML; Medium
+ *  consumes Markdown natively.
+ */
+export type BodyFormat = "html" | "markdown";
+
+export type ChannelConfig = {
+	/**  Stable UUID. Survives renaming the user-facing label. */
+	id: string,
+	/**  User-facing label, e.g. "Personal Ghost". */
+	name: string,
+} & PlatformConfig;
+
 export type ChapterStats = {
 	file_name: string,
 	file_path: string,
@@ -250,12 +394,12 @@ export type ChapterStats = {
 };
 
 export type ClaudeSpawnRequest = {
-	// Override the auto-detected CLI path.
+	/**  Override the auto-detected CLI path. */
 	cli_path: string | null,
-	// Working directory for the spawned process. Default: inherit.
+	/**  Working directory for the spawned process. Default: inherit. */
 	cwd: string | null,
 	system_prompt: string | null,
-	// Extra `--add-dir` values (plugin usually includes the project root).
+	/**  Extra `--add-dir` values (plugin usually includes the project root). */
 	add_dirs: string[],
 	/**
 	 *  One of: "acceptEdits", "auto", "bypassPermissions", "default",
@@ -263,13 +407,54 @@ export type ClaudeSpawnRequest = {
 	 */
 	permission_mode: string | null,
 	model: string | null,
-	// Plugin-owned UUID; must be a valid UUID string on the CLI side.
+	/**  Plugin-owned UUID; must be a valid UUID string on the CLI side. */
 	session_uuid: string,
 	/**
 	 *  Extra CLI args (escape hatch). Validated against a blocklist of
 	 *  flags we manage ourselves.
 	 */
 	extra_args: string[],
+};
+
+/**
+ *  Payload emitted as the `cli-open` event on hot path (existing instance
+ *  receives a second invocation). The frontend routes folders to new windows
+ *  and files to either the focused single-file window or a new window.
+ */
+export type CliOpenPayload = {
+	files: PendingFile[],
+	folders: string[],
+	force_new_window: boolean,
+	/**
+	 *  Label of the single window meant to handle this event. On Windows,
+	 *  `emit_to` broadcasts to every webview, so the frontend filters on this
+	 *  to keep the "single coordinator" semantics (see app-events listeners).
+	 */
+	target_label: string,
+};
+
+export type CliShimStatus = {
+	/**  Where the shim would (or does) live on this platform. */
+	install_path: string,
+	/**  True if the file at `install_path` exists. */
+	installed: boolean,
+	/**  True if `installed` AND it points at the bundled shim we ship now. */
+	up_to_date: boolean,
+	/**  Path to the bundled shim — what would be linked/copied. */
+	source_path: string,
+};
+
+/**
+ *  PNG-encoded image bytes pulled from the system clipboard via the
+ *  Rust-side `arboard` API. Reading via Rust (instead of the browser's
+ *  `navigator.clipboard.read()`) avoids the WebKit/macOS "Paste"
+ *  permission prompt that otherwise pops up next to the cursor.
+ */
+export type ClipboardImage = {
+	bytes: number[],
+	mime: string,
+	width: number,
+	height: number,
 };
 
 export type DailyStats = {
@@ -283,126 +468,115 @@ export type DetectedCli = {
 	version: string | null,
 };
 
+export type EffectiveSettings = {
+	view: ResolvedView,
+	new_file: ResolvedNewFile,
+	plugins: ResolvedPlugins,
+	/**  True when a project is open — lets the UI show project-vs-global affordances. */
+	is_project_scoped: boolean,
+};
+
 export type FileEntry = {
 	name: string,
 	path: string,
 	is_dir: boolean,
 	size: number,
-	// Unix epoch milliseconds; None when filesystem doesn't expose mtime.
+	/**  Unix epoch milliseconds; None when filesystem doesn't expose mtime. */
 	mtime: number | null,
-	// Unix epoch milliseconds for filesystem creation/birth time. None on
-	// platforms or filesystems that don't expose it.
+	/**
+	 *  Unix epoch milliseconds for filesystem creation/birth time. None on
+	 *  platforms or filesystems that don't expose it (e.g. older ext4).
+	 */
 	ctime: number | null,
 };
 
-export type OutlineConfig = {
-	order?: string[],
+/**  Shape written to `~/.novelist/settings.json`. */
+export type GlobalSettings = GlobalSettings_Serialize | GlobalSettings_Deserialize;
+
+/**  Shape written to `~/.novelist/settings.json`. */
+export type GlobalSettings_Deserialize = {
+	view?: ViewConfig_Deserialize,
+	new_file?: NewFileConfig_Deserialize,
+	plugins?: PluginsConfig,
+	/**
+	 *  Image-host providers and active-host pointer. Credentials live
+	 *  here only — never in per-project settings.
+	 */
+	image_hosts?: ImageHostSettings_Deserialize,
+	/**
+	 *  Publish channels (Ghost / WordPress / Medium). Credentials live
+	 *  here only — same convention as image_hosts.
+	 */
+	publish?: PublishSettings,
+	/**
+	 *  Optional override path to the Pandoc binary. When unset (or
+	 *  empty), Novelist auto-detects Pandoc from `$PATH` and common
+	 *  install locations. Pandoc is NOT bundled with Novelist — users
+	 *  without it installed are pointed at https://pandoc.org/installing.html.
+	 */
+	pandoc_path?: string | null,
 };
 
-export type PandocStatus = {
-	available: boolean,
-	version: string | null,
-	resolved_path?: string,
-	override_path?: string,
+/**  Shape written to `~/.novelist/settings.json`. */
+export type GlobalSettings_Serialize = {
+	view: ViewConfig_Serialize,
+	new_file: NewFileConfig_Serialize,
+	plugins: PluginsConfig,
+	/**
+	 *  Image-host providers and active-host pointer. Credentials live
+	 *  here only — never in per-project settings.
+	 */
+	image_hosts: ImageHostSettings_Serialize,
+	/**
+	 *  Publish channels (Ghost / WordPress / Medium). Credentials live
+	 *  here only — same convention as image_hosts.
+	 */
+	publish: PublishSettings,
+	/**
+	 *  Optional override path to the Pandoc binary. When unset (or
+	 *  empty), Novelist auto-detects Pandoc from `$PATH` and common
+	 *  install locations. Pandoc is NOT bundled with Novelist — users
+	 *  without it installed are pointed at https://pandoc.org/installing.html.
+	 */
+	pandoc_path?: string | null,
 };
 
-export type PluginInfo = {
+export type HostConfig = HostConfig_Serialize | HostConfig_Deserialize;
+
+export type HostConfig_Deserialize = {
+	/**  Stable UUID. Survives renaming the user-facing label. */
 	id: string,
+	/**  User-facing label, e.g. "Personal R2". */
 	name: string,
-	version: string,
-	permissions: string[],
-	active: boolean,
-	ui: PluginUiConfig | null,
-	description: string | null,
-	author: string | null,
-	icon: string | null,
-	builtin: boolean,
-	enabled: boolean,
-};
+} & ProviderConfig_Deserialize;
 
-export type PluginReplacementResult = {
-	from: number,
-	to: number,
-	text: string,
-};
-
-export type PluginUiConfig = {
-	type: string,
-	entry: string,
-	width?: number | null,
-	label?: string | null,
-	file_extensions?: string[] | null,
-};
-
-export type PortableModeInfo = {
-	enabled: boolean,
-	data_root: string,
-};
-
-export type ProjectConfig = {
-	project: ProjectMeta,
-	outline?: OutlineConfig,
-	writing?: WritingConfig,
-	view?: ViewConfig,
-	new_file?: NewFileConfig,
-	plugins?: PluginsConfig,
-};
-
-export type ViewConfig = {
-	sort_mode?: string | null,
-	show_hidden_files?: boolean | null,
-	wrap_file_names?: boolean | null,
-};
-
-export type NewFileConfig = {
-	template?: string | null,
-	detect_from_folder?: boolean | null,
-	auto_rename_from_h1?: boolean | null,
-	default_dir?: string | null,
-	last_used_dir?: string | null,
-};
-
-export type PluginsConfig = {
-	enabled: { [key: string]: boolean },
-};
-
-export type GlobalSettings = {
-	view?: ViewConfig,
-	new_file?: NewFileConfig,
-	plugins?: PluginsConfig,
-};
-
-export type ResolvedView = {
-	sort_mode: string,
-	show_hidden_files: boolean,
-	wrap_file_names: boolean,
-};
-
-export type ResolvedNewFile = {
-	template: string,
-	detect_from_folder: boolean,
-	auto_rename_from_h1: boolean,
-	default_dir: string | null,
-	last_used_dir: string | null,
-};
-
-export type ResolvedPlugins = {
-	enabled: { [key: string]: boolean },
-};
-
-export type EffectiveSettings = {
-	view: ResolvedView,
-	new_file: ResolvedNewFile,
-	plugins: ResolvedPlugins,
-	is_project_scoped: boolean,
-};
-
-export type ProjectMeta = {
+export type HostConfig_Serialize = {
+	/**  Stable UUID. Survives renaming the user-facing label. */
+	id: string,
+	/**  User-facing label, e.g. "Personal R2". */
 	name: string,
-	type?: string,
-	version?: string,
+} & ProviderConfig_Serialize;
+
+export type ImageHostSettings = ImageHostSettings_Serialize | ImageHostSettings_Deserialize;
+
+export type ImageHostSettings_Deserialize = {
+	hosts?: HostConfig_Deserialize[],
+	active_host_id?: string | null,
+	auto_on_paste?: boolean,
 };
 
+export type ImageHostSettings_Serialize = {
+	hosts: HostConfig_Serialize[],
+	active_host_id?: string | null,
+	auto_on_paste: boolean,
+};
+
+/**
+ *  All human-readable labels used in the menu. The frontend builds
+ *  this from the i18n store for the current locale. Every field must
+ *  be present — fall back to the English string on the frontend if a
+ *  translation is missing.
+ */
 export type MenuLabels = {
 	file_menu: string,
 	edit_menu: string,
@@ -449,6 +623,314 @@ export type MenuLabels = {
 	check_for_updates: string,
 };
 
+/**  New-file template preferences. */
+export type NewFileConfig = NewFileConfig_Serialize | NewFileConfig_Deserialize;
+
+/**  New-file template preferences. */
+export type NewFileConfig_Deserialize = {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	/**
+	 *  User-pinned default location for new files. Absolute path. When set,
+	 *  Cmd+N always creates here regardless of the recent activity pointer.
+	 *  `None` means "follow the last-used tracker."
+	 */
+	default_dir?: string | null,
+	/**
+	 *  Live pointer: directory of the most recently created file. Updated
+	 *  after every successful create (header button, Cmd+N, per-folder
+	 *  context menu). Seeded to the project root on first open.
+	 */
+	last_used_dir?: string | null,
+};
+
+/**  New-file template preferences. */
+export type NewFileConfig_Serialize = {
+	template?: string | null,
+	detect_from_folder?: boolean | null,
+	auto_rename_from_h1?: boolean | null,
+	/**
+	 *  User-pinned default location for new files. Absolute path. When set,
+	 *  Cmd+N always creates here regardless of the recent activity pointer.
+	 *  `None` means "follow the last-used tracker."
+	 */
+	default_dir?: string | null,
+	/**
+	 *  Live pointer: directory of the most recently created file. Updated
+	 *  after every successful create (header button, Cmd+N, per-folder
+	 *  context menu). Seeded to the project root on first open.
+	 */
+	last_used_dir?: string | null,
+};
+
+export type OutlineConfig = {
+	order?: string[],
+};
+
+export type PandocStatus = PandocStatus_Serialize | PandocStatus_Deserialize;
+
+export type PandocStatus_Deserialize = {
+	available: boolean,
+	version: string | null,
+	/**
+	 *  Absolute path of the resolved binary, when found. Useful for
+	 *  the Settings UI to confirm what we're actually invoking.
+	 */
+	resolved_path?: string | null,
+	/**
+	 *  The user's saved override (mirrors `GlobalSettings.pandoc_path`)
+	 *  — surfaced so the Settings form can pre-fill the input.
+	 */
+	override_path?: string | null,
+};
+
+export type PandocStatus_Serialize = {
+	available: boolean,
+	version: string | null,
+	/**
+	 *  Absolute path of the resolved binary, when found. Useful for
+	 *  the Settings UI to confirm what we're actually invoking.
+	 */
+	resolved_path?: string | null,
+	/**
+	 *  The user's saved override (mirrors `GlobalSettings.pandoc_path`)
+	 *  — surfaced so the Settings form can pre-fill the input.
+	 */
+	override_path?: string | null,
+};
+
+export type PendingFile = {
+	path: string,
+	line: number | null,
+	col: number | null,
+};
+
+export type PlatformConfig = { platform: "ghost"; 
+/**  Admin URL ending without a slash, e.g. "https://blog.example.com". */
+admin_url: string; 
+/**  Admin API key in the canonical "<id>:<secret_hex>" form. */
+api_key: string } | { platform: "wordpress_self_hosted"; 
+/**  Site URL ending without a slash, e.g. "https://blog.example.com". */
+site_url: string; username: string; 
+/**
+ *  Application Password, the 24-char string from WP Admin →
+ *  Users → Application Passwords. Spaces optional.
+ */
+app_password: string } | { platform: "wordpress_com"; 
+/**  Site id (numeric) or domain ("myblog.wordpress.com"). */
+site_id_or_domain: string; 
+/**  OAuth2 access token from developer.wordpress.com. */
+access_token: string } | { platform: "medium"; 
+/**
+ *  Integration token from Settings → Security → Integration
+ *  Tokens. The Medium UI for generating new tokens was removed
+ *  in late 2024; legacy users only.
+ */
+token: string };
+
+export type PluginInfo = {
+	id: string,
+	name: string,
+	version: string,
+	permissions: string[],
+	active: boolean,
+	ui: PluginUiConfig | null,
+	description: string | null,
+	author: string | null,
+	icon: string | null,
+	builtin: boolean,
+	enabled: boolean,
+};
+
+export type PluginReplacementResult = {
+	from: number,
+	to: number,
+	text: string,
+};
+
+export type PluginUiConfig = {
+	type: string,
+	entry: string,
+	width?: number | null,
+	label?: string | null,
+	file_extensions?: string[] | null,
+};
+
+/**
+ *  Per-plugin enable flags. Project-level map stores only entries that
+ *  differ from the global default.
+ */
+export type PluginsConfig = {
+	enabled?: { [key in string]: boolean },
+};
+
+export type PortableModeInfo = {
+	enabled: boolean,
+	data_root: string,
+};
+
+/**
+ *  Returns `(hosted_url, attachment_id_or_zero)`. Only WordPress
+ *  returns a non-zero attachment id (used for `featured_media`).
+ */
+export type PostImageUploadResult = {
+	url: string,
+	attachment_id: number,
+};
+
+export type ProjectConfig = ProjectConfig_Serialize | ProjectConfig_Deserialize;
+
+export type ProjectConfig_Deserialize = {
+	project: ProjectMeta,
+	outline?: OutlineConfig,
+	writing?: WritingConfig,
+	/**  Sidebar/file-tree view preferences. Overrides global `~/.novelist/settings.json`. */
+	view?: ViewConfig_Deserialize,
+	/**  New-file template preferences. Overrides global. */
+	new_file?: NewFileConfig_Deserialize,
+	/**  Per-plugin enable flags (deltas from the global default map). */
+	plugins?: PluginsConfig,
+	/**
+	 *  Per-project override for which image host is active. Credentials
+	 *  stay in global settings — only the pointer to a configured host
+	 *  can be overridden here.
+	 */
+	active_image_host_id?: string | null,
+};
+
+export type ProjectConfig_Serialize = {
+	project: ProjectMeta,
+	outline: OutlineConfig,
+	writing: WritingConfig,
+	/**  Sidebar/file-tree view preferences. Overrides global `~/.novelist/settings.json`. */
+	view?: ViewConfig_Serialize,
+	/**  New-file template preferences. Overrides global. */
+	new_file?: NewFileConfig_Serialize,
+	/**  Per-plugin enable flags (deltas from the global default map). */
+	plugins?: PluginsConfig,
+	/**
+	 *  Per-project override for which image host is active. Credentials
+	 *  stay in global settings — only the pointer to a configured host
+	 *  can be overridden here.
+	 */
+	active_image_host_id?: string | null,
+};
+
+export type ProjectMeta = {
+	name: string,
+	type?: string,
+	version?: string,
+};
+
+export type ProviderConfig = ProviderConfig_Serialize | ProviderConfig_Deserialize;
+
+export type ProviderConfig_Deserialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string; 
+/**  CDN domain that fronts the bucket, e.g. "https://cdn.example.com". */
+domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string; 
+/**  Region endpoint, e.g. "oss-cn-hangzhou.aliyuncs.com". */
+endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string; 
+/**  Set for non-AWS S3-compatible endpoints (R2, MinIO). */
+endpoint?: string | null; 
+/**  Optional key prefix prepended before the generated object key. */
+path_prefix?: string | null; 
+/**  Custom CDN domain. Final URL = `<custom_domain>/<key>` when set. */
+custom_domain?: string | null }) & { access_key?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; post_url?: never; secret_key?: never } | ({ provider: "imgur"; client_id: string }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; bucket?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "smms"; api_token?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; bearer?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "custom"; post_url: string; bearer?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; region?: never; secret_access_key?: never; secret_key?: never };
+
+export type ProviderConfig_Serialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string; 
+/**  CDN domain that fronts the bucket, e.g. "https://cdn.example.com". */
+domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string; 
+/**  Region endpoint, e.g. "oss-cn-hangzhou.aliyuncs.com". */
+endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string; 
+/**  Set for non-AWS S3-compatible endpoints (R2, MinIO). */
+endpoint?: string | null; 
+/**  Optional key prefix prepended before the generated object key. */
+path_prefix?: string | null; 
+/**  Custom CDN domain. Final URL = `<custom_domain>/<key>` when set. */
+custom_domain?: string | null }) & { access_key?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; post_url?: never; secret_key?: never } | ({ provider: "imgur"; client_id: string }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; bucket?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "smms"; api_token?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; bearer?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "custom"; post_url: string; bearer?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; region?: never; secret_access_key?: never; secret_key?: never };
+
+/**
+ *  Inputs handed to a platform adapter's `publish()` function. The
+ *  frontend builds this from the publish dialog plus pre-publish
+ *  image rewrite.
+ */
+export type PublishInput = PublishInput_Serialize | PublishInput_Deserialize;
+
+/**
+ *  Inputs handed to a platform adapter's `publish()` function. The
+ *  frontend builds this from the publish dialog plus pre-publish
+ *  image rewrite.
+ */
+export type PublishInput_Deserialize = {
+	title: string,
+	/**
+	 *  Already-rewritten body. For Ghost / WordPress this is HTML
+	 *  (from Pandoc); for Medium this is Markdown.
+	 */
+	body: string,
+	body_format: BodyFormat,
+	tags?: string[],
+	slug?: string | null,
+	excerpt?: string | null,
+	/**  Platform-specific status string. See per-platform spec. */
+	status: string,
+	/**  Already-uploaded feature image URL on the platform. */
+	feature_image_url?: string | null,
+	/**  WordPress-specific: pre-uploaded media attachment id. */
+	featured_media_id?: number | null,
+	/**
+	 *  Medium-only: when set, post to a publication instead of the
+	 *  authenticated user.
+	 */
+	publication_id?: string | null,
+};
+
+/**
+ *  Inputs handed to a platform adapter's `publish()` function. The
+ *  frontend builds this from the publish dialog plus pre-publish
+ *  image rewrite.
+ */
+export type PublishInput_Serialize = {
+	title: string,
+	/**
+	 *  Already-rewritten body. For Ghost / WordPress this is HTML
+	 *  (from Pandoc); for Medium this is Markdown.
+	 */
+	body: string,
+	body_format: BodyFormat,
+	tags: string[],
+	slug?: string | null,
+	excerpt?: string | null,
+	/**  Platform-specific status string. See per-platform spec. */
+	status: string,
+	/**  Already-uploaded feature image URL on the platform. */
+	feature_image_url?: string | null,
+	/**  WordPress-specific: pre-uploaded media attachment id. */
+	featured_media_id?: number | null,
+	/**
+	 *  Medium-only: when set, post to a publication instead of the
+	 *  authenticated user.
+	 */
+	publication_id?: string | null,
+};
+
+/**  Result returned to the frontend on success. */
+export type PublishResult = {
+	/**  Canonical URL of the new post on the platform. */
+	url: string,
+	/**  Platform post id (string for portability across platforms). */
+	remote_id: string,
+};
+
+export type PublishSettings = {
+	channels?: ChannelConfig[],
+};
+
+/**
+ *  An entry shown under the Open Recent submenu. Name is the display
+ *  label; path is the absolute directory path used as the menu item ID
+ *  suffix.
+ */
 export type RecentEntry = {
 	name: string,
 	path: string,
@@ -476,10 +958,40 @@ export type RegisteredCommandInfo = {
 	label: string,
 };
 
+export type ResolvedNewFile = {
+	template: string,
+	detect_from_folder: boolean,
+	auto_rename_from_h1: boolean,
+	/**  Pinned default directory (`None` means no pin — use last-used instead). */
+	default_dir: string | null,
+	/**  Last-used directory (`None` means not yet recorded — caller uses project root). */
+	last_used_dir: string | null,
+};
+
+export type ResolvedPlugins = {
+	enabled: { [key in string]: boolean },
+};
+
+/**  Fully resolved settings handed to the frontend — no `Option`s. */
+export type ResolvedView = {
+	sort_mode: string,
+	show_hidden_files: boolean,
+	wrap_file_names: boolean,
+	sidebar_font_size: number,
+};
+
 export type RopeDocumentMeta = {
 	file_id: string,
 	total_lines: number,
 	total_bytes: number,
+};
+
+export type RouteResult = {
+	/**
+	 *  `Some(label)` — Rust has delivered to the winner; FE caller may stop.
+	 *  `None` — no window claimed; FE caller should spawn a new window.
+	 */
+	winner_label: string | null,
 };
 
 export type SearchMatch = {
@@ -523,18 +1035,10 @@ export type SyncStatus = {
 	in_progress: boolean,
 };
 
-// Info returned to the frontend for listing templates.
-export type TemplateInfo = {
-	id: string,
-	name: string,
-	description: string,
-	category: string,
-	// Whether this is a built-in template (cannot be deleted).
-	builtin: boolean,
+export type TemplateFile = {
+	summary: TemplateFileSummary,
+	body: string,
 };
-
-export type TemplateSource = "bundled" | "project";
-export type TemplateMode = "insert" | "new-file";
 
 export type TemplateFileSummary = {
 	id: string,
@@ -545,11 +1049,6 @@ export type TemplateFileSummary = {
 	defaultFilename: string | null,
 };
 
-export type TemplateFile = {
-	summary: TemplateFileSummary,
-	body: string,
-};
-
 export type TemplateFrontMatterInput = {
 	name: string,
 	mode: TemplateMode,
@@ -557,14 +1056,59 @@ export type TemplateFrontMatterInput = {
 	defaultFilename: string | null,
 };
 
+/**  Info returned to the frontend for listing templates. */
+export type TemplateInfo = {
+	id: string,
+	name: string,
+	description: string,
+	category: string,
+	/**  Whether this is a built-in template (cannot be deleted). */
+	builtin: boolean,
+};
+
+export type TemplateMode = "insert" | "new-file";
+
+export type TemplateSource = "bundled" | "project";
+
+/**  Result of a successful upload. */
+export type UploadResult = {
+	/**  Public URL the user's Markdown should reference. */
+	url: string,
+	/**
+	 *  The remote object key, when the provider chose one we control
+	 *  (S3 / OSS / Qiniu). `None` for hosts that pick their own URL
+	 *  scheme (imgur, sm.ms).
+	 */
+	remote_key: string | null,
+};
+
+/**  Sidebar / file-tree view preferences. */
+export type ViewConfig = ViewConfig_Serialize | ViewConfig_Deserialize;
+
+/**  Sidebar / file-tree view preferences. */
+export type ViewConfig_Deserialize = {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
+	wrap_file_names?: boolean | null,
+	sidebar_font_size?: number | null,
+};
+
+/**  Sidebar / file-tree view preferences. */
+export type ViewConfig_Serialize = {
+	sort_mode?: string | null,
+	show_hidden_files?: boolean | null,
+	wrap_file_names?: boolean | null,
+	sidebar_font_size?: number | null,
+};
+
 export type ViewportContent = {
-	// The text content for the requested line range
+	/**  The text content for the requested line range */
 	text: string,
-	// Actual start line (0-indexed)
+	/**  Actual start line (0-indexed) */
 	start_line: number,
-	// Actual end line (exclusive, 0-indexed)
+	/**  Actual end line (exclusive, 0-indexed) */
 	end_line: number,
-	// Total lines in document (can change after edits)
+	/**  Total lines in document (can change after edits) */
 	total_lines: number,
 };
 
@@ -580,79 +1124,6 @@ export type WritingStatsOverview = {
 	streak_days: number,
 	today_words: number,
 	today_minutes: number,
-};
-
-/* Image hosting (v0.2.4) — manually maintained types matching core/src/models/image_host.rs */
-export type UploadResult = {
-	url: string,
-	remote_key: string | null,
-};
-
-export type ImageHostSettings = {
-	hosts: HostConfig[],
-	active_host_id?: string,
-	auto_on_paste: boolean,
-};
-
-export type HostConfig = {
-	id: string,
-	name: string,
-} & ProviderConfig;
-
-export type ProviderConfig =
-	| { provider: "qiniu", access_key: string, secret_key: string, bucket: string, domain: string }
-	| { provider: "aliyun_oss", access_key_id: string, access_key_secret: string, bucket: string, endpoint: string, custom_domain?: string }
-	| { provider: "s3", access_key_id: string, secret_access_key: string, bucket: string, region: string, endpoint?: string, path_prefix?: string, custom_domain?: string }
-	| { provider: "imgur", client_id: string }
-	| { provider: "smms", api_token?: string }
-	| { provider: "custom", post_url: string, bearer?: string };
-
-/* Publishing (v0.2.4) — manually maintained types matching core/src/models/publish.rs */
-export type PublishSettings = {
-	channels: ChannelConfig[],
-};
-
-export type ChannelConfig = {
-	id: string,
-	name: string,
-} & PlatformConfig;
-
-export type PlatformConfig =
-	| { platform: "ghost", admin_url: string, api_key: string }
-	| { platform: "wordpress_self_hosted", site_url: string, username: string, app_password: string }
-	| { platform: "wordpress_com", site_id_or_domain: string, access_token: string }
-	| { platform: "medium", token: string };
-
-export type BodyFormat = "html" | "markdown";
-
-export type PublishInput = {
-	title: string,
-	body: string,
-	body_format: BodyFormat,
-	tags: string[],
-	slug?: string,
-	excerpt?: string,
-	status: string,
-	feature_image_url?: string,
-	featured_media_id?: number,
-	publication_id?: string,
-};
-
-export type PublishResult = {
-	url: string,
-	remote_id: string,
-};
-
-export type PostImageUploadResult = {
-	url: string,
-	attachment_id: number,
-};
-
-export type ClipboardImage = {
-	bytes: number[],
-	mime: string,
-	width: number,
-	height: number,
 };
 
 /* Tauri Specta runtime */

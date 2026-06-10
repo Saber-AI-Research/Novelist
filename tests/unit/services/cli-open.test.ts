@@ -55,6 +55,7 @@ function payload(overrides: Partial<CliOpenPayload> = {}): CliOpenPayload {
     files: overrides.files ?? [],
     folders: overrides.folders ?? [],
     force_new_window: overrides.force_new_window ?? false,
+    target_label: overrides.target_label ?? 'main',
   };
 }
 

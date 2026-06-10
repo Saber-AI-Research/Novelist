@@ -15,7 +15,7 @@
  * `active_host_id`. Throws if no usable host is configured.
  */
 
-import { commands, type HostConfig, type ImageHostSettings, type ProviderConfig, type UploadResult } from '$lib/ipc/commands';
+import { commands, type HostConfig, type ImageHostSettings_Serialize, type ProviderConfig, type UploadResult } from '$lib/ipc/commands';
 
 export type UploadReport = {
   successes: Array<{ original: string; url: string }>;
@@ -31,7 +31,7 @@ export class NoActiveHostError extends Error {
 
 /** Resolve the active host given current settings + an optional project override. */
 export function resolveActiveHost(
-  settings: ImageHostSettings,
+  settings: ImageHostSettings_Serialize,
   projectActiveHostId: string | null | undefined,
 ): HostConfig | null {
   const id = (projectActiveHostId && projectActiveHostId.length > 0)

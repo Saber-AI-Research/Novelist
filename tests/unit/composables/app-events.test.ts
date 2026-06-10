@@ -21,7 +21,7 @@ const { hoisted } = vi.hoisted(() => {
     dragDropHandlers.push(handler);
     return unlisten;
   });
-  const getCurrentWindow = vi.fn(() => ({ onDragDropEvent }));
+  const getCurrentWindow = vi.fn(() => ({ onDragDropEvent, label: 'main' }));
 
   const readFile = vi.fn();
   const registerOpenFile = vi.fn(async () => ({ status: 'ok' }));
@@ -248,9 +248,54 @@ describe('[contract] pending-files drain', () => {
 describe('[contract] open-file event → cross-window routing', () => {
   it('forwards macOS Finder Open-With events to the router', async () => {
     await wire();
-    await hoisted.listeners.get('open-file')!({ payload: '/tmp/x.md' });
+    await hoisted.listeners.get('open-file')!({ payload: { path: '/tmp/x.md', target_label: 'main' } });
     expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/tmp/x.md');
     expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
+  });
+
+  // On Windows `emit_to` broadcasts to every webview; only the stamped window
+  // may start a routing round, or every window routes the same file.
+  it('ignores open-file events addressed to a different window', async () => {
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('open-file')!({
+      payload: { path: '/tmp/x.md', target_label: 'novelist-7' },
+    });
+    expect(hoisted.routeSingleFileOpen).not.toHaveBeenCalled();
+  });
+
+  it('still routes legacy payloads without target_label', async () => {
+    await wire();
+    await hoisted.listeners.get('open-file')!({ payload: { path: '/tmp/x.md' } });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/tmp/x.md');
+  });
+});
+
+describe('[contract] cli-open event → coordinator filtering', () => {
+  const cliPayload = (target_label?: string) => ({
+    files: [{ path: '/a.md', line: null, col: null }],
+    folders: [],
+    force_new_window: false,
+    ...(target_label === undefined ? {} : { target_label }),
+  });
+
+  it('runs the routing round when addressed to this window', async () => {
+    await wire();
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload('main') });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/a.md', null, null, false);
+  });
+
+  // The v0.2.8 Windows bug: `emit_to` broadcasts, every window ran its own
+  // routing round, and one CLI invocation opened the file in every window.
+  it('ignores cli-open addressed to a different window', async () => {
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload('novelist-7') });
+    expect(hoisted.routeSingleFileOpen).not.toHaveBeenCalled();
+  });
+
+  it('still handles legacy payloads without target_label', async () => {
+    await wire();
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload(undefined) });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/a.md', null, null, false);
   });
 });
 
@@ -303,6 +348,27 @@ describe('[contract] open-file-deliver event (router→winner)', () => {
       payload: { path: '/tmp/x.md', line: null, col: null },
     });
     expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
+  });
+
+  // On Windows `emit_to` broadcasts to every webview; the target_label guard
+  // keeps the file from opening in windows it was not addressed to.
+  it('ignores delivery addressed to a different window', async () => {
+    hoisted.readFile.mockResolvedValue({ status: 'ok', data: 'body' });
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('open-file-deliver')!({
+      payload: { path: '/proj/story.md', line: null, col: null, target_label: 'novelist-99' },
+    });
+    expect(hoisted.readFile).not.toHaveBeenCalled();
+    expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
+  });
+
+  it('opens when delivery is addressed to this window', async () => {
+    hoisted.readFile.mockResolvedValue({ status: 'ok', data: 'body' });
+    await wire();
+    await hoisted.listeners.get('open-file-deliver')!({
+      payload: { path: '/proj/story.md', line: null, col: null, target_label: 'main' },
+    });
+    expect(hoisted.tabsState.openTab).toHaveBeenCalledWith('/proj/story.md', 'body');
   });
 });
 

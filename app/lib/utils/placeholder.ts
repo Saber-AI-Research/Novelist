@@ -453,3 +453,58 @@ export function applyH1Substitution(
 
   return bumpStemUntilFree(newName, siblings, currentName);
 }
+
+/**
+ * Matcher for a template's own placeholder form — the filename produced when
+ * the file was created with no title yet (the "Untitled" fill), e.g.
+ * `第{N}章-{title}` → `第3章-Untitled.md`, `draft-{title}` → `draft-Untitled.md`.
+ *
+ * PLACEHOLDER_PATTERNS only knows the built-in families; user templates with
+ * a {title} slot render placeholder names the static list can't enumerate, so
+ * Path A of the H1 auto-rename additionally consults this template-derived
+ * matcher. Templates whose macros (e.g. {date}) were resolved at creation
+ * time won't match here — their resolved forms are digit-prefixed and already
+ * covered by the built-in `{N}<sep>Untitled` patterns.
+ *
+ * Captures: [1] before the fill, [2] optional collision counter, [3] after.
+ */
+function templateTitleSlotMatcher(templateRaw: string): RegExp | null {
+  const template = parseTemplate(templateRaw);
+  if (!template || !template.hasTitleSlot) return null;
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (template.hasNumberSlot) {
+    const [pre, post = ''] = template.suffix.split('{title}');
+    return new RegExp(
+      `^(${esc(template.prefix)}[\\d\\u4e00-\\u9fff]+${esc(pre)})Untitled( \\d+)?(${esc(post)})\\.md$`,
+    );
+  }
+  return new RegExp(
+    `^(${esc(template.prefix)})Untitled( \\d+)?(${esc(template.suffix)})\\.md$`,
+  );
+}
+
+/** True if `filename` is `templateRaw`'s rendered placeholder (Untitled fill). */
+export function isTemplateTitlePlaceholder(filename: string, templateRaw: string): boolean {
+  const re = templateTitleSlotMatcher(templateRaw);
+  return re ? re.test(filename) : false;
+}
+
+/**
+ * Path A companion to `renameFromH1` for template-derived placeholders:
+ * swap the "Untitled" fill (and any collision counter) for the sanitized H1.
+ * `第1章-Untitled.md` + `开篇` → `第1章-开篇.md`.
+ */
+export function renameFromTemplateTitleSlot(
+  currentName: string,
+  h1: string,
+  templateRaw: string,
+  siblings: string[],
+): string | null {
+  const m = templateTitleSlotMatcher(templateRaw)?.exec(currentName);
+  if (!m) return null;
+  const sanitized = sanitizeFilenameStem(h1);
+  if (sanitized.length === 0) return null;
+  const newName = `${m[1]}${sanitized}${m[3]}.md`;
+  if (newName === currentName) return null;
+  return bumpStemUntilFree(newName, siblings, currentName);
+}

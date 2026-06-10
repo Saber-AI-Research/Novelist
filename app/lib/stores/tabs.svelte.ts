@@ -2,7 +2,13 @@ import { commands } from '$lib/ipc/commands';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
 import { isScratchFile, nextScratchDisplayName } from '$lib/utils/scratch';
-import { isPlaceholder, renameFromH1, applyH1Substitution } from '$lib/utils/placeholder';
+import {
+  isPlaceholder,
+  isTemplateTitlePlaceholder,
+  renameFromH1,
+  renameFromTemplateTitleSlot,
+  applyH1Substitution,
+} from '$lib/utils/placeholder';
 import { extractFirstH1 } from '$lib/utils/h1';
 import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
 import { t } from '$lib/i18n';
@@ -216,7 +222,11 @@ class TabsStore {
    *    Manually renamed files have no anchor to find, so sync auto-detaches.
    */
   async tryRenameAfterSave(filePath: string, content: string): Promise<string> {
-    if (!newFileSettings.autoRenameFromH1) return filePath;
+    // NOT the legacy `autoRenameFromH1` checkbox — that setting lost its UI
+    // in 1e0ab6e and users with a persisted `false` could never re-enable it.
+    // (47bc5f3 accidentally reverted this line to the checkbox; see the
+    // docstring above, which always described the template gate.)
+    if (!newFileSettings.template.includes('{title}')) return filePath;
     if (isScratchFile(filePath)) return filePath;
 
     // Find the tab so we can read/update `lastSyncedH1`. Save-from-another-pane
@@ -232,7 +242,10 @@ class TabsStore {
     // Run this before the `newH1 === oldH1` fast path. A placeholder file
     // opened from disk may already have its H1 seeded into `lastSyncedH1`,
     // but the filename still needs its first H1-driven rename on Cmd+S.
-    if (isPlaceholder(fileName)) {
+    // Built-in placeholder families (Untitled N, 第N章, …) plus the user
+    // template's own rendered placeholder (e.g. 第{N}章-{title} →
+    // 第1章-Untitled.md), which the static pattern list can't enumerate.
+    if (isPlaceholder(fileName) || isTemplateTitlePlaceholder(fileName, newFileSettings.template)) {
       if (newH1.trim().length === 0) {
         // No H1 yet; nothing to do. Don't update anchor either — let next
         // save with a real H1 fall through here again.
@@ -240,7 +253,8 @@ class TabsStore {
       }
       const list = await commands.listDirectory(parentDir, null);
       const siblings = list.status === 'ok' ? list.data.map(e => e.name) : [];
-      const newName = renameFromH1(fileName, newH1, siblings);
+      const newName = renameFromH1(fileName, newH1, siblings)
+        ?? renameFromTemplateTitleSlot(fileName, newH1, newFileSettings.template, siblings);
       if (!newName) {
         // `renameFromH1` returned null (sanitized H1 empty or computed name
         // would equal current). We DID observe an H1; record it so Path B

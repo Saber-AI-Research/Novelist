@@ -35,6 +35,9 @@ research/notesnook/
 # Local workspace files
 .sisyphus/
 
+# Local machine info (Windows test machine credentials, IPs, MACs — never commit)
+.local/
+
 # Test temp files
 /tmp/novelist-*
 *.novelist-tmp

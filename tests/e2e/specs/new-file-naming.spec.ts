@@ -2,10 +2,11 @@ import { test, expect } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 /**
- * E2E coverage for the project-mode "new file naming" flow:
- *   - empty folder -> default template ("Untitled 1.md")
+ * E2E coverage for the project-mode "new file naming" flow, exercised against
+ * the production default template 第{N}章-{title} (mirrored in tauri-mock):
+ *   - empty folder -> default template ("第1章-Untitled.md")
  *   - chapter-pattern folder -> inferred next chapter
- *   - H1 auto-rename on save promotes placeholder name
+ *   - H1 auto-rename on save fills the {title} slot
  *   - collision on auto-rename bumps to " 2"
  *   - manual rename breaks placeholder status (no further auto-rename)
  *
@@ -42,14 +43,14 @@ async function triggerSave(app: any) {
 }
 
 test.describe('New file naming in project mode', () => {
-  test('empty folder -> Untitled 1.md', async ({ app }) => {
+  test('empty folder -> 第1章-Untitled.md (default template at N=1)', async ({ app }) => {
     await enterProject(app, MOCK_PROJECT_DIR, []);
     await triggerNewFile(app);
 
-    // Tab bar should gain an Untitled 1.md tab.
-    await expect(app.getByTestId('tab-Untitled 1.md')).toBeVisible({ timeout: 3000 });
+    // Tab bar should gain a 第1章-Untitled.md tab.
+    await expect(app.getByTestId('tab-第1章-Untitled.md')).toBeVisible({ timeout: 3000 });
     // Sidebar should list it too.
-    await expect(app.getByTestId('sidebar-file-Untitled 1.md')).toBeVisible();
+    await expect(app.getByTestId('sidebar-file-第1章-Untitled.md')).toBeVisible();
   });
 
   test('folder with chapter pattern -> next chapter', async ({ app }) => {
@@ -63,10 +64,10 @@ test.describe('New file naming in project mode', () => {
     await expect(app.getByTestId('sidebar-file-第三章.md')).toBeVisible();
   });
 
-  test('H1 + save renames placeholder', async ({ app }) => {
+  test('H1 + save fills the {title} slot of the placeholder', async ({ app }) => {
     await enterProject(app, MOCK_PROJECT_DIR, []);
     await triggerNewFile(app);
-    await expect(app.getByTestId('tab-Untitled 1.md')).toBeVisible({ timeout: 3000 });
+    await expect(app.getByTestId('tab-第1章-Untitled.md')).toBeVisible({ timeout: 3000 });
 
     const editor = app.locator('.cm-content').first();
     await editor.click();
@@ -76,20 +77,29 @@ test.describe('New file naming in project mode', () => {
 
     await triggerSave(app);
 
-    // After save, the placeholder tab should be renamed to match the H1.
+    // After save, the Untitled fill should be swapped for the H1 text.
     // (Sidebar refresh on auto-rename is driven by file-watcher events in prod;
     // the mock does not emit them, so we only assert the tab update here.)
-    await expect(app.getByTestId('tab-开篇.md')).toBeVisible({ timeout: 3000 });
-    await expect(app.getByTestId('tab-Untitled 1.md')).toHaveCount(0);
+    await expect(app.getByTestId('tab-第1章-开篇.md')).toBeVisible({ timeout: 3000 });
+    await expect(app.getByTestId('tab-第1章-Untitled.md')).toHaveCount(0);
   });
 
   test('collision on rename bumps to " 2"', async ({ app }) => {
+    // Under the default 第{N}章-{title} template a post-rename collision
+    // cannot be pre-seeded (any same-family sibling advances {N} past it),
+    // so this case uses a title-only project template: new file renders
+    // "Untitled.md" and the H1 rename targets "开篇.md", which we seed.
+    await app.evaluate(([d]: readonly [string]) => {
+      localStorage.setItem(
+        '__novelist_mock_project_settings__:' + d,
+        JSON.stringify({ view: {}, new_file: { template: '{title}' }, plugins: { enabled: {} } }),
+      );
+    }, [MOCK_PROJECT_DIR] as const);
     await enterProject(app, MOCK_PROJECT_DIR, [
       { name: '开篇.md', path: `${MOCK_PROJECT_DIR}/开篇.md`, is_dir: false, size: 0 },
     ]);
     await triggerNewFile(app);
-    // Initial placeholder for non-matching folder = Untitled 1.md.
-    await expect(app.getByTestId('tab-Untitled 1.md')).toBeVisible({ timeout: 3000 });
+    await expect(app.getByTestId('tab-Untitled.md')).toBeVisible({ timeout: 3000 });
 
     const editor = app.locator('.cm-content').first();
     await editor.click();

@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { commands, type HostConfig, type ImageHostSettings, type ProviderConfig } from '$lib/ipc/commands';
+  import { commands, type HostConfig, type ImageHostSettings_Serialize, type ProviderConfig } from '$lib/ipc/commands';
   import { dispatchUpload, toProviderConfig } from '$lib/services/image-host';
   import { t } from '$lib/i18n';
   import SettingsSwitch from './SettingsSwitch.svelte';
 
   type ProviderId = ProviderConfig['provider'];
 
-  let settings: ImageHostSettings = $state({ hosts: [], active_host_id: undefined, auto_on_paste: false });
+  // The Serialize phase shape — what reads return: `hosts`/`auto_on_paste`
+  // always present. Structurally assignable to the Deserialize shape that
+  // setImageHostSettings expects, so one local type serves both directions.
+  let settings: ImageHostSettings_Serialize = $state({ hosts: [], active_host_id: undefined, auto_on_paste: false });
   let loading = $state(true);
   let saveError = $state<string | null>(null);
   let testStatus = $state<Record<string, { kind: 'idle' | 'pending' | 'ok' | 'err'; message?: string }>>({});

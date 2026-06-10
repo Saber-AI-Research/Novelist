@@ -76,7 +76,9 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             sidebar_font_size: pick('sidebar_font_size', 14),
           },
           new_file: {
-            template: pickNF('template', 'Untitled {N}'),
+            // Mirror the production default (core/src/models/settings.rs
+            // DEFAULT_TEMPLATE) so E2E exercises real out-of-the-box behavior.
+            template: pickNF('template', '第{N}章-{title}'),
             detect_from_folder: pickNF('detect_from_folder', true),
             auto_rename_from_h1: pickNF('auto_rename_from_h1', true),
           },

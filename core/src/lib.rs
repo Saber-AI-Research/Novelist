@@ -173,6 +173,10 @@ pub struct CliOpenPayload {
     pub files: Vec<PendingFile>,
     pub folders: Vec<String>,
     pub force_new_window: bool,
+    /// Label of the single window meant to handle this event. On Windows,
+    /// `emit_to` broadcasts to every webview, so the frontend filters on this
+    /// to keep the "single coordinator" semantics (see app-events listeners).
+    pub target_label: String,
 }
 
 impl CliOpenPayload {
@@ -185,8 +189,21 @@ impl CliOpenPayload {
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
             force_new_window: req.force_new_window,
+            // Filled in by the caller once the coordinator window is chosen.
+            target_label: String::new(),
         }
     }
+}
+
+/// Payload for the macOS `open-file` hot-path event (Finder "Open With" while
+/// running). Carries `target_label` for the same reason as [`CliOpenPayload`]:
+/// `emit_to` broadcasts on Windows, so the frontend filters on it.
+/// macOS-only: the only emitter is the `RunEvent::Opened` handler below.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct OpenFilePayload {
+    pub path: String,
+    pub target_label: String,
 }
 
 fn open_event_target_label(app: &tauri::AppHandle) -> Option<String> {
@@ -275,251 +292,271 @@ pub fn run() {
     );
 
     #[cfg(feature = "sync")]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        read_file,
-        write_file,
-        get_file_encoding,
-        list_directory,
-        create_file,
-        create_scratch_file,
-        create_directory,
-        rename_item,
-        broadcast_file_renamed,
-        move_item,
-        delete_item,
-        check_pandoc,
-        set_pandoc_path,
-        export_project,
-        detect_project,
-        read_project_config,
-        get_effective_settings,
-        get_global_settings,
-        write_global_settings,
-        write_project_settings,
-        start_file_watcher,
-        stop_file_watcher,
-        register_open_file,
-        unregister_open_file,
-        register_write_ignore,
-        get_recent_projects,
-        add_recent_project,
-        remove_recent_project,
-        set_project_pinned,
-        reorder_recent_projects,
-        list_plugins,
-        load_plugin,
-        unload_plugin,
-        reload_plugin,
-        get_plugin_commands,
-        invoke_plugin_command,
-        set_plugin_document_state,
-        set_plugin_enabled,
-        scaffold_plugin,
-        get_plugins_dir,
-        is_portable_mode,
-        rope_open,
-        rope_get_lines,
-        rope_apply_edit,
-        rope_save,
-        rope_close,
-        rope_line_to_char,
-        read_draft_note,
-        write_draft_note,
-        delete_draft_note,
-        has_draft_note,
-        search_in_project,
-        create_snapshot,
-        list_snapshots,
-        restore_snapshot,
-        delete_snapshot,
-        record_writing_stats,
-        get_writing_stats,
-        list_templates,
-        create_project_from_template,
-        save_project_as_template,
-        delete_template,
-        import_template_zip,
-        list_template_files,
-        read_template_file,
-        write_template_file,
-        rename_template_file,
-        delete_template_file,
-        duplicate_bundled_template,
-        create_file_with_body,
-        get_pending_open_files,
-        get_pending_open_projects,
-        route_single_file_open_cmd,
-        submit_file_open_bid,
-        cli_shim_status,
-        install_cli_shim,
-        read_image_data_uri,
-        read_image_bytes,
-        upload_image_qiniu,
-        upload_image_aliyun_oss,
-        upload_image_s3,
-        upload_image_imgur,
-        upload_image_smms,
-        upload_image_custom,
-        get_image_host_settings,
-        set_image_host_settings,
-        publish_to_ghost,
-        publish_to_wordpress_self_hosted,
-        publish_to_wordpress_com,
-        publish_to_medium,
-        upload_post_image_ghost,
-        upload_post_image_wordpress_self_hosted,
-        upload_post_image_wordpress_com,
-        upload_post_image_medium,
-        convert_markdown_to_html,
-        verify_publish_channel,
-        list_publish_tags,
-        read_clipboard_image,
-        get_publish_settings,
-        set_publish_settings,
-        write_binary_file,
-        reveal_in_file_manager,
-        duplicate_file,
-        log_startup_phase,
-        ai_fetch_stream_start,
-        ai_fetch_stream_cancel,
-        list_ai_sessions,
-        read_ai_session,
-        write_ai_session,
-        delete_ai_session,
-        list_ai_prompt_assets,
-        write_ai_memory,
-        claude_cli_detect,
-        claude_cli_spawn,
-        claude_cli_send,
-        claude_cli_kill,
-        refresh_menu,
-        set_window_appearance,
-        get_sync_config,
-        save_sync_config,
-        sync_now,
-        test_sync_connection,
-    ]);
+    // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
+    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // below 2^53), matching the pre-rc.25 bindings; without it the export
+    // refuses BigInt-style types outright.
+    let builder = Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        // `cli-open` is emitted manually (not a command param/result), so the
+        // payload type must be registered explicitly or it vanishes from the
+        // generated bindings — app-events.svelte.ts imports it.
+        .typ::<CliOpenPayload>()
+        .commands(collect_commands![
+            read_file,
+            write_file,
+            get_file_encoding,
+            list_directory,
+            create_file,
+            create_scratch_file,
+            create_directory,
+            rename_item,
+            broadcast_file_renamed,
+            move_item,
+            delete_item,
+            check_pandoc,
+            set_pandoc_path,
+            export_project,
+            detect_project,
+            read_project_config,
+            get_effective_settings,
+            get_global_settings,
+            write_global_settings,
+            write_project_settings,
+            start_file_watcher,
+            stop_file_watcher,
+            register_open_file,
+            unregister_open_file,
+            register_write_ignore,
+            get_recent_projects,
+            add_recent_project,
+            remove_recent_project,
+            set_project_pinned,
+            reorder_recent_projects,
+            list_plugins,
+            load_plugin,
+            unload_plugin,
+            reload_plugin,
+            get_plugin_commands,
+            invoke_plugin_command,
+            set_plugin_document_state,
+            set_plugin_enabled,
+            scaffold_plugin,
+            get_plugins_dir,
+            is_portable_mode,
+            rope_open,
+            rope_get_lines,
+            rope_apply_edit,
+            rope_save,
+            rope_close,
+            rope_line_to_char,
+            read_draft_note,
+            write_draft_note,
+            delete_draft_note,
+            has_draft_note,
+            search_in_project,
+            create_snapshot,
+            list_snapshots,
+            restore_snapshot,
+            delete_snapshot,
+            record_writing_stats,
+            get_writing_stats,
+            list_templates,
+            create_project_from_template,
+            save_project_as_template,
+            delete_template,
+            import_template_zip,
+            list_template_files,
+            read_template_file,
+            write_template_file,
+            rename_template_file,
+            delete_template_file,
+            duplicate_bundled_template,
+            create_file_with_body,
+            get_pending_open_files,
+            get_pending_open_projects,
+            route_single_file_open_cmd,
+            submit_file_open_bid,
+            cli_shim_status,
+            install_cli_shim,
+            read_image_data_uri,
+            read_image_bytes,
+            upload_image_qiniu,
+            upload_image_aliyun_oss,
+            upload_image_s3,
+            upload_image_imgur,
+            upload_image_smms,
+            upload_image_custom,
+            get_image_host_settings,
+            set_image_host_settings,
+            publish_to_ghost,
+            publish_to_wordpress_self_hosted,
+            publish_to_wordpress_com,
+            publish_to_medium,
+            upload_post_image_ghost,
+            upload_post_image_wordpress_self_hosted,
+            upload_post_image_wordpress_com,
+            upload_post_image_medium,
+            convert_markdown_to_html,
+            verify_publish_channel,
+            list_publish_tags,
+            read_clipboard_image,
+            get_publish_settings,
+            set_publish_settings,
+            write_binary_file,
+            reveal_in_file_manager,
+            duplicate_file,
+            log_startup_phase,
+            ai_fetch_stream_start,
+            ai_fetch_stream_cancel,
+            list_ai_sessions,
+            read_ai_session,
+            write_ai_session,
+            delete_ai_session,
+            list_ai_prompt_assets,
+            write_ai_memory,
+            claude_cli_detect,
+            claude_cli_spawn,
+            claude_cli_send,
+            claude_cli_kill,
+            refresh_menu,
+            set_window_appearance,
+            get_sync_config,
+            save_sync_config,
+            sync_now,
+            test_sync_connection,
+        ]);
     #[cfg(not(feature = "sync"))]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        read_file,
-        write_file,
-        get_file_encoding,
-        list_directory,
-        create_file,
-        create_scratch_file,
-        create_directory,
-        rename_item,
-        broadcast_file_renamed,
-        move_item,
-        delete_item,
-        check_pandoc,
-        set_pandoc_path,
-        export_project,
-        detect_project,
-        read_project_config,
-        get_effective_settings,
-        get_global_settings,
-        write_global_settings,
-        write_project_settings,
-        start_file_watcher,
-        stop_file_watcher,
-        register_open_file,
-        unregister_open_file,
-        register_write_ignore,
-        get_recent_projects,
-        add_recent_project,
-        remove_recent_project,
-        set_project_pinned,
-        reorder_recent_projects,
-        list_plugins,
-        load_plugin,
-        unload_plugin,
-        reload_plugin,
-        get_plugin_commands,
-        invoke_plugin_command,
-        set_plugin_document_state,
-        set_plugin_enabled,
-        scaffold_plugin,
-        get_plugins_dir,
-        is_portable_mode,
-        rope_open,
-        rope_get_lines,
-        rope_apply_edit,
-        rope_save,
-        rope_close,
-        rope_line_to_char,
-        read_draft_note,
-        write_draft_note,
-        delete_draft_note,
-        has_draft_note,
-        search_in_project,
-        create_snapshot,
-        list_snapshots,
-        restore_snapshot,
-        delete_snapshot,
-        record_writing_stats,
-        get_writing_stats,
-        list_templates,
-        create_project_from_template,
-        save_project_as_template,
-        delete_template,
-        import_template_zip,
-        list_template_files,
-        read_template_file,
-        write_template_file,
-        rename_template_file,
-        delete_template_file,
-        duplicate_bundled_template,
-        create_file_with_body,
-        get_pending_open_files,
-        get_pending_open_projects,
-        route_single_file_open_cmd,
-        submit_file_open_bid,
-        cli_shim_status,
-        install_cli_shim,
-        read_image_data_uri,
-        read_image_bytes,
-        upload_image_qiniu,
-        upload_image_aliyun_oss,
-        upload_image_s3,
-        upload_image_imgur,
-        upload_image_smms,
-        upload_image_custom,
-        get_image_host_settings,
-        set_image_host_settings,
-        publish_to_ghost,
-        publish_to_wordpress_self_hosted,
-        publish_to_wordpress_com,
-        publish_to_medium,
-        upload_post_image_ghost,
-        upload_post_image_wordpress_self_hosted,
-        upload_post_image_wordpress_com,
-        upload_post_image_medium,
-        convert_markdown_to_html,
-        verify_publish_channel,
-        list_publish_tags,
-        read_clipboard_image,
-        get_publish_settings,
-        set_publish_settings,
-        write_binary_file,
-        reveal_in_file_manager,
-        duplicate_file,
-        log_startup_phase,
-        ai_fetch_stream_start,
-        ai_fetch_stream_cancel,
-        list_ai_sessions,
-        read_ai_session,
-        write_ai_session,
-        delete_ai_session,
-        list_ai_prompt_assets,
-        write_ai_memory,
-        claude_cli_detect,
-        claude_cli_spawn,
-        claude_cli_send,
-        claude_cli_kill,
-        refresh_menu,
-        set_window_appearance,
-    ]);
+    // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
+    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // below 2^53), matching the pre-rc.25 bindings; without it the export
+    // refuses BigInt-style types outright.
+    let builder = Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        // `cli-open` is emitted manually (not a command param/result), so the
+        // payload type must be registered explicitly or it vanishes from the
+        // generated bindings — app-events.svelte.ts imports it.
+        .typ::<CliOpenPayload>()
+        .commands(collect_commands![
+            read_file,
+            write_file,
+            get_file_encoding,
+            list_directory,
+            create_file,
+            create_scratch_file,
+            create_directory,
+            rename_item,
+            broadcast_file_renamed,
+            move_item,
+            delete_item,
+            check_pandoc,
+            set_pandoc_path,
+            export_project,
+            detect_project,
+            read_project_config,
+            get_effective_settings,
+            get_global_settings,
+            write_global_settings,
+            write_project_settings,
+            start_file_watcher,
+            stop_file_watcher,
+            register_open_file,
+            unregister_open_file,
+            register_write_ignore,
+            get_recent_projects,
+            add_recent_project,
+            remove_recent_project,
+            set_project_pinned,
+            reorder_recent_projects,
+            list_plugins,
+            load_plugin,
+            unload_plugin,
+            reload_plugin,
+            get_plugin_commands,
+            invoke_plugin_command,
+            set_plugin_document_state,
+            set_plugin_enabled,
+            scaffold_plugin,
+            get_plugins_dir,
+            is_portable_mode,
+            rope_open,
+            rope_get_lines,
+            rope_apply_edit,
+            rope_save,
+            rope_close,
+            rope_line_to_char,
+            read_draft_note,
+            write_draft_note,
+            delete_draft_note,
+            has_draft_note,
+            search_in_project,
+            create_snapshot,
+            list_snapshots,
+            restore_snapshot,
+            delete_snapshot,
+            record_writing_stats,
+            get_writing_stats,
+            list_templates,
+            create_project_from_template,
+            save_project_as_template,
+            delete_template,
+            import_template_zip,
+            list_template_files,
+            read_template_file,
+            write_template_file,
+            rename_template_file,
+            delete_template_file,
+            duplicate_bundled_template,
+            create_file_with_body,
+            get_pending_open_files,
+            get_pending_open_projects,
+            route_single_file_open_cmd,
+            submit_file_open_bid,
+            cli_shim_status,
+            install_cli_shim,
+            read_image_data_uri,
+            read_image_bytes,
+            upload_image_qiniu,
+            upload_image_aliyun_oss,
+            upload_image_s3,
+            upload_image_imgur,
+            upload_image_smms,
+            upload_image_custom,
+            get_image_host_settings,
+            set_image_host_settings,
+            publish_to_ghost,
+            publish_to_wordpress_self_hosted,
+            publish_to_wordpress_com,
+            publish_to_medium,
+            upload_post_image_ghost,
+            upload_post_image_wordpress_self_hosted,
+            upload_post_image_wordpress_com,
+            upload_post_image_medium,
+            convert_markdown_to_html,
+            verify_publish_channel,
+            list_publish_tags,
+            read_clipboard_image,
+            get_publish_settings,
+            set_publish_settings,
+            write_binary_file,
+            reveal_in_file_manager,
+            duplicate_file,
+            log_startup_phase,
+            ai_fetch_stream_start,
+            ai_fetch_stream_cancel,
+            list_ai_sessions,
+            read_ai_session,
+            write_ai_session,
+            delete_ai_session,
+            list_ai_prompt_assets,
+            write_ai_memory,
+            claude_cli_detect,
+            claude_cli_spawn,
+            claude_cli_send,
+            claude_cli_kill,
+            refresh_menu,
+            set_window_appearance,
+        ]);
 
     #[cfg(feature = "codegen")]
     builder
@@ -545,12 +582,15 @@ pub fn run() {
             );
             let cwd_path = std::path::PathBuf::from(&cwd);
             let req = parse_argv(&argv, &cwd_path);
-            let payload = CliOpenPayload::from_request(&req);
+            let mut payload = CliOpenPayload::from_request(&req);
             match open_event_target_label(app) {
                 Some(label) => {
                     // Bring the coordinator to the front so the user sees the
                     // routed result, whether it lands there or in a new window.
                     focus_open_event_target(app, &label);
+                    // On Windows `emit_to` broadcasts to every webview, so stamp
+                    // the intended window's label and let the frontend filter.
+                    payload.target_label = label.clone();
                     if let Err(e) = app.emit_to(label.as_str(), "cli-open", payload) {
                         tracing::warn!(
                             target: "novelist::cli",
@@ -700,8 +740,12 @@ pub fn run() {
                                 // listener active)
                                 match open_event_target_label(app) {
                                     Some(label) => {
+                                        let payload = OpenFilePayload {
+                                            path: file_path,
+                                            target_label: label.clone(),
+                                        };
                                         if let Err(e) =
-                                            app.emit_to(label.as_str(), "open-file", file_path)
+                                            app.emit_to(label.as_str(), "open-file", payload)
                                         {
                                             tracing::warn!(
                                                 target: "novelist::cli",
@@ -727,4 +771,51 @@ pub fn run() {
             // Suppress unused variable warnings on non-macOS
             let _ = (app, event);
         });
+}
+
+#[cfg(test)]
+mod external_open_payload_tests {
+    use super::*;
+    use std::path::Path;
+
+    // The frontend filters `cli-open` on this exact JSON key because Windows'
+    // `emit_to` broadcasts to every webview (see app-events listeners). A
+    // rename or serde attribute change would silently disable the filter and
+    // reintroduce the file-opens-in-every-window bug.
+    #[test]
+    fn cli_open_payload_serializes_target_label_for_frontend_filter() {
+        let req = parse_argv(
+            &["novelist".to_string(), "/tmp/a.md".to_string()],
+            Path::new("/tmp"),
+        );
+        let mut payload = CliOpenPayload::from_request(&req);
+        payload.target_label = "main".into();
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "main");
+    }
+
+    // `from_request` must not invent a target: the label is stamped by the
+    // emitter only after the coordinator window is chosen, and an empty label
+    // means "unaddressed" (frontend guard lets it through for compatibility).
+    #[test]
+    fn cli_open_payload_target_is_empty_until_coordinator_is_chosen() {
+        let req = parse_argv(
+            &["novelist".to_string(), "/tmp/a.md".to_string()],
+            Path::new("/tmp"),
+        );
+        let payload = CliOpenPayload::from_request(&req);
+        assert!(payload.target_label.is_empty());
+    }
+
+    // Same wire contract for the macOS Finder "Open With" hot path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_file_payload_serializes_target_label_for_frontend_filter() {
+        let payload = OpenFilePayload {
+            path: "/tmp/a.md".into(),
+            target_label: "main".into(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "main");
+    }
 }
