@@ -73,6 +73,33 @@ App.svelte's mount calls `consumeWindowSeed()` (in
 indicated target, then clears the hash via `history.replaceState` so a
 reload doesn't re-fire.
 
+## Windows: `emit_to` broadcasts, so payloads carry `target_label`
+
+On Windows/WebView2, Tauri's `app.emit_to(label, …)` is **not targeted** —
+it broadcasts to every webview (verified 2026-06-08 via WebView2 remote
+debugging on a real Windows machine; on macOS it targets correctly). The
+external-open design assumes a single coordinator/winner window receives
+each event, so before v0.2.9 one `Novelist.exe file.md` delivered
+`cli-open` *and* `open-file-deliver` to every open window — each ran its
+own routing round and the file opened everywhere.
+
+Fix (shipped in v0.2.9, branch `fix/windows-emit-to-broadcast-routing`):
+targeting is explicit in the payload instead of relying on `emit_to`
+semantics.
+
+- The backend stamps the intended window's label on each external-open
+  payload: `CliOpenPayload` (`cli-open`), `OpenFileDeliver`
+  (`open-file-deliver`), and the macOS-only `OpenFilePayload`
+  (`open-file`) all carry a `target_label` field.
+- Each window's listener in `app-events.svelte.ts` drops events whose
+  `target_label` is present and ≠ its own window label
+  (`notForThisWindow`). The guard is defensive: a missing/empty label
+  (older backend, cold-start paths) is treated as addressed-to-us, which
+  keeps macOS and cached frontends working.
+- The `target_label` JSON key is a wire contract — serde rename or field
+  rename silently disables the filter. Contract tests pin it on both
+  sides (see Tests below).
+
 ## CLI shim
 
 The bundled shim ships under `core/bundled-cli/`:
@@ -108,4 +135,10 @@ and let the user decide.
   unknown flag forward-compat, and help text shape.
 - `tests/unit/composables/app-events.test.ts` — drains
   `get_pending_open_projects` / `get_pending_open_files`, asserts
-  `cli-open` listener registration and teardown bookkeeping.
+  `cli-open` listener registration and teardown bookkeeping, and covers
+  the `target_label` window filter for `open-file`, `open-file-deliver`,
+  and `cli-open` (addressed / wrong-window / legacy-unaddressed cases).
+- `core/src/lib.rs` (`external_open_payload_tests`) +
+  `core/src/services/file_routing.rs` — pin the `target_label` JSON key
+  on `CliOpenPayload`, `OpenFileDeliver`, and `OpenFilePayload` so the
+  frontend filter's wire contract can't drift silently.

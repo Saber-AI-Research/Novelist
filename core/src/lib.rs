@@ -772,3 +772,50 @@ pub fn run() {
             let _ = (app, event);
         });
 }
+
+#[cfg(test)]
+mod external_open_payload_tests {
+    use super::*;
+    use std::path::Path;
+
+    // The frontend filters `cli-open` on this exact JSON key because Windows'
+    // `emit_to` broadcasts to every webview (see app-events listeners). A
+    // rename or serde attribute change would silently disable the filter and
+    // reintroduce the file-opens-in-every-window bug.
+    #[test]
+    fn cli_open_payload_serializes_target_label_for_frontend_filter() {
+        let req = parse_argv(
+            &["novelist".to_string(), "/tmp/a.md".to_string()],
+            Path::new("/tmp"),
+        );
+        let mut payload = CliOpenPayload::from_request(&req);
+        payload.target_label = "main".into();
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "main");
+    }
+
+    // `from_request` must not invent a target: the label is stamped by the
+    // emitter only after the coordinator window is chosen, and an empty label
+    // means "unaddressed" (frontend guard lets it through for compatibility).
+    #[test]
+    fn cli_open_payload_target_is_empty_until_coordinator_is_chosen() {
+        let req = parse_argv(
+            &["novelist".to_string(), "/tmp/a.md".to_string()],
+            Path::new("/tmp"),
+        );
+        let payload = CliOpenPayload::from_request(&req);
+        assert!(payload.target_label.is_empty());
+    }
+
+    // Same wire contract for the macOS Finder "Open With" hot path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_file_payload_serializes_target_label_for_frontend_filter() {
+        let payload = OpenFilePayload {
+            path: "/tmp/a.md".into(),
+            target_label: "main".into(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "main");
+    }
+}

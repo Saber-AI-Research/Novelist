@@ -252,6 +252,51 @@ describe('[contract] open-file event → cross-window routing', () => {
     expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/tmp/x.md');
     expect(hoisted.tabsState.openTab).not.toHaveBeenCalled();
   });
+
+  // On Windows `emit_to` broadcasts to every webview; only the stamped window
+  // may start a routing round, or every window routes the same file.
+  it('ignores open-file events addressed to a different window', async () => {
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('open-file')!({
+      payload: { path: '/tmp/x.md', target_label: 'novelist-7' },
+    });
+    expect(hoisted.routeSingleFileOpen).not.toHaveBeenCalled();
+  });
+
+  it('still routes legacy payloads without target_label', async () => {
+    await wire();
+    await hoisted.listeners.get('open-file')!({ payload: { path: '/tmp/x.md' } });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/tmp/x.md');
+  });
+});
+
+describe('[contract] cli-open event → coordinator filtering', () => {
+  const cliPayload = (target_label?: string) => ({
+    files: [{ path: '/a.md', line: null, col: null }],
+    folders: [],
+    force_new_window: false,
+    ...(target_label === undefined ? {} : { target_label }),
+  });
+
+  it('runs the routing round when addressed to this window', async () => {
+    await wire();
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload('main') });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/a.md', null, null, false);
+  });
+
+  // The v0.2.8 Windows bug: `emit_to` broadcasts, every window ran its own
+  // routing round, and one CLI invocation opened the file in every window.
+  it('ignores cli-open addressed to a different window', async () => {
+    await wire(); // mock current window label is 'main'
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload('novelist-7') });
+    expect(hoisted.routeSingleFileOpen).not.toHaveBeenCalled();
+  });
+
+  it('still handles legacy payloads without target_label', async () => {
+    await wire();
+    await hoisted.listeners.get('cli-open')!({ payload: cliPayload(undefined) });
+    expect(hoisted.routeSingleFileOpen).toHaveBeenCalledWith('/a.md', null, null, false);
+  });
 });
 
 describe('[contract] open-file-deliver event (router→winner)', () => {

@@ -331,4 +331,20 @@ mod tests {
         let labels: Vec<String> = vec![];
         assert_eq!(pick_open_event_target(labels), None);
     }
+
+    // The frontend filters `open-file-deliver` on this exact JSON key because
+    // Windows' `emit_to` broadcasts to every webview. A rename or serde
+    // attribute change would make every window treat the event as legacy
+    // unaddressed and reintroduce the duplicate-open bug.
+    #[test]
+    fn open_file_deliver_serializes_target_label_for_frontend_filter() {
+        let payload = OpenFileDeliver {
+            path: "/tmp/a.md".into(),
+            line: None,
+            col: None,
+            target_label: "novelist-2".into(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["target_label"], "novelist-2");
+    }
 }
