@@ -64,6 +64,21 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
     }
   });
 
+  it('renames the default template placeholder (第1章-Untitled.md → 第1章-开篇.md)', async () => {
+    // The default 第{N}章-{title} renders placeholders the static pattern
+    // list can't know; the template-derived matcher must catch them.
+    tabsStore.openTab(`${PROJECT}/第1章-Untitled.md`, '', { justCreated: true });
+
+    const newPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/第1章-Untitled.md`, '# 开篇');
+
+    expect(newPath).toBe(`${PROJECT}/第1章-开篇.md`);
+    expect(commands.renameItem).toHaveBeenCalledWith(
+      `${PROJECT}/第1章-Untitled.md`,
+      '第1章-开篇.md',
+      true,
+    );
+  });
+
   it('renames a placeholder-named tab that was just created (Cmd+N flow)', async () => {
     tabsStore.openTab(`${PROJECT}/Untitled 1.md`, '', { justCreated: true });
     const body = '# 开篇\n\nsome body';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTemplate, renderTemplate, isPlaceholder, inferNextName, renameFromH1 } from '$lib/utils/placeholder';
+import { parseTemplate, renderTemplate, isPlaceholder, inferNextName, renameFromH1, isTemplateTitlePlaceholder, renameFromTemplateTitleSlot } from '$lib/utils/placeholder';
 
 describe('parseTemplate', () => {
   it('parses Untitled {N}', () => {
@@ -331,5 +331,55 @@ describe('renameFromH1', () => {
     expect(renameFromH1('开篇.md', 'Second heading', [])).toBeNull();
     expect(renameFromH1('Chapter 3 开篇.md', 'Another', [])).toBeNull();
     expect(renameFromH1('03-开篇.md', 'Another', [])).toBeNull();
+  });
+});
+
+describe('isTemplateTitlePlaceholder + renameFromTemplateTitleSlot', () => {
+  // The production default template renders placeholders the static
+  // PLACEHOLDER_PATTERNS list can't know about (第1章-Untitled.md). These
+  // template-derived matchers are what make Path A work out of the box.
+  const DEFAULT = '第{N}章-{title}';
+
+  it('matches the default template placeholder form', () => {
+    expect(isTemplateTitlePlaceholder('第1章-Untitled.md', DEFAULT)).toBe(true);
+    expect(isTemplateTitlePlaceholder('第12章-Untitled.md', DEFAULT)).toBe(true);
+    expect(isTemplateTitlePlaceholder('第二章-Untitled.md', DEFAULT)).toBe(true);
+    expect(isTemplateTitlePlaceholder('第1章-Untitled 2.md', DEFAULT)).toBe(true); // collision bump
+  });
+
+  it('does not match titled or foreign names', () => {
+    expect(isTemplateTitlePlaceholder('第1章-开篇.md', DEFAULT)).toBe(false);
+    expect(isTemplateTitlePlaceholder('Untitled 1.md', DEFAULT)).toBe(false);
+    expect(isTemplateTitlePlaceholder('第1章.md', DEFAULT)).toBe(false);
+  });
+
+  it('matches a title-only template placeholder', () => {
+    expect(isTemplateTitlePlaceholder('draft-Untitled.md', 'draft-{title}')).toBe(true);
+    expect(isTemplateTitlePlaceholder('draft-overview.md', 'draft-{title}')).toBe(false);
+  });
+
+  it('returns false for templates without a {title} slot', () => {
+    expect(isTemplateTitlePlaceholder('Untitled 1.md', 'Untitled {N}')).toBe(false);
+    expect(isTemplateTitlePlaceholder('第1章.md', '第{N}章')).toBe(false);
+  });
+
+  it('第1章-Untitled.md + 开篇 → 第1章-开篇.md', () => {
+    expect(renameFromTemplateTitleSlot('第1章-Untitled.md', '开篇', DEFAULT, []))
+      .toBe('第1章-开篇.md');
+  });
+
+  it('drops the collision counter when filling the title', () => {
+    expect(renameFromTemplateTitleSlot('第1章-Untitled 2.md', '开篇', DEFAULT, []))
+      .toBe('第1章-开篇.md');
+  });
+
+  it('bumps on sibling collision', () => {
+    expect(renameFromTemplateTitleSlot('第1章-Untitled.md', '开篇', DEFAULT, ['第1章-开篇.md']))
+      .toBe('第1章-开篇 2.md');
+  });
+
+  it('returns null when H1 sanitizes to empty or name is unchanged', () => {
+    expect(renameFromTemplateTitleSlot('第1章-Untitled.md', '   ', DEFAULT, [])).toBeNull();
+    expect(renameFromTemplateTitleSlot('第1章-Untitled.md', 'Untitled', DEFAULT, [])).toBeNull();
   });
 });
