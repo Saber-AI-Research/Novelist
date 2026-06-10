@@ -216,7 +216,11 @@ class TabsStore {
    *    Manually renamed files have no anchor to find, so sync auto-detaches.
    */
   async tryRenameAfterSave(filePath: string, content: string): Promise<string> {
-    if (!newFileSettings.autoRenameFromH1) return filePath;
+    // NOT the legacy `autoRenameFromH1` checkbox — that setting lost its UI
+    // in 1e0ab6e and users with a persisted `false` could never re-enable it.
+    // (47bc5f3 accidentally reverted this line to the checkbox; see the
+    // docstring above, which always described the template gate.)
+    if (!newFileSettings.template.includes('{title}')) return filePath;
     if (isScratchFile(filePath)) return filePath;
 
     // Find the tab so we can read/update `lastSyncedH1`. Save-from-another-pane
