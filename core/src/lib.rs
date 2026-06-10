@@ -292,7 +292,17 @@ pub fn run() {
     );
 
     #[cfg(feature = "sync")]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
+    // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
+    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // below 2^53), matching the pre-rc.25 bindings; without it the export
+    // refuses BigInt-style types outright.
+    let builder = Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        // `cli-open` is emitted manually (not a command param/result), so the
+        // payload type must be registered explicitly or it vanishes from the
+        // generated bindings — app-events.svelte.ts imports it.
+        .typ::<CliOpenPayload>()
+        .commands(collect_commands![
         read_file,
         write_file,
         get_file_encoding,
@@ -417,7 +427,17 @@ pub fn run() {
         test_sync_connection,
     ]);
     #[cfg(not(feature = "sync"))]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
+    // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
+    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // below 2^53), matching the pre-rc.25 bindings; without it the export
+    // refuses BigInt-style types outright.
+    let builder = Builder::<tauri::Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        // `cli-open` is emitted manually (not a command param/result), so the
+        // payload type must be registered explicitly or it vanishes from the
+        // generated bindings — app-events.svelte.ts imports it.
+        .typ::<CliOpenPayload>()
+        .commands(collect_commands![
         read_file,
         write_file,
         get_file_encoding,

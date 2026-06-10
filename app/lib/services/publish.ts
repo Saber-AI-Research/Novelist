@@ -37,7 +37,7 @@ export type DialogPayload = {
 export async function listChannels(): Promise<ChannelConfig[]> {
   const r = await commands.getPublishSettings();
   if (r.status !== 'ok') throw new Error(`Failed to read publish settings: ${r.error}`);
-  return r.data.channels;
+  return r.data.channels ?? [];
 }
 
 /** Strip a `---\n...\n---\n` YAML front-matter prefix if present. */

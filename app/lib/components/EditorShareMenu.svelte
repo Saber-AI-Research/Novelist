@@ -19,7 +19,7 @@
 
   async function reloadChannels() {
     const r = await commands.getPublishSettings();
-    if (r.status === 'ok') channels = r.data.channels;
+    if (r.status === 'ok') channels = r.data.channels ?? [];
   }
 
   function onClickOutside(e: MouseEvent) {

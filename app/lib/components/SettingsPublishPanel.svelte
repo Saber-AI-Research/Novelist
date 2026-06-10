@@ -6,7 +6,9 @@
 
   type PlatformId = PlatformConfig['platform'];
 
-  let settings: PublishSettings = $state({ channels: [] });
+  // `channels` is optional on the wire (serde default) — keep it required
+  // locally so the template can index it without guards.
+  let settings: Required<PublishSettings> = $state({ channels: [] });
   let loading = $state(true);
   let saveError = $state<string | null>(null);
   let testStatus = $state<Record<string, { kind: 'idle' | 'pending' | 'ok' | 'err'; message?: string }>>({});
@@ -62,7 +64,7 @@
 
   async function reload() {
     const r = await commands.getPublishSettings();
-    if (r.status === 'ok') settings = r.data;
+    if (r.status === 'ok') settings = { channels: r.data.channels ?? [] };
   }
 
   async function persist() {
