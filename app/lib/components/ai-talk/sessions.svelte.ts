@@ -12,7 +12,14 @@
  * run twice.
  */
 
-export type DisplayMessage = { role: 'user' | 'assistant' | 'system'; content: string };
+import type { SuggestionStatus } from '$lib/components/ai-shared/edit-suggestions';
+
+export type DisplayMessage = {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  /** Accept/reject state of parsed ```novelist-edit suggestions, by id. */
+  suggestionStatus?: Record<string, SuggestionStatus>;
+};
 
 export type TalkSession = {
   id: string;

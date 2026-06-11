@@ -1,35 +1,25 @@
 <script lang="ts">
   import type { SlashCommandId } from './context';
-
-  type Command = { id: SlashCommandId; label: string; hint: string };
-  const COMMANDS: Command[] = [
-    { id: 'rewrite', label: '/rewrite', hint: 'rewrite selected or attached prose' },
-    { id: 'summarize', label: '/summarize', hint: 'summarize attached context' },
-    { id: 'continue', label: '/continue', hint: 'continue in the same voice' },
-    { id: 'translate', label: '/translate', hint: 'translate literary prose' },
-    { id: 'line-edit', label: '/line-edit', hint: 'line edit with concrete changes' },
-    { id: 'brainstorm', label: '/brainstorm', hint: 'generate story options' },
-    { id: 'compact', label: '/compact', hint: 'compress conversation' },
-    { id: 'clear', label: '/clear', hint: 'reset current session' },
-    { id: 'save', label: '/save', hint: 'save transcript to project' },
-    { id: 'plan', label: '/plan', hint: 'switch agent to plan mode' },
-    { id: 'act', label: '/act', hint: 'switch agent to act mode' },
-  ];
+  import type { SlashMenuItem } from './menu-items';
 
   type Props = {
-    visible: boolean;
-    query: string;
+    items: readonly SlashMenuItem[];
+    activeIndex: number;
     onPick: (id: SlashCommandId) => void;
   };
 
-  let { visible, query, onPick }: Props = $props();
-  let filtered = $derived(COMMANDS.filter((c) => c.label.includes(query.toLowerCase())));
+  let { items, activeIndex, onPick }: Props = $props();
 </script>
 
-{#if visible && filtered.length > 0}
+{#if items.length > 0}
   <div class="menu" data-testid="ai-command-menu">
-    {#each filtered as cmd}
-      <button type="button" onclick={() => onPick(cmd.id)}>
+    {#each items as cmd, i (cmd.id)}
+      <button
+        type="button"
+        class:active={i === activeIndex}
+        data-active={i === activeIndex || undefined}
+        onclick={() => onPick(cmd.id)}
+      >
         <strong>{cmd.label}</strong>
         <span>{cmd.hint}</span>
       </button>
@@ -59,6 +49,7 @@
     cursor: pointer;
     text-align: left;
   }
-  button:hover { background: var(--novelist-bg-secondary); }
+  button:hover,
+  button.active { background: var(--novelist-bg-secondary); }
   span { color: var(--novelist-text-secondary); }
 </style>

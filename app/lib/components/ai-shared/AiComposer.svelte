@@ -6,6 +6,7 @@
   import type { SlashCommandId } from './context';
   import type { AiContextAttachment } from './attachments';
   import { attachmentToContextItem } from './attachments';
+  import { filterMentionItems, filterSlashCommands } from './menu-items';
   import { IconClose, IconDocument } from '../icons';
 
   type SuggestedSelection = {
@@ -73,7 +74,57 @@
 
   let contextItems = $derived(attachments.map(attachmentToContextItem));
 
+  // ---- Menu keyboard selection (ArrowUp/Down to move, Tab/Enter to pick) ----
+  // The composer owns the filtered lists and the active index; the menu
+  // components are pure renderers, so mouse and keyboard stay in sync.
+  let commandItems = $derived(commandVisible ? filterSlashCommands(commandQuery) : []);
+  let mentionItems = $derived(mentionVisible ? filterMentionItems(mentionQuery, mentionCandidates) : []);
+  let menuLength = $derived(commandItems.length || mentionItems.length);
+  let menuIndex = $state(0);
+  // Reset the selection whenever the query (and thus the list) changes.
+  $effect(() => {
+    void commandQuery;
+    void mentionQuery;
+    void commandVisible;
+    void mentionVisible;
+    menuIndex = 0;
+  });
+  let activeMenuIndex = $derived(menuLength > 0 ? Math.min(menuIndex, menuLength - 1) : 0);
+
+  function pickActiveMenuItem(): boolean {
+    if (commandItems.length > 0) {
+      onPickCommand(commandItems[activeMenuIndex].id);
+      return true;
+    }
+    if (mentionItems.length > 0) {
+      const m = mentionItems[activeMenuIndex];
+      void onPickMention(m.token, m.attachment);
+      return true;
+    }
+    return false;
+  }
+
   function keydown(e: KeyboardEvent) {
+    // Never steal keys from an active IME composition (CJK input).
+    if (e.isComposing) return;
+    if (menuLength > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        menuIndex = (activeMenuIndex + 1) % menuLength;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        menuIndex = (activeMenuIndex - 1 + menuLength) % menuLength;
+        return;
+      }
+      if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.shiftKey)) {
+        if (pickActiveMenuItem()) {
+          e.preventDefault();
+          return;
+        }
+      }
+    }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (busy) onStop?.();
@@ -115,13 +166,8 @@
     onRemove={onRemoveAttachment}
     onClear={onClearAttachments}
   />
-  <AiCommandMenu visible={commandVisible} query={commandQuery} onPick={onPickCommand} />
-  <AiMentionMenu
-    visible={mentionVisible}
-    query={mentionQuery}
-    candidates={mentionCandidates}
-    onPick={onPickMention}
-  />
+  <AiCommandMenu items={commandItems} activeIndex={activeMenuIndex} onPick={onPickCommand} />
+  <AiMentionMenu items={mentionItems} activeIndex={activeMenuIndex} onPick={onPickMention} />
   <textarea
     data-testid={inputTestId}
     rows="3"

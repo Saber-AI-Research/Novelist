@@ -42,6 +42,13 @@ pub struct ClaudeSpawnRequest {
     pub model: Option<String>,
     /// Plugin-owned UUID; must be a valid UUID string on the CLI side.
     pub session_uuid: String,
+    /// Resume an existing CLI conversation instead of creating a new one.
+    /// The CLI rejects `--session-id` values it has already seen (the
+    /// process exits immediately, which surfaced as "Unknown claude
+    /// session" on the next send), so re-spawns of a session that already
+    /// produced output MUST pass `--resume` instead.
+    #[serde(default)]
+    pub resume: bool,
     /// Extra CLI args (escape hatch). Validated against a blocklist of
     /// flags we manage ourselves.
     pub extra_args: Vec<String>,
@@ -244,9 +251,12 @@ fn build_command(req: &ClaudeSpawnRequest, cli_path: &str) -> Result<Command, Ap
         .arg("--output-format")
         .arg("stream-json")
         .arg("--include-partial-messages")
-        .arg("--verbose")
-        .arg("--session-id")
-        .arg(&req.session_uuid);
+        .arg("--verbose");
+    if req.resume {
+        cmd.arg("--resume").arg(&req.session_uuid);
+    } else {
+        cmd.arg("--session-id").arg(&req.session_uuid);
+    }
 
     if let Some(sp) = &req.system_prompt {
         if !sp.is_empty() {
@@ -346,8 +356,23 @@ pub async fn claude_cli_spawn(
         });
     }
 
-    // exit watcher: owns the Child, listens for kill signal OR natural exit.
+    // Register the session BEFORE starting the exit watcher. If the CLI
+    // dies instantly (bad flags, rejected --session-id), the watcher's
+    // cleanup must not race ahead of the insertion and leave a stale
+    // entry with a dead stdin behind.
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(
+            session_id.clone(),
+            Session {
+                stdin,
+                kill_tx: Some(kill_tx),
+            },
+        );
+    }
+
+    // exit watcher: owns the Child, listens for kill signal OR natural exit.
     {
         let app = app.clone();
         let channel = channel.clone();
@@ -386,17 +411,6 @@ pub async fn claude_cli_spawn(
                 map.remove(&sid);
             }
         });
-    }
-
-    {
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(
-            session_id.clone(),
-            Session {
-                stdin,
-                kill_tx: Some(kill_tx),
-            },
-        );
     }
 
     Ok(session_id)
@@ -461,6 +475,7 @@ mod tests {
             permission_mode: Some("acceptEdits".into()),
             model: Some("sonnet".into()),
             session_uuid: session.into(),
+            resume: false,
             extra_args: vec!["--no-chrome".into()],
         }
     }
@@ -527,6 +542,26 @@ mod tests {
         assert!(saw_output, "missing --output-format stream-json");
         assert!(saw_partial, "missing --include-partial-messages");
         assert!(saw_session, "missing --session-id");
+    }
+
+    #[test]
+    fn build_command_resume_uses_resume_flag() {
+        let mut req = mk_req("11111111-2222-3333-4444-555555555555");
+        req.resume = true;
+        let cmd = build_command(&req, "/fake/claude").unwrap();
+        let std_cmd = cmd.as_std();
+        let args: Vec<_> = std_cmd.get_args().collect();
+        let mut saw_resume = false;
+        for window in args.windows(2) {
+            if window[0] == "--resume" && window[1] == req.session_uuid.as_str() {
+                saw_resume = true;
+            }
+        }
+        assert!(saw_resume, "missing --resume <session_uuid>");
+        assert!(
+            !args.iter().any(|a| *a == "--session-id"),
+            "--session-id must not be passed when resuming"
+        );
     }
 
     #[test]

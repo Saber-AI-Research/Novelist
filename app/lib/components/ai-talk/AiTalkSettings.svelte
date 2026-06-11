@@ -6,6 +6,10 @@
   import SettingsSwitch from '$lib/components/SettingsSwitch.svelte';
 
   let { compact = false }: { compact?: boolean } = $props();
+
+  let activeProfile = $derived(
+    aiTalkSettings.value.profiles.find((p) => p.id === aiTalkSettings.value.activeProfileId),
+  );
 </script>
 
 <div class="ai-talk-settings" class:compact>
@@ -24,14 +28,39 @@
   <label>
     <span>{t('settings.aiTalk.providerProfile')}</span>
     <select
+      data-testid="ai-talk-profile-select"
       value={aiTalkSettings.value.activeProfileId}
       onchange={(e) => aiTalkSettings.update({ activeProfileId: e.currentTarget.value })}
     >
-      {#each aiTalkSettings.value.profiles as p}
+      {#each aiTalkSettings.value.profiles as p (p.id)}
         <option value={p.id}>{p.label}</option>
       {/each}
     </select>
   </label>
+  <div class="profile-actions full">
+    <button
+      type="button"
+      class="novelist-btn novelist-btn-ghost"
+      data-testid="ai-talk-profile-save-as"
+      onclick={() => aiTalkSettings.saveAsNewProfile()}
+    >{t('settings.aiTalk.profileSaveAs')}</button>
+    {#if activeProfile?.custom}
+      <input
+        type="text"
+        class="profile-name"
+        aria-label={t('settings.aiTalk.profileName')}
+        placeholder={t('settings.aiTalk.profileName')}
+        value={activeProfile.label}
+        oninput={(e) => aiTalkSettings.renameProfile(activeProfile.id, e.currentTarget.value)}
+      />
+      <button
+        type="button"
+        class="novelist-btn novelist-btn-ghost"
+        data-testid="ai-talk-profile-delete"
+        onclick={() => aiTalkSettings.deleteProfile(activeProfile.id)}
+      >{t('settings.aiTalk.profileDelete')}</button>
+    {/if}
+  </div>
   <label>
     <span>{t('settings.aiTalk.baseUrl')}</span>
     <input
@@ -124,6 +153,16 @@
   }
   .switch-row {
     grid-column: 1 / -1;
+  }
+  .profile-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .profile-actions .profile-name {
+    flex: 1;
+    min-width: 0;
   }
   input,
   select,

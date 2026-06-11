@@ -65,6 +65,42 @@ describe('aiTalkSettings store', () => {
     expect(JSON.parse(raw!).model).toBe('gpt-4o-mini');
   });
 
+  it('saveAsNewProfile snapshots current settings into an active custom profile', () => {
+    aiTalkSettings.update({ baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk-d', model: 'deepseek-chat' });
+    const id = aiTalkSettings.saveAsNewProfile('Work DeepSeek');
+    expect(aiTalkSettings.value.activeProfileId).toBe(id);
+    const profile = aiTalkSettings.value.profiles.find((p) => p.id === id);
+    expect(profile).toMatchObject({
+      label: 'Work DeepSeek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'sk-d',
+      model: 'deepseek-chat',
+      custom: true,
+    });
+  });
+
+  it('switching activeProfileId swaps the connection fields', () => {
+    aiTalkSettings.update({ apiKey: 'sk-openai' });
+    const id = aiTalkSettings.saveAsNewProfile('Alt');
+    aiTalkSettings.update({ model: 'other-model' });
+    aiTalkSettings.update({ activeProfileId: 'openai' });
+    expect(aiTalkSettings.value.model).toBe('gpt-4o-mini');
+    expect(aiTalkSettings.value.apiKey).toBe('sk-openai');
+    aiTalkSettings.update({ activeProfileId: id });
+    expect(aiTalkSettings.value.model).toBe('other-model');
+  });
+
+  it('renameProfile / deleteProfile manage custom profiles only', () => {
+    const id = aiTalkSettings.saveAsNewProfile('Temp');
+    aiTalkSettings.renameProfile(id, 'Renamed');
+    expect(aiTalkSettings.value.profiles.find((p) => p.id === id)?.label).toBe('Renamed');
+    aiTalkSettings.deleteProfile('openai'); // built-in: no-op
+    expect(aiTalkSettings.value.profiles.some((p) => p.id === 'openai')).toBe(true);
+    aiTalkSettings.deleteProfile(id);
+    expect(aiTalkSettings.value.profiles.some((p) => p.id === id)).toBe(false);
+    expect(aiTalkSettings.value.activeProfileId).not.toBe(id);
+  });
+
   it('persist failures (quota / disabled storage) do not throw', () => {
     const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('QuotaExceededError');
@@ -97,5 +133,25 @@ describe('aiTalkSettings — module-load behavior', () => {
     const mod = await import('$lib/components/ai-talk/settings.svelte');
     expect(mod.aiTalkSettings.value.model).toBe('gpt-4o-mini');
     expect(mod.aiTalkSettings.value.temperature).toBe(0.7);
+  });
+
+  it('keeps saved custom profiles when merging with the default set', async () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        activeProfileId: 'custom-abc',
+        profiles: [
+          { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-1', model: 'gpt-4o-mini', temperature: 0.7 },
+          { id: 'custom-abc', label: 'My Router', baseUrl: 'https://r.example/v1', apiKey: 'sk-2', model: 'mix-large', temperature: 0.4, custom: true },
+        ],
+      }),
+    );
+    const mod = await import('$lib/components/ai-talk/settings.svelte');
+    const custom = mod.aiTalkSettings.value.profiles.find((p) => p.id === 'custom-abc');
+    expect(custom).toMatchObject({ label: 'My Router', model: 'mix-large' });
+    // The saved custom profile is active and hydrated into the flat fields.
+    expect(mod.aiTalkSettings.value.activeProfileId).toBe('custom-abc');
+    expect(mod.aiTalkSettings.value.model).toBe('mix-large');
+    expect(mod.aiTalkSettings.value.baseUrl).toBe('https://r.example/v1');
   });
 });

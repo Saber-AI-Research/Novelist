@@ -164,6 +164,16 @@ class AiAgentSessionStore {
     persist(this.sessions);
   }
 
+  /** Merge keys into a session's providerState (e.g. claudeStarted). */
+  patchProviderState(id: string, patch: Record<string, unknown>) {
+    this.sessions = this.sessions.map((s) =>
+      s.id === id
+        ? { ...s, providerState: { ...(s.providerState ?? {}), ...patch }, updatedAt: Date.now() }
+        : s,
+    );
+    persist(this.sessions);
+  }
+
   markInterrupted(id: string) {
     this.sessions = this.sessions.map((s) =>
       s.id === id ? { ...s, interrupted: true, updatedAt: Date.now() } : s,
@@ -289,6 +299,8 @@ class AiAgentSessionStore {
             title: 'New agent',
             sessionUuid: uuid(),
             totalCost: undefined,
+            // Fresh uuid → fresh CLI conversation; drop resume markers.
+            providerState: {},
             updatedAt: Date.now(),
           }
         : s,

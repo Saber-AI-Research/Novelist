@@ -53,7 +53,7 @@ function mergeProfiles(parsed: Partial<AiTalkSettings>): AiTalkProviderProfile[]
   const saved = Array.isArray(parsed.profiles) ? parsed.profiles : [];
   const byId = new Map(saved.map((p) => [p.id, p]));
   const activeProfileId = parsed.activeProfileId ?? DEFAULTS.activeProfileId;
-  return DEFAULT_PROFILES.map((profile) => {
+  const defaults = DEFAULT_PROFILES.map((profile) => {
     const merged = { ...profile, ...(byId.get(profile.id) ?? {}) };
     if (!Array.isArray(parsed.profiles) && profile.id === activeProfileId) {
       return {
@@ -66,6 +66,9 @@ function mergeProfiles(parsed: Partial<AiTalkSettings>): AiTalkProviderProfile[]
     }
     return merged;
   });
+  // User-created profiles (ids outside the default set) survive reloads.
+  const extras = saved.filter((p) => !DEFAULT_PROFILES.some((d) => d.id === p.id));
+  return [...defaults, ...extras];
 }
 
 function hydrateActiveProfile(value: AiTalkSettings): AiTalkSettings {
@@ -128,6 +131,58 @@ class AiTalkSettingsStore {
       );
     }
     this.value = hydrateActiveProfile({ ...next, activeProfileId, profiles });
+    persist(this.value);
+  }
+
+  /**
+   * Save the current connection settings (baseUrl/apiKey/model/temperature)
+   * as a new custom profile and make it active. Returns the new profile id.
+   */
+  saveAsNewProfile(label?: string): string {
+    const v = this.value;
+    const id = `custom-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+    let host = 'custom';
+    try {
+      host = new URL(v.baseUrl).hostname;
+    } catch {
+      /* keep fallback */
+    }
+    const profile: AiTalkProviderProfile = {
+      id,
+      label: (label ?? '').trim() || `${v.model || 'Model'} @ ${host}`,
+      baseUrl: v.baseUrl,
+      apiKey: v.apiKey,
+      model: v.model,
+      temperature: v.temperature,
+      custom: true,
+    };
+    this.value = hydrateActiveProfile({
+      ...v,
+      activeProfileId: id,
+      profiles: [...v.profiles, profile],
+    });
+    persist(this.value);
+    return id;
+  }
+
+  renameProfile(id: string, label: string) {
+    const cleaned = label.trim();
+    if (!cleaned) return;
+    this.value = {
+      ...this.value,
+      profiles: this.value.profiles.map((p) => (p.id === id ? { ...p, label: cleaned } : p)),
+    };
+    persist(this.value);
+  }
+
+  /** Delete a user-created profile. Built-in provider profiles can't be removed. */
+  deleteProfile(id: string) {
+    const target = this.value.profiles.find((p) => p.id === id);
+    if (!target || DEFAULT_PROFILES.some((d) => d.id === id)) return;
+    const profiles = this.value.profiles.filter((p) => p.id !== id);
+    const activeProfileId =
+      this.value.activeProfileId === id ? profiles[0]?.id ?? DEFAULTS.activeProfileId : this.value.activeProfileId;
+    this.value = hydrateActiveProfile({ ...this.value, activeProfileId, profiles });
     persist(this.value);
   }
 

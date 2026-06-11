@@ -1,50 +1,25 @@
 <script lang="ts">
   import type { AiContextAttachment } from './attachments';
-  import { searchAttachmentCandidates } from './attachments';
-
-  type Mention = {
-    token: string;
-    label: string;
-    hint: string;
-    attachment?: AiContextAttachment;
-  };
-
-  const MENTIONS: Mention[] = [
-    { token: '@selection', label: '@selection', hint: 'selected editor text' },
-    { token: '@current', label: '@current', hint: 'current file contents' },
-    { token: '@outline', label: '@outline', hint: 'current file heading outline' },
-    { token: '@file:', label: '@file:path', hint: 'attach first matching file' },
-    { token: '@folder:', label: '@folder:path', hint: 'attach folder summary' },
-  ];
+  import type { MentionMenuItem } from './menu-items';
 
   type Props = {
-    visible: boolean;
-    query: string;
-    candidates?: readonly AiContextAttachment[];
+    items: readonly MentionMenuItem[];
+    activeIndex: number;
     onPick: (token: string, attachment?: AiContextAttachment) => void;
   };
 
-  let { visible, query, candidates = [], onPick }: Props = $props();
-  let dynamicMentions = $derived(
-    searchAttachmentCandidates(candidates, query).map((item) => ({
-      token: `@${item.id}`,
-      label: item.label,
-      hint: item.path ?? item.kind,
-      attachment: item,
-    })),
-  );
-  let filtered = $derived(
-    [
-      ...MENTIONS.filter((m) => `${m.label} ${m.hint}`.toLowerCase().includes(query.toLowerCase())),
-      ...dynamicMentions,
-    ].slice(0, 8),
-  );
+  let { items, activeIndex, onPick }: Props = $props();
 </script>
 
-{#if visible && filtered.length > 0}
+{#if items.length > 0}
   <div class="menu" data-testid="ai-mention-menu">
-    {#each filtered as mention}
-      <button type="button" onclick={() => onPick(mention.token, mention.attachment)}>
+    {#each items as mention, i (mention.token)}
+      <button
+        type="button"
+        class:active={i === activeIndex}
+        data-active={i === activeIndex || undefined}
+        onclick={() => onPick(mention.token, mention.attachment)}
+      >
         <strong>{mention.label}</strong>
         <span>{mention.hint}</span>
       </button>
@@ -74,6 +49,7 @@
     cursor: pointer;
     text-align: left;
   }
-  button:hover { background: var(--novelist-bg-secondary); }
+  button:hover,
+  button.active { background: var(--novelist-bg-secondary); }
   span { color: var(--novelist-text-secondary); }
 </style>

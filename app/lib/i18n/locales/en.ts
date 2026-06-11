@@ -599,6 +599,9 @@ export const en: TranslationMap = {
   'settings.aiTalk.includeCurrentFile': 'Include current file in chat context',
   'settings.aiTalk.includeSelection': 'Include current selection in chat context',
   'settings.aiTalk.hint': 'API key is stored locally on this device. Requests go through the Novelist Rust backend (URL allowlist enforced).',
+  'settings.aiTalk.profileSaveAs': 'Save as new profile',
+  'settings.aiTalk.profileName': 'Profile name',
+  'settings.aiTalk.profileDelete': 'Delete profile',
 
   // --- Settings · AI Talk · Prompt presets ---
   'settings.aiTalk.presets.title': 'Prompt presets',

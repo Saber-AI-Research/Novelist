@@ -179,8 +179,17 @@ describe('[contract] host bridge wrappers', () => {
       permission_mode: 'acceptEdits',
       model: 'opus',
       session_uuid: 'uuid-1',
+      resume: false,
       extra_args: [],
     });
+  });
+
+  it('spawnClaudeSession passes resume through for existing conversations', async () => {
+    claudeCliSpawn.mockResolvedValue({ status: 'ok', data: 'sess-43' });
+    await spawnClaudeSession({ sessionUuid: 'uuid-1', resume: true });
+    expect(claudeCliSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({ session_uuid: 'uuid-1', resume: true }),
+    );
   });
 
   it('spawnClaudeSession defaults optional args to null / empty', async () => {
@@ -194,6 +203,7 @@ describe('[contract] host bridge wrappers', () => {
       permission_mode: null,
       model: null,
       session_uuid: 'uuid-x',
+      resume: false,
       extra_args: [],
     });
   });

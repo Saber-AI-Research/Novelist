@@ -73,7 +73,9 @@
   let turns = $derived<Turn[]>(activeSession?.turns ?? []);
   let isLive = $derived(activeSession ? liveSessions.has(activeSession.sessionUuid) : false);
   let agentMode = $derived(activeSession?.mode ?? 'act');
-  let commandMenuVisible = $derived(/^\/[a-z-]*$/.test(input.trim()));
+  // No trailing trim: a trailing space (inserted after picking a command)
+  // must close the menu so Enter/Tab go back to normal typing.
+  let commandMenuVisible = $derived(/^\s*\/[a-z-]*$/.test(input));
   let commandQuery = $derived(input.trim().startsWith('/') ? input.trim().slice(1) : '');
   let mentionMenuVisible = $derived(/(^|\s)@[^\s]*$/.test(input));
   let mentionQuery = $derived((/(?:^|\s)@([^\s]*)$/.exec(input)?.[1] ?? '').toLowerCase());
@@ -203,6 +205,9 @@
         model: settings.model || undefined,
         permissionMode: s.mode === 'plan' ? 'plan' : settings.permissionMode,
         addDirs: settings.attachProjectRoot && cwd ? [cwd] : [],
+        // The CLI refuses to re-create a --session-id it already knows, so
+        // once this uuid has produced output we must resume, not re-create.
+        resume: s.providerState?.claudeStarted === true,
       });
       const unlisten = await ClaudeRuntime.listen(s.sessionUuid, (ev) =>
         handleStreamEvent(sessionId, ev),
@@ -237,7 +242,8 @@
       input = input.replace(/(^|\s)@[^\s]*$/, '$1').trimStart();
       return;
     }
-    input = input.replace(/(^|\s)@[^\s]*$/, `$1${token}`);
+    // Trailing space closes the mention menu after the pick.
+    input = input.replace(/(^|\s)@[^\s]*$/, `$1${token} `);
   }
 
   function extension(path: string): string {
@@ -369,6 +375,21 @@
     return false;
   }
 
+  /** Drop the live listener + map entry for a CLI process that's gone. */
+  function dropLive(uuid: string) {
+    const fn = liveSessions.get(uuid);
+    fn?.();
+    liveSessions.delete(uuid);
+  }
+
+  /** Remember that the CLI created this conversation → future spawns resume. */
+  function markClaudeStarted(sessionId: string) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (s && s.providerState?.claudeStarted !== true) {
+      aiAgentSessions.patchProviderState(sessionId, { claudeStarted: true });
+    }
+  }
+
   function handleStreamEvent(
     sessionId: string,
     ev: ClaudeStreamEvent,
@@ -379,13 +400,9 @@
     }
     if (ev.kind === 'exit') {
       // The CLI for this session exited. Drop the listener; the next
-      // send() will re-spawn with the same sessionUuid.
+      // send() will re-spawn (resuming) with the same sessionUuid.
       const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
-      if (s) {
-        const fn = liveSessions.get(s.sessionUuid);
-        fn?.();
-        liveSessions.delete(s.sessionUuid);
-      }
+      if (s) dropLive(s.sessionUuid);
       return;
     }
     if (ev.kind === 'error') {
@@ -409,9 +426,12 @@
           applyToolResult(sessionId, parsed.content);
           break;
         case 'result':
+          markClaudeStarted(sessionId);
           applyResult(sessionId, parsed.text, parsed.cost);
           break;
         case 'system':
+          // The init frame means the CLI persisted this session id.
+          markClaudeStarted(sessionId);
           break;
       }
     }
@@ -475,7 +495,18 @@
     try {
       const uuid = await ensureLive(sessionId);
       if (!uuid) throw new Error('Failed to spawn Claude CLI');
-      await ClaudeRuntime.send(uuid, outbound);
+      try {
+        await ClaudeRuntime.send(uuid, outbound);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (!message.includes('Unknown claude session')) throw e;
+        // The CLI exited between turns and its backend entry is gone while
+        // our live map still points at it. Re-spawn (resume) and retry once.
+        dropLive(uuid);
+        const fresh = await ensureLive(sessionId);
+        if (!fresh) throw e;
+        await ClaudeRuntime.send(fresh, outbound);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }

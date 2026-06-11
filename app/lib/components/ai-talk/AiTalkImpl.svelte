@@ -15,6 +15,14 @@
   import SessionTabs from '$lib/components/ai-shared/SessionTabs.svelte';
   import AiComposer from '$lib/components/ai-shared/AiComposer.svelte';
   import InlineEditReview from '$lib/components/ai-shared/InlineEditReview.svelte';
+  import AiEditSuggestionCard from '$lib/components/ai-shared/AiEditSuggestionCard.svelte';
+  import {
+    EDIT_SUGGESTION_PROTOCOL,
+    locateSuggestion,
+    splitEditSuggestions,
+    type EditSuggestion,
+    type SuggestionStatus,
+  } from '$lib/components/ai-shared/edit-suggestions';
   import {
     attachmentToContextItem,
     createAttachmentFromContext,
@@ -91,7 +99,9 @@
   let chatStreaming = $state(false);
   let chatStreamId: string | null = null;
   let chatScroller = $state<HTMLDivElement | undefined>(undefined);
-  let commandMenuVisible = $derived(/^\/[a-z-]*$/.test(chatInput.trim()));
+  // No trailing trim: a trailing space (inserted after picking a command)
+  // must close the menu so Enter/Tab go back to normal typing.
+  let commandMenuVisible = $derived(/^\s*\/[a-z-]*$/.test(chatInput));
   let commandQuery = $derived(chatInput.trim().startsWith('/') ? chatInput.trim().slice(1) : '');
   let mentionMenuVisible = $derived(/(^|\s)@[^\s]*$/.test(chatInput));
   let mentionQuery = $derived((/(?:^|\s)@([^\s]*)$/.exec(chatInput)?.[1] ?? '').toLowerCase());
@@ -122,13 +132,19 @@
     };
   }
 
-  function buildChatContext(userText: string, extraContext: AiContextAttachment[] = []): ChatMessage[] {
+  /**
+   * Build the OpenAI message list for a turn. `history` is the exact
+   * conversation to send (ending with the user message for this turn) —
+   * passed explicitly so retry/edit can replay a truncated transcript.
+   * The edit-suggestion protocol is always appended to the system prompt
+   * so structured ```novelist-edit blocks come back regardless of preset.
+   */
+  function buildChatContextFrom(history: DisplayMessage[], extraContext: AiContextAttachment[] = []): ChatMessage[] {
     const ctx: ChatMessage[] = [];
     const s = aiTalkSettings.value;
     const cfg = activeConfig();
-    if (cfg.systemPrompt.trim()) {
-      ctx.push({ role: 'system', content: cfg.systemPrompt });
-    }
+    const systemPrompt = [cfg.systemPrompt.trim(), EDIT_SUGGESTION_PROTOCOL].filter(Boolean).join('\n\n');
+    ctx.push({ role: 'system', content: systemPrompt });
 
     const snap = getEditorSnapshot();
     if (snap) {
@@ -148,10 +164,9 @@
       });
     }
 
-    for (const m of messages) {
+    for (const m of history) {
       ctx.push({ role: m.role, content: m.content });
     }
-    ctx.push({ role: 'user', content: userText });
     return ctx;
   }
 
@@ -178,7 +193,8 @@
       chatInput = chatInput.replace(/(^|\s)@[^\s]*$/, '$1').trimStart();
       return;
     }
-    chatInput = chatInput.replace(/(^|\s)@[^\s]*$/, `$1${token}`);
+    // Trailing space closes the mention menu after the pick.
+    chatInput = chatInput.replace(/(^|\s)@[^\s]*$/, `$1${token} `);
   }
 
   function selectionKey(snapshot: EditorSnapshot): string {
@@ -370,18 +386,28 @@
       ? `${instruction}\n\nUser request: ${cleaned || slash?.rest || text}`
       : cleaned || text;
 
+    const history: DisplayMessage[] = [...messages, { role: 'user', content: effectiveText }];
+    chatInput = '';
+    await runAssistantTurn(sessionId, history, turnContext);
+  }
+
+  /**
+   * Stream one assistant completion for the given conversation history
+   * (which must end with a user message). Shared by send, retry, and edit.
+   */
+  async function runAssistantTurn(
+    sessionId: string,
+    history: DisplayMessage[],
+    turnContext: AiContextAttachment[] = [],
+  ) {
     // Snapshot messages through this turn locally so we can index into
     // the assistant slot as deltas arrive; we push the full array back
     // into the store after each update.
-    const base: DisplayMessage[] = [...messages, { role: 'user', content: effectiveText }];
-    chatInput = '';
-    aiTalkSessions.updateMessages(sessionId, base);
-    scrollChat();
-
-    const assistantIdx = base.length;
-    const working: DisplayMessage[] = [...base, { role: 'assistant', content: '' }];
+    const assistantIdx = history.length;
+    const working: DisplayMessage[] = [...history, { role: 'assistant', content: '' }];
     aiTalkSessions.updateMessages(sessionId, working);
     chatStreaming = true;
+    scrollChat();
 
     let buffered = '';
     try {
@@ -391,7 +417,7 @@
         apiKey: aiTalkSettings.value.apiKey,
         model: cfg.model,
         temperature: cfg.temperature,
-        messages: buildChatContext(effectiveText, turnContext),
+        messages: buildChatContextFrom(history, turnContext),
       });
       chatStreamId = await startAiStream(req);
       for await (const ev of aiStream(chatStreamId)) {
@@ -421,6 +447,81 @@
       chatStreaming = false;
       chatStreamId = null;
       await persistProjectSessions();
+    }
+  }
+
+  // -------- Per-message actions: copy / edit / retry / suggestions --------
+
+  let editingIndex = $state<number | null>(null);
+  let editingText = $state('');
+
+  function copyMessage(content: string) {
+    void navigator.clipboard?.writeText(content).catch(() => {});
+  }
+
+  /** Regenerate the assistant message at index `i` from the turns before it. */
+  function retryMessage(i: number) {
+    if (chatStreaming || !activeSessionId) return;
+    const history = messages.slice(0, i);
+    if (history.length === 0 || history[history.length - 1].role !== 'user') return;
+    void runAssistantTurn(activeSessionId, history, [...attachments]);
+  }
+
+  function startEditMessage(i: number) {
+    if (chatStreaming) return;
+    editingIndex = i;
+    editingText = messages[i].content;
+  }
+
+  function cancelEditMessage() {
+    editingIndex = null;
+    editingText = '';
+  }
+
+  /** Replace the edited user message, drop everything after it, and re-send. */
+  function submitEditMessage() {
+    if (editingIndex == null || chatStreaming || !activeSessionId) return;
+    const text = editingText.trim();
+    if (!text) return;
+    const history: DisplayMessage[] = [
+      ...messages.slice(0, editingIndex),
+      { role: 'user', content: text },
+    ];
+    cancelEditMessage();
+    void runAssistantTurn(activeSessionId, history, [...attachments]);
+  }
+
+  function setSuggestionStatus(messageIndex: number, suggestionId: string, status: SuggestionStatus) {
+    if (!activeSessionId) return;
+    const next = messages.map((m, idx) =>
+      idx === messageIndex
+        ? { ...m, suggestionStatus: { ...(m.suggestionStatus ?? {}), [suggestionId]: status } }
+        : m,
+    );
+    aiTalkSessions.updateMessages(activeSessionId, next);
+    void persistProjectSessions();
+  }
+
+  /** Apply a suggestion to the active editor document by exact match. */
+  function acceptSuggestion(messageIndex: number, suggestion: EditSuggestion) {
+    const snap = getEditorSnapshot();
+    const range = snap ? locateSuggestion(snap.fullDoc, suggestion) : null;
+    if (!range) {
+      setSuggestionStatus(messageIndex, suggestion.id, 'conflict');
+      return;
+    }
+    replaceEditorRange(range.from, range.to, suggestion.replace);
+    setSuggestionStatus(messageIndex, suggestion.id, 'accepted');
+  }
+
+  function rejectSuggestion(messageIndex: number, suggestion: EditSuggestion) {
+    setSuggestionStatus(messageIndex, suggestion.id, 'rejected');
+  }
+
+  function acceptAllSuggestions(messageIndex: number, list: EditSuggestion[]) {
+    for (const suggestion of list) {
+      const status = messages[messageIndex]?.suggestionStatus?.[suggestion.id];
+      if (!status) acceptSuggestion(messageIndex, suggestion);
     }
   }
 
@@ -672,6 +773,7 @@
   function handleSessionSelect(id: string) {
     // Cancel any in-flight stream on the previous session before switching.
     if (chatStreaming) void cancelChat();
+    cancelEditMessage();
     aiTalkSessions.setActive(id);
   }
 
@@ -734,6 +836,18 @@
       {#if activeTab === 'chat'}
         <select
           class="preset-picker"
+          data-testid="ai-talk-model-picker"
+          value={aiTalkSettings.value.activeProfileId}
+          onchange={(e) => aiTalkSettings.update({ activeProfileId: e.currentTarget.value })}
+          aria-label="Model profile"
+          title="Model profile"
+        >
+          {#each aiTalkSettings.value.profiles as p (p.id)}
+            <option value={p.id}>{p.label} · {p.model}</option>
+          {/each}
+        </select>
+        <select
+          class="preset-picker"
           data-testid="ai-talk-preset-picker"
           value={activePresetId}
           onchange={(e) => handlePresetChange(e.currentTarget.value)}
@@ -761,7 +875,70 @@
       {#each messages as m, i (i)}
         <div class="msg {m.role}" data-testid="ai-talk-msg-{m.role}">
           <div class="role">{m.role === 'user' ? 'You' : m.role === 'system' ? 'Memory' : 'Assistant'}</div>
-          <div class="content">{m.content}</div>
+          {#if editingIndex === i}
+            <div class="edit-box" data-testid="ai-talk-edit-box">
+              <textarea rows="3" bind:value={editingText} data-testid="ai-talk-edit-input"></textarea>
+              <div class="edit-actions">
+                <button
+                  class="novelist-btn novelist-btn-primary"
+                  data-testid="ai-talk-edit-send"
+                  disabled={!editingText.trim() || chatStreaming}
+                  onclick={submitEditMessage}
+                >Send</button>
+                <button class="novelist-btn novelist-btn-ghost" onclick={cancelEditMessage}>Cancel</button>
+              </div>
+            </div>
+          {:else if m.role === 'assistant'}
+            {@const split = splitEditSuggestions(m.content)}
+            <div class="content">{split.suggestions.length > 0 ? split.body : m.content}</div>
+            {#if split.suggestions.length > 0}
+              <div class="suggestions">
+                {#each split.suggestions as s (s.id)}
+                  <AiEditSuggestionCard
+                    suggestion={s}
+                    status={m.suggestionStatus?.[s.id]}
+                    disabled={chatStreaming}
+                    onAccept={() => acceptSuggestion(i, s)}
+                    onReject={() => rejectSuggestion(i, s)}
+                  />
+                {/each}
+                {#if split.suggestions.length > 1 && split.suggestions.some((s) => !m.suggestionStatus?.[s.id])}
+                  <div class="suggestions-bulk">
+                    <button
+                      class="novelist-btn novelist-btn-ghost"
+                      data-testid="ai-talk-accept-all-suggestions"
+                      disabled={chatStreaming}
+                      onclick={() => acceptAllSuggestions(i, split.suggestions)}
+                    >Accept all</button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+            <div class="msg-actions">
+              <button onclick={() => copyMessage(m.content)} title="Copy message">Copy</button>
+              {#if i > 0 && messages[i - 1].role === 'user'}
+                <button
+                  data-testid="ai-talk-retry"
+                  disabled={chatStreaming}
+                  onclick={() => retryMessage(i)}
+                  title="Regenerate this reply"
+                >Retry</button>
+              {/if}
+            </div>
+          {:else}
+            <div class="content">{m.content}</div>
+            {#if m.role === 'user'}
+              <div class="msg-actions user-actions">
+                <button onclick={() => copyMessage(m.content)} title="Copy message">Copy</button>
+                <button
+                  data-testid="ai-talk-edit"
+                  disabled={chatStreaming}
+                  onclick={() => startEditMessage(i)}
+                  title="Edit and re-send (discards later messages)"
+                >Edit</button>
+              </div>
+            {/if}
+          {/if}
         </div>
       {/each}
       {#if messages.length === 0}
@@ -974,6 +1151,67 @@
     color: #fff;
     align-self: flex-end;
     max-width: 85%;
+  }
+  .msg-actions {
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 100ms;
+  }
+  .msg:hover .msg-actions,
+  .msg:focus-within .msg-actions {
+    opacity: 1;
+  }
+  .msg-actions.user-actions {
+    align-self: flex-end;
+  }
+  .msg-actions button {
+    border: 1px solid var(--novelist-border);
+    background: var(--novelist-bg);
+    color: var(--novelist-text-secondary);
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .msg-actions button:hover:not(:disabled) {
+    color: var(--novelist-text);
+    background: var(--novelist-bg-secondary);
+  }
+  .msg-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .edit-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .edit-box textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--novelist-bg);
+    border: 1px solid var(--novelist-accent);
+    color: var(--novelist-text);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font: inherit;
+    resize: vertical;
+  }
+  .edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .suggestions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .suggestions-bulk {
+    display: flex;
+    justify-content: flex-end;
   }
   .empty {
     color: var(--novelist-text-secondary);

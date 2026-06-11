@@ -599,6 +599,9 @@ export const zhCN: TranslationMap = {
   'settings.aiTalk.includeCurrentFile': '将当前文件作为聊天上下文',
   'settings.aiTalk.includeSelection': '将当前选区作为聊天上下文',
   'settings.aiTalk.hint': 'API 密钥仅保存在本机。请求经由 Novelist Rust 后端转发（已启用 URL 白名单）。',
+  'settings.aiTalk.profileSaveAs': '保存为新配置',
+  'settings.aiTalk.profileName': '配置名称',
+  'settings.aiTalk.profileDelete': '删除配置',
 
   // --- Settings · AI Talk · Prompt presets ---
   'settings.aiTalk.presets.title': '提示词预设',

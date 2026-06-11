@@ -410,6 +410,14 @@ export type ClaudeSpawnRequest = {
 	/**  Plugin-owned UUID; must be a valid UUID string on the CLI side. */
 	session_uuid: string,
 	/**
+	 *  Resume an existing CLI conversation instead of creating a new one.
+	 *  The CLI rejects `--session-id` values it has already seen (the
+	 *  process exits immediately, which surfaced as "Unknown claude
+	 *  session" on the next send), so re-spawns of a session that already
+	 *  produced output MUST pass `--resume` instead.
+	 */
+	resume?: boolean,
+	/**
 	 *  Extra CLI args (escape hatch). Validated against a blocklist of
 	 *  flags we manage ourselves.
 	 */

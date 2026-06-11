@@ -27,6 +27,12 @@ export type SpawnArgs = {
   model?: string;
   permissionMode?: string;
   addDirs?: string[];
+  /**
+   * Resume the CLI conversation stored under `sessionUuid` instead of
+   * creating a new one. Must be true whenever this uuid has produced
+   * output before — the CLI rejects already-used `--session-id` values.
+   */
+  resume?: boolean;
 };
 
 export async function spawnClaudeSession(args: SpawnArgs): Promise<string> {
@@ -38,6 +44,7 @@ export async function spawnClaudeSession(args: SpawnArgs): Promise<string> {
     permission_mode: args.permissionMode || null,
     model: args.model || null,
     session_uuid: args.sessionUuid,
+    resume: args.resume ?? false,
     extra_args: [],
   });
   if (result.status === 'error') throw new Error(result.error);
