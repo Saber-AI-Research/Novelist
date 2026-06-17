@@ -7,6 +7,7 @@
   import type { AiContextAttachment } from './attachments';
   import { attachmentToContextItem } from './attachments';
   import { filterMentionItems, filterSlashCommands } from './menu-items';
+  import { getCaretCoordinates } from './caret-coordinates';
   import { IconClose, IconDocument } from '../icons';
 
   type SuggestedSelection = {
@@ -91,6 +92,25 @@
   });
   let activeMenuIndex = $derived(menuLength > 0 ? Math.min(menuIndex, menuLength - 1) : 0);
 
+  // ---- Anchor the popup to the caret pixel position inside the textarea ----
+  // <textarea> has no caret-rect API, so we measure via a mirror div whenever
+  // a menu is open and the text changes. The menu floats upward from the caret
+  // (the composer sits at the panel bottom, so there is always room above).
+  const MENU_MIN_WIDTH = 220;
+  let textareaEl = $state<HTMLTextAreaElement | undefined>(undefined);
+  let caretLeft = $state(0);
+  let caretTop = $state(0);
+  $effect(() => {
+    // Re-measure on input or when a menu opens/closes.
+    void value;
+    if (menuLength === 0 || !textareaEl) return;
+    const coords = getCaretCoordinates(textareaEl, textareaEl.selectionStart);
+    // Clamp horizontally so a long token near the right edge stays in view.
+    const maxLeft = Math.max(0, textareaEl.clientWidth - MENU_MIN_WIDTH);
+    caretLeft = Math.min(coords.left, maxLeft);
+    caretTop = coords.top;
+  });
+
   function pickActiveMenuItem(): boolean {
     if (commandItems.length > 0) {
       onPickCommand(commandItems[activeMenuIndex].id);
@@ -166,16 +186,23 @@
     onRemove={onRemoveAttachment}
     onClear={onClearAttachments}
   />
-  <AiCommandMenu items={commandItems} activeIndex={activeMenuIndex} onPick={onPickCommand} />
-  <AiMentionMenu items={mentionItems} activeIndex={activeMenuIndex} onPick={onPickMention} />
-  <textarea
-    data-testid={inputTestId}
-    rows="3"
-    {placeholder}
-    value={value}
-    oninput={(e) => onInput(e.currentTarget.value)}
-    onkeydown={keydown}
-  ></textarea>
+  <div class="input-wrap">
+    {#if menuLength > 0}
+      <div class="menu-anchor" style="left: {caretLeft}px; top: {caretTop}px;">
+        <AiCommandMenu items={commandItems} activeIndex={activeMenuIndex} onPick={onPickCommand} />
+        <AiMentionMenu items={mentionItems} activeIndex={activeMenuIndex} onPick={onPickMention} />
+      </div>
+    {/if}
+    <textarea
+      bind:this={textareaEl}
+      data-testid={inputTestId}
+      rows="3"
+      {placeholder}
+      value={value}
+      oninput={(e) => onInput(e.currentTarget.value)}
+      onkeydown={keydown}
+    ></textarea>
+  </div>
   <div class="composer-actions">
     {#if actions}
       {@render actions()}
@@ -196,6 +223,20 @@
     flex-direction: column;
     gap: 6px;
     background: var(--novelist-bg-secondary);
+  }
+  .input-wrap {
+    position: relative;
+  }
+  /* Floats above the caret line; the composer sits at the panel bottom so
+     there is always room above. translateY lifts the menu by its own height. */
+  .menu-anchor {
+    position: absolute;
+    z-index: 30;
+    min-width: 220px;
+    max-width: min(360px, 100%);
+    max-height: 240px;
+    overflow-y: auto;
+    transform: translateY(calc(-100% - 6px));
   }
   textarea {
     width: 100%;
