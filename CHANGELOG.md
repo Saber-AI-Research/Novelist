@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-06-17
+
+### Added
+
+- **AI chat: keyboard navigation for the `/` and `@` menus.** Arrow keys move
+  the selection and Tab / Enter complete it, so picking a command or mention no
+  longer requires the mouse. IME composition (CJK) is left untouched, and the
+  Agent panel's Shift+Tab Plan/Act toggle still works.
+- **AI chat: per-message Edit and Retry.** User messages can be edited and
+  re-sent (discarding later turns); assistant replies can be regenerated. Both
+  also offer Copy.
+- **AI chat: Cursor-style accept/deny edit suggestions.** When the model
+  proposes concrete text changes it emits structured ` ```novelist-edit `
+  SEARCH/REPLACE blocks, rendered as word-diff cards with Accept / Reject /
+  Accept all. Accepting applies the change to the active editor document; the
+  protocol is appended to the system prompt so corrections come back as cards
+  instead of a prose list.
+- **AI chat: saved model profiles.** Save the current provider connection as a
+  named profile, rename/delete it, and switch models from a picker in the chat
+  header.
+
+### Fixed
+
+- **AI chat: the `/` and `@` popups now anchor to the typing caret** instead of
+  rendering in a fixed block above the input.
+- **AI Agent: "Unknown claude session" no longer breaks the session.** Re-spawns
+  of a known session id now resume the CLI conversation (`--resume`) rather than
+  re-creating it (which the CLI rejects, exiting instantly); a session-map race
+  on spawn is closed and a failed send retries once after re-spawning.
+
 ## [0.2.9] - 2026-06-10
 
 ### Fixed
