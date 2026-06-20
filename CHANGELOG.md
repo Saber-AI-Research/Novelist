@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-06-20
+
+### Added
+
+- **AI Agent: Codex backend.** The agent panel can now drive OpenAI's `codex`
+  CLI as an alternative to Claude Code. Pick the backend in AI Agent settings
+  (stamped onto new sessions); the app detects the `codex` binary, runs each
+  turn as `codex exec --json`, resumes the conversation across turns by thread
+  id, renders text replies + tool-use cards, and shows per-turn token usage.
+  Act mode maps to Codex's `workspace-write` sandbox, Plan mode to `read-only`.
+
+### Fixed
+
+- **Editor: headings no longer go stale while editing a table in a long
+  document.** The WYSIWYG decorator now rebuilds when the incremental parser
+  advances the syntax tree (tree-only transactions), matching the table
+  plugins — so on-screen headings near a table stay correctly rendered after
+  background parsing completes.
+
 ## [0.2.10] - 2026-06-17
 
 ### Added
