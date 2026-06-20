@@ -3,6 +3,7 @@ pub mod ai_files;
 pub mod bench;
 pub mod claude_bridge;
 pub mod cli_shim;
+pub mod codex_bridge;
 pub mod draft;
 pub mod export;
 pub mod file;

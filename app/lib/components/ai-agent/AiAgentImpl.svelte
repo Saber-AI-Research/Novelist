@@ -3,10 +3,12 @@
   import { aiAgentSettings } from './settings.svelte';
   import {
     detectClaudeCli,
+    detectCodexCli,
     killClaudeSession,
+    killCodexSession,
     type DetectedCli,
   } from './host';
-  import { ClaudeRuntime } from './runtime';
+  import { ClaudeRuntime, runtimeFor } from './runtime';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import AiAgentSettings from './AiAgentSettings.svelte';
   import SessionTabs from '$lib/components/ai-shared/SessionTabs.svelte';
@@ -46,16 +48,30 @@
   import type { ClaudeStreamEvent } from './host';
   import { IconGear, IconTool, IconArrowInsert } from '../icons';
 
-  let detected = $state<DetectedCli | null>(null);
+  let claudeDetected = $state<DetectedCli | null>(null);
+  let codexDetected = $state<DetectedCli | null>(null);
   let detecting = $state(true);
 
   // A session is "live" (CLI spawned + listener attached) iff its
   // sessionUuid has an entry here. This is purely component-local —
   // sessions persist across reloads, the live subprocess state does not.
   const liveSessions = new Map<string, UnlistenFn>();
+  // Codex (one-shot) listeners, keyed by sessionUuid. The channel is keyed by
+  // the stable sessionUuid so a single subscription survives many one-shot
+  // children; we attach lazily on the first turn and tear down on teardown.
+  const codexListeners = new Map<string, UnlistenFn>();
+  // Codex sessions with a turn currently streaming, keyed by session.id.
+  // Reactive so the composer busy state + live badge update.
+  let turnInFlight = $state(new Set<string>());
   // Sessions currently mid-spawn, keyed by session.id. Prevents racing
   // spawns when send() is called twice in rapid succession.
   const spawning = new Set<string>();
+
+  function setTurnInFlight(sessionId: string, on: boolean) {
+    const next = new Set(turnInFlight);
+    if (on) next.add(sessionId); else next.delete(sessionId);
+    turnInFlight = next;
+  }
   const SUPPORTED_CONTEXT_EXTENSIONS = new Set(['.md', '.txt', '.canvas', '.kanban']);
 
   let input = $state('');
@@ -71,7 +87,19 @@
   let activeSession = $derived(aiAgentSessions.active);
   let activeId = $derived(aiAgentSessions.activeId);
   let turns = $derived<Turn[]>(activeSession?.turns ?? []);
-  let isLive = $derived(activeSession ? liveSessions.has(activeSession.sessionUuid) : false);
+  let activeProvider = $derived(activeSession?.providerId ?? aiAgentSettings.value.providerId);
+  let isLive = $derived(
+    activeSession
+      ? (runtimeFor(activeSession.providerId).capabilities.persistent
+          ? liveSessions.has(activeSession.sessionUuid)
+          : turnInFlight.has(activeSession.id))
+      : false,
+  );
+  // Provider-aware CLI detection + configured-path fallback for the warning row.
+  let detected = $derived(activeProvider === 'codex' ? codexDetected : claudeDetected);
+  let effectiveCliPath = $derived(
+    activeProvider === 'codex' ? aiAgentSettings.value.codexCliPath : aiAgentSettings.value.cliPath,
+  );
   let agentMode = $derived(activeSession?.mode ?? 'act');
   // No trailing trim: a trailing space (inserted after picking a command)
   // must close the menu so Enter/Tab go back to normal typing.
@@ -83,7 +111,10 @@
 
   onMount(async () => {
     aiAgentSessions.ensureOne();
-    detected = await detectClaudeCli();
+    [claudeDetected, codexDetected] = await Promise.all([
+      detectClaudeCli().catch(() => null),
+      detectCodexCli().catch(() => null),
+    ]);
     detecting = false;
     void loadProjectSessions();
     if (sessionStorage.getItem('novelist:ai-agent:open-settings') === '1') {
@@ -98,6 +129,11 @@
       await killClaudeSession(uuid).catch(() => {});
     }
     liveSessions.clear();
+    for (const [uuid, unlisten] of codexListeners.entries()) {
+      try { unlisten(); } catch { /* ignore */ }
+      await killCodexSession(uuid).catch(() => {});
+    }
+    codexListeners.clear();
   });
 
   function ensureAssistantTurn(current: Turn[]): { idx: number; turns: Turn[] } {
@@ -155,7 +191,12 @@
     scrollDown();
   }
 
-  function applyResult(sessionId: string, text: string, cost?: number) {
+  function applyResult(
+    sessionId: string,
+    text: string,
+    cost?: number,
+    usage?: { input: number; output: number },
+  ) {
     const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
     if (!s) return;
     const { idx, turns: base } = ensureAssistantTurn(s.turns);
@@ -165,7 +206,7 @@
     const cards = changeSets.length > 0
       ? [...cur.cards, ...changeSets.map((changeSet) => ({ kind: 'apply-changes' as const, changeSet }))]
       : cur.cards;
-    base[idx] = { ...cur, text: finalText, cards, cost };
+    base[idx] = { ...cur, text: finalText, cards, cost, usage: usage ?? cur.usage };
     aiAgentSessions.updateTurns(sessionId, base, cost);
     void persistProjectSessions();
     scrollDown();
@@ -217,6 +258,21 @@
     } finally {
       spawning.delete(sessionId);
     }
+  }
+
+  /**
+   * Ensure a Codex (one-shot) session has its stream listener attached. The
+   * channel is keyed by the stable sessionUuid, so one subscription covers
+   * every per-turn child process the Rust bridge spawns.
+   */
+  async function ensureListening(sessionId: string): Promise<void> {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (!s || codexListeners.has(s.sessionUuid)) return;
+    const runtime = runtimeFor(s.providerId);
+    const unlisten = await runtime.listen(s.sessionUuid, (ev) =>
+      handleStreamEvent(sessionId, ev),
+    );
+    codexListeners.set(s.sessionUuid, unlisten);
   }
 
   function addAttachments(items: AiContextAttachment[]) {
@@ -311,10 +367,17 @@
   async function setActiveMode(mode: 'act' | 'plan') {
     const s = activeSession;
     if (!s) return;
-    const wasLive = liveSessions.get(s.sessionUuid);
-    wasLive?.();
-    liveSessions.delete(s.sessionUuid);
-    await killClaudeSession(s.sessionUuid).catch(() => {});
+    const runtime = runtimeFor(s.providerId);
+    if (runtime.capabilities.persistent) {
+      // Claude bakes the mode into spawn flags, so drop the live process; the
+      // next send re-spawns with the new permission-mode.
+      const wasLive = liveSessions.get(s.sessionUuid);
+      wasLive?.();
+      liveSessions.delete(s.sessionUuid);
+    } else {
+      setTurnInFlight(s.id, false);
+    }
+    await runtime.kill(s.sessionUuid).catch(() => {});
     aiAgentSessions.setMode(s.id, mode);
     await persistProjectSessions();
   }
@@ -322,10 +385,15 @@
   async function stopActiveSession() {
     const s = activeSession;
     if (!s) return;
-    const fn = liveSessions.get(s.sessionUuid);
-    fn?.();
-    liveSessions.delete(s.sessionUuid);
-    await ClaudeRuntime.cancel(s.sessionUuid).catch(() => {});
+    const runtime = runtimeFor(s.providerId);
+    if (runtime.capabilities.persistent) {
+      const fn = liveSessions.get(s.sessionUuid);
+      fn?.();
+      liveSessions.delete(s.sessionUuid);
+    } else {
+      setTurnInFlight(s.id, false);
+    }
+    await runtime.cancel(s.sessionUuid).catch(() => {});
     aiAgentSessions.markInterrupted(s.id);
     await persistProjectSessions();
   }
@@ -390,27 +458,58 @@
     }
   }
 
+  /** Persist Codex's thread id so the NEXT turn resumes the same conversation. */
+  function markCodexThread(sessionId: string, threadId: string) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    if (s && s.providerState?.codexThreadId !== threadId) {
+      aiAgentSessions.patchProviderState(sessionId, { codexThreadId: threadId });
+    }
+  }
+
+  /** Finalize a one-shot Codex turn (idempotent). */
+  function finishCodexTurn(sessionId: string, opts?: { interrupted?: boolean }) {
+    if (!turnInFlight.has(sessionId)) return; // already finalized
+    setTurnInFlight(sessionId, false);
+    if (opts?.interrupted) aiAgentSessions.markInterrupted(sessionId);
+  }
+
   function handleStreamEvent(
     sessionId: string,
     ev: ClaudeStreamEvent,
   ) {
+    const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
+    const runtime = runtimeFor(s?.providerId ?? 'claude');
+    const persistent = runtime.capabilities.persistent;
+
     if (ev.kind === 'stderr-line') {
-      if (ev.data.trim()) error = ev.data.trim();
+      const line = ev.data.trim();
+      if (!line) return;
+      // Codex prints benign operational chatter (e.g. "Reading additional
+      // input from stdin…") to stderr — only surface genuine failures.
+      if (persistent || /\b(error|panic|fatal|failed|denied|refused)\b/i.test(line)) {
+        error = line;
+      }
       return;
     }
     if (ev.kind === 'exit') {
-      // The CLI for this session exited. Drop the listener; the next
-      // send() will re-spawn (resuming) with the same sessionUuid.
-      const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
-      if (s) dropLive(s.sessionUuid);
+      if (persistent) {
+        // The CLI for this session exited. Drop the listener; the next
+        // send() will re-spawn (resuming) with the same sessionUuid.
+        if (s) dropLive(s.sessionUuid);
+      } else {
+        // One-shot turn ended. If it never reported turn.completed, the turn
+        // was interrupted (crash / kill); otherwise this is a no-op.
+        finishCodexTurn(sessionId, { interrupted: true });
+      }
       return;
     }
     if (ev.kind === 'error') {
       error = ev.message;
+      if (!persistent) finishCodexTurn(sessionId, { interrupted: true });
       return;
     }
     if (ev.kind === 'stdout-line') {
-      const parsed = ClaudeRuntime.parseEvent(ev.data);
+      const parsed = runtime.parseEvent(ev.data);
       if (!parsed) return;
       switch (parsed.kind) {
         case 'text-delta':
@@ -426,12 +525,18 @@
           applyToolResult(sessionId, parsed.content);
           break;
         case 'result':
-          markClaudeStarted(sessionId);
-          applyResult(sessionId, parsed.text, parsed.cost);
+          if (persistent) markClaudeStarted(sessionId);
+          applyResult(sessionId, parsed.text, parsed.cost, parsed.usage);
+          // Codex `turn.completed` finalizes the one-shot turn cleanly.
+          if (!persistent) finishCodexTurn(sessionId);
           break;
         case 'system':
           // The init frame means the CLI persisted this session id.
           markClaudeStarted(sessionId);
+          break;
+        case 'session':
+          // Codex thread id — capture immediately so the next turn resumes.
+          markCodexThread(sessionId, parsed.threadId);
           break;
       }
     }
@@ -492,11 +597,47 @@
     ]);
     await persistProjectSessions();
     scrollDown();
+
+    const runtime = runtimeFor(s.providerId);
+    const settings = aiAgentSettings.value;
+    const cwd = projectStore.dirPath ?? null;
+
+    if (!runtime.capabilities.persistent) {
+      // ── One-shot provider (Codex): each turn is a fresh `codex exec`. ──
+      if (turnInFlight.has(sessionId)) {
+        error = 'A Codex turn is already running for this session.';
+        return;
+      }
+      try {
+        await ensureListening(sessionId);
+        setTurnInFlight(sessionId, true);
+        await runtime.runTurn!({
+          sessionUuid: s.sessionUuid,
+          prompt: outbound,
+          cwd,
+          cliPath: settings.codexCliPath || undefined,
+          model: settings.codexModel || undefined,
+          // Plan mode is read-only; Act lets Codex modify the workspace.
+          sandbox: s.mode === 'plan' ? 'read-only' : 'workspace-write',
+          addDirs: settings.attachProjectRoot && cwd ? [cwd] : [],
+          // Read the latest persisted thread id at call time (not a stale closure).
+          resumeThreadId:
+            (aiAgentSessions.sessions.find((x) => x.id === sessionId)?.providerState
+              ?.codexThreadId as string | undefined) ?? null,
+        });
+      } catch (e) {
+        setTurnInFlight(sessionId, false);
+        error = e instanceof Error ? e.message : String(e);
+      }
+      return;
+    }
+
+    // ── Persistent provider (Claude): spawn-once, send-many over stdin. ──
     try {
       const uuid = await ensureLive(sessionId);
       if (!uuid) throw new Error('Failed to spawn Claude CLI');
       try {
-        await ClaudeRuntime.send(uuid, outbound);
+        await runtime.send(uuid, outbound);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         if (!message.includes('Unknown claude session')) throw e;
@@ -505,7 +646,7 @@
         dropLive(uuid);
         const fresh = await ensureLive(sessionId);
         if (!fresh) throw e;
-        await ClaudeRuntime.send(fresh, outbound);
+        await runtime.send(fresh, outbound);
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -526,9 +667,11 @@
   async function handleSessionDelete(id: string) {
     const s = aiAgentSessions.sessions.find((x) => x.id === id);
     if (s) {
-      const fn = liveSessions.get(s.sessionUuid);
-      fn?.();
+      liveSessions.get(s.sessionUuid)?.();
       liveSessions.delete(s.sessionUuid);
+      codexListeners.get(s.sessionUuid)?.();
+      codexListeners.delete(s.sessionUuid);
+      setTurnInFlight(id, false);
     }
     await aiAgentSessions.delete(id);
     if (aiAgentSessions.sessions.length === 0) aiAgentSessions.create();
@@ -771,7 +914,7 @@
         <span class="badge live" title={activeSession?.sessionUuid.slice(0, 8)}>● live</span>
       {:else if detecting}
         <span class="badge pending">detecting</span>
-      {:else if !detected && !aiAgentSettings.value.cliPath}
+      {:else if !detected && !effectiveCliPath}
         <span class="badge bad">no CLI</span>
       {:else}
         <span class="badge idle">idle</span>
@@ -791,18 +934,31 @@
     </section>
   {/if}
 
-  {#if !detecting && !detected && !aiAgentSettings.value.cliPath}
+  {#if !detecting && !detected && !effectiveCliPath}
     <div class="empty">
-      <p class="empty-title">Claude Code CLI not found</p>
-      <p>
-        AI Agent uses a locally installed <code>claude</code> binary. Install Claude Code, then reload —
-        or open Settings and set an absolute path.
-      </p>
-      <p>
-        <a href="https://docs.claude.com/en/docs/claude-code/overview" target="_blank" rel="noreferrer">
-          Install instructions →
-        </a>
-      </p>
+      {#if activeProvider === 'codex'}
+        <p class="empty-title">Codex CLI not found</p>
+        <p>
+          This session uses a locally installed <code>codex</code> binary. Install Codex and run
+          <code>codex login</code>, then reload — or open Settings and set an absolute path.
+        </p>
+        <p>
+          <a href="https://github.com/openai/codex" target="_blank" rel="noreferrer">
+            Install instructions →
+          </a>
+        </p>
+      {:else}
+        <p class="empty-title">Claude Code CLI not found</p>
+        <p>
+          AI Agent uses a locally installed <code>claude</code> binary. Install Claude Code, then reload —
+          or open Settings and set an absolute path.
+        </p>
+        <p>
+          <a href="https://docs.claude.com/en/docs/claude-code/overview" target="_blank" rel="noreferrer">
+            Install instructions →
+          </a>
+        </p>
+      {/if}
     </div>
   {:else}
     <div class="conv" bind:this={scroller}>
@@ -861,6 +1017,11 @@
                 />
               {/if}
             {/each}
+            {#if turn.usage}
+              <div class="usage" title="Codex token usage">
+                ↑{turn.usage.input.toLocaleString()} ↓{turn.usage.output.toLocaleString()} tokens
+              </div>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -977,6 +1138,13 @@
     border-color: color-mix(in srgb, var(--novelist-accent) 45%, var(--novelist-border));
   }
   .badge.interrupted { background: #f59e0b; color: #111827; }
+  .usage {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--novelist-text-secondary);
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+  }
   .actions {
     display: flex;
     gap: 4px;

@@ -12,11 +12,14 @@ describe('aiAgentSettings store', () => {
 
   it('exposes the documented defaults on a fresh profile', () => {
     expect(aiAgentSettings.value).toEqual({
+      providerId: 'claude',
       cliPath: '',
       model: '',
       permissionMode: 'acceptEdits',
       systemPrompt: '',
       attachProjectRoot: true,
+      codexCliPath: '',
+      codexModel: '',
     });
   });
 

@@ -659,6 +659,18 @@ export const en: TranslationMap = {
   'settings.aiAgent.hintMid': 'binary as a subprocess and inherits its tool-use capabilities (file edits, bash, etc.). Treat',
   'settings.aiAgent.hintBypass': 'bypassPermissions',
   'settings.aiAgent.hintTail': 'with care.',
+  'settings.aiAgent.provider': 'Backend (for new sessions)',
+  'settings.aiAgent.providerClaude': 'Claude Code',
+  'settings.aiAgent.providerCodex': 'Codex',
+  'settings.aiAgent.codexLabel': 'codex',
+  'settings.aiAgent.codexNotFoundLead': 'Codex CLI not found on',
+  'settings.aiAgent.codexNotFoundTail': '. Install it and run',
+  'settings.aiAgent.codexNotFoundEnd': ', or set an absolute path below.',
+  'settings.aiAgent.codexCliPath': 'Codex CLI path override (optional)',
+  'settings.aiAgent.codexCliPathPlaceholder': '/usr/local/bin/codex',
+  'settings.aiAgent.codexModel': 'Codex model (optional)',
+  'settings.aiAgent.codexModelPlaceholder': 'gpt-5-codex / o4-mini / model id',
+  'settings.aiAgent.codexSandboxNote': 'Act mode lets Codex edit the workspace (workspace-write); Plan mode is read-only. Codex runs non-interactively, so it cannot prompt for approval mid-turn.',
 
   // --- Settings → Image Hosts ---
   'settings.imageHosts.title': 'Image Hosts',

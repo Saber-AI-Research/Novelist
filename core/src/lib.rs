@@ -18,6 +18,7 @@ use commands::claude_bridge::{
     claude_cli_detect, claude_cli_kill, claude_cli_send, claude_cli_spawn, ClaudeBridgeState,
 };
 use commands::cli_shim::{cli_shim_status, install_cli_shim};
+use commands::codex_bridge::{codex_cli_detect, codex_cli_kill, codex_cli_turn, CodexBridgeState};
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
 use commands::export::{check_pandoc, export_project, set_pandoc_path};
 use commands::file::{
@@ -419,6 +420,9 @@ pub fn run() {
             claude_cli_spawn,
             claude_cli_send,
             claude_cli_kill,
+            codex_cli_detect,
+            codex_cli_turn,
+            codex_cli_kill,
             refresh_menu,
             set_window_appearance,
             get_sync_config,
@@ -554,6 +558,9 @@ pub fn run() {
             claude_cli_spawn,
             claude_cli_send,
             claude_cli_kill,
+            codex_cli_detect,
+            codex_cli_turn,
+            codex_cli_kill,
             refresh_menu,
             set_window_appearance,
         ]);
@@ -645,6 +652,7 @@ pub fn run() {
         .manage(FileRoutingState::new())
         .manage(AiBridgeState::new())
         .manage(ClaudeBridgeState::new())
+        .manage(CodexBridgeState::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             tracing::info!(

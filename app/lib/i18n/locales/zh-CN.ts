@@ -659,6 +659,18 @@ export const zhCN: TranslationMap = {
   'settings.aiAgent.hintMid': '二进制，并继承其工具能力（文件编辑、bash 等）。请谨慎使用',
   'settings.aiAgent.hintBypass': 'bypassPermissions',
   'settings.aiAgent.hintTail': '。',
+  'settings.aiAgent.provider': '后端（用于新会话）',
+  'settings.aiAgent.providerClaude': 'Claude Code',
+  'settings.aiAgent.providerCodex': 'Codex',
+  'settings.aiAgent.codexLabel': 'codex',
+  'settings.aiAgent.codexNotFoundLead': '未在以下位置找到 Codex CLI：',
+  'settings.aiAgent.codexNotFoundTail': '。请安装并运行',
+  'settings.aiAgent.codexNotFoundEnd': '，或在下方填写绝对路径。',
+  'settings.aiAgent.codexCliPath': 'Codex CLI 路径覆盖（可选）',
+  'settings.aiAgent.codexCliPathPlaceholder': '/usr/local/bin/codex',
+  'settings.aiAgent.codexModel': 'Codex 模型（可选）',
+  'settings.aiAgent.codexModelPlaceholder': 'gpt-5-codex / o4-mini / 模型 id',
+  'settings.aiAgent.codexSandboxNote': 'Act 模式允许 Codex 修改工作区（workspace-write）；Plan 模式为只读。Codex 以非交互方式运行，无法在中途弹框请求授权。',
 
   // --- Settings → Image Hosts ---
   'settings.imageHosts.title': '图床',

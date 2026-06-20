@@ -85,13 +85,18 @@ export type TextBlock = { type: 'text'; text: string };
  *  - { kind: 'system', data } — passthrough
  *  - null — unknown / ignored
  */
+export type TokenUsage = { input: number; output: number };
+
 export type ParsedStreamEvent =
   | { kind: 'text-delta'; text: string }
   | { kind: 'assistant-block'; blocks: Array<TextBlock | ToolUseBlock> }
   | { kind: 'tool-use'; name: string; input: unknown }
   | { kind: 'tool-result'; content: string }
-  | { kind: 'result'; text: string; cost?: number }
-  | { kind: 'system'; data: unknown };
+  | { kind: 'result'; text: string; cost?: number; usage?: TokenUsage }
+  | { kind: 'system'; data: unknown }
+  // Codex emits its conversation/thread id mid-turn; the caller persists it
+  // to resume the conversation on the next turn.
+  | { kind: 'session'; threadId: string };
 
 export function parseClaudeLine(line: string): ParsedStreamEvent | null {
   if (!line.trim()) return null;
@@ -166,4 +171,112 @@ export function userInputLine(text: string): string {
       content: [{ type: 'text', text }],
     },
   });
+}
+
+// ============================== Codex bridge ==============================
+//
+// Codex's `exec` is one-shot per turn: `runCodexTurn` spawns a fresh process,
+// streams JSONL on the SAME `codex-stream://{sessionUuid}` channel shape as
+// Claude (`AgentStreamEvent`), then the process exits. Continuation uses
+// `resumeThreadId` captured from the first `thread.started` event.
+
+/** Neutral alias — Codex reuses the exact Tauri stream-event shape. */
+export type AgentStreamEvent = ClaudeStreamEvent;
+
+export async function detectCodexCli(): Promise<DetectedCli | null> {
+  const result = await commands.codexCliDetect();
+  return result ?? null;
+}
+
+export type CodexTurnArgs = {
+  sessionUuid: string;
+  prompt: string;
+  cwd?: string | null;
+  cliPath?: string;
+  model?: string;
+  /** "read-only" | "workspace-write" | "danger-full-access" */
+  sandbox?: string;
+  addDirs?: string[];
+  /** Resume an existing Codex conversation instead of starting a new one. */
+  resumeThreadId?: string | null;
+};
+
+export async function runCodexTurn(args: CodexTurnArgs): Promise<void> {
+  const result = await commands.codexCliTurn({
+    cli_path: args.cliPath || null,
+    cwd: args.cwd || null,
+    model: args.model || null,
+    sandbox: args.sandbox || null,
+    add_dirs: args.addDirs ?? [],
+    prompt: args.prompt,
+    resume_thread_id: args.resumeThreadId || null,
+    session_uuid: args.sessionUuid,
+  });
+  if (result.status === 'error') throw new Error(result.error);
+}
+
+export async function killCodexSession(sessionId: string): Promise<void> {
+  const result = await commands.codexCliKill(sessionId);
+  if (result.status === 'error') throw new Error(result.error);
+}
+
+export function listenCodexStream(
+  sessionId: string,
+  handler: (event: AgentStreamEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentStreamEvent>(`codex-stream://${sessionId}`, (event) => {
+    handler(event.payload);
+  });
+}
+
+/**
+ * Parse one Codex `exec --json` JSONL line into a `ParsedStreamEvent`.
+ *
+ * Verified event shapes (codex-cli 0.141.0):
+ *  - {"type":"thread.started","thread_id":"<uuid>"}            → session
+ *  - {"type":"turn.started"}                                   → ignored
+ *  - {"type":"item.completed","item":{"type":"agent_message","text":"…"}} → assistant-block
+ *  - {"type":"item.completed","item":{"type":"command_execution"|"file_change"|"reasoning"|…}} → tool-use
+ *  - {"type":"turn.completed","usage":{"input_tokens":…,"output_tokens":…}} → result (token usage)
+ *  - {"type":"error","message":"…"}                            → result-ish error (surfaced as text)
+ */
+export function parseCodexLine(line: string): ParsedStreamEvent | null {
+  if (!line.trim()) return null;
+  let msg: Record<string, unknown>;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return null;
+  }
+
+  switch (msg.type) {
+    case 'thread.started': {
+      const id = msg.thread_id;
+      return typeof id === 'string' && id ? { kind: 'session', threadId: id } : null;
+    }
+    case 'item.completed': {
+      const item = msg.item as Record<string, unknown> | undefined;
+      if (!item || typeof item.type !== 'string') return null;
+      if (item.type === 'agent_message') {
+        const text = typeof item.text === 'string' ? item.text : '';
+        return { kind: 'assistant-block', blocks: [{ type: 'text', text }] };
+      }
+      // Every other item kind (command_execution, file_change, reasoning,
+      // mcp_tool_call, todo_list, …) renders as a tool-use card.
+      return { kind: 'tool-use', name: item.type, input: item };
+    }
+    case 'turn.completed': {
+      const usage = msg.usage as Record<string, unknown> | undefined;
+      const input = typeof usage?.input_tokens === 'number' ? usage.input_tokens : 0;
+      const output = typeof usage?.output_tokens === 'number' ? usage.output_tokens : 0;
+      return { kind: 'result', text: '', usage: { input, output } };
+    }
+    case 'error': {
+      const message = typeof msg.message === 'string' ? msg.message : 'Codex error';
+      return { kind: 'result', text: `⚠️ ${message}` };
+    }
+    // turn.started, item.started, and unknown types are ignored.
+    default:
+      return null;
+  }
 }

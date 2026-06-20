@@ -316,6 +316,12 @@ export const commands = {
 	claudeCliSpawn: (req: ClaudeSpawnRequest) => typedError<string, string>(__TAURI_INVOKE("claude_cli_spawn", { req })),
 	claudeCliSend: (sessionId: string, line: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_send", { sessionId, line })),
 	claudeCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_kill", { sessionId })),
+	codexCliDetect: () => __TAURI_INVOKE<{
+	path: string,
+	version: string | null,
+} | null>("codex_cli_detect"),
+	codexCliTurn: (req: CodexTurnRequest) => typedError<string, string>(__TAURI_INVOKE("codex_cli_turn", { req })),
+	codexCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("codex_cli_kill", { sessionId })),
 	refreshMenu: (labels: MenuLabels, recent: RecentEntry[]) => typedError<null, string>(__TAURI_INVOKE("refresh_menu", { labels, recent })),
 	/**
 	 *  Match the NSWindow's appearance to the app theme so the system-drawn
@@ -463,6 +469,28 @@ export type ClipboardImage = {
 	mime: string,
 	width: number,
 	height: number,
+};
+
+export type CodexTurnRequest = {
+	/**  Override the auto-detected CLI path. */
+	cli_path: string | null,
+	/**  Working directory / agent workspace root. */
+	cwd: string | null,
+	/**  Model id (passed as `-m`). Empty/None → Codex picks its default. */
+	model: string | null,
+	/**  Sandbox policy: "read-only", "workspace-write", or "danger-full-access". */
+	sandbox: string | null,
+	/**  Extra writable directories (`--add-dir`). */
+	add_dirs: string[],
+	/**  The user prompt for this turn (sent via stdin). */
+	prompt: string,
+	/**
+	 *  When set, resume the existing Codex conversation
+	 *  (`codex exec … resume <thread_id>`) instead of starting a new one.
+	 */
+	resume_thread_id: string | null,
+	/**  Caller-owned id used to key the Tauri event channel + kill registry. */
+	session_uuid: string,
 };
 
 export type DailyStats = {

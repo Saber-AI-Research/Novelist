@@ -12,8 +12,15 @@
  * Active-session id: `novelist:ai-agent:active-session:v1`.
  */
 
-import { killClaudeSession } from './host';
+import { killClaudeSession, killCodexSession } from './host';
+import { aiAgentSettings } from './settings.svelte';
 import type { AiChangeSet } from '$lib/components/ai-shared/apply-change-set';
+
+/** Kill both CLI bridges for a session uuid; each no-ops if it doesn't own it. */
+function killBothBridges(sessionUuid: string): void {
+  void killClaudeSession(sessionUuid).catch(() => {});
+  void killCodexSession(sessionUuid).catch(() => {});
+}
 
 export type ToolCard = { kind: 'tool'; name: string; input: unknown };
 export type ToolResultCard = { kind: 'tool-result'; content: string; status?: 'pending' | 'success' | 'error' | 'cancelled' };
@@ -43,6 +50,8 @@ export type AssistantTurn = {
   text: string;
   cards: Card[];
   cost?: number;
+  /** Codex token usage for the turn (Codex reports tokens, not USD cost). */
+  usage?: { input: number; output: number };
 };
 
 export type Turn = UserTurn | AssistantTurn;
@@ -142,7 +151,7 @@ class AiAgentSessionStore {
     const now = Date.now();
     const session: AgentSession = {
       id: uuid(),
-      providerId: 'claude',
+      providerId: aiAgentSettings.value.providerId,
       mode: 'act',
       title: 'New agent',
       createdAt: now,
@@ -260,7 +269,7 @@ class AiAgentSessionStore {
     const target = this.sessions.find((s) => s.id === id);
     if (!target) return;
     // Fire-and-forget: if the CLI process never existed, this no-ops.
-    void killClaudeSession(target.sessionUuid).catch(() => {});
+    killBothBridges(target.sessionUuid);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     if (this.activeId === id) {
       this.activeId = this.sessions[0]?.id ?? null;
@@ -290,7 +299,7 @@ class AiAgentSessionStore {
     const target = this.sessions.find((s) => s.id === id);
     if (!target) return;
     // Also kill the CLI subprocess so the NEXT send gets a fresh session.
-    void killClaudeSession(target.sessionUuid).catch(() => {});
+    killBothBridges(target.sessionUuid);
     this.sessions = this.sessions.map((s) =>
       s.id === id
         ? {

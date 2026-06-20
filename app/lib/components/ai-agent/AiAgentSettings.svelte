@@ -1,18 +1,25 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { aiAgentSettings } from './settings.svelte';
-  import { detectClaudeCli, type DetectedCli } from './host';
+  import { aiAgentSettings, type AgentProvider } from './settings.svelte';
+  import { detectClaudeCli, detectCodexCli, type DetectedCli } from './host';
   import { t } from '$lib/i18n';
   import SettingsSwitch from '$lib/components/SettingsSwitch.svelte';
 
   let { compact = false }: { compact?: boolean } = $props();
 
-  let detected = $state<DetectedCli | null>(null);
+  let claudeDetected = $state<DetectedCli | null>(null);
+  let codexDetected = $state<DetectedCli | null>(null);
   let detecting = $state(true);
+
+  let provider = $derived(aiAgentSettings.value.providerId);
+  let detected = $derived(provider === 'codex' ? codexDetected : claudeDetected);
 
   onMount(async () => {
     try {
-      detected = await detectClaudeCli();
+      [claudeDetected, codexDetected] = await Promise.all([
+        detectClaudeCli().catch(() => null),
+        detectCodexCli().catch(() => null),
+      ]);
     } finally {
       detecting = false;
     }
@@ -20,13 +27,31 @@
 </script>
 
 <div class="ai-agent-settings" class:compact>
+  <label class="full">
+    <span>{t('settings.aiAgent.provider')}</span>
+    <select
+      value={aiAgentSettings.value.providerId}
+      onchange={(e) => aiAgentSettings.update({ providerId: e.currentTarget.value as AgentProvider })}
+    >
+      <option value="claude">{t('settings.aiAgent.providerClaude')}</option>
+      <option value="codex">{t('settings.aiAgent.providerCodex')}</option>
+    </select>
+  </label>
+
   <div class="status">
     {#if detecting}
       <span class="dot pending"></span>
-      <span>{t('settings.aiAgent.detecting')} <code>{t('settings.aiAgent.cliLabel')}</code> CLI…</span>
+      <span>{t('settings.aiAgent.detecting')}
+        <code>{provider === 'codex' ? t('settings.aiAgent.codexLabel') : t('settings.aiAgent.cliLabel')}</code> CLI…</span>
     {:else if detected}
       <span class="dot ok"></span>
       <span>{t('settings.aiAgent.cliFound')} <code>{detected.path}</code>{detected.version ? ` (${detected.version})` : ''}</span>
+    {:else if provider === 'codex'}
+      <span class="dot bad"></span>
+      <span>
+        {t('settings.aiAgent.codexNotFoundLead')} <code>$PATH</code>{t('settings.aiAgent.codexNotFoundTail')}
+        <code>codex login</code>{t('settings.aiAgent.codexNotFoundEnd')}
+      </span>
     {:else}
       <span class="dot bad"></span>
       <span>
@@ -39,52 +64,74 @@
     {/if}
   </div>
 
-  <label>
-    <span>{t('settings.aiAgent.cliPath')}</span>
-    <input
-      type="text"
-      placeholder={t('settings.aiAgent.cliPathPlaceholder')}
-      value={aiAgentSettings.value.cliPath}
-      oninput={(e) => aiAgentSettings.update({ cliPath: e.currentTarget.value })}
-    />
-  </label>
-  <label>
-    <span>{t('settings.aiAgent.model')}</span>
-    <input
-      type="text"
-      placeholder={t('settings.aiAgent.modelPlaceholder')}
-      value={aiAgentSettings.value.model}
-      oninput={(e) => aiAgentSettings.update({ model: e.currentTarget.value })}
-    />
-  </label>
-  <label>
-    <span>{t('settings.aiAgent.permissionMode')}</span>
-    <select
-      value={aiAgentSettings.value.permissionMode}
-      onchange={(e) =>
-        aiAgentSettings.update({
-          permissionMode: e.currentTarget.value as
-            | 'default'
-            | 'acceptEdits'
-            | 'bypassPermissions'
-            | 'plan',
-        })}
-    >
-      <option value="default">{t('settings.aiAgent.permission.default')}</option>
-      <option value="acceptEdits">{t('settings.aiAgent.permission.acceptEdits')}</option>
-      <option value="bypassPermissions">{t('settings.aiAgent.permission.bypass')}</option>
-      <option value="plan">{t('settings.aiAgent.permission.plan')}</option>
-    </select>
-  </label>
-  <label class="full">
-    <span>{t('settings.aiAgent.systemPrompt')}</span>
-    <textarea
-      rows={compact ? 2 : 4}
-      placeholder={t('settings.aiAgent.systemPromptPlaceholder')}
-      value={aiAgentSettings.value.systemPrompt}
-      oninput={(e) => aiAgentSettings.update({ systemPrompt: e.currentTarget.value })}
-    ></textarea>
-  </label>
+  {#if provider === 'codex'}
+    <label>
+      <span>{t('settings.aiAgent.codexCliPath')}</span>
+      <input
+        type="text"
+        placeholder={t('settings.aiAgent.codexCliPathPlaceholder')}
+        value={aiAgentSettings.value.codexCliPath}
+        oninput={(e) => aiAgentSettings.update({ codexCliPath: e.currentTarget.value })}
+      />
+    </label>
+    <label>
+      <span>{t('settings.aiAgent.codexModel')}</span>
+      <input
+        type="text"
+        placeholder={t('settings.aiAgent.codexModelPlaceholder')}
+        value={aiAgentSettings.value.codexModel}
+        oninput={(e) => aiAgentSettings.update({ codexModel: e.currentTarget.value })}
+      />
+    </label>
+    <p class="hint">{t('settings.aiAgent.codexSandboxNote')}</p>
+  {:else}
+    <label>
+      <span>{t('settings.aiAgent.cliPath')}</span>
+      <input
+        type="text"
+        placeholder={t('settings.aiAgent.cliPathPlaceholder')}
+        value={aiAgentSettings.value.cliPath}
+        oninput={(e) => aiAgentSettings.update({ cliPath: e.currentTarget.value })}
+      />
+    </label>
+    <label>
+      <span>{t('settings.aiAgent.model')}</span>
+      <input
+        type="text"
+        placeholder={t('settings.aiAgent.modelPlaceholder')}
+        value={aiAgentSettings.value.model}
+        oninput={(e) => aiAgentSettings.update({ model: e.currentTarget.value })}
+      />
+    </label>
+    <label>
+      <span>{t('settings.aiAgent.permissionMode')}</span>
+      <select
+        value={aiAgentSettings.value.permissionMode}
+        onchange={(e) =>
+          aiAgentSettings.update({
+            permissionMode: e.currentTarget.value as
+              | 'default'
+              | 'acceptEdits'
+              | 'bypassPermissions'
+              | 'plan',
+          })}
+      >
+        <option value="default">{t('settings.aiAgent.permission.default')}</option>
+        <option value="acceptEdits">{t('settings.aiAgent.permission.acceptEdits')}</option>
+        <option value="bypassPermissions">{t('settings.aiAgent.permission.bypass')}</option>
+        <option value="plan">{t('settings.aiAgent.permission.plan')}</option>
+      </select>
+    </label>
+    <label class="full">
+      <span>{t('settings.aiAgent.systemPrompt')}</span>
+      <textarea
+        rows={compact ? 2 : 4}
+        placeholder={t('settings.aiAgent.systemPromptPlaceholder')}
+        value={aiAgentSettings.value.systemPrompt}
+        oninput={(e) => aiAgentSettings.update({ systemPrompt: e.currentTarget.value })}
+      ></textarea>
+    </label>
+  {/if}
   <div class="switch-row">
     <SettingsSwitch
       checked={aiAgentSettings.value.attachProjectRoot}
@@ -97,11 +144,13 @@
       {t('settings.aiAgent.attachProjectRootTail')}
     </span>
   </div>
-  <p class="hint">
-    {t('settings.aiAgent.hintLead')} <code>{t('settings.aiAgent.cliLabel')}</code>
-    {t('settings.aiAgent.hintMid')}
-    <strong>{t('settings.aiAgent.hintBypass')}</strong>{t('settings.aiAgent.hintTail')}
-  </p>
+  {#if provider !== 'codex'}
+    <p class="hint">
+      {t('settings.aiAgent.hintLead')} <code>{t('settings.aiAgent.cliLabel')}</code>
+      {t('settings.aiAgent.hintMid')}
+      <strong>{t('settings.aiAgent.hintBypass')}</strong>{t('settings.aiAgent.hintTail')}
+    </p>
+  {/if}
 </div>
 
 <style>

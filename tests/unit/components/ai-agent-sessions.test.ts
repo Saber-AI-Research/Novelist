@@ -1,20 +1,25 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 
-const { killClaudeSession } = vi.hoisted(() => ({
+const { killClaudeSession, killCodexSession } = vi.hoisted(() => ({
   killClaudeSession: vi.fn().mockResolvedValue(undefined),
+  killCodexSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('$lib/components/ai-agent/host', () => ({
   killClaudeSession,
+  killCodexSession,
 }));
 
 import { aiAgentSessions } from '$lib/components/ai-agent/sessions.svelte';
+import { aiAgentSettings } from '$lib/components/ai-agent/settings.svelte';
 
 function resetStore() {
   localStorage.clear();
   aiAgentSessions.sessions = [];
   aiAgentSessions.activeId = null;
+  aiAgentSettings.reset();
   killClaudeSession.mockClear();
+  killCodexSession.mockClear();
 }
 
 describe('[contract] aiAgentSessions store', () => {
@@ -91,5 +96,29 @@ describe('[contract] aiAgentSessions store', () => {
       displayText: 'summarize',
     });
     expect(aiAgentSessions.active?.title).toBe('summarize');
+  });
+
+  it('stamps the provider from settings onto new sessions', () => {
+    aiAgentSettings.update({ providerId: 'codex' });
+    const id = aiAgentSessions.create();
+    expect(aiAgentSessions.sessions.find((s) => s.id === id)?.providerId).toBe('codex');
+  });
+
+  it('clearTurns kills both bridges and drops the Codex thread id', () => {
+    const id = aiAgentSessions.create();
+    const uuid = aiAgentSessions.active?.sessionUuid;
+    aiAgentSessions.patchProviderState(id, { codexThreadId: 'thread-77' });
+    aiAgentSessions.clearTurns(id);
+    expect(aiAgentSessions.active?.providerState).toEqual({});
+    expect(killClaudeSession).toHaveBeenCalledWith(uuid);
+    expect(killCodexSession).toHaveBeenCalledWith(uuid);
+  });
+
+  it('delete kills both bridges (provider-agnostic)', async () => {
+    const id = aiAgentSessions.create();
+    const uuid = aiAgentSessions.active?.sessionUuid;
+    await aiAgentSessions.delete(id);
+    expect(killClaudeSession).toHaveBeenCalledWith(uuid);
+    expect(killCodexSession).toHaveBeenCalledWith(uuid);
   });
 });

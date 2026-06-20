@@ -4,20 +4,30 @@
 
 const KEY = 'novelist:ai-agent:settings:v1';
 
+export type AgentProvider = 'claude' | 'codex';
+
 export type AiAgentSettings = {
+  /** Backend stamped onto NEW sessions. Existing sessions keep their provider. */
+  providerId: AgentProvider;
   cliPath: string;
   model: string;
   permissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   systemPrompt: string;
   attachProjectRoot: boolean;
+  /** Codex-specific overrides (the `codex` binary differs from `claude`). */
+  codexCliPath: string;
+  codexModel: string;
 };
 
 const DEFAULTS: AiAgentSettings = {
+  providerId: 'claude',
   cliPath: '',
   model: '',
   permissionMode: 'acceptEdits',
   systemPrompt: '',
   attachProjectRoot: true,
+  codexCliPath: '',
+  codexModel: '',
 };
 
 function load(): AiAgentSettings {
