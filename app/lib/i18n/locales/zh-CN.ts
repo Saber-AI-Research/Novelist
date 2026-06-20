@@ -216,6 +216,7 @@ export const zhCN: TranslationMap = {
   'export.includeTheme': '包含当前主题样式',
   'export.exporting': { one: '正在导出 {count} 个文件...', other: '正在导出 {count} 个文件...' },
   'export.noFiles': '没有可导出的 Markdown 文件',
+  'export.noActiveFile': '导出前请先保存文件。',
   'export.close': '关闭',
   'export.export': '导出',
   'export.exportingButton': '导出中...',

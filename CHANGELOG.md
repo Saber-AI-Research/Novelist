@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advances the syntax tree (tree-only transactions), matching the table
   plugins — so on-screen headings near a table stay correctly rendered after
   background parsing completes.
+- **Export works on a standalone file (no project open).** The format
+  converter previously sourced its file list only from the open project, so
+  exporting a file opened on its own failed with "no markdown files". It now
+  falls back to the active tab's file when there's no project.
 
 ## [0.2.10] - 2026-06-17
 

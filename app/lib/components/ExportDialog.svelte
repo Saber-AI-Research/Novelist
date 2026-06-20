@@ -3,6 +3,8 @@
   import { save } from '@tauri-apps/plugin-dialog';
   import { commands } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { collectExportFiles } from '$lib/utils/export-files';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { themeToCSS } from '$lib/themes';
   import { t } from '$lib/i18n';
@@ -34,13 +36,11 @@
   });
 
   async function doExport() {
-    // Get file list from project
-    const files = projectStore.files
-      .filter(f => !f.is_dir && (f.name.endsWith('.md') || f.name.endsWith('.markdown')))
-      .map(f => f.path);
+    // Project mode → all markdown files; standalone mode → the active file.
+    const files = collectExportFiles(projectStore.dirPath, projectStore.files, tabsStore.activeTab);
 
     if (files.length === 0) {
-      message = t('export.noFiles');
+      message = projectStore.dirPath ? t('export.noFiles') : t('export.noActiveFile');
       status = 'error';
       return;
     }

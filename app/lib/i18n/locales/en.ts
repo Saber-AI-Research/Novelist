@@ -216,6 +216,7 @@ export const en: TranslationMap = {
   'export.includeTheme': 'Include current theme styling',
   'export.exporting': { one: 'Exporting {count} file...', other: 'Exporting {count} files...' },
   'export.noFiles': 'No markdown files to export',
+  'export.noActiveFile': 'Save the file before exporting.',
   'export.close': 'Close',
   'export.export': 'Export',
   'export.exportingButton': 'Exporting...',
