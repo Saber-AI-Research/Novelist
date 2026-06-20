@@ -1057,6 +1057,24 @@ class WysiwygPluginClass {
     // (cursor may jump transiently but no doc change means no cross-line risk).
     if (isComposing) return;
 
+    // Rebuild when the incremental parser advances the syntax tree, even
+    // without a doc/selection/viewport change.
+    //
+    // CM6's language ViewPlugin parses lazily in the background and dispatches
+    // tree-only transactions (no docChanged, no selectionSet) as it catches up.
+    // In a long document an edit (e.g. typing in a table cell) invalidates a
+    // large region, so the first post-edit rebuild runs against an incomplete
+    // tree — headings beyond the synchronous parse budget aren't recognized yet,
+    // leaving their marker decorations stale. Without this guard the WYSIWYG
+    // decorations are never refreshed when the parser finishes, so on-screen
+    // headings render wrong until the next unrelated doc/selection/viewport
+    // change. The table plugins (table.ts) already guard on this same condition.
+    if (syntaxTree(update.state) !== syntaxTree(update.startState)) {
+      this.decorations = buildDecorations(update.view);
+      this.lastCursorLine = update.state.doc.lineAt(update.state.selection.main.head).number;
+      return;
+    }
+
     // For selection-only changes: skip rebuild if cursor stayed on the same line.
     if (update.selectionSet) {
       const newLine = update.state.doc.lineAt(update.state.selection.main.head).number;
