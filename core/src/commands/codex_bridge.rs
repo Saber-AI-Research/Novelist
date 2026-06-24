@@ -442,10 +442,18 @@ mod tests {
         let args = args_of(&cmd);
         assert_eq!(args.first().map(String::as_str), Some("exec"));
         assert!(args.iter().any(|a| a == "--json"));
-        assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "gpt-5-codex"));
-        assert!(args.windows(2).any(|w| w[0] == "-s" && w[1] == "workspace-write"));
-        assert!(args.windows(2).any(|w| w[0] == "-C" && w[1] == "/tmp/project"));
-        assert!(args.windows(2).any(|w| w[0] == "--add-dir" && w[1] == "/tmp/extra"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-m" && w[1] == "gpt-5-codex"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-s" && w[1] == "workspace-write"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-C" && w[1] == "/tmp/project"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--add-dir" && w[1] == "/tmp/extra"));
         assert!(args.iter().any(|a| a == "--skip-git-repo-check"));
         assert!(!args.iter().any(|a| a == "resume"));
         assert_eq!(args.last().map(String::as_str), Some("-"));
@@ -477,7 +485,10 @@ mod tests {
             "danger-full-access"
         );
         // Unknown values fall back to the safe-ish default.
-        assert_eq!(normalize_sandbox(&Some("nonsense".into())), "workspace-write");
+        assert_eq!(
+            normalize_sandbox(&Some("nonsense".into())),
+            "workspace-write"
+        );
     }
 
     #[test]

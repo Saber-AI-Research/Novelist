@@ -12,6 +12,7 @@ export const en: TranslationMap = {
   // --- Welcome ---
   'welcome.recentProjects': 'Recent Projects',
   'welcome.noRecent': 'No recent projects yet.',
+  'welcome.openFile': 'Open File...',
   'welcome.openDirectory': 'Open Directory...',
   'welcome.newFile': 'New File',
   'welcome.newProject': 'New Project',
@@ -315,7 +316,9 @@ export const en: TranslationMap = {
   'command.newFile': 'New File',
   'command.newProject': 'New Project from Template',
   'command.switchProject': 'Switch Project',
+  'command.openFile': 'Open File',
   'command.openDirectory': 'Open Directory',
+  'command.openContainingFolder': 'Open Containing Folder as Project',
   'command.exportProject': 'Export Project',
   'command.closeTab': 'Close Tab',
   'command.renameFile': 'Rename / Save As',
@@ -590,8 +593,7 @@ export const en: TranslationMap = {
   'settings.plugins.aiAgent.description': 'Agentic chat backed by your local Claude Code CLI',
 
   // --- Settings · AI Talk ---
-  'settings.aiTalk.providerPreset': 'Provider preset:',
-  'settings.aiTalk.providerProfile': 'Provider profile',
+  'settings.aiTalk.providerProfile': 'Provider:',
   'settings.aiTalk.baseUrl': 'Base URL',
   'settings.aiTalk.apiKey': 'API Key',
   'settings.aiTalk.model': 'Model',
@@ -601,6 +603,7 @@ export const en: TranslationMap = {
   'settings.aiTalk.includeSelection': 'Include current selection in chat context',
   'settings.aiTalk.hint': 'API key is stored locally on this device. Requests go through the Novelist Rust backend (URL allowlist enforced).',
   'settings.aiTalk.profileSaveAs': 'Save as new profile',
+  'settings.aiTalk.profileAdd': '+ Add profile',
   'settings.aiTalk.profileName': 'Profile name',
   'settings.aiTalk.profileDelete': 'Delete profile',
 

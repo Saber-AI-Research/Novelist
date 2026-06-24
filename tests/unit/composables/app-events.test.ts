@@ -38,6 +38,7 @@ const { hoisted } = vi.hoisted(() => {
     reloadContent: vi.fn(),
     openTab: vi.fn(),
     updatePath: vi.fn(),
+    retargetOpenPathTree: vi.fn(async (_oldPath: string, _newPath: string) => 0),
   };
 
   const projectState = {
@@ -91,6 +92,8 @@ vi.mock('$lib/stores/tabs.svelte', () => ({
     reloadContent: (...a: any[]) => hoisted.tabsState.reloadContent(...a),
     openTab: (...a: any[]) => hoisted.tabsState.openTab(...a),
     updatePath: (...a: any[]) => hoisted.tabsState.updatePath(...a),
+    retargetOpenPathTree: (oldPath: string, newPath: string) =>
+      hoisted.tabsState.retargetOpenPathTree(oldPath, newPath),
   },
 }));
 
@@ -130,6 +133,7 @@ beforeEach(() => {
   hoisted.tabsState.reloadContent.mockReset();
   hoisted.tabsState.openTab.mockReset();
   hoisted.tabsState.updatePath.mockReset();
+  hoisted.tabsState.retargetOpenPathTree.mockReset().mockResolvedValue(0);
   hoisted.projectState.enterSingleFileMode.mockClear();
   hoisted.projectState.refreshFolder.mockReset().mockResolvedValue(undefined);
   hoisted.projectState.refreshLoadedFolders.mockReset().mockResolvedValue(undefined);
@@ -413,19 +417,20 @@ describe('[contract] file-changed event', () => {
 });
 
 describe('[contract] file-renamed event', () => {
-  it('updates tab paths and refreshes the new parent folder', async () => {
+  it('retargets open paths and refreshes both affected parent folders', async () => {
     await wire();
     await hoisted.listeners.get('file-renamed')!({
-      payload: { old_path: '/proj/old.md', new_path: '/proj/sub/new.md' },
+      payload: { old_path: '/proj/old/Story.md', new_path: '/proj/sub/Story.md' },
     });
-    expect(hoisted.tabsState.updatePath).toHaveBeenCalledWith('/proj/old.md', '/proj/sub/new.md');
+    expect(hoisted.tabsState.retargetOpenPathTree).toHaveBeenCalledWith('/proj/old/Story.md', '/proj/sub/Story.md');
+    expect(hoisted.projectState.refreshFolder).toHaveBeenCalledWith('/proj/old');
     expect(hoisted.projectState.refreshFolder).toHaveBeenCalledWith('/proj/sub');
   });
 
   it('skips the folder refresh when the new path has no parent', async () => {
     await wire();
     await hoisted.listeners.get('file-renamed')!({
-      payload: { old_path: '/a', new_path: 'bare' },
+      payload: { old_path: 'old', new_path: 'bare' },
     });
     expect(hoisted.projectState.refreshFolder).not.toHaveBeenCalled();
   });

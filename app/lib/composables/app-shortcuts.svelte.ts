@@ -14,6 +14,21 @@ export type AppShortcutContext = {
 };
 
 /**
+ * True when the keystroke originates from a text input that is NOT the
+ * CodeMirror editor — e.g. the AI composer textarea, a dialog field, or any
+ * other `<input>/<textarea>/[contenteditable]`. The editor lives inside
+ * `.cm-editor` and must keep its global shortcuts (formatting, save), so it
+ * is explicitly excluded. Used to stop tab-cycling and customizable shortcuts
+ * (close-tab, new-file, …) from leaking out of focused panels/dialogs.
+ */
+function isNonEditorTextInput(e: KeyboardEvent): boolean {
+  const el = e.target as HTMLElement | null;
+  if (!el || typeof el.closest !== 'function') return false;
+  if (el.closest('.cm-editor')) return false;
+  return !!el.closest('input, textarea, [contenteditable="true"]');
+}
+
+/**
  * Build the global keydown handler. Handles non-customizable shortcuts
  * (new-window, save, project-search, zoom, Cmd+1-9, Escape-zen) inline,
  * then dispatches customizable ones through the command registry.
@@ -47,10 +62,16 @@ export function createKeydownHandler(ctx: AppShortcutContext) {
       return;
     }
 
+    // Don't let tab-cycling or customizable shortcuts (close-tab, new-file,
+    // formatting, …) leak into the main editor while a non-editor text input
+    // is focused — e.g. the AI composer or a dialog field. Globals handled
+    // above this point (save, zoom, new-window, project-search) stay active.
+    const inNonEditorInput = isNonEditorTextInput(e);
+
     // Ctrl+Tab / Ctrl+Shift+Tab: cycle active pane's tab (next / previous).
     // Use ctrlKey specifically (not metaKey) because Cmd+Tab is reserved by
     // macOS for app switching and never reaches the webview.
-    if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
+    if (!inNonEditorInput && e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       tabsStore.cycleActiveTab(e.shiftKey ? -1 : 1);
       return;
@@ -98,6 +119,7 @@ export function createKeydownHandler(ctx: AppShortcutContext) {
 
     // Customizable shortcuts — match against shortcutsStore, dispatch via
     // the command registry so palette and keyboard run the same handler.
+    if (inNonEditorInput) return;
     for (const cmdId of shortcutsStore.allCommandIds) {
       const shortcut = shortcutsStore.get(cmdId);
       if (shortcut && matchesShortcut(e, shortcut)) {

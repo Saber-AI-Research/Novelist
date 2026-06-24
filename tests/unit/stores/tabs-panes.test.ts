@@ -12,6 +12,7 @@ vi.mock('$lib/ipc/commands', () => ({
     renameItem: vi.fn(),
     broadcastFileRenamed: vi.fn(),
     registerWriteIgnore: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
+    registerOpenFile: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
     writeFile: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
     unregisterOpenFile: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
   },
@@ -41,7 +42,10 @@ beforeEach(() => {
   tabsStore.closeAll();
   vi.clearAllMocks();
   (commands.registerWriteIgnore as any).mockResolvedValue({ status: 'ok', data: null });
+  (commands.registerOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
   (commands.writeFile as any).mockResolvedValue({ status: 'ok', data: null });
+  (commands.unregisterOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
+  (commands.broadcastFileRenamed as any).mockResolvedValue({ status: 'ok', data: null });
 });
 
 describe('[contract] tabsStore.toggleSplit', () => {
@@ -220,6 +224,44 @@ describe('[contract] tabsStore mutators', () => {
     tabsStore.updateFilePath(id, '/proj/saved.md');
     expect(tabsStore.tabs[0].filePath).toBe('/proj/saved.md');
     expect(tabsStore.tabs[0].fileName).toBe('saved.md');
+  });
+
+  it('retargetOpenPath re-registers the watcher for a renamed open file', async () => {
+    tabsStore.openTab('/proj/old.md', '');
+    await tabsStore.retargetOpenPath('/proj/old.md', '/proj/new.md', { broadcast: true });
+
+    expect(tabsStore.findByPath('/proj/new.md')).toBeTruthy();
+    expect(commands.unregisterOpenFile).toHaveBeenCalledWith('/proj/old.md');
+    expect(commands.registerOpenFile).toHaveBeenCalledWith('/proj/new.md');
+    expect(commands.broadcastFileRenamed).toHaveBeenCalledWith('/proj/old.md', '/proj/new.md');
+  });
+
+  it('retargetOpenPathTree re-points descendants and re-registers each open child', async () => {
+    tabsStore.openTab('/proj/old/a.md', '');
+    tabsStore.openTab('/proj/old/nested/b.md', '');
+
+    await tabsStore.retargetOpenPathTree('/proj/old', '/proj/new');
+
+    expect(tabsStore.findByPath('/proj/new/a.md')).toBeTruthy();
+    expect(tabsStore.findByPath('/proj/new/nested/b.md')).toBeTruthy();
+    expect(commands.unregisterOpenFile).toHaveBeenCalledWith('/proj/old/a.md');
+    expect(commands.registerOpenFile).toHaveBeenCalledWith('/proj/new/a.md');
+    expect(commands.unregisterOpenFile).toHaveBeenCalledWith('/proj/old/nested/b.md');
+    expect(commands.registerOpenFile).toHaveBeenCalledWith('/proj/new/nested/b.md');
+  });
+
+  it('closeTab keeps watcher registration while the same path remains open in another pane', async () => {
+    tabsStore.openTab('/proj/shared.md', '');
+    const pane1Tab = tabsStore.activeTabId!;
+    tabsStore.toggleSplit();
+    tabsStore.openTabInPane('pane-2', '/proj/shared.md', '');
+
+    await tabsStore.closeTab(pane1Tab);
+    expect(commands.unregisterOpenFile).not.toHaveBeenCalled();
+
+    const remaining = tabsStore.findByPath('/proj/shared.md')!;
+    await tabsStore.closeTab(remaining.id);
+    expect(commands.unregisterOpenFile).toHaveBeenCalledWith('/proj/shared.md');
   });
 
   it('reloadContent replaces content, clears dirty, and bumps version', () => {

@@ -24,12 +24,37 @@ impl EncodingState {
     }
 }
 
-/// Move the encoding entry from `old_canonical` to `new_canonical`. No-op when
-/// the old key is not present (file was UTF-8).
-pub fn migrate_encoding_state(state: &EncodingState, old_canonical: &str, new_canonical: &str) {
+/// Move every encoding entry under a renamed/moved path. Handles both a single
+/// file (`old_canonical == key`) and descendants of a directory.
+pub fn migrate_encoding_state_tree(
+    state: &EncodingState,
+    old_canonical: &Path,
+    new_canonical: &Path,
+) {
     let mut map = state.encodings.lock().expect("encodings lock");
-    if let Some(enc) = map.remove(old_canonical) {
-        map.insert(new_canonical.to_string(), enc);
+    let mut updates = Vec::new();
+
+    for (key, enc) in map.iter() {
+        let key_path = PathBuf::from(key);
+        let next_path = if key_path == old_canonical {
+            Some(new_canonical.to_path_buf())
+        } else if key_path.starts_with(old_canonical) {
+            key_path
+                .strip_prefix(old_canonical)
+                .ok()
+                .map(|suffix| new_canonical.join(suffix))
+        } else {
+            None
+        };
+
+        if let Some(next_path) = next_path {
+            updates.push((key.clone(), next_path.to_string_lossy().to_string(), *enc));
+        }
+    }
+
+    for (old_key, new_key, enc) in updates {
+        map.remove(&old_key);
+        map.insert(new_key, enc);
     }
 }
 
@@ -557,7 +582,7 @@ pub(crate) async fn rename_item_inner(
         .ok()
         .map(|p| p.to_string_lossy().to_string());
     if let (Some(o), Some(n)) = (old_canon, new_canon) {
-        migrate_encoding_state(encoding_state, &o, &n);
+        migrate_encoding_state_tree(encoding_state, Path::new(&o), Path::new(&n));
     }
     Ok(new_path.to_string_lossy().to_string())
 }
@@ -566,7 +591,19 @@ pub(crate) async fn rename_item_inner(
 /// ("a.md" -> "a 2.md"). Rejects moving a folder into its own descendant.
 #[tauri::command]
 #[specta::specta]
-pub async fn move_item(source_path: String, target_dir: String) -> Result<String, AppError> {
+pub async fn move_item(
+    source_path: String,
+    target_dir: String,
+    encoding_state: tauri::State<'_, EncodingState>,
+) -> Result<String, AppError> {
+    move_item_inner(source_path, target_dir, &encoding_state).await
+}
+
+pub(crate) async fn move_item_inner(
+    source_path: String,
+    target_dir: String,
+    encoding_state: &EncodingState,
+) -> Result<String, AppError> {
     let source = validate_path(&source_path)?;
     let target = validate_path(&target_dir)?;
 
@@ -621,9 +658,21 @@ pub async fn move_item(source_path: String, target_dir: String) -> Result<String
         }
     }
 
+    let old_canon = source
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+
     // Source & target are both inside the project tree (frontend guarantees this via
     // validate_path). Same filesystem -> plain rename is enough.
     tokio::fs::rename(&source, &dest).await?;
+    let new_canon = dest
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    if let (Some(o), Some(n)) = (old_canon, new_canon) {
+        migrate_encoding_state_tree(encoding_state, Path::new(&o), Path::new(&n));
+    }
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -1214,9 +1263,10 @@ mod tests {
         let subdir = dir.path().join("sub");
         fs::create_dir(&subdir).unwrap();
 
-        let new_path = move_item(
+        let new_path = move_item_inner(
             src_file.to_string_lossy().to_string(),
             subdir.to_string_lossy().to_string(),
+            &enc(),
         )
         .await
         .unwrap();
@@ -1236,9 +1286,10 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
         fs::write(subdir.join("a.md"), "existing").unwrap();
 
-        let new_path = move_item(
+        let new_path = move_item_inner(
             src.to_string_lossy().to_string(),
             subdir.to_string_lossy().to_string(),
+            &enc(),
         )
         .await
         .unwrap();
@@ -1256,9 +1307,10 @@ mod tests {
         let child = parent.join("child");
         fs::create_dir(&child).unwrap();
 
-        let result = move_item(
+        let result = move_item_inner(
             parent.to_string_lossy().to_string(),
             child.to_string_lossy().to_string(),
+            &enc(),
         )
         .await;
         assert!(result.is_err());
@@ -1274,9 +1326,10 @@ mod tests {
         let not_dir = dir.path().join("b.md");
         fs::write(&not_dir, "").unwrap();
 
-        let result = move_item(
+        let result = move_item_inner(
             src.to_string_lossy().to_string(),
             not_dir.to_string_lossy().to_string(),
+            &enc(),
         )
         .await;
         assert!(result.is_err());
@@ -1288,9 +1341,10 @@ mod tests {
         let src = dir.path().join("a.md");
         fs::write(&src, "content").unwrap();
 
-        let result = move_item(
+        let result = move_item_inner(
             src.to_string_lossy().to_string(),
             dir.path().to_string_lossy().to_string(),
+            &enc(),
         )
         .await;
         assert!(result.is_err(), "moving into own parent should fail");
@@ -1307,9 +1361,10 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
         fs::write(subdir.join("Makefile"), "existing").unwrap();
 
-        let new_path = move_item(
+        let new_path = move_item_inner(
             src.to_string_lossy().to_string(),
             subdir.to_string_lossy().to_string(),
+            &enc(),
         )
         .await
         .unwrap();
@@ -1579,11 +1634,73 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        migrate_encoding_state(&state, &old_copy, &canonical_new);
+        migrate_encoding_state_tree(&state, Path::new(&old_copy), Path::new(&canonical_new));
 
         let map = state.encodings.lock().unwrap();
         assert!(!map.contains_key(&old_copy));
         assert_eq!(map.get(&canonical_new), Some(&"GBK"));
+    }
+
+    #[tokio::test]
+    async fn test_move_item_migrates_encoding_state() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("gbk.md");
+        fs::write(&src, "x").unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        let canonical_old = src.canonicalize().unwrap().to_string_lossy().to_string();
+
+        let state = EncodingState::new();
+        state
+            .encodings
+            .lock()
+            .unwrap()
+            .insert(canonical_old.clone(), "GBK");
+
+        let new_path = move_item_inner(
+            src.to_string_lossy().to_string(),
+            subdir.to_string_lossy().to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let canonical_new = Path::new(&new_path)
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let map = state.encodings.lock().unwrap();
+        assert!(!map.contains_key(&canonical_old));
+        assert_eq!(map.get(&canonical_new), Some(&"GBK"));
+    }
+
+    #[test]
+    fn test_migrate_encoding_state_tree_moves_descendants() {
+        let dir = TempDir::new().unwrap();
+        let old_root = dir.path().join("old");
+        let new_root = dir.path().join("new");
+        fs::create_dir_all(old_root.join("nested")).unwrap();
+        let child = old_root.join("nested").join("chapter.md");
+        fs::write(&child, "x").unwrap();
+
+        let state = EncodingState::new();
+        let old_child = child.to_string_lossy().to_string();
+        state
+            .encodings
+            .lock()
+            .unwrap()
+            .insert(old_child.clone(), "Big5");
+
+        let new_child = new_root.join("nested").join("chapter.md");
+        migrate_encoding_state_tree(&state, &old_root, &new_root);
+
+        let map = state.encodings.lock().unwrap();
+        assert!(!map.contains_key(&old_child));
+        assert_eq!(
+            map.get(&new_child.to_string_lossy().to_string()),
+            Some(&"Big5")
+        );
     }
 }
 

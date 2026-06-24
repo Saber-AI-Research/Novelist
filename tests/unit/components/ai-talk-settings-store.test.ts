@@ -25,10 +25,7 @@ describe('aiTalkSettings store', () => {
       'openai',
       'anthropic',
       'deepseek',
-      'openrouter',
-      'groq',
       'ollama',
-      'custom',
     ]);
   });
 

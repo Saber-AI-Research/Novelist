@@ -12,7 +12,7 @@ import {
 import { extractFirstH1 } from '$lib/utils/h1';
 import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
 import { t } from '$lib/i18n';
-import { pathBasename, pathDirname } from '$lib/utils/path';
+import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
 import type { EditorView } from '@codemirror/view';
 
 interface TabState {
@@ -202,6 +202,80 @@ class TabsStore {
     }
   }
 
+  private async syncWatcherAfterPathChange(oldPath: string, newPath: string) {
+    if (oldPath === newPath) return;
+    if (this.findAllByPath(oldPath).length === 0) {
+      await commands.unregisterOpenFile(oldPath).catch(() => {});
+    }
+    if (this.findAllByPath(newPath).length > 0) {
+      await commands.registerOpenFile(newPath).catch(() => {});
+    }
+  }
+
+  /**
+   * Re-point all open tabs for one file path and keep the backend watcher in
+   * sync. Use this after an actual filesystem rename/move.
+   */
+  async retargetOpenPath(
+    oldPath: string,
+    newPath: string,
+    options: { broadcast?: boolean } = {},
+  ): Promise<number> {
+    const count = this.findAllByPath(oldPath).length;
+    if (count > 0) {
+      this.updatePath(oldPath, newPath);
+      await this.syncWatcherAfterPathChange(oldPath, newPath);
+    }
+    if (options.broadcast) {
+      await commands.broadcastFileRenamed(oldPath, newPath).catch(() => {});
+    }
+    return count;
+  }
+
+  /**
+   * Re-point a single tab, preserving other tabs that still reference the old
+   * path. Use this for Save As flows where the old file remains on disk.
+   */
+  async retargetTabPath(tabId: string, newPath: string): Promise<boolean> {
+    const tab = this.allTabs.find(t => t.id === tabId);
+    if (!tab) return false;
+    const oldPath = tab.filePath;
+    this.updateFilePath(tabId, newPath);
+    await this.syncWatcherAfterPathChange(oldPath, newPath);
+    return true;
+  }
+
+  /**
+   * Re-point any open tab under a renamed/moved file or folder root. The
+   * broadcast payload stays at the root path so other windows can apply the
+   * same prefix transform.
+   */
+  async retargetOpenPathTree(
+    oldRoot: string,
+    newRoot: string,
+    options: { broadcast?: boolean } = {},
+  ): Promise<number> {
+    const changes = new Map<string, string>();
+    for (const pane of this.panes) {
+      for (const tab of pane.tabs) {
+        if (tab.filePath === oldRoot) {
+          changes.set(tab.filePath, newRoot);
+        } else if (pathStartsWithChild(tab.filePath, oldRoot)) {
+          changes.set(tab.filePath, newRoot + tab.filePath.slice(oldRoot.length));
+        }
+      }
+    }
+
+    for (const [oldPath, newPath] of changes) {
+      this.updatePath(oldPath, newPath);
+      await this.syncWatcherAfterPathChange(oldPath, newPath);
+    }
+    if (options.broadcast) {
+      await commands.broadcastFileRenamed(oldRoot, newRoot).catch(() => {});
+    }
+    return changes.size;
+  }
+
   /**
    * Post-write hook: keep the filename in sync with the file's H1 heading.
    * Returns the new path (== old path if no rename). Safe to call after every
@@ -268,9 +342,8 @@ class TabsStore {
         return filePath;
       }
       const newPath = result.data;
-      this.updatePath(filePath, newPath);
+      await this.retargetOpenPath(filePath, newPath, { broadcast: true });
       this.setLastSyncedH1ByPath(newPath, newH1);
-      await commands.broadcastFileRenamed(filePath, newPath).catch(() => {});
       return newPath;
     }
 
@@ -306,9 +379,8 @@ class TabsStore {
       return filePath;
     }
     const newPath = result.data;
-    this.updatePath(filePath, newPath);
+    await this.retargetOpenPath(filePath, newPath, { broadcast: true });
     this.setLastSyncedH1ByPath(newPath, newH1);
-    await commands.broadcastFileRenamed(filePath, newPath).catch(() => {});
     return newPath;
   }
 
@@ -445,11 +517,14 @@ class TabsStore {
         // choice === 'discard' falls through: close without saving.
       }
 
-      commands.unregisterOpenFile(tab.filePath).catch(() => {});
       savedEditorStates.delete(id);
+      const closedFilePath = tab.filePath;
       pane.tabs.splice(idx, 1);
       if (pane.activeTabId === id) {
         pane.activeTabId = pane.tabs.length > 0 ? pane.tabs[Math.min(idx, pane.tabs.length - 1)].id : null;
+      }
+      if (!this.findByPath(closedFilePath)) {
+        commands.unregisterOpenFile(closedFilePath).catch(() => {});
       }
       return;
     }

@@ -19,6 +19,8 @@ vi.mock('$lib/ipc/commands', () => ({
     listDirectory: vi.fn(),
     renameItem: vi.fn(),
     broadcastFileRenamed: vi.fn(),
+    registerOpenFile: vi.fn(),
+    unregisterOpenFile: vi.fn(),
   },
 }));
 
@@ -49,6 +51,8 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
       Promise.resolve({ status: 'ok', data: `${PROJECT}/${name}` }),
     );
     (commands.broadcastFileRenamed as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.registerOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.unregisterOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
   });
 
   it('does NOT rename when the template has no {title} (the designed opt-out)', async () => {

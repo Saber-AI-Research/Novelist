@@ -23,7 +23,9 @@ export type AppCommandContext = {
   openNewWindow: () => void;
   handleNewFile: () => void;
   handleNewScratchFile: () => void;
+  handleOpenFile: () => void;
   handleOpenDirectory: () => void;
+  handleOpenContainingFolder: () => void;
   handleCloseTab: () => void;
   handleGoToLine: () => void;
   saveCurrentFileAsTemplate: () => void;
@@ -113,7 +115,9 @@ export function registerAppCommands(ctx: AppCommandContext) {
   }});
   reg({ id: 'new-project', labelKey: 'command.newProject', handler: ctx.openNewProjectDialog });
   reg({ id: 'switch-project', labelKey: 'command.switchProject', handler: ctx.requestProjectSwitcher });
+  reg({ id: 'open-file', labelKey: 'command.openFile', shortcut: shortcutsStore.get('open-file'), handler: ctx.handleOpenFile });
   reg({ id: 'open-directory', labelKey: 'command.openDirectory', shortcut: shortcutsStore.get('open-directory'), handler: ctx.handleOpenDirectory });
+  reg({ id: 'open-containing-folder', labelKey: 'command.openContainingFolder', handler: ctx.handleOpenContainingFolder });
   reg({ id: 'export-project', labelKey: 'command.exportProject', shortcut: shortcutsStore.get('export-project'), handler: ctx.openExportDialog });
   reg({ id: 'close-tab', labelKey: 'command.closeTab', shortcut: shortcutsStore.get('close-tab'), handler: ctx.handleCloseTab });
   reg({ id: 'rename-file', labelKey: 'command.renameFile', shortcut: shortcutsStore.get('rename-file'), handler: ctx.renameCurrentFile });

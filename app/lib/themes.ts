@@ -208,13 +208,25 @@ export function applyTheme(theme: Theme) {
   for (const [key, value] of Object.entries(theme.vars)) {
     root.style.setProperty(key, value);
   }
+  const bg = theme.vars['--novelist-bg'] ?? '#fcfcfa';
+  const bgSecondary = theme.vars['--novelist-bg-secondary'] ?? bg;
+  const bgTertiary = theme.vars['--novelist-bg-tertiary'] ?? bgSecondary;
+  const accent = theme.vars['--novelist-accent'] ?? '#5b7e9a';
+  const scrollbarMix = theme.dark
+    ? { thumb: 34, hover: 52, active: 64 }
+    : { thumb: 24, hover: 42, active: 56 };
+
   // Derived variables that use color-mix
-  root.style.setProperty('--novelist-accent-soft', `color-mix(in srgb, ${theme.vars['--novelist-accent']} 10%, transparent)`);
-  root.style.setProperty('--novelist-sidebar-bg', theme.vars['--novelist-bg-secondary']);
+  root.style.setProperty('--novelist-accent-soft', `color-mix(in srgb, ${accent} 10%, transparent)`);
+  root.style.setProperty('--novelist-sidebar-bg', bgSecondary);
   root.style.setProperty('--novelist-sidebar-text', theme.vars['--novelist-text']);
-  root.style.setProperty('--novelist-sidebar-hover', `color-mix(in srgb, ${theme.vars['--novelist-accent']} 8%, ${theme.vars['--novelist-bg-secondary']})`);
-  root.style.setProperty('--novelist-sidebar-active', `color-mix(in srgb, ${theme.vars['--novelist-accent']} 14%, ${theme.vars['--novelist-bg-secondary']})`);
-  root.style.setProperty('--novelist-editor-bg', theme.vars['--novelist-bg']);
+  root.style.setProperty('--novelist-sidebar-hover', `color-mix(in srgb, ${accent} 8%, ${bgSecondary})`);
+  root.style.setProperty('--novelist-sidebar-active', `color-mix(in srgb, ${accent} 14%, ${bgSecondary})`);
+  root.style.setProperty('--novelist-editor-bg', bg);
+  root.style.setProperty('--novelist-scrollbar-track', theme.vars['--novelist-scrollbar-track'] ?? `color-mix(in srgb, ${bgSecondary} 92%, ${bg})`);
+  root.style.setProperty('--novelist-scrollbar-thumb', theme.vars['--novelist-scrollbar-thumb'] ?? `color-mix(in srgb, ${accent} ${scrollbarMix.thumb}%, ${bgTertiary})`);
+  root.style.setProperty('--novelist-scrollbar-thumb-hover', theme.vars['--novelist-scrollbar-thumb-hover'] ?? `color-mix(in srgb, ${accent} ${scrollbarMix.hover}%, ${bgTertiary})`);
+  root.style.setProperty('--novelist-scrollbar-thumb-active', theme.vars['--novelist-scrollbar-thumb-active'] ?? `color-mix(in srgb, ${accent} ${scrollbarMix.active}%, ${bgTertiary})`);
 
   // Set color-scheme for scrollbar theming
   root.style.setProperty('color-scheme', theme.dark ? 'dark' : 'light');

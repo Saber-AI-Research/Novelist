@@ -1,6 +1,5 @@
 <script lang="ts">
   import { aiTalkSettings } from './settings.svelte';
-  import { AI_TALK_PRESETS, applyAiTalkPreset } from './presets';
   import PromptPresetManager from './PromptPresetManager.svelte';
   import { t } from '$lib/i18n';
   import SettingsSwitch from '$lib/components/SettingsSwitch.svelte';
@@ -13,38 +12,30 @@
 </script>
 
 <div class="ai-talk-settings" class:compact>
-  <div class="presets full">
-    <span class="preset-label">{t('settings.aiTalk.providerPreset')}</span>
-    {#each AI_TALK_PRESETS as p}
+  <!-- One unified list: built-in providers and user-added custom configs sit
+       side by side; the active one is highlighted, and "+ Add" snapshots the
+       current connection fields into a new custom profile. -->
+  <div class="profiles full">
+    <span class="preset-label">{t('settings.aiTalk.providerProfile')}</span>
+    {#each aiTalkSettings.value.profiles as p (p.id)}
       <button
         type="button"
-        class="preset-chip"
-        data-testid="ai-talk-preset-{p.id}"
-        onclick={() => applyAiTalkPreset(p.id)}
+        class="provider-chip"
+        class:active={p.id === aiTalkSettings.value.activeProfileId}
+        data-testid="ai-talk-profile-{p.id}"
+        onclick={() => aiTalkSettings.update({ activeProfileId: p.id })}
         title="{p.baseUrl} · {p.model}"
-      >{p.label}</button>
+      >{p.label}{#if p.custom}<span class="chip-tag">★</span>{/if}</button>
     {/each}
-  </div>
-  <label>
-    <span>{t('settings.aiTalk.providerProfile')}</span>
-    <select
-      data-testid="ai-talk-profile-select"
-      value={aiTalkSettings.value.activeProfileId}
-      onchange={(e) => aiTalkSettings.update({ activeProfileId: e.currentTarget.value })}
-    >
-      {#each aiTalkSettings.value.profiles as p (p.id)}
-        <option value={p.id}>{p.label}</option>
-      {/each}
-    </select>
-  </label>
-  <div class="profile-actions full">
     <button
       type="button"
-      class="novelist-btn novelist-btn-ghost"
-      data-testid="ai-talk-profile-save-as"
+      class="provider-chip add"
+      data-testid="ai-talk-profile-add"
       onclick={() => aiTalkSettings.saveAsNewProfile()}
-    >{t('settings.aiTalk.profileSaveAs')}</button>
-    {#if activeProfile?.custom}
+    >{t('settings.aiTalk.profileAdd')}</button>
+  </div>
+  {#if activeProfile?.custom}
+    <div class="profile-actions full">
       <input
         type="text"
         class="profile-name"
@@ -59,8 +50,8 @@
         data-testid="ai-talk-profile-delete"
         onclick={() => aiTalkSettings.deleteProfile(activeProfile.id)}
       >{t('settings.aiTalk.profileDelete')}</button>
-    {/if}
-  </div>
+    </div>
+  {/if}
   <label>
     <span>{t('settings.aiTalk.baseUrl')}</span>
     <input
@@ -165,7 +156,6 @@
     min-width: 0;
   }
   input,
-  select,
   textarea {
     background: var(--novelist-bg);
     border: 1px solid var(--novelist-border);
@@ -184,7 +174,7 @@
     font-size: 11px;
     color: var(--novelist-text-secondary);
   }
-  .presets {
+  .profiles {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -195,7 +185,7 @@
     color: var(--novelist-text-secondary);
     margin-right: 4px;
   }
-  .preset-chip {
+  .provider-chip {
     background: var(--novelist-bg);
     border: 1px solid var(--novelist-border);
     color: var(--novelist-text-secondary);
@@ -203,11 +193,24 @@
     border-radius: 10px;
     cursor: pointer;
     font-size: 11px;
-    transition: background 80ms, color 80ms;
+    transition: background 80ms, color 80ms, border-color 80ms;
   }
-  .preset-chip:hover {
+  .provider-chip:hover {
     background: color-mix(in srgb, var(--novelist-accent) 15%, var(--novelist-bg));
     color: var(--novelist-accent);
     border-color: color-mix(in srgb, var(--novelist-accent) 50%, transparent);
+  }
+  .provider-chip.active {
+    background: var(--novelist-accent);
+    color: var(--novelist-accent-contrast, #fff);
+    border-color: var(--novelist-accent);
+  }
+  .provider-chip.add {
+    border-style: dashed;
+  }
+  .chip-tag {
+    margin-left: 4px;
+    opacity: 0.7;
+    font-size: 9px;
   }
 </style>

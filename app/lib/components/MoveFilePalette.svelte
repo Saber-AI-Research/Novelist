@@ -77,7 +77,7 @@
     const result = await commands.moveItem(srcPath, targetDir);
     if (result.status === 'ok') {
       const newPath = result.data;
-      tabsStore.updatePath(srcPath, newPath);
+      await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: true });
       // Refresh both affected folders so the tree catches up immediately.
       const oldParent = srcPath.slice(0, srcPath.lastIndexOf('/'));
       await projectStore.refreshFolder(oldParent).catch(() => {});

@@ -12,6 +12,7 @@ export const zhCN: TranslationMap = {
   // --- Welcome ---
   'welcome.recentProjects': '最近项目',
   'welcome.noRecent': '暂无最近项目。',
+  'welcome.openFile': '打开文件...',
   'welcome.openDirectory': '打开目录...',
   'welcome.newFile': '新建文件',
   'welcome.newProject': '新建项目',
@@ -315,7 +316,9 @@ export const zhCN: TranslationMap = {
   'command.newFile': '新建文件',
   'command.newProject': '从模板新建项目',
   'command.switchProject': '切换项目',
+  'command.openFile': '打开文件',
   'command.openDirectory': '打开目录',
+  'command.openContainingFolder': '打开所在文件夹作为项目',
   'command.exportProject': '导出项目',
   'command.closeTab': '关闭标签',
   'command.renameFile': '重命名 / 另存为',
@@ -590,8 +593,7 @@ export const zhCN: TranslationMap = {
   'settings.plugins.aiAgent.description': '由本地 Claude Code CLI 驱动的代理式聊天',
 
   // --- Settings · AI Talk ---
-  'settings.aiTalk.providerPreset': '服务商预设：',
-  'settings.aiTalk.providerProfile': '服务商配置',
+  'settings.aiTalk.providerProfile': '服务商：',
   'settings.aiTalk.baseUrl': '接口地址',
   'settings.aiTalk.apiKey': 'API 密钥',
   'settings.aiTalk.model': '模型',
@@ -601,6 +603,7 @@ export const zhCN: TranslationMap = {
   'settings.aiTalk.includeSelection': '将当前选区作为聊天上下文',
   'settings.aiTalk.hint': 'API 密钥仅保存在本机。请求经由 Novelist Rust 后端转发（已启用 URL 白名单）。',
   'settings.aiTalk.profileSaveAs': '保存为新配置',
+  'settings.aiTalk.profileAdd': '+ 新建配置',
   'settings.aiTalk.profileName': '配置名称',
   'settings.aiTalk.profileDelete': '删除配置',
 

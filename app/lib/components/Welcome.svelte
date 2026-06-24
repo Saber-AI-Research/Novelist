@@ -6,12 +6,13 @@
   import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
 
   interface Props {
+    onOpenFile: () => void;
     onOpenDirectory: () => void;
     onOpenRecent: (path: string) => void;
     onNewFile: () => void;
     onNewProject?: () => void;
   }
-  let { onOpenDirectory, onOpenRecent, onNewFile, onNewProject }: Props = $props();
+  let { onOpenFile, onOpenDirectory, onOpenRecent, onNewFile, onNewProject }: Props = $props();
 
   const MAX_RECENT_DISPLAY = 7;
 
@@ -193,6 +194,9 @@
       {/if}
       <button class="open-btn" data-testid="welcome-new-file" onclick={onNewFile}>
         {t('welcome.newFile')}
+      </button>
+      <button class="open-btn" data-testid="welcome-open-file" onclick={onOpenFile}>
+        {t('welcome.openFile')}
       </button>
       <button class="open-btn" data-testid="welcome-open-folder" onclick={onOpenDirectory}>
         {t('welcome.openDirectory')}

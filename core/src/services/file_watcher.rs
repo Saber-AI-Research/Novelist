@@ -104,6 +104,29 @@ fn refresh_dir_for_path(path: &Path, watching_dir: &Path) -> Option<PathBuf> {
     path.parent().map(Path::to_path_buf)
 }
 
+/// macOS FSEvents (and symlinked watch roots in general) report fully
+/// canonicalized paths — e.g. a project opened as `/var/folders/…` or
+/// `~/iCloud…` comes back as `/private/var/folders/…` with every symlink
+/// resolved. The frontend, however, registers open files and lists the
+/// sidebar using the *original* (non-canonical) path it passed to
+/// `start_file_watcher`. If we forward the canonical path verbatim, the
+/// `tracked_files` lookup misses (→ no editor reload) and the sidebar
+/// `refreshFolder` finds no matching node (→ no tree refresh).
+///
+/// This rewrites an event path that sits under `canonical_dir` back onto the
+/// `original_dir` prefix so it matches what the frontend knows. Paths that
+/// don't share the canonical prefix (or when the two roots are identical) are
+/// returned untouched.
+fn normalize_event_path(path: PathBuf, canonical_dir: &Path, original_dir: &Path) -> PathBuf {
+    if canonical_dir == original_dir {
+        return path;
+    }
+    match path.strip_prefix(canonical_dir) {
+        Ok(rest) => original_dir.join(rest),
+        Err(_) => path,
+    }
+}
+
 // ── Shared state ────────────────────────────────────────────────────
 
 pub struct FileWatcherState {
@@ -158,8 +181,13 @@ pub async fn start_file_watcher(
     // Channel for raw notify events -> debounce processor
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PendingFsEvent>();
 
+    // FSEvents resolves symlinks and reports canonical paths; remember both so
+    // we can rewrite event paths back onto the prefix the frontend uses.
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+
     // Create the notify watcher that sends paths into the channel
     let dir_for_events = dir.clone();
+    let canonical_for_events = canonical_dir.clone();
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -173,6 +201,8 @@ pub async fn start_file_watcher(
                     | notify::EventKind::Create(_)
                     | notify::EventKind::Remove(_) => {
                         for path in event.paths {
+                            let path =
+                                normalize_event_path(path, &canonical_for_events, &dir_for_events);
                             let refresh_dir = refresh_dir_for_path(&path, &dir_for_events);
                             let _ = tx.send(PendingFsEvent { path, refresh_dir });
                         }
@@ -305,13 +335,21 @@ pub async fn start_file_watcher(
 #[tauri::command]
 #[specta::specta]
 pub async fn stop_file_watcher(state: tauri::State<'_, FileWatcherState>) -> Result<(), AppError> {
+    stop_file_watcher_inner(&state)
+}
+
+fn stop_file_watcher_inner(state: &FileWatcherState) -> Result<(), AppError> {
     let mut guard = state
         .inner
         .lock()
         .map_err(|e| AppError::Custom(e.to_string()))?;
-    // Drop the watcher to stop OS-level watching
+    // Drop the watcher to stop OS-level watching and clear per-project open
+    // file state. The frontend re-registers open files after a new project is
+    // opened.
     guard.watcher = None;
     guard.watching_dir = None;
+    guard.tracked_files.clear();
+    guard.ignore_set = IgnoreSet::new();
     // Signal the processor task to stop
     if let Some(tx) = guard.cancel_tx.take() {
         let _ = tx.send(());
@@ -418,6 +456,36 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_file_watcher_clears_tracking_state() {
+        let state = FileWatcherState::new();
+        let path = PathBuf::from("/tmp/open.md");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        {
+            let mut guard = state.inner.lock().unwrap();
+            guard.watching_dir = Some(PathBuf::from("/tmp"));
+            guard.cancel_tx = Some(tx);
+            guard.ignore_set.register(&path);
+            guard.tracked_files.insert(
+                path.clone(),
+                TrackedFile {
+                    path: path.clone(),
+                    hash: blake3::hash(b"content"),
+                    mtime: SystemTime::now(),
+                },
+            );
+        }
+
+        stop_file_watcher_inner(&state).unwrap();
+
+        let mut guard = state.inner.lock().unwrap();
+        assert!(guard.watcher.is_none());
+        assert!(guard.watching_dir.is_none());
+        assert!(guard.cancel_tx.is_none());
+        assert!(guard.tracked_files.is_empty());
+        assert!(!guard.ignore_set.should_ignore(&path));
+    }
+
+    #[test]
     fn test_refresh_dir_for_file_path() {
         let root = PathBuf::from("/tmp/novelist");
         let file = root.join("sub").join("a.md");
@@ -428,6 +496,39 @@ mod tests {
     fn test_refresh_dir_for_watching_root() {
         let root = PathBuf::from("/tmp/novelist");
         assert_eq!(refresh_dir_for_path(&root, &root), Some(root.clone()));
+    }
+
+    #[test]
+    fn test_normalize_event_path_rewrites_canonical_prefix() {
+        // FSEvents canonical form (/private/var) -> frontend form (/var).
+        let original = PathBuf::from("/var/folders/x/project");
+        let canonical = PathBuf::from("/private/var/folders/x/project");
+        let event = canonical.join("sub").join("a.md");
+        assert_eq!(
+            normalize_event_path(event, &canonical, &original),
+            original.join("sub").join("a.md"),
+        );
+    }
+
+    #[test]
+    fn test_normalize_event_path_noop_when_roots_match() {
+        let dir = PathBuf::from("/Users/me/project");
+        let event = dir.join("a.md");
+        assert_eq!(
+            normalize_event_path(event.clone(), &dir, &dir),
+            event,
+        );
+    }
+
+    #[test]
+    fn test_normalize_event_path_passes_through_unrelated_paths() {
+        let original = PathBuf::from("/var/folders/x/project");
+        let canonical = PathBuf::from("/private/var/folders/x/project");
+        let outside = PathBuf::from("/somewhere/else/a.md");
+        assert_eq!(
+            normalize_event_path(outside.clone(), &canonical, &original),
+            outside,
+        );
     }
 
     #[test]

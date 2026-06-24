@@ -185,7 +185,18 @@ pub async fn record_words(
 /// Recursively collect narrative files under `root`. Skips dot-prefixed entries
 /// (hidden dirs like `.novelist`, recovery drafts like `*.~recovery`) and
 /// returns (file_name, full_path) pairs.
+///
+/// Single-file mode passes a file path (not a directory) as the stats root, so
+/// when `root` is a regular file we return it as the lone chapter rather than
+/// trying to walk it as a directory.
 fn collect_chapter_files(root: &Path) -> Vec<(String, String)> {
+    if root.is_file() {
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        return vec![(name, root.to_string_lossy().to_string())];
+    }
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -407,6 +418,27 @@ mod tests {
         // 3 (ch1) + 4 (ch2 CJK) + 2 (ch3) = 9
         assert_eq!(overview.total_words, 9);
         assert_eq!(overview.chapters.len(), 3);
+
+        restore_data_dir(old);
+    }
+
+    #[tokio::test]
+    #[serial(stats_data_dir)]
+    async fn test_single_file_stats_root() {
+        // Single-file mode passes a file path (not a dir) as the stats root.
+        let data_tmp = TempDir::new().unwrap();
+        let old = set_data_dir(data_tmp.path());
+
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("draft.txt");
+        std::fs::write(&file, "hello world 你好").unwrap();
+        let file_path = file.to_string_lossy().to_string();
+
+        let overview = get_stats_overview(&file_path).await.unwrap();
+        // 2 latin words + 2 CJK chars = 4
+        assert_eq!(overview.total_words, 4);
+        assert_eq!(overview.chapters.len(), 1);
+        assert_eq!(overview.chapters[0].file_name, "draft.txt");
 
         restore_data_dir(old);
     }

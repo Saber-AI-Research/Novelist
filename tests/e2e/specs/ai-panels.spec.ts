@@ -369,8 +369,8 @@ test.describe('Settings → Plugin settings nav', () => {
     await app.keyboard.press('Meta+,');
     await app.getByTestId('settings-section-plugin:ai-talk').click();
 
-    await expect(app.getByTestId('ai-talk-preset-openai')).toBeVisible();
-    await expect(app.getByTestId('ai-talk-preset-anthropic')).toBeVisible();
+    await expect(app.getByTestId('ai-talk-profile-openai')).toBeVisible();
+    await expect(app.getByTestId('ai-talk-profile-anthropic')).toBeVisible();
   });
 
   test('Configure button from Plugins list navigates to plugin settings section', async ({ app }) => {
@@ -380,10 +380,10 @@ test.describe('Settings → Plugin settings nav', () => {
     await expect(app.getByTestId('plugin-configure-ai-talk')).toBeVisible();
     await app.getByTestId('plugin-configure-ai-talk').click();
 
-    // Dialog should still be open and the preset chips (part of AiTalkSettings)
+    // Dialog should still be open and the provider chips (part of AiTalkSettings)
     // should now be rendered in the right content pane.
     await expect(app.getByTestId('settings-dialog')).toBeVisible();
-    await expect(app.getByTestId('ai-talk-preset-openai')).toBeVisible();
+    await expect(app.getByTestId('ai-talk-profile-openai')).toBeVisible();
   });
 
   test('AI Agent settings lists the detected CLI status', async ({ app }) => {
@@ -399,10 +399,10 @@ test.describe('Settings → Plugin settings nav', () => {
     await expect(app.getByTestId('settings-dialog')).toContainText('/usr/local/bin/claude');
   });
 
-  test('applying an AI Talk preset updates baseUrl + model', async ({ app }) => {
+  test('selecting an AI Talk provider updates baseUrl + model', async ({ app }) => {
     await app.keyboard.press('Meta+,');
     await app.getByTestId('settings-section-plugin:ai-talk').click();
-    await app.getByTestId('ai-talk-preset-anthropic').click();
+    await app.getByTestId('ai-talk-profile-anthropic').click();
 
     const baseUrlInput = app.locator('input[type="text"]').first();
     await expect(baseUrlInput).toHaveValue('https://api.anthropic.com/v1');

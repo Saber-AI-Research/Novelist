@@ -13,6 +13,8 @@ vi.mock('$lib/ipc/commands', () => ({
     listDirectory: vi.fn(),
     renameItem: vi.fn(),
     broadcastFileRenamed: vi.fn(),
+    registerOpenFile: vi.fn(),
+    unregisterOpenFile: vi.fn(),
   },
 }));
 
@@ -42,6 +44,8 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
       Promise.resolve({ status: 'ok', data: `${PROJECT}/${name}` }),
     );
     (commands.broadcastFileRenamed as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.registerOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.unregisterOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
   });
 
   it('renames when H1 changes on a non-placeholder file whose name still contains the old H1', async () => {

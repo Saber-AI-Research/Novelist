@@ -52,7 +52,8 @@
   import { handleTitlebarDrag } from '$lib/utils/window-drag';
   import { useWindowTitle } from '$lib/composables/window-title.svelte';
   import { promptGoToLine } from '$lib/utils/go-to-line';
-  import { pathBasename } from '$lib/utils/path';
+  import { pathBasename, pathDirname } from '$lib/utils/path';
+  import { isScratchFile } from '$lib/utils/scratch';
   import { registerAppCommands } from '$lib/app-commands';
   import { wireAppEvents } from '$lib/composables/app-events.svelte';
   import { wireMenuEvents } from '$lib/composables/menu-events.svelte';
@@ -268,6 +269,45 @@ let paletteOpen = $state(false);
     await openProjectFromPath(selected as string);
   }
 
+  /**
+   * Open a single text file in this window, entering single-file mode if no
+   * project is open. Shared by the "Open File…" command and the spawned-window
+   * `#file=` seed. Returns true on success.
+   */
+  async function openSingleFile(filePath: string, line: number | null = null): Promise<boolean> {
+    const result = await commands.readFile(filePath);
+    if (result.status !== 'ok') return false;
+    if (!projectStore.isOpen) {
+      projectStore.enterSingleFileMode();
+      uiStore.sidebarVisible = false;
+    }
+    tabsStore.openTab(filePath, result.data);
+    await commands.registerOpenFile(filePath);
+    if (line && line > 0) {
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent('novelist-goto-line', { detail: { line } }));
+      });
+    }
+    return true;
+  }
+
+  async function handleOpenFile() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban'] }],
+    });
+    if (!selected) return;
+    await openSingleFile(selected as string);
+  }
+
+  /** Open the active file's containing folder as a project. */
+  async function handleOpenContainingFolder() {
+    const filePath = tabsStore.activeTab?.filePath;
+    if (!filePath || isScratchFile(filePath)) return;
+    const dir = pathDirname(filePath);
+    if (dir) await openProjectFromPath(dir);
+  }
+
   async function handleOpenRecent(path: string) {
     await openProjectFromPath(path);
   }
@@ -369,7 +409,9 @@ let paletteOpen = $state(false);
       openNewWindow,
       handleNewFile,
       handleNewScratchFile,
+      handleOpenFile,
       handleOpenDirectory,
+      handleOpenContainingFolder,
       handleCloseTab,
       handleGoToLine,
       saveCurrentFileAsTemplate,
@@ -432,22 +474,7 @@ let paletteOpen = $state(false);
       // cli-open routing helper with `#project=…` or `#file=…` in its hash.
       runStartupTask('consumeWindowSeed', () => consumeWindowSeed({
         openProject: (path) => openProjectFromPath(path),
-        openFile: async (filePath, line) => {
-          const result = await commands.readFile(filePath);
-          if (result.status !== 'ok') return false;
-          if (!projectStore.isOpen) {
-            projectStore.enterSingleFileMode();
-            uiStore.sidebarVisible = false;
-          }
-          tabsStore.openTab(filePath, result.data);
-          await commands.registerOpenFile(filePath);
-          if (line && line > 0) {
-            requestAnimationFrame(() => {
-              window.dispatchEvent(new CustomEvent('novelist-goto-line', { detail: { line } }));
-            });
-          }
-          return true;
-        },
+        openFile: (filePath, line) => openSingleFile(filePath, line),
       }));
 
       // Native menu → commandRegistry dispatch bridge.
@@ -536,7 +563,7 @@ let paletteOpen = $state(false);
 {/if}
 
 {#if !projectStore.isOpen}
-  <Welcome onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} onNewFile={handleNewScratchFile} onNewProject={() => { newProjectDialogOpen = true; }} />
+  <Welcome onOpenFile={handleOpenFile} onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} onNewFile={handleNewScratchFile} onNewProject={() => { newProjectDialogOpen = true; }} />
 {:else if uiStore.zenMode}
   {#await loadZenMode() then { default: ZenMode }}
     <ZenMode {wordCount}>
@@ -768,7 +795,7 @@ let paletteOpen = $state(false);
       {/if}
       <!-- Panel content -->
       {#if uiStore.outlineVisible}
-        <div class="overflow-y-auto" style="width: {uiStore.rightPanelWidth}px;">
+        <div class="overflow-y-auto" style="width: {uiStore.rightPanelWidth}px; border-right: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
           {#await loadOutline() then { default: Outline }}
             <Outline {headings} onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} onMoveSection={handleMoveSection} />
           {/await}
@@ -786,10 +813,10 @@ let paletteOpen = $state(false);
             <SnapshotPanel />
           {/await}
         </div>
-      {:else if uiStore.statsVisible && projectStore.dirPath}
+      {:else if uiStore.statsVisible && (projectStore.dirPath ?? tabsStore.activeTab)}
         <div style="width: {uiStore.rightPanelWidth}px;">
           {#await loadStatsPanel() then { default: StatsPanel }}
-            <StatsPanel projectDir={projectStore.dirPath} />
+            <StatsPanel projectDir={projectStore.dirPath ?? tabsStore.activeTab?.filePath ?? ''} />
           {/await}
         </div>
       {:else if uiStore.templateVisible}
@@ -1026,35 +1053,41 @@ let paletteOpen = $state(false);
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 30px;
+    width: 12px;
+    height: 26px;
     padding: 0;
-    border: 1px solid var(--novelist-border-subtle, var(--novelist-border));
+    border: 1px solid color-mix(in srgb, var(--novelist-accent) 22%, var(--novelist-border));
     background: var(--novelist-sidebar-bg);
-    color: var(--novelist-text-tertiary, var(--novelist-text-secondary));
+    color: color-mix(in srgb, var(--novelist-accent) 45%, var(--novelist-text-tertiary, var(--novelist-text-secondary)));
     cursor: pointer;
     transform: translateY(-50%);
-    transition: color 120ms, border-color 120ms, background 120ms;
+    transition: color 120ms, border-color 120ms, background 120ms, box-shadow 120ms;
   }
   .sidebar-toggle-handle svg,
   .sidebar-reopen-handle svg {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
   .sidebar-toggle-handle {
-    right: -6px;
-    border-radius: 0 4px 4px 0;
+    right: -5px;
+    border-radius: 0 5px 5px 0;
   }
   .sidebar-reopen-handle {
     left: 0;
     border-left: none;
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 5px 5px 0;
   }
   .sidebar-toggle-handle:hover,
   .sidebar-reopen-handle:hover {
     color: var(--novelist-accent);
-    border-color: var(--novelist-accent);
+    border-color: color-mix(in srgb, var(--novelist-accent) 70%, var(--novelist-border));
     background: var(--novelist-sidebar-hover);
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--novelist-text) 8%, transparent);
+  }
+  .sidebar-toggle-handle:focus-visible,
+  .sidebar-reopen-handle:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--novelist-accent) 36%, transparent);
+    outline-offset: 2px;
   }
 
   /* Pane drop overlays — only rendered while a sidebar file drag is in flight. */

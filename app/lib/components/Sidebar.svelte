@@ -469,16 +469,7 @@
     const result = await commands.renameItem(renaming.path, renameValue.trim(), null);
     if (result.status === 'ok') {
       const newPath = result.data;
-      // Update any open tabs referencing the renamed file/folder.
-      for (const pane of tabsStore.panes) {
-        for (const tab of pane.tabs) {
-          if (tab.filePath === oldPath) {
-            tabsStore.updateFilePath(tab.id, newPath);
-          } else if (pathStartsWithChild(tab.filePath, oldPath)) {
-            tabsStore.updateFilePath(tab.id, newPath + tab.filePath.slice(oldPath.length));
-          }
-        }
-      }
+      await tabsStore.retargetOpenPathTree(oldPath, newPath, { broadcast: true });
       const newParent = pathDirname(newPath);
       if (oldParent) await projectStore.refreshFolder(oldParent);
       if (newParent && newParent !== oldParent) await projectStore.refreshFolder(newParent);
@@ -545,10 +536,15 @@
     const confirmed = confirm(t('sidebar.deleteConfirm', { name: entry.name }));
     if (!confirmed) return;
 
-    // Close any open tab for this file
-    const tab = tabsStore.findByPath(entry.path);
-    if (tab) {
-      tabsStore.closeTab(tab.id);
+    const openTabs = tabsStore.allTabs.filter(tab =>
+      tab.filePath === entry.path || pathStartsWithChild(tab.filePath, entry.path)
+    );
+    for (const tab of openTabs) {
+      const pathBeforeClose = tab.filePath;
+      await tabsStore.closeTab(tab.id);
+      if (tabsStore.findByPath(pathBeforeClose)) {
+        return;
+      }
     }
 
     const result = await commands.deleteItem(entry.path);
@@ -631,16 +627,7 @@
     }
     const newPath = result.data;
 
-    // Update any open tab whose path starts with the moved source.
-    for (const pane of tabsStore.panes) {
-      for (const tab of pane.tabs) {
-        if (tab.filePath === source.path) {
-          tabsStore.updateFilePath(tab.id, newPath);
-        } else if (pathStartsWithChild(tab.filePath, source.path)) {
-          tabsStore.updateFilePath(tab.id, newPath + tab.filePath.slice(source.path.length));
-        }
-      }
-    }
+    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: true });
 
     await projectStore.refreshFolder(parentPath);
     await projectStore.refreshFolder(target.path);
@@ -683,14 +670,7 @@
       return;
     }
     const newPath = result.data;
-    for (const pane of tabsStore.panes) {
-      for (const tab of pane.tabs) {
-        if (tab.filePath === source.path || pathStartsWithChild(tab.filePath, source.path)) {
-          const rest = tab.filePath.slice(source.path.length);
-          tabsStore.updateFilePath(tab.id, newPath + rest);
-        }
-      }
-    }
+    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: true });
     await projectStore.refreshFolder(parentPath);
     await projectStore.refreshFolder(projectStore.dirPath);
   }

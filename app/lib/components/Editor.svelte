@@ -246,10 +246,14 @@
     // double-record.
     sessionStartTime = null;
     sessionWordsAdded = 0;
-    if (!projectStore.dirPath) return;
+    // In single-file mode there's no project dir, so key stats by the file's
+    // own path (the backend buckets stats by a hash of this value and treats a
+    // file path as a single-chapter root).
+    const statsRoot = projectStore.dirPath ?? getActiveTab()?.filePath ?? null;
+    if (!statsRoot) return;
     if (wordsAdded === 0 && minutes < 2) return;
     invoke('record_writing_stats', {
-      projectDir: projectStore.dirPath,
+      projectDir: statsRoot,
       wordDelta: wordsAdded,
       minutes,
     }).catch(e => console.warn('[Stats] Failed to record:', e));
@@ -402,10 +406,9 @@
       if (isScratchFile(tab.filePath)) {
         commands.deleteItem(tab.filePath).catch(() => {});
       }
-      tabsStore.updateFilePath(tab.id, savePath);
+      await tabsStore.retargetTabPath(tab.id, savePath);
       tabsStore.updateContent(tab.id, content);
       tabsStore.markSavedByPath(savePath);
-      await commands.registerOpenFile(savePath);
       // Refresh sidebar if in project mode
       if (projectStore.dirPath) {
         const filesResult = await commands.listDirectory(projectStore.dirPath, null);

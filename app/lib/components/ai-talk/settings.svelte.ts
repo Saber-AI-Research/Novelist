@@ -27,14 +27,14 @@ export type AiTalkProviderProfile = {
   custom?: boolean;
 };
 
+// A deliberately lean set of built-in providers. Anything else (OpenRouter,
+// Groq, a self-hosted gateway, …) is added by the user via "+ Add profile",
+// which appends a custom profile that lives in the same list as these.
 const DEFAULT_PROFILES: AiTalkProviderProfile[] = [
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', temperature: 0.7 },
-  { id: 'anthropic', label: 'Anthropic-compatible', baseUrl: 'https://api.anthropic.com/v1', apiKey: '', model: 'claude-sonnet-4-5', temperature: 0.7 },
+  { id: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', apiKey: '', model: 'claude-sonnet-4-5', temperature: 0.7 },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat', temperature: 0.7 },
-  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: 'openai/gpt-4o-mini', temperature: 0.7 },
-  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.3-70b-versatile', temperature: 0.7 },
   { id: 'ollama', label: 'Ollama (local)', baseUrl: 'http://localhost:11434/v1', apiKey: '', model: 'llama3.2', temperature: 0.7 },
-  { id: 'custom', label: 'Custom', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', temperature: 0.7, custom: true },
 ];
 
 const DEFAULTS: AiTalkSettings = {

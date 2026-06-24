@@ -56,6 +56,7 @@ test.describe('Sidebar', () => {
       const edgeRect = edge?.getBoundingClientRect();
       const handleStyles = getComputedStyle(handle);
       const edgeStyles = edge ? getComputedStyle(edge) : null;
+      const rootStyles = getComputedStyle(document.documentElement);
 
       return {
         handleWidth: handleRect.width,
@@ -65,15 +66,19 @@ test.describe('Sidebar', () => {
         edgeBackground: edgeStyles?.backgroundColor ?? '',
         edgeLeft: edgeRect?.left ?? 0,
         sidebarRight: sidebarRegion?.getBoundingClientRect().right ?? 0,
+        scrollbarTrack: rootStyles.getPropertyValue('--novelist-scrollbar-track').trim(),
+        scrollbarThumb: rootStyles.getPropertyValue('--novelist-scrollbar-thumb').trim(),
       };
     });
 
-    expect(metrics.handleWidth).toBeLessThanOrEqual(16);
-    expect(metrics.handleHeight).toBeLessThanOrEqual(32);
-    expect(metrics.edgeWidth).toBeLessThanOrEqual(6);
+    expect(metrics.handleWidth).toBeLessThanOrEqual(12);
+    expect(metrics.handleHeight).toBeLessThanOrEqual(28);
+    expect(metrics.edgeWidth).toBeLessThanOrEqual(4);
     expect(metrics.edgeBackground).not.toBe('rgba(0, 0, 0, 0)');
     expect(metrics.handleBackground).toBe(metrics.edgeBackground);
     expect(metrics.edgeLeft).toBeCloseTo(metrics.sidebarRight, 1);
+    expect(metrics.scrollbarTrack).toContain('color-mix');
+    expect(metrics.scrollbarThumb).toContain('color-mix');
   });
 
   test('toggle sidebar visibility', async ({ app }) => {
@@ -116,6 +121,24 @@ test.describe('Sidebar', () => {
     await expect(contextMenu).toBeVisible();
 
     await app.keyboard.press('Escape');
+  });
+
+  test('delete waits for unsaved-close confirmation before removing an open dirty file', async ({ app, mockState }) => {
+    await app.getByTestId('sidebar-file-Chapter 1.md').click();
+    await app.locator('.cm-content').click();
+    await app.keyboard.type('draft edit');
+
+    await app.evaluate(() => {
+      window.confirm = () => true;
+    });
+
+    await app.getByTestId('sidebar-file-Chapter 1.md').click({ button: 'right' });
+    await app.getByRole('menuitem', { name: 'Delete' }).click();
+    await expect(app.getByTestId('unsaved-changes-dialog')).toBeVisible();
+    await app.getByTestId('unsaved-cancel').click();
+
+    expect(await mockState.getDeletedFiles()).toEqual([]);
+    await expect(app.getByTestId('tab-bar')).toContainText('Chapter 1');
   });
 
   test('folder tree: expand shows children, collapse hides them', async ({ app }) => {

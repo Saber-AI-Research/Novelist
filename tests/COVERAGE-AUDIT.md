@@ -61,7 +61,6 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 | app/lib/utils/typora-theme.ts | 94.25 % | tests/unit/utils/typora-theme.test.ts |
 | app/lib/components/ai-talk/cleanup.ts | 100 % | tests/unit/components/ai-talk-cleanup.test.ts |
 | app/lib/components/ai-talk/openai.ts | 100 % | tests/unit/components/ai-talk-openai.test.ts |
-| app/lib/components/ai-talk/presets.ts | 100 % | tests/unit/components/ai-talk-presets.test.ts |
 | app/lib/components/ai-talk/presets.svelte.ts | 86.84 % | tests/unit/components/ai-talk-prompt-presets.test.ts |
 | app/lib/components/ai-talk/sessions.svelte.ts | 80.24 % | tests/unit/components/ai-talk-sessions.test.ts |
 | app/lib/components/ai-talk/settings.svelte.ts | 100 % | tests/unit/components/ai-talk-settings-store.test.ts |

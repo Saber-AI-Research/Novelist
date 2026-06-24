@@ -199,12 +199,16 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
 
   // Cross-window file rename broadcast: another window auto-renamed a file we
   // may have open. Update our tab paths and refresh the affected sidebar folder.
-  bindEvent<{ old_path: string; new_path: string }>('file-renamed', (event) => {
+  bindEvent<{ old_path: string; new_path: string }>('file-renamed', async (event) => {
     const { old_path, new_path } = event.payload;
-    tabsStore.updatePath(old_path, new_path);
-    const parent = pathDirname(new_path);
-    if (parent) {
-      projectStore.refreshFolder(parent).catch(() => {});
+    await tabsStore.retargetOpenPathTree(old_path, new_path);
+    const oldParent = pathDirname(old_path);
+    const newParent = pathDirname(new_path);
+    if (oldParent) {
+      await projectStore.refreshFolder(oldParent);
+    }
+    if (newParent && newParent !== oldParent) {
+      await projectStore.refreshFolder(newParent);
     }
   }, fn => { unlistenFileRenamed = fn; });
 
