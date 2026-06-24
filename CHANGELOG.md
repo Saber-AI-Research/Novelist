@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-24
+
+### Added
+
+- **Open File command.** A dedicated "Open File" action (Cmd+Shift+O) opens a
+  single file in the current pane, surfaced in the Welcome screen, the
+  application menu, and the command palette. A companion "Open containing
+  folder" command reveals the active file's directory.
+
+### Changed
+
+- **AI chat provider config redesigned into one unified list.** The built-in
+  provider set is trimmed from seven to four (OpenAI, Anthropic, DeepSeek,
+  Ollama); any other provider is added as a custom profile. Built-in and
+  user-added profiles now share a single selectable chip list — the active one
+  is highlighted, custom profiles can be renamed/deleted inline, and "+ Add
+  profile" snapshots the current connection fields. This replaces the previous
+  split between a provider-preset chip row and a separate profile dropdown, so
+  custom configurations always appear alongside the defaults.
+
+### Fixed
+
+- **External edits now auto-refresh, including symlinked project locations.**
+  macOS FSEvents reports fully canonicalized paths (`/private/…`, resolved
+  symlinks) that didn't match the paths the app registered, so external changes
+  to a project under iCloud / a symlinked or `/tmp` location silently failed to
+  reload the open file or refresh the sidebar. Watcher events are now rewritten
+  back onto the original watched-directory prefix, so edits made by other
+  programs reload the open document and folder changes refresh the tree.
+- **Customizable shortcuts no longer leak out of text inputs.** Tab-cycling and
+  user shortcuts (close-tab, new-file, …) are suppressed while a non-editor
+  text field is focused (the AI composer, dialog inputs), while the main
+  editor's global shortcuts stay active.
+- **Move/rename keeps non-UTF-8 encoding state.** Moving or renaming a file or
+  folder now migrates the recorded text encoding for the whole affected
+  subtree, and a move retargets open tabs and broadcasts the rename so other
+  windows follow.
+- **Writing stats work in single-file mode.** When a lone file (not a project)
+  is open, the stats overview treats that file as the only chapter instead of
+  failing to walk it as a directory.
+- **Scrollbars follow the active theme.** Scrollbar colors are derived from
+  each theme's palette rather than a fixed light-mode default.
+
 ## [0.2.11] - 2026-06-20
 
 ### Added
