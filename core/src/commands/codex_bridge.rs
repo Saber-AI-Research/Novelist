@@ -510,11 +510,19 @@ mod tests {
     #[test]
     fn candidate_paths_includes_path_and_node_dirs() {
         use std::path::Path;
-        std::env::set_var("PATH", "/tmp/one:/tmp/two");
+        // Use the platform PATH separator and the platform binary name so the
+        // assertions hold on Windows too (where bin_name() is `codex.exe`).
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        std::env::set_var("PATH", format!("/tmp/one{sep}/tmp/two"));
+        let bin = bin_name();
         let c = candidate_paths();
         let strs: Vec<String> = c.iter().map(|p| p.to_string_lossy().to_string()).collect();
         assert!(strs.iter().any(|s| s.contains("/tmp/one")));
-        assert!(c.iter().any(|p| p.ends_with(Path::new(".volta/bin/codex"))));
-        assert!(c.iter().any(|p| p.ends_with(Path::new(".bun/bin/codex"))));
+        assert!(c
+            .iter()
+            .any(|p| p.ends_with(Path::new(&format!(".volta/bin/{bin}")))));
+        assert!(c
+            .iter()
+            .any(|p| p.ends_with(Path::new(&format!(".bun/bin/{bin}")))));
     }
 }
