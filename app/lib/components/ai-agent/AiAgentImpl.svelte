@@ -43,6 +43,7 @@
     type AiPromptAsset,
   } from '$lib/components/ai-shared/persistence';
   import { aiAgentSessions, type ApplyChangesCard as ApplyChangesCardState, type Turn } from './sessions.svelte';
+  import { assistantParts } from './render-parts';
   import { commands } from '$lib/ipc/commands';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import type { ClaudeStreamEvent } from './host';
@@ -88,6 +89,9 @@
   let activeId = $derived(aiAgentSessions.activeId);
   let turns = $derived<Turn[]>(activeSession?.turns ?? []);
   let activeProvider = $derived(activeSession?.providerId ?? aiAgentSettings.value.providerId);
+  // `isLive` = the session's CLI process is alive/persisted (drives the header
+  // "● live" badge). For persistent providers (Claude) the process is spawned
+  // once and kept alive across many turns, so this stays true between turns.
   let isLive = $derived(
     activeSession
       ? (runtimeFor(activeSession.providerId).capabilities.persistent
@@ -95,6 +99,12 @@
           : turnInFlight.has(activeSession.id))
       : false,
   );
+  // `busy` = a turn is currently streaming (drives the composer Send/Stop
+  // toggle). Distinct from `isLive`: a persistent CLI stays live *between*
+  // turns, but the composer must return to "Send" once a turn's `result`
+  // arrives so the user can send the next message. Keyed on `turnInFlight`,
+  // which is now set for both one-shot (Codex) and persistent (Claude) turns.
+  let busy = $derived(activeSession ? turnInFlight.has(activeSession.id) : false);
   // Provider-aware CLI detection + configured-path fallback for the warning row.
   let detected = $derived(activeProvider === 'codex' ? codexDetected : claudeDetected);
   let effectiveCliPath = $derived(
@@ -173,7 +183,10 @@
           textChanged = true;
         }
       } else if (b.type === 'tool_use') {
-        cards.push({ kind: 'tool', name: b.name, input: b.input });
+        // Stamp the current text length so the renderer can place this card
+        // right after the text that preceded it (and before any text streamed
+        // afterward).
+        cards.push({ kind: 'tool', name: b.name, input: b.input, textOffset: text.length });
       }
     }
     base[idx] = { ...cur, text: textChanged ? text : cur.text, cards };
@@ -186,7 +199,7 @@
     if (!s) return;
     const { idx, turns: base } = ensureAssistantTurn(s.turns);
     const cur = base[idx] as Extract<Turn, { role: 'assistant' }>;
-    base[idx] = { ...cur, cards: [...cur.cards, { kind: 'tool-result', content }] };
+    base[idx] = { ...cur, cards: [...cur.cards, { kind: 'tool-result', content, textOffset: cur.text.length }] };
     aiAgentSessions.updateTurns(sessionId, base);
     scrollDown();
   }
@@ -204,7 +217,7 @@
     const finalText = text && text.length > cur.text.length ? text : cur.text;
     const changeSets = parseChangeSetsFromText(finalText, { sourceSessionId: sessionId });
     const cards = changeSets.length > 0
-      ? [...cur.cards, ...changeSets.map((changeSet) => ({ kind: 'apply-changes' as const, changeSet }))]
+      ? [...cur.cards, ...changeSets.map((changeSet) => ({ kind: 'apply-changes' as const, changeSet, textOffset: finalText.length }))]
       : cur.cards;
     base[idx] = { ...cur, text: finalText, cards, cost, usage: usage ?? cur.usage };
     aiAgentSessions.updateTurns(sessionId, base, cost);
@@ -390,9 +403,9 @@
       const fn = liveSessions.get(s.sessionUuid);
       fn?.();
       liveSessions.delete(s.sessionUuid);
-    } else {
-      setTurnInFlight(s.id, false);
     }
+    // Clear in-flight for both providers so the composer flips back to Send.
+    setTurnInFlight(s.id, false);
     await runtime.cancel(s.sessionUuid).catch(() => {});
     aiAgentSessions.markInterrupted(s.id);
     await persistProjectSessions();
@@ -494,8 +507,10 @@
     if (ev.kind === 'exit') {
       if (persistent) {
         // The CLI for this session exited. Drop the listener; the next
-        // send() will re-spawn (resuming) with the same sessionUuid.
+        // send() will re-spawn (resuming) with the same sessionUuid. Clear any
+        // in-flight turn so the composer doesn't stay stuck on Stop.
         if (s) dropLive(s.sessionUuid);
+        if (turnInFlight.has(sessionId)) setTurnInFlight(sessionId, false);
       } else {
         // One-shot turn ended. If it never reported turn.completed, the turn
         // was interrupted (crash / kill); otherwise this is a no-op.
@@ -505,7 +520,8 @@
     }
     if (ev.kind === 'error') {
       error = ev.message;
-      if (!persistent) finishCodexTurn(sessionId, { interrupted: true });
+      if (persistent) setTurnInFlight(sessionId, false);
+      else finishCodexTurn(sessionId, { interrupted: true });
       return;
     }
     if (ev.kind === 'stdout-line') {
@@ -527,8 +543,11 @@
         case 'result':
           if (persistent) markClaudeStarted(sessionId);
           applyResult(sessionId, parsed.text, parsed.cost, parsed.usage);
-          // Codex `turn.completed` finalizes the one-shot turn cleanly.
-          if (!persistent) finishCodexTurn(sessionId);
+          // The turn finished streaming — clear in-flight so the composer
+          // returns to Send. Codex routes through finishCodexTurn (which also
+          // handles its interrupted/exit bookkeeping); Claude clears directly.
+          if (persistent) setTurnInFlight(sessionId, false);
+          else finishCodexTurn(sessionId);
           break;
         case 'system':
           // The init frame means the CLI persisted this session id.
@@ -633,6 +652,14 @@
     }
 
     // ── Persistent provider (Claude): spawn-once, send-many over stdin. ──
+    // Mark the turn in-flight so the composer shows Stop and blocks re-sends
+    // until the streamed `result` (or an exit/error) finalizes it. The CLI
+    // process itself stays alive between turns — that's `isLive`, not `busy`.
+    if (turnInFlight.has(sessionId)) {
+      error = 'A turn is already running for this session.';
+      return;
+    }
+    setTurnInFlight(sessionId, true);
     try {
       const uuid = await ensureLive(sessionId);
       if (!uuid) throw new Error('Failed to spawn Claude CLI');
@@ -649,6 +676,10 @@
         await runtime.send(fresh, outbound);
       }
     } catch (e) {
+      // The send never got off the ground — clear the in-flight flag so the
+      // composer isn't stuck on Stop. A successful send leaves it set until
+      // the `result` event clears it.
+      setTurnInFlight(sessionId, false);
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -991,29 +1022,31 @@
                   <div>{plan}</div>
                 </div>
               {/if}
-              {#if assistantBody(turn.text)}
-                <div class="text">{assistantBody(turn.text)}</div>
-              {/if}
             {/if}
-            {#each turn.cards as c, ci (ci)}
-              {#if c.kind === 'tool'}
+            {#each assistantParts(turn) as part, pi (pi)}
+              {#if part.kind === 'text'}
+                {#if assistantBody(part.text)}
+                  <div class="text">{assistantBody(part.text)}</div>
+                {/if}
+              {:else if part.card.kind === 'tool'}
                 <details class="card tool">
-                  <summary><span class="summary-icon"><IconTool size={12} /></span> {c.name}</summary>
-                  <pre>{summarizeInput(c.input)}</pre>
+                  <summary><span class="summary-icon"><IconTool size={12} /></span> {part.card.name}</summary>
+                  <pre>{summarizeInput(part.card.input)}</pre>
                 </details>
-              {:else if c.kind === 'tool-result'}
+              {:else if part.card.kind === 'tool-result'}
                 <details class="card tool-result">
                   <summary><span class="summary-icon"><IconArrowInsert size={12} /></span> result</summary>
-                  <pre>{c.content.length > 4000 ? c.content.slice(0, 4000) + '\n…' : c.content}</pre>
+                  <pre>{part.card.content.length > 4000 ? part.card.content.slice(0, 4000) + '\n…' : part.card.content}</pre>
                 </details>
-              {:else if c.kind === 'apply-changes'}
+              {:else if part.card.kind === 'apply-changes'}
+                {@const changeSet = part.card.changeSet}
                 <ApplyChangesCard
-                  changeSet={c.changeSet}
-                  status={c.status}
-                  onAcceptFile={(file) => acceptApplyFile(c.changeSet.id, file)}
-                  onRejectFile={(file) => rejectApplyFile(c.changeSet.id, file)}
-                  onAcceptAll={() => acceptApplyAll(c.changeSet.id)}
-                  onRejectAll={() => rejectApplyAll(c.changeSet.id)}
+                  {changeSet}
+                  status={part.card.status}
+                  onAcceptFile={(file) => acceptApplyFile(changeSet.id, file)}
+                  onRejectFile={(file) => rejectApplyFile(changeSet.id, file)}
+                  onAcceptAll={() => acceptApplyAll(changeSet.id)}
+                  onRejectAll={() => rejectApplyAll(changeSet.id)}
                 />
               {/if}
             {/each}
@@ -1051,7 +1084,7 @@
       mentionCandidates={mentionCandidates}
       commandVisible={commandMenuVisible}
       commandQuery={commandQuery}
-      busy={isLive}
+      busy={busy}
       canSend={Boolean(input.trim())}
       onInput={(value) => (input = value)}
       onSend={send}

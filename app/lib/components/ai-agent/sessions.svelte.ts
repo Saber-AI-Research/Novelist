@@ -22,12 +22,20 @@ function killBothBridges(sessionUuid: string): void {
   void killCodexSession(sessionUuid).catch(() => {});
 }
 
-export type ToolCard = { kind: 'tool'; name: string; input: unknown };
-export type ToolResultCard = { kind: 'tool-result'; content: string; status?: 'pending' | 'success' | 'error' | 'cancelled' };
+/**
+ * `textOffset` records the length of the turn's accumulated `text` at the
+ * moment the card was emitted, so the renderer can interleave assistant text
+ * and cards in true chronological order (text before a tool call stays above
+ * it; text streamed after stays below). Older persisted turns lack it — the
+ * renderer falls back to text-then-cards for those.
+ */
+export type ToolCard = { kind: 'tool'; name: string; input: unknown; textOffset?: number };
+export type ToolResultCard = { kind: 'tool-result'; content: string; status?: 'pending' | 'success' | 'error' | 'cancelled'; textOffset?: number };
 export type ApplyChangesCard = {
   kind: 'apply-changes';
   changeSet: AiChangeSet;
   status?: 'pending' | 'accepted' | 'rejected' | 'conflict';
+  textOffset?: number;
 };
 export type Card = ToolCard | ToolResultCard | ApplyChangesCard;
 

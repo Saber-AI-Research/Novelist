@@ -36,18 +36,38 @@ export function buildChatRequest(args: ChatRequestArgs): {
   };
 }
 
+/** A single streamed delta: answer text and/or reasoning ("thinking") text. */
+export type ChatDelta = { content?: string; reasoning?: string };
+
 /**
- * Parse a single SSE `data:` payload from a chat completions stream and
- * return the text fragment (if any) carried in `choices[0].delta.content`.
+ * Parse a single SSE `data:` payload from a chat completions stream into its
+ * answer text and reasoning text. Reasoning models stream the chain-of-thought
+ * separately from the answer — DeepSeek uses `delta.reasoning_content`,
+ * OpenRouter uses `delta.reasoning` — often leaving `delta.content` null until
+ * the answer phase. Returns `null` only when neither field carries text.
  */
-export function parseChatDelta(jsonChunk: string): string | null {
+export function parseChatChunk(jsonChunk: string): ChatDelta | null {
   if (!jsonChunk) return null;
-  let parsed: { choices?: Array<{ delta?: { content?: string } }> };
+  let parsed: {
+    choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+  };
   try {
     parsed = JSON.parse(jsonChunk);
   } catch {
     return null;
   }
-  const delta = parsed.choices?.[0]?.delta?.content;
-  return typeof delta === 'string' ? delta : null;
+  const delta = parsed.choices?.[0]?.delta;
+  if (!delta) return null;
+  const out: ChatDelta = {};
+  if (typeof delta.content === 'string' && delta.content) out.content = delta.content;
+  const reasoning = delta.reasoning_content ?? delta.reasoning;
+  if (typeof reasoning === 'string' && reasoning) out.reasoning = reasoning;
+  return out.content === undefined && out.reasoning === undefined ? null : out;
+}
+
+/**
+ * Back-compat helper: the answer-text fragment only (ignores reasoning).
+ */
+export function parseChatDelta(jsonChunk: string): string | null {
+  return parseChatChunk(jsonChunk)?.content ?? null;
 }

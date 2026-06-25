@@ -17,6 +17,11 @@ import type { SuggestionStatus } from '$lib/components/ai-shared/edit-suggestion
 export type DisplayMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /**
+   * Chain-of-thought streamed by reasoning models (DeepSeek `reasoning_content`,
+   * OpenRouter `reasoning`). Rendered in a collapsible block and persisted.
+   */
+  reasoning?: string;
   /** Accept/reject state of parsed ```novelist-edit suggestions, by id. */
   suggestionStatus?: Record<string, SuggestionStatus>;
 };

@@ -29,6 +29,16 @@ describe('[contract] AI shared context parsing', () => {
     ]);
   });
 
+  it('parses a contiguous @file: token but drops one with a stray space', () => {
+    // Composer inserts `@file:` without a trailing space so the user types the
+    // path contiguously; this is the contract the menu insertion relies on.
+    expect(parseMentions('See @file:book/第二章.md please')).toEqual([
+      { kind: 'project-file', raw: '@file:book/第二章.md', query: 'book/第二章.md' },
+    ]);
+    // A space after the colon (the old trailing-space bug) yields no mention.
+    expect(parseMentions('See @file: book/第二章.md')).toEqual([]);
+  });
+
   it('strips mention and skill tokens from user text', () => {
     const text = 'Please /keep @current $plot-doctor tighten this';
     expect(stripMentionTokens(text)).toBe('Please /keep $plot-doctor tighten this');
