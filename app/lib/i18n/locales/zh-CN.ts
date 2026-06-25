@@ -7,6 +7,7 @@ export const zhCN: TranslationMap = {
   'app.openFolder': '打开文件夹开始写作',
   'app.openFile': '在此面板打开文件',
   'pane.drop.openHere': '在此面板打开',
+  'pane.drop.splitLeft': '左侧分屏打开',
   'pane.drop.splitRight': '右侧分屏打开',
 
   // --- Welcome ---

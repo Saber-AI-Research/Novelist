@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   // First-paint critical shell: keep these static.
   import Sidebar from '$lib/components/Sidebar.svelte';
-  import TabBar from '$lib/components/TabBar.svelte';
+  import EditorPane, { type PaneMetrics } from '$lib/components/EditorPane.svelte';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import Welcome from '$lib/components/Welcome.svelte';
   import ErrorBoundary from '$lib/components/ErrorBoundary.svelte';
@@ -30,9 +30,6 @@
   const loadPluginPanel = () => import('$lib/components/PluginPanel.svelte');
   const loadAiTalkPanel = () => import('$lib/components/AiTalkPanel.svelte');
   const loadAiAgentPanel = () => import('$lib/components/AiAgentPanel.svelte');
-  const loadPluginFileEditor = () => import('$lib/components/PluginFileEditor.svelte');
-  const loadCanvasFileEditor = () => import('$lib/components/CanvasFileEditor.svelte');
-  const loadKanbanFileEditor = () => import('$lib/components/KanbanFileEditor.svelte');
   const loadUpdateProgressModal = () => import('$lib/components/UpdateProgressModal.svelte');
   const loadUpdateAvailableBanner = () => import('$lib/components/UpdateAvailableBanner.svelte');
   import { updaterState } from '$lib/stores/updater-state.svelte';
@@ -59,36 +56,52 @@
   import { wireMenuEvents } from '$lib/composables/menu-events.svelte';
   import { useMenuSync } from '$lib/composables/menu-sync.svelte';
   import { useAppLifecycle } from '$lib/composables/app-lifecycle.svelte';
+  import { initScrollAutoHide } from '$lib/actions/auto-hide-scroll';
   import { unsavedPromptState, resolveUnsavedPrompt } from '$lib/composables/unsaved-prompt.svelte';
   import { handleKeepMine, handleLoadTheirs } from '$lib/conflict-handlers';
   import { createKeydownHandler } from '$lib/composables/app-shortcuts.svelte';
   import { createCloseTab } from '$lib/composables/close-tab.svelte';
   import { createScratchFile, createNewFileInProject, executeTemplate, requestSaveCurrentAsTemplate } from '$lib/services/new-file';
-  import { SIDEBAR_PATH_MIME, hasSidebarPath, openPathInPane, openPathSplitRight } from '$lib/services/pane-drop';
   import { shortcutsStore, initShortcutsI18n, formatShortcut } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
   import type { HeadingItem } from '$lib/editor/outline';
   import type { EditorView } from '@codemirror/view';
 
-  // Per-pane editor state for status bar & outline navigation
-  let pane1WordCount = $state(0);
-  let pane1CursorLine = $state(1);
-  let pane1CursorCol = $state(1);
-  let pane1Headings = $state<HeadingItem[]>([]);
-  let pane1EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void; saveCurrentFile: () => Promise<void> } | undefined>(undefined);
+  // Per-pane editor metrics, keyed by pane id. Each EditorPane pushes its
+  // word-count / cursor / headings / editor-ref up via onmetrics; the status
+  // bar and outline read whichever pane is active.
+  //
+  // `handlePaneMetrics` is called FROM an EditorPane $effect, so we must read
+  // the previous `paneMetrics` untracked — otherwise that effect would gain a
+  // dependency on the very state it writes and loop forever.
+  let paneMetrics = $state<Record<string, PaneMetrics>>({});
+  function handlePaneMetrics(paneId: string, m: PaneMetrics) {
+    paneMetrics = { ...untrack(() => paneMetrics), [paneId]: m };
+  }
+  // Drop metrics for panes that no longer exist (closed columns). Depends only
+  // on `panes`; the paneMetrics read/write is untracked so this never self-loops.
+  $effect(() => {
+    const ids = new Set(tabsStore.panes.map(p => p.id));
+    untrack(() => {
+      const stale = Object.keys(paneMetrics).filter(id => !ids.has(id));
+      if (stale.length) {
+        const next = { ...paneMetrics };
+        for (const id of stale) delete next[id];
+        paneMetrics = next;
+      }
+    });
+  });
 
-  let pane2WordCount = $state(0);
-  let pane2CursorLine = $state(1);
-  let pane2CursorCol = $state(1);
-  let pane2Headings = $state<HeadingItem[]>([]);
-  let pane2EditorRef = $state<{ scrollToPosition: (from: number) => void; jumpToAbsoluteLine: (line: number) => void; renameCurrentFile: () => void; saveCurrentFile: () => Promise<void> } | undefined>(undefined);
+  // Zen mode renders a single (pane-1) editor; keep its word count locally.
+  let zenWordCount = $state(0);
 
-  // Status bar reflects active pane
-  let wordCount = $derived(tabsStore.activePaneId === 'pane-2' ? pane2WordCount : pane1WordCount);
-  let cursorLine = $derived(tabsStore.activePaneId === 'pane-2' ? pane2CursorLine : pane1CursorLine);
-  let cursorCol = $derived(tabsStore.activePaneId === 'pane-2' ? pane2CursorCol : pane1CursorCol);
-  let headings = $derived(tabsStore.activePaneId === 'pane-2' ? pane2Headings : pane1Headings);
-  let activeEditorRef = $derived(tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef);
+  // Status bar reflects the active pane.
+  let activeMetrics = $derived(paneMetrics[tabsStore.activePaneId]);
+  let wordCount = $derived(activeMetrics?.wordCount ?? 0);
+  let cursorLine = $derived(activeMetrics?.cursorLine ?? 1);
+  let cursorCol = $derived(activeMetrics?.cursorCol ?? 1);
+  let headings = $derived(activeMetrics?.headings ?? []);
+  let activeEditorRef = $derived(activeMetrics?.editorRef);
 
 let paletteOpen = $state(false);
   let movePaletteOpen = $state(false);
@@ -106,15 +119,47 @@ let paletteOpen = $state(false);
   let isDraggingRightPanel = $state(false);
   let splitContainerRef: HTMLDivElement | undefined = $state(undefined);
 
-  const startSplitDrag = makeResizeHandler({
-    shouldStart: () => tabsStore.splitActive,
-    setDragging: (v) => { isDraggingSplit = v; },
-    onMove: (ev) => {
-      if (!splitContainerRef) return;
-      const rect = splitContainerRef.getBoundingClientRect();
-      uiStore.setSplitRatio((ev.clientX - rect.left) / rect.width);
-    },
-  });
+  // Column flex grow factor for pane `i`. The 2-pane case keeps using the
+  // persisted `splitRatio`; N>2 columns use session-only weights in the store.
+  function paneFlex(i: number): number {
+    if (tabsStore.panes.length === 2) {
+      return i === 0 ? uiStore.splitRatio : 1 - uiStore.splitRatio;
+    }
+    return tabsStore.paneSizes[i] ?? 1;
+  }
+
+  // Divider `i` sits between columns i-1 and i and redistributes width between
+  // them. Returns a fresh mousedown handler bound to that divider index.
+  function startDividerDrag(i: number) {
+    return makeResizeHandler({
+      shouldStart: () => tabsStore.panes.length > 1,
+      setDragging: (v) => { isDraggingSplit = v; },
+      init: () => ({
+        rect: splitContainerRef!.getBoundingClientRect(),
+        sizes: [...tabsStore.paneSizes],
+      }),
+      onMove: (ev, s) => {
+        if (!splitContainerRef) return;
+        const px = (ev.clientX - s.rect.left) / s.rect.width;
+        if (tabsStore.panes.length === 2) {
+          uiStore.setSplitRatio(px);
+          return;
+        }
+        const left = i - 1, right = i;
+        const total = s.sizes.reduce((a, b) => a + b, 0) || 1;
+        const beforeFrac = s.sizes.slice(0, left).reduce((a, b) => a + b, 0) / total;
+        const pair = s.sizes[left] + s.sizes[right];
+        const pairFrac = pair / total;
+        const MINF = 0.1;
+        let leftFrac = Math.max(MINF, Math.min(pairFrac - MINF, px - beforeFrac));
+        const leftWeight = (leftFrac / pairFrac) * pair;
+        const next = [...s.sizes];
+        next[left] = leftWeight;
+        next[right] = pair - leftWeight;
+        tabsStore.paneSizes = next;
+      },
+    });
+  }
 
   const startLeftSidebarDrag = makeResizeHandler({
     setDragging: (v) => { isDraggingLeftSidebar = v; },
@@ -131,37 +176,11 @@ let paletteOpen = $state(false);
 
   let isDraggingAny = $derived(isDraggingSplit || isDraggingLeftSidebar || isDraggingRightPanel);
 
-  // Pane drop overlay (sidebar file → pane / split). The hovered zone drives
-  // the visible drop indicator. 'none' = overlay rendered but no zone hot.
-  type DropZone = 'none' | 'pane-1' | 'pane-2' | 'split-right';
-  let activeDropZone = $state<DropZone>('none');
-
-  function paneDragOver(e: DragEvent, zone: 'pane-1' | 'pane-2' | 'split-right') {
-    if (!hasSidebarPath(e.dataTransfer?.types)) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    activeDropZone = zone;
-  }
-
-  function paneDragLeave(zone: 'pane-1' | 'pane-2' | 'split-right') {
-    // Only clear if the zone we're leaving is still the active one — otherwise
-    // a sibling's dragenter may have already taken over.
-    if (activeDropZone === zone) activeDropZone = 'none';
-  }
-
-  async function paneDrop(e: DragEvent, zone: 'pane-1' | 'pane-2' | 'split-right') {
-    if (!hasSidebarPath(e.dataTransfer?.types)) return;
-    e.preventDefault();
-    activeDropZone = 'none';
-    const path = e.dataTransfer?.getData(SIDEBAR_PATH_MIME);
-    if (!path) return;
-    if (zone === 'split-right') await openPathSplitRight(path);
-    else await openPathInPane(zone, path);
-  }
+  // Per-pane edge drop zones live in EditorPane.svelte now.
 
   function clearSidebarDragState() {
     uiStore.sidebarFileDragActive = false;
-    activeDropZone = 'none';
+    uiStore.tabDragActive = false;
   }
 
   // Whether any right panel content (not just toggle tabs) is visible
@@ -375,7 +394,7 @@ let paletteOpen = $state(false);
   }
 
   function handleGoToLine() {
-    const ref = tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef;
+    const ref = activeEditorRef;
     promptGoToLine(t('gotoline.prompt'), (line) => ref?.jumpToAbsoluteLine(line));
   }
 
@@ -383,6 +402,8 @@ let paletteOpen = $state(false);
     startupMark('frontend.app.onMount.begin');
     // Wire up i18n for shortcuts store (needs Svelte compile context)
     initShortcutsI18n(t);
+    // Reveal overlay scrollbars while actively scrolling (hover reveal is CSS).
+    const unlistenScrollAutoHide = initScrollAutoHide();
     // Kick off global settings load so reactive consumers see real values
     // as soon as IPC answers. Safe if no project is open — falls back to
     // ~/.novelist/settings.json defaults.
@@ -464,7 +485,7 @@ let paletteOpen = $state(false);
         onConflict: (path) => { conflictFilePath = path; },
         onRecentProjectsUpdated: (list) => { recentProjects = list; },
         onGotoLine: (line) => {
-          const ref = tabsStore.activePaneId === 'pane-2' ? pane2EditorRef : pane1EditorRef;
+          const ref = activeEditorRef;
           ref?.jumpToAbsoluteLine(line);
         },
         onOpenProjectInThisWindow: (dirPath) => openProjectFromPath(dirPath),
@@ -495,6 +516,7 @@ let paletteOpen = $state(false);
       unlistenAppEvents?.();
       unlistenLifecycle();
       unlistenMenu?.();
+      unlistenScrollAutoHide();
     };
   });
 </script>
@@ -566,11 +588,11 @@ let paletteOpen = $state(false);
   <Welcome onOpenFile={handleOpenFile} onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} onNewFile={handleNewScratchFile} onNewProject={() => { newProjectDialogOpen = true; }} />
 {:else if uiStore.zenMode}
   {#await loadZenMode() then { default: ZenMode }}
-    <ZenMode {wordCount}>
+    <ZenMode wordCount={zenWordCount}>
       <div class="flex-1 min-h-0 overflow-hidden w-full">
         {#if tabsStore.getPaneActiveTab('pane-1')}
           {#await loadEditor() then { default: Editor }}
-            <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
+            <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={zenWordCount} /></ErrorBoundary>
           {/await}
         {:else}
           <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-secondary);">
@@ -632,157 +654,26 @@ let paletteOpen = $state(false);
 
     <!-- Main editor column (contains split panes + status bar) -->
     <div data-testid="editor-region" class="flex flex-col flex-1 min-w-0 relative">
-      <!-- Panes row -->
+      <!-- Panes row: N resizable editor columns, dividers between them. -->
       <div class="flex flex-1 min-h-0" bind:this={splitContainerRef} style="{isDraggingSplit ? 'cursor: col-resize; user-select: none;' : ''}">
-
-        <!-- Pane 1 -->
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="flex flex-col min-w-0"
-          style="
-            flex: {tabsStore.splitActive ? `0 0 ${uiStore.splitRatio * 100}%` : '1 1 0%'};
-            {tabsStore.splitActive && tabsStore.activePaneId === 'pane-1' ? 'box-shadow: inset 0 2px 0 0 var(--novelist-accent);' : ''}
-          "
-          onclick={() => tabsStore.setActivePane('pane-1')}
-        >
-          <TabBar paneId="pane-1" />
-
-          <div class="flex-1 min-h-0 overflow-hidden relative">
-            {#if tabsStore.getPaneActiveTab('pane-1')}
-              {@const fileName1 = tabsStore.getPaneActiveTab('pane-1')?.fileName ?? ''}
-              {@const lower1 = fileName1.toLowerCase()}
-              {#if lower1.endsWith('.canvas')}
-                {#await loadCanvasFileEditor() then { default: CanvasFileEditor }}
-                  <ErrorBoundary><CanvasFileEditor paneId="pane-1" /></ErrorBoundary>
-                {/await}
-              {:else if lower1.endsWith('.kanban')}
-                {#await loadKanbanFileEditor() then { default: KanbanFileEditor }}
-                  <ErrorBoundary><KanbanFileEditor paneId="pane-1" /></ErrorBoundary>
-                {/await}
-              {:else}
-                {@const fileHandler1 = extensionStore.getFileHandler(fileName1)}
-                {#if fileHandler1}
-                  {#await loadPluginFileEditor() then { default: PluginFileEditor }}
-                    <ErrorBoundary><PluginFileEditor extension={fileHandler1} paneId="pane-1" /></ErrorBoundary>
-                  {/await}
-                {:else}
-                  {#await loadEditor() then { default: Editor }}
-                    <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={pane1WordCount} bind:cursorLine={pane1CursorLine} bind:cursorCol={pane1CursorCol} bind:headings={pane1Headings} bind:this={pane1EditorRef} /></ErrorBoundary>
-                  {/await}
-                {/if}
-              {/if}
-            {:else}
-              <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
-                <div class="text-center">
-                  <p style="font-size: 1.3rem; font-weight: 500; margin-bottom: 6px; color: var(--novelist-text-secondary);">{t('app.name')}</p>
-                  <p style="font-size: 0.95rem;">{t('app.openFolder')}</p>
-                </div>
-              </div>
-            {/if}
-
-            <!-- Sidebar-file drop overlay (open in pane-1 / split right) -->
-            {#if uiStore.sidebarFileDragActive}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div
-                class="pane-drop-zone pane-drop-main"
-                class:pane-drop-active={activeDropZone === 'pane-1'}
-                style="right: {tabsStore.splitActive ? '0' : '30%'};"
-                ondragover={(e) => paneDragOver(e, 'pane-1')}
-                ondragleave={() => paneDragLeave('pane-1')}
-                ondrop={(e) => paneDrop(e, 'pane-1')}
-              >
-                <span class="pane-drop-label">{t('pane.drop.openHere')}</span>
-              </div>
-              {#if !tabsStore.splitActive}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="pane-drop-zone pane-drop-split-right"
-                  class:pane-drop-active={activeDropZone === 'split-right'}
-                  ondragover={(e) => paneDragOver(e, 'split-right')}
-                  ondragleave={() => paneDragLeave('split-right')}
-                  ondrop={(e) => paneDrop(e, 'split-right')}
-                >
-                  <span class="pane-drop-label">{t('pane.drop.splitRight')}</span>
-                </div>
-              {/if}
-            {/if}
+        {#each tabsStore.panes as pane, i (pane.id)}
+          {#if i > 0}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="split-divider" onmousedown={startDividerDrag(i)}></div>
+          {/if}
+          <div class="flex flex-col min-w-0" style="flex: {paneFlex(i)} 1 0%;">
+            <EditorPane
+              paneId={pane.id}
+              index={i}
+              isPrimary={i === 0}
+              isActive={tabsStore.activePaneId === pane.id}
+              onmetrics={handlePaneMetrics}
+            />
           </div>
-        </div>
-
-        <!-- Resizable split divider -->
-        {#if tabsStore.splitActive}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="split-divider"
-            onmousedown={startSplitDrag}
-          ></div>
-        {/if}
-
-        <!-- Pane 2 (shown when split is active) -->
-        {#if tabsStore.splitActive}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="flex flex-col min-w-0"
-            style="flex: 0 0 {(1 - uiStore.splitRatio) * 100}%; {tabsStore.activePaneId === 'pane-2' ? 'box-shadow: inset 0 2px 0 0 var(--novelist-accent);' : ''}"
-            onclick={() => tabsStore.setActivePane('pane-2')}
-          >
-            <TabBar paneId="pane-2" />
-
-            <div class="flex-1 min-h-0 overflow-hidden relative">
-              {#if tabsStore.getPaneActiveTab('pane-2')}
-                {@const fileName2 = tabsStore.getPaneActiveTab('pane-2')?.fileName ?? ''}
-                {@const lower2 = fileName2.toLowerCase()}
-                {#if lower2.endsWith('.canvas')}
-                  {#await loadCanvasFileEditor() then { default: CanvasFileEditor }}
-                    <ErrorBoundary><CanvasFileEditor paneId="pane-2" /></ErrorBoundary>
-                  {/await}
-                {:else if lower2.endsWith('.kanban')}
-                  {#await loadKanbanFileEditor() then { default: KanbanFileEditor }}
-                    <ErrorBoundary><KanbanFileEditor paneId="pane-2" /></ErrorBoundary>
-                  {/await}
-                {:else}
-                  {@const fileHandler2 = extensionStore.getFileHandler(fileName2)}
-                  {#if fileHandler2}
-                    {#await loadPluginFileEditor() then { default: PluginFileEditor }}
-                      <ErrorBoundary><PluginFileEditor extension={fileHandler2} paneId="pane-2" /></ErrorBoundary>
-                    {/await}
-                  {:else}
-                    {#await loadEditor() then { default: Editor }}
-                      <ErrorBoundary><Editor paneId="pane-2" bind:wordCount={pane2WordCount} bind:cursorLine={pane2CursorLine} bind:cursorCol={pane2CursorCol} bind:headings={pane2Headings} bind:this={pane2EditorRef} /></ErrorBoundary>
-                    {/await}
-                  {/if}
-                {/if}
-              {:else}
-                <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-tertiary, var(--novelist-text-secondary));">
-                  <div class="text-center">
-                    <p style="font-size: 0.95rem;">{t('app.openFile')}</p>
-                  </div>
-                </div>
-              {/if}
-
-              <!-- Sidebar-file drop overlay (open in pane-2) -->
-              {#if uiStore.sidebarFileDragActive}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="pane-drop-zone pane-drop-main"
-                  class:pane-drop-active={activeDropZone === 'pane-2'}
-                  style="right: 0;"
-                  ondragover={(e) => paneDragOver(e, 'pane-2')}
-                  ondragleave={() => paneDragLeave('pane-2')}
-                  ondrop={(e) => paneDrop(e, 'pane-2')}
-                >
-                  <span class="pane-drop-label">{t('pane.drop.openHere')}</span>
-                </div>
-              {/if}
-            </div>
-          </div>
-        {/if}
-
+        {/each}
       </div>
 
-      <!-- Shared status bar spanning both panes -->
+      <!-- Shared status bar spanning all panes -->
       <StatusBar {wordCount} {cursorLine} {cursorCol} />
     </div>
 
@@ -1061,7 +952,7 @@ let paletteOpen = $state(false);
     color: color-mix(in srgb, var(--novelist-accent) 45%, var(--novelist-text-tertiary, var(--novelist-text-secondary)));
     cursor: pointer;
     transform: translateY(-50%);
-    transition: color 120ms, border-color 120ms, background 120ms, box-shadow 120ms;
+    transition: color 120ms, border-color 120ms, background 120ms, box-shadow 120ms, opacity 120ms;
   }
   .sidebar-toggle-handle svg,
   .sidebar-reopen-handle svg {
@@ -1071,6 +962,14 @@ let paletteOpen = $state(false);
   .sidebar-toggle-handle {
     right: -5px;
     border-radius: 0 5px 5px 0;
+    /* Hidden at rest; revealed when the pointer is over the sidebar or its
+       edge (or when focused via keyboard). Keeps the writing surface clean. */
+    opacity: 0;
+  }
+  [data-testid='sidebar-region']:hover + .sidebar-edge .sidebar-toggle-handle,
+  .sidebar-edge:hover .sidebar-toggle-handle,
+  .sidebar-toggle-handle:focus-visible {
+    opacity: 1;
   }
   .sidebar-reopen-handle {
     left: 0;
@@ -1091,41 +990,4 @@ let paletteOpen = $state(false);
   }
 
   /* Pane drop overlays — only rendered while a sidebar file drag is in flight. */
-  .pane-drop-zone {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 50;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    pointer-events: auto;
-    background: transparent;
-    border: 2px dashed transparent;
-    border-radius: 6px;
-    transition: background 120ms, border-color 120ms;
-  }
-  .pane-drop-split-right {
-    left: auto;
-    right: 0;
-    width: 30%;
-  }
-  .pane-drop-active {
-    background: color-mix(in srgb, var(--novelist-accent) 12%, transparent);
-    border-color: var(--novelist-accent);
-  }
-  .pane-drop-label {
-    color: var(--novelist-text-secondary);
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
-    opacity: 0;
-    transition: opacity 120ms;
-    pointer-events: none;
-  }
-  .pane-drop-active .pane-drop-label {
-    opacity: 1;
-    color: var(--novelist-accent);
-  }
-
 </style>

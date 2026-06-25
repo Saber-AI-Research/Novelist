@@ -78,6 +78,13 @@ class UiStore {
    */
   sidebarFileDragActive = $state(false);
 
+  /**
+   * True while a tab is being dragged (set in TabBar dragstart, cleared on the
+   * global window dragend). Drives the per-pane edge drop zones the same way
+   * `sidebarFileDragActive` does for sidebar files.
+   */
+  tabDragActive = $state(false);
+
   // Theme
   themeId = $state(loadThemeId());
   currentTheme = $state<Theme>(resolveTheme(loadThemeId()));

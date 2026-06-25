@@ -114,13 +114,46 @@ interface PaneState {
   activeTabId: string | null;
 }
 
+/** Max editor columns. Beyond this, drag-to-split falls back to "open here". */
+const MAX_PANES = 4;
+/** Smallest a pane column may be shrunk to (fraction of the row). */
+const MIN_PANE_WEIGHT = 0.15;
+
 class TabsStore {
   panes = $state<PaneState[]>([{ id: 'pane-1', tabs: [], activeTabId: null }]);
   activePaneId = $state('pane-1');
   splitActive = $state(false);
+  /** Flex weights, index-aligned to `panes`. Column i renders `flex: w 1 0%`. */
+  paneSizes = $state<number[]>([1]);
+  /** Monotonic counter for minting pane ids beyond pane-1/pane-2. */
+  private paneSeq = 1;
 
   get activePane(): PaneState {
     return this.panes.find(p => p.id === this.activePaneId) || this.panes[0];
+  }
+
+  /** Mint a pane id not currently in use (pane-2, pane-3, …). */
+  private nextPaneId(): string {
+    let id: string;
+    do {
+      id = `pane-${++this.paneSeq}`;
+    } while (this.panes.some(p => p.id === id));
+    return id;
+  }
+
+  /** Pad/truncate `paneSizes` to match `panes.length` (new columns get 1). */
+  private normalizePaneSizes() {
+    const next = this.panes.map((_, i) => this.paneSizes[i] ?? 1);
+    this.paneSizes = next;
+    this.splitActive = this.panes.length > 1;
+  }
+
+  /** Resize column `i`, redistributing against neighbor `i+1` (divider drag). */
+  setPaneSize(i: number, weight: number) {
+    if (i < 0 || i >= this.paneSizes.length) return;
+    const next = [...this.paneSizes];
+    next[i] = Math.max(MIN_PANE_WEIGHT, weight);
+    this.paneSizes = next;
   }
 
   get activeTab(): TabState | undefined {
@@ -136,27 +169,32 @@ class TabsStore {
 
   toggleSplit() {
     if (this.splitActive) {
-      // Merge pane-2 tabs into pane-1 (skip duplicates by filePath)
+      // Collapse to one column: merge every other pane's tabs into pane-1,
+      // skipping duplicates by filePath (cleaning up their per-tab state).
       const pane1 = this.panes[0];
-      const pane2 = this.panes.find(p => p.id === 'pane-2');
-      if (pane2) {
-        const existingPaths = new Set(pane1.tabs.map(t => t.filePath));
-        for (const tab of pane2.tabs) {
+      const existingPaths = new Set(pane1.tabs.map(t => t.filePath));
+      for (const pane of this.panes.slice(1)) {
+        for (const tab of pane.tabs) {
           if (!existingPaths.has(tab.filePath)) {
             pane1.tabs.push(tab);
+            existingPaths.add(tab.filePath);
           } else {
-            // Clean up state for the duplicate tab being discarded
+            // Mirror unregisterEditorView, plus the saved CM state.
             savedEditorStates.delete(tab.id);
             editorViews.delete(tab.id);
+            viewportModeTabs.delete(tab.id);
           }
         }
       }
       this.panes = [pane1];
       this.activePaneId = pane1.id;
-      this.splitActive = false;
+      this.normalizePaneSizes();
     } else {
+      // 2-pane convenience: append the literal `pane-2` column.
       this.panes = [...this.panes, { id: 'pane-2', tabs: [], activeTabId: null }];
-      this.splitActive = true;
+      // Seed the 2-pane sizes from the persisted ratio if available later;
+      // default to an even split here.
+      this.normalizePaneSizes();
     }
   }
 
@@ -441,7 +479,17 @@ class TabsStore {
   }
 
   /** Move a tab from its current pane to a target pane. */
+  /** Back-compat append-move (kept for existing callers/tests). */
   moveTabToPane(tabId: string, targetPaneId: string) {
+    this.moveTabToPaneAt(tabId, targetPaneId);
+  }
+
+  /**
+   * Move a tab to another pane, inserting at `insertIndex` (append if omitted).
+   * Activates it in the target, fixes the source's active tab, and removes the
+   * source pane if it ends up empty.
+   */
+  moveTabToPaneAt(tabId: string, targetPaneId: string, insertIndex?: number) {
     let sourcePane: PaneState | undefined;
     let tabIdx = -1;
     for (const pane of this.panes) {
@@ -453,8 +501,12 @@ class TabsStore {
     if (!targetPane || targetPane.id === sourcePane.id) return;
 
     const [tab] = sourcePane.tabs.splice(tabIdx, 1);
-    targetPane.tabs.push(tab);
+    const at = insertIndex === undefined
+      ? targetPane.tabs.length
+      : Math.max(0, Math.min(insertIndex, targetPane.tabs.length));
+    targetPane.tabs.splice(at, 0, tab);
     targetPane.activeTabId = tab.id;
+    this.activePaneId = targetPane.id;
 
     // Fix source pane's active tab
     if (sourcePane.activeTabId === tabId) {
@@ -462,6 +514,78 @@ class TabsStore {
         ? sourcePane.tabs[Math.min(tabIdx, sourcePane.tabs.length - 1)].id
         : null;
     }
+    this.removePaneIfEmpty(sourcePane.id);
+  }
+
+  /** Reorder a tab within its own pane to `insertIndex`. */
+  reorderTabInPane(paneId: string, tabId: string, insertIndex: number) {
+    const pane = this.panes.find(p => p.id === paneId);
+    if (!pane) return;
+    const from = pane.tabs.findIndex(t => t.id === tabId);
+    if (from === -1) return;
+    const [tab] = pane.tabs.splice(from, 1);
+    const at = Math.max(0, Math.min(insertIndex, pane.tabs.length));
+    pane.tabs.splice(at, 0, tab);
+    pane.activeTabId = tab.id;
+  }
+
+  /**
+   * Insert a new empty column at `atIndex` and return its id, or null if at the
+   * column cap. Always leaves `activePaneId` on the new pane.
+   */
+  createPane(atIndex: number): string | null {
+    if (this.panes.length >= MAX_PANES) return null;
+    const id = this.nextPaneId();
+    const at = Math.max(0, Math.min(atIndex, this.panes.length));
+    this.panes.splice(at, 0, { id, tabs: [], activeTabId: null });
+    // Mirror the splice into paneSizes so weights stay index-aligned.
+    const sizes = [...this.paneSizes];
+    sizes.splice(at, 0, 1);
+    this.paneSizes = sizes;
+    this.normalizePaneSizes();
+    this.activePaneId = id;
+    return id;
+  }
+
+  /** Create a new column at `atIndex` and move `fromTabId` into it. */
+  createPaneWithTab(atIndex: number, fromTabId: string): string | null {
+    const id = this.createPane(atIndex);
+    if (!id) return null;
+    this.moveTabToPaneAt(fromTabId, id, 0);
+    return id;
+  }
+
+  /**
+   * Remove a pane and reflow columns. Reassigns the active pane to a survivor.
+   * Never removes the last pane (resets it to the empty pane-1 shape instead).
+   */
+  removePane(paneId: string) {
+    const idx = this.panes.findIndex(p => p.id === paneId);
+    if (idx === -1) return;
+    if (this.panes.length === 1) {
+      // Keep at least one pane; just empty it.
+      this.panes = [{ id: 'pane-1', tabs: [], activeTabId: null }];
+      this.activePaneId = 'pane-1';
+      this.paneSizes = [1];
+      this.normalizePaneSizes();
+      return;
+    }
+    this.panes.splice(idx, 1);
+    const sizes = [...this.paneSizes];
+    sizes.splice(idx, 1);
+    this.paneSizes = sizes;
+    if (this.activePaneId === paneId) {
+      const neighbor = this.panes[Math.min(idx, this.panes.length - 1)];
+      this.activePaneId = neighbor.id;
+    }
+    this.normalizePaneSizes();
+  }
+
+  /** Remove a pane if it has no tabs (but never the sole remaining pane). */
+  removePaneIfEmpty(paneId: string) {
+    if (this.panes.length <= 1) return;
+    const pane = this.panes.find(p => p.id === paneId);
+    if (pane && pane.tabs.length === 0) this.removePane(paneId);
   }
 
   async closeTab(id: string) {
@@ -526,6 +650,8 @@ class TabsStore {
       if (!this.findByPath(closedFilePath)) {
         commands.unregisterOpenFile(closedFilePath).catch(() => {});
       }
+      // An emptied non-sole column collapses away (VSCode-like).
+      this.removePaneIfEmpty(pane.id);
       return;
     }
   }
@@ -658,6 +784,8 @@ class TabsStore {
     this.panes = [{ id: 'pane-1', tabs: [], activeTabId: null }];
     this.activePaneId = 'pane-1';
     this.splitActive = false;
+    this.paneSizes = [1];
+    this.paneSeq = 1;
     savedEditorStates.clear();
   }
 

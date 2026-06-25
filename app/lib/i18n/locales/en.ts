@@ -7,6 +7,7 @@ export const en: TranslationMap = {
   'app.openFolder': 'Open a folder to get started',
   'app.openFile': 'Open a file in this pane',
   'pane.drop.openHere': 'Open in this pane',
+  'pane.drop.splitLeft': 'Split left',
   'pane.drop.splitRight': 'Split right',
 
   // --- Welcome ---

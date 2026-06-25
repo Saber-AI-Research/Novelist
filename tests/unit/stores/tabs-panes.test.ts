@@ -403,3 +403,95 @@ describe('[contract] editorView registry + saved EditorState helpers', () => {
     expect(getSavedEditorState('tab-s')).toBeUndefined();
   });
 });
+
+describe('[contract] tabsStore.createPane / removePane (dynamic columns)', () => {
+  it('createPane inserts a new column at the index, activates it, and pads sizes', () => {
+    const id = tabsStore.createPane(1);
+    expect(id).toBe('pane-2');
+    expect(tabsStore.panes.map(p => p.id)).toEqual(['pane-1', 'pane-2']);
+    expect(tabsStore.paneSizes).toHaveLength(2);
+    expect(tabsStore.activePaneId).toBe('pane-2');
+    expect(tabsStore.splitActive).toBe(true);
+  });
+
+  it('caps the number of columns at 4 (returns null past the cap)', () => {
+    expect(tabsStore.createPane(1)).toBe('pane-2');
+    expect(tabsStore.createPane(2)).toBe('pane-3');
+    expect(tabsStore.createPane(3)).toBe('pane-4');
+    expect(tabsStore.createPane(4)).toBeNull();
+    expect(tabsStore.panes).toHaveLength(4);
+  });
+
+  it('removePane drops the column, reflows sizes, and reassigns the active pane to a neighbor', () => {
+    tabsStore.createPane(1); // pane-2 (active)
+    tabsStore.createPane(2); // pane-3 (active)
+    tabsStore.setActivePane('pane-2');
+    tabsStore.removePane('pane-2');
+    expect(tabsStore.panes.map(p => p.id)).toEqual(['pane-1', 'pane-3']);
+    expect(tabsStore.paneSizes).toHaveLength(2);
+    expect(tabsStore.activePaneId).toBe('pane-3');
+  });
+
+  it('removePane never removes the last column (empties it instead)', () => {
+    tabsStore.openTab('/a.md', '');
+    tabsStore.removePane('pane-1');
+    expect(tabsStore.panes).toHaveLength(1);
+    expect(tabsStore.panes[0].id).toBe('pane-1');
+  });
+
+  it('removePaneIfEmpty removes an emptied non-sole column but never the only one', () => {
+    tabsStore.createPane(1); // pane-2, empty
+    tabsStore.removePaneIfEmpty('pane-2');
+    expect(tabsStore.panes).toHaveLength(1);
+    // Sole empty pane is preserved.
+    tabsStore.removePaneIfEmpty('pane-1');
+    expect(tabsStore.panes).toHaveLength(1);
+  });
+});
+
+describe('[contract] tabsStore.moveTabToPaneAt / reorderTabInPane / createPaneWithTab', () => {
+  it('moveTabToPaneAt inserts at the given index in the target pane', () => {
+    tabsStore.openTab('/a.md', '');
+    tabsStore.openTab('/b.md', '');
+    const id = tabsStore.createPane(1)!; // pane-2
+    tabsStore.openTabInPane(id, '/c.md', '');
+    tabsStore.openTabInPane(id, '/d.md', '');
+    const aId = tabsStore.getPaneTabs('pane-1').find(t => t.filePath === '/a.md')!.id;
+
+    tabsStore.moveTabToPaneAt(aId, id, 1);
+    expect(tabsStore.getPaneTabs(id).map(t => t.filePath)).toEqual(['/c.md', '/a.md', '/d.md']);
+  });
+
+  it('moveTabToPaneAt auto-removes the source pane when it empties', () => {
+    tabsStore.openTab('/a.md', '');
+    const id = tabsStore.createPane(1)!; // pane-2
+    tabsStore.openTabInPane(id, '/b.md', '');
+    const aId = tabsStore.getPaneTabs('pane-1').find(t => t.filePath === '/a.md')!.id;
+
+    tabsStore.moveTabToPaneAt(aId, id);
+    // pane-1 emptied → removed; only the (renamed) pane survives.
+    expect(tabsStore.panes).toHaveLength(1);
+    expect(tabsStore.panes[0].tabs.map(t => t.filePath)).toEqual(['/b.md', '/a.md']);
+  });
+
+  it('reorderTabInPane moves a tab to a new index within its pane', () => {
+    tabsStore.openTab('/a.md', '');
+    tabsStore.openTab('/b.md', '');
+    tabsStore.openTab('/c.md', '');
+    const aId = tabsStore.getPaneTabs('pane-1').find(t => t.filePath === '/a.md')!.id;
+
+    tabsStore.reorderTabInPane('pane-1', aId, 2);
+    expect(tabsStore.getPaneTabs('pane-1').map(t => t.filePath)).toEqual(['/b.md', '/c.md', '/a.md']);
+  });
+
+  it('createPaneWithTab splits the dragged tab into a fresh column', () => {
+    tabsStore.openTab('/a.md', '');
+    tabsStore.openTab('/b.md', '');
+    const bId = tabsStore.getPaneTabs('pane-1').find(t => t.filePath === '/b.md')!.id;
+
+    const newId = tabsStore.createPaneWithTab(1, bId);
+    expect(newId).not.toBeNull();
+    expect(tabsStore.getPaneTabs('pane-1').map(t => t.filePath)).toEqual(['/a.md']);
+    expect(tabsStore.getPaneTabs(newId!).map(t => t.filePath)).toEqual(['/b.md']);
+  });
+});

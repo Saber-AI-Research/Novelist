@@ -222,16 +222,21 @@
   async function openInOtherPane(entry: FileNode) {
     closeContextMenu();
     if (entry.is_dir || !isTextFile(entry.name)) return;
-    // Determine the "other" pane
-    const currentPane = tabsStore.activePaneId;
-    const otherPane = currentPane === 'pane-1' ? 'pane-2' : 'pane-1';
-    // Ensure split is active
-    if (!tabsStore.splitActive) tabsStore.toggleSplit();
     const result = await commands.readFile(entry.path);
-    if (result.status === 'ok') {
-      tabsStore.openTabInPane(otherPane, entry.path, result.data);
-      await commands.registerOpenFile(entry.path);
+    if (result.status !== 'ok') return;
+    // Target the column to the right of the active one, creating it if this is
+    // still a single pane (falling back to the active pane at the column cap).
+    const panes = tabsStore.panes;
+    const activeIdx = panes.findIndex(p => p.id === tabsStore.activePaneId);
+    let targetId: string;
+    if (panes.length === 1) {
+      targetId = tabsStore.createPane(activeIdx + 1) ?? panes[0].id;
+    } else {
+      targetId = panes[Math.min(activeIdx + 1, panes.length - 1)].id;
     }
+    tabsStore.openTabInPane(targetId, entry.path, result.data);
+    tabsStore.setActivePane(targetId);
+    await commands.registerOpenFile(entry.path);
   }
 
   // --- New file inline input ---

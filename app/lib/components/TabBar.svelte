@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { uiStore } from '$lib/stores/ui.svelte';
   import { t } from '$lib/i18n';
   import EditorShareMenu from './EditorShareMenu.svelte';
   import { SIDEBAR_PATH_MIME, hasSidebarPath, openPathInPane } from '$lib/services/pane-drop';
@@ -14,6 +15,10 @@
   let effectivePaneId = $derived(paneId ?? tabsStore.activePaneId);
   let paneTabs = $derived(tabsStore.getPaneTabs(effectivePaneId));
   let paneActiveTabId = $derived(tabsStore.getPaneActiveTabId(effectivePaneId));
+
+  let barEl = $state<HTMLDivElement>();
+  // Insertion index for a tab drop (null = no tab drag over this bar).
+  let dropIndex = $state<number | null>(null);
 
   function handleTabClick(id: string) {
     tabsStore.setActivePane(effectivePaneId);
@@ -36,6 +41,23 @@
     e.dataTransfer?.setData('novelist/tab-id', id);
     e.dataTransfer?.setData('novelist/source-pane', effectivePaneId);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    uiStore.tabDragActive = true;
+  }
+
+  function handleDragEnd() {
+    uiStore.tabDragActive = false;
+    dropIndex = null;
+  }
+
+  /** Index where a drop would insert, based on cursor X vs each tab midpoint. */
+  function computeInsertIndex(clientX: number): number {
+    if (!barEl) return paneTabs.length;
+    const items = Array.from(barEl.querySelectorAll('.tab-item')) as HTMLElement[];
+    for (let i = 0; i < items.length; i++) {
+      const r = items[i].getBoundingClientRect();
+      if (clientX < r.left + r.width / 2) return i;
+    }
+    return items.length;
   }
 
   function handleDragOver(e: DragEvent) {
@@ -43,12 +65,21 @@
     if (types?.includes('novelist/tab-id') || hasSidebarPath(types)) {
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      if (types?.includes('novelist/tab-id')) dropIndex = computeInsertIndex(e.clientX);
     }
+  }
+
+  function handleDragLeave() {
+    dropIndex = null;
   }
 
   function handleDrop(e: DragEvent) {
     if (!e.dataTransfer) return;
     const types = e.dataTransfer.types;
+    const index = dropIndex ?? computeInsertIndex(e.clientX);
+    dropIndex = null;
+    uiStore.tabDragActive = false;
+
     if (hasSidebarPath(types)) {
       e.preventDefault();
       const path = e.dataTransfer.getData(SIDEBAR_PATH_MIME);
@@ -59,8 +90,15 @@
       e.preventDefault();
       const tabId = e.dataTransfer.getData('novelist/tab-id');
       const sourcePaneId = e.dataTransfer.getData('novelist/source-pane');
-      if (tabId && sourcePaneId && sourcePaneId !== effectivePaneId) {
-        tabsStore.moveTabToPane(tabId, effectivePaneId);
+      if (!tabId) return;
+      if (sourcePaneId === effectivePaneId) {
+        // Reorder within this pane. The computed index is visual (includes the
+        // dragged tab), so shift left when moving a tab rightward.
+        const from = paneTabs.findIndex(tb => tb.id === tabId);
+        if (from === -1) return;
+        tabsStore.reorderTabInPane(effectivePaneId, tabId, from < index ? index - 1 : index);
+      } else {
+        tabsStore.moveTabToPaneAt(tabId, effectivePaneId, index);
       }
     }
   }
@@ -77,20 +115,25 @@
   "
 >
 <div
+  bind:this={barEl}
   class="tab-bar flex items-center overflow-x-auto"
   data-testid="tab-bar"
   data-tauri-drag-region
   ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
   ondrop={handleDrop}
   style="flex: 1 1 auto; min-width: 0; height: 100%;"
 >
-  {#each paneTabs as tab (tab.id)}
+  {#each paneTabs as tab, i (tab.id)}
     <button
       class="tab-item group relative flex items-center h-full shrink-0 cursor-pointer"
       class:tab-active={tab.id === paneActiveTabId}
+      class:drop-before={dropIndex === i}
+      class:drop-after={dropIndex === paneTabs.length && i === paneTabs.length - 1}
       data-testid="tab-{tab.fileName}"
       draggable="true"
       ondragstart={(e) => handleDragStart(e, tab.id)}
+      ondragend={handleDragEnd}
       style="
         padding: 0 0.75rem;
         background: transparent;
@@ -181,5 +224,12 @@
   }
   .tab-active:hover {
     color: var(--novelist-text) !important;
+  }
+  /* Tab drag insertion caret. */
+  .tab-item.drop-before {
+    box-shadow: inset 2px 0 0 0 var(--novelist-accent);
+  }
+  .tab-item.drop-after {
+    box-shadow: inset -2px 0 0 0 var(--novelist-accent);
   }
 </style>

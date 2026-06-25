@@ -107,28 +107,48 @@ html, body, #app {
   }
 }
 
-/* App-owned scrollbars: keep native behavior, but replace system colors. */
+/* App-owned overlay scrollbars: thin, rounded, themed, and AUTO-HIDING.
+   Transparent at rest; the thumb fades in only while the pointer is over the
+   container (`:hover`) or while it is actively scrolling (`.is-scrolling`,
+   toggled by app/lib/actions/auto-hide-scroll.ts). The track is always
+   transparent so the bar reads as an overlay, not a reserved system gutter.
+
+   Two mechanisms because the three Tauri webviews disagree:
+   - macOS WKWebView + Linux WebKitGTK honour `::-webkit-scrollbar`.
+   - Windows WebView2 (Blink) prefers the standard `scrollbar-width` /
+     `scrollbar-color` and then IGNORES `::-webkit-scrollbar`.
+   So we set both; each platform picks the one it supports. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--novelist-scrollbar-thumb) var(--novelist-scrollbar-track);
+  scrollbar-color: transparent transparent;
 }
+*:hover,
+*.is-scrolling {
+  scrollbar-color: var(--novelist-scrollbar-thumb) transparent;
+}
+
 *::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
-  background: var(--novelist-scrollbar-track);
+  width: 8px;
+  height: 8px;
+  background: transparent;
 }
 *::-webkit-scrollbar-track {
-  background: var(--novelist-scrollbar-track);
-  border-radius: 999px;
+  background: transparent;
 }
 *::-webkit-scrollbar-thumb {
   min-width: 32px;
   min-height: 32px;
-  border: 2px solid var(--novelist-scrollbar-track);
+  border: 2px solid transparent; /* with padding-box clip → ~4px inset thumb */
   border-radius: 999px;
-  background-color: var(--novelist-scrollbar-thumb);
+  background-color: transparent; /* hidden at rest */
   background-clip: padding-box;
-  transition: background-color 120ms, border-color 120ms;
+  transition: background-color 160ms ease;
+}
+/* Reveal the thumb when the container (or any ancestor in the hover chain) is
+   hovered, or while it is actively scrolling. */
+*:hover::-webkit-scrollbar-thumb,
+*.is-scrolling::-webkit-scrollbar-thumb {
+  background-color: var(--novelist-scrollbar-thumb);
 }
 *::-webkit-scrollbar-thumb:hover {
   background-color: var(--novelist-scrollbar-thumb-hover);
@@ -137,15 +157,7 @@ html, body, #app {
   background-color: var(--novelist-scrollbar-thumb-active);
 }
 *::-webkit-scrollbar-corner {
-  background: var(--novelist-scrollbar-track);
-}
-.sidebar,
-.sidebar-files {
-  --novelist-scrollbar-track: var(--novelist-sidebar-bg);
-}
-.cm-editor,
-.cm-scroller {
-  --novelist-scrollbar-track: var(--novelist-editor-bg);
+  background: transparent;
 }
 
 /* Shared popup/context-menu styling — used by the sidebar file-tree menu,

@@ -30,4 +30,26 @@ test.describe('Split View', () => {
     // Back to one tab bar
     await expect(app.getByTestId('tab-bar')).toHaveCount(1, { timeout: 2000 });
   });
+
+  test('dragging a sidebar file to a pane edge splits into a new column', async ({ app }) => {
+    await expect(app.getByTestId('tab-bar')).toHaveCount(1);
+
+    // Low-level mouse drag: a real mousedown+move fires native dragstart (which
+    // reveals the edge drop zones), then we drop on the right edge of the
+    // editor region. dragTo() can't target a zone that only exists mid-drag.
+    const src = app.getByTestId('sidebar-file-Chapter 2.md');
+    const box = (await src.boundingBox())!;
+    const region = (await app.getByTestId('editor-region').boundingBox())!;
+
+    await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await app.mouse.down();
+    await app.mouse.move(box.x + 20, box.y + 20, { steps: 3 });
+    await app.mouse.move(region.x + region.width - 20, region.y + region.height / 2, { steps: 8 });
+    await app.waitForTimeout(150);
+    await app.mouse.up();
+
+    // A second column appeared with its own tab bar.
+    await expect(app.getByTestId('tab-bar')).toHaveCount(2, { timeout: 2000 });
+    await expect(app.getByTestId('tab-Chapter 2.md')).toBeVisible();
+  });
 });
