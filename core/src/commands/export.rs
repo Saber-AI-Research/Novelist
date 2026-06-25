@@ -2,6 +2,10 @@ use crate::error::AppError;
 use crate::services::pandoc;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-process counter so concurrent exports never share a temp filename.
+static EXPORT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize, Type)]
 pub struct PandocStatus {
@@ -69,8 +73,16 @@ pub async fn export_project(
         }
     }
 
+    // Unique per-export temp name (pid + counter) so two windows exporting at
+    // once don't read/delete each other's input or clobber a predictable path
+    // in the shared temp dir.
     let temp_dir = std::env::temp_dir();
-    let temp_input = temp_dir.join("novelist-export-input.md");
+    let seq = EXPORT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp_input = temp_dir.join(format!(
+        "novelist-export-{}-{}.md",
+        std::process::id(),
+        seq
+    ));
 
     let mut combined = String::new();
     for path in &input_files {

@@ -22,6 +22,12 @@ use crate::error::AppError;
 const REQUEST_TIMEOUT_SECS: u64 = 120;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024; // 2 MB — guards against runaway requests.
 
+/// Ceiling on the response we'll buffer from an (untrusted) endpoint. Caps the
+/// non-SSE body and a single un-delimited SSE event so a hostile or buggy
+/// server can't grow our memory without bound. 32 MB is generous for chat
+/// completions while still bounding worst-case allocation.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Payload pushed on each SSE `data:` line (for `sse = true`) or the
 /// single chunk that carries the full response body (for `sse = false`).
 #[derive(Debug, Clone, Serialize, Type)]
@@ -196,17 +202,44 @@ pub async fn ai_fetch_stream_start(
         }
 
         if !req.sse {
-            // Non-SSE path: buffer the whole body and emit a single chunk.
-            match response.text().await {
-                Ok(text) => {
-                    emit(AiStreamEvent::Chunk { data: text });
-                    emit(AiStreamEvent::Done);
+            // Non-SSE path: buffer the whole body (bounded) and emit one chunk.
+            let mut stream = response.bytes_stream();
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                let next = tokio::select! {
+                    _ = cancel.notified() => {
+                        emit(AiStreamEvent::Error { message: "cancelled".into(), status: None });
+                        return;
+                    }
+                    item = stream.next() => item,
+                };
+                match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        emit(AiStreamEvent::Error {
+                            message: format!("Failed to read body: {e}"),
+                            status: None,
+                        });
+                        return;
+                    }
+                    Some(Ok(bytes)) => {
+                        if buf.len() + bytes.len() > MAX_RESPONSE_BYTES {
+                            emit(AiStreamEvent::Error {
+                                message: format!(
+                                    "Response exceeded {MAX_RESPONSE_BYTES} bytes"
+                                ),
+                                status: None,
+                            });
+                            return;
+                        }
+                        buf.extend_from_slice(&bytes);
+                    }
                 }
-                Err(e) => emit(AiStreamEvent::Error {
-                    message: format!("Failed to read body: {e}"),
-                    status: None,
-                }),
             }
+            emit(AiStreamEvent::Chunk {
+                data: String::from_utf8_lossy(&buf).into_owned(),
+            });
+            emit(AiStreamEvent::Done);
             return;
         }
 
@@ -232,6 +265,17 @@ pub async fn ai_fetch_stream_start(
                 }
                 Some(Ok(bytes)) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    // Bound a single un-delimited event: a server that streams
+                    // forever without a blank-line separator can't OOM us.
+                    if buffer.len() > MAX_RESPONSE_BYTES {
+                        emit(AiStreamEvent::Error {
+                            message: format!(
+                                "SSE event exceeded {MAX_RESPONSE_BYTES} bytes without a delimiter"
+                            ),
+                            status: None,
+                        });
+                        return;
+                    }
                     while let Some(idx) = buffer.find("\n\n") {
                         let event_block = buffer[..idx].to_string();
                         buffer.drain(..idx + 2);

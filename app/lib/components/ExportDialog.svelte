@@ -74,7 +74,10 @@ th, td { border: 1px solid var(--novelist-border); padding: 8px 12px; text-align
 th { background: var(--novelist-bg-secondary); font-weight: 600; }
 hr { border: none; border-top: 1px solid var(--novelist-border); margin: 24px 0; }
 img { max-width: 100%; border-radius: 6px; }`;
-      const cssPath = '/tmp/novelist-export-theme.css';
+      // Resolve the OS temp dir (Windows has no /tmp) and use a unique name so
+      // concurrent exports don't clobber one another.
+      const { tempDir, join } = await import('@tauri-apps/api/path');
+      const cssPath = await join(await tempDir(), `novelist-export-theme-${Date.now()}.css`);
       await commands.writeFile(cssPath, fullCSS);
       extraArgs.push('--css', cssPath);
     }

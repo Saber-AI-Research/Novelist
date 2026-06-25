@@ -288,41 +288,50 @@ pub async fn start_file_watcher(
                 let _ = app.emit("directory-changed", &payload);
             }
 
-            // Process collected paths
+            // Phase 1: under the lock, pick out tracked, non-ignored files and
+            // snapshot their known hash. We do NOT hash on disk here — that's a
+            // blocking read that would stall this Tokio worker and serialize
+            // against register/unregister/stop while the lock is held.
             let watcher_state = app.state::<FileWatcherState>();
-            let mut guard = match watcher_state.inner.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-
-            for path in filtered_paths {
-                if !path.is_file() {
-                    continue;
-                }
-
-                if guard.ignore_set.should_ignore(&path) {
-                    continue;
-                }
-
-                let tracked = match guard.tracked_files.get(&path) {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                let new_hash = match hash_file(&path) {
-                    Ok(h) => h,
+            let candidates: Vec<(PathBuf, blake3::Hash)> = {
+                let mut guard = match watcher_state.inner.lock() {
+                    Ok(g) => g,
                     Err(_) => continue,
                 };
+                filtered_paths
+                    .into_iter()
+                    .filter(|p| p.is_file())
+                    .filter_map(|p| {
+                        if guard.ignore_set.should_ignore(&p) {
+                            return None;
+                        }
+                        guard.tracked_files.get(&p).map(|t| (p, t.hash))
+                    })
+                    .collect()
+            };
 
-                if new_hash != tracked.hash {
-                    let payload = FileChangedPayload {
-                        path: path.to_string_lossy().to_string(),
-                    };
-                    let _ = app.emit("file-changed", &payload);
+            // Phase 2: hash each candidate off-lock; keep the ones that changed.
+            let changed: Vec<(PathBuf, blake3::Hash)> = candidates
+                .into_iter()
+                .filter_map(|(path, old_hash)| match hash_file(&path) {
+                    Ok(new_hash) if new_hash != old_hash => Some((path, new_hash)),
+                    _ => None,
+                })
+                .collect();
 
-                    if let Some(entry) = guard.tracked_files.get_mut(&path) {
-                        entry.hash = new_hash;
-                        entry.mtime = SystemTime::now();
+            // Phase 3: re-lock briefly to commit new hashes and emit events. Skip
+            // any file unregistered in the meantime.
+            if !changed.is_empty() {
+                if let Ok(mut guard) = watcher_state.inner.lock() {
+                    for (path, new_hash) in changed {
+                        if let Some(entry) = guard.tracked_files.get_mut(&path) {
+                            entry.hash = new_hash;
+                            entry.mtime = SystemTime::now();
+                            let payload = FileChangedPayload {
+                                path: path.to_string_lossy().to_string(),
+                            };
+                            let _ = app.emit("file-changed", &payload);
+                        }
                     }
                 }
             }

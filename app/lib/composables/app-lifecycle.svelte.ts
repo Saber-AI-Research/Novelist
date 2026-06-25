@@ -22,11 +22,14 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
   let unlistenCloseRequested: (() => void) | null = null;
   let syncIntervalId: ReturnType<typeof setInterval> | null = null;
 
-  async function setupSyncTimer() {
+  function clearSyncTimer() {
     if (syncIntervalId) { clearInterval(syncIntervalId); syncIntervalId = null; }
-    if (!projectStore.dirPath) return;
+  }
+
+  async function configureSyncTimer(dirPath: string) {
+    clearSyncTimer();
     try {
-      const config = await invoke('get_sync_config', { projectDir: projectStore.dirPath }) as {
+      const config = await invoke('get_sync_config', { projectDir: dirPath }) as {
         enabled: boolean;
         interval_minutes: number;
       };
@@ -45,7 +48,17 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
     }
   }
 
-  setupSyncTimer();
+  // Re-read sync config whenever the open project changes. At cold start the
+  // welcome screen is shown (dirPath === null), so a single up-front call would
+  // never start the timer once a project is later opened/switched. `$effect.root`
+  // lets us own a reactive effect from this onMount-invoked composable.
+  const disposeSyncEffect = $effect.root(() => {
+    $effect(() => {
+      const dirPath = projectStore.dirPath;
+      clearSyncTimer();
+      if (dirPath) void configureSyncTimer(dirPath);
+    });
+  });
 
   // Window close (Cmd+Q or title-bar close button).
   // If there are unsaved files, prompt the user before closing. Cmd+W also
@@ -99,6 +112,7 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
   return () => {
     unlistenCloseRequested?.();
     window.removeEventListener('beforeunload', handleBeforeUnload);
-    if (syncIntervalId) clearInterval(syncIntervalId);
+    clearSyncTimer();
+    disposeSyncEffect();
   };
 }

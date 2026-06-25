@@ -307,16 +307,13 @@ pub async fn codex_cli_turn(
         .take()
         .ok_or_else(|| AppError::Custom("codex CLI had no stdin".into()))?;
 
-    // Write the prompt then CLOSE stdin so `codex exec -` stops waiting.
-    stdin
-        .write_all(prompt.as_bytes())
-        .await
-        .map_err(|e| AppError::Custom(format!("write to codex stdin failed: {e}")))?;
-    drop(stdin);
-
     let channel = format!("codex-stream://{session_id}");
 
-    // stdout reader
+    // stdout reader — spawned BEFORE writing the prompt so stdout drains
+    // concurrently. Writing the whole (possibly large) packed prompt to stdin
+    // up front would otherwise deadlock: codex can begin emitting JSONL before
+    // it finishes reading stdin, fill the stdout pipe buffer, block on its own
+    // write, stop reading stdin, and leave our write_all stuck forever.
     {
         let app = app.clone();
         let channel = channel.clone();
@@ -337,6 +334,24 @@ pub async fn codex_cli_turn(
             while let Ok(Some(line)) = reader.next_line().await {
                 let _ = app.emit(&channel, CodexStreamEvent::StderrLine { data: line });
             }
+        });
+    }
+
+    // Write the prompt then CLOSE stdin so `codex exec -` stops waiting. Done in
+    // a detached task so it runs concurrently with the stdout reader above.
+    {
+        let app = app.clone();
+        let channel = channel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = stdin.write_all(prompt.as_bytes()).await {
+                let _ = app.emit(
+                    &channel,
+                    CodexStreamEvent::StderrLine {
+                        data: format!("write to codex stdin failed: {e}"),
+                    },
+                );
+            }
+            drop(stdin);
         });
     }
 

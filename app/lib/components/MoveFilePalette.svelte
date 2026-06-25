@@ -3,6 +3,7 @@
   import { commands } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { pathDirname } from '$lib/utils/path';
   import { t } from '$lib/i18n';
 
   /**
@@ -52,9 +53,7 @@
   /** Filter on substring match of the relative path (case-insensitive). */
   const results = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    const tabParent = activeTab?.filePath
-      ? activeTab.filePath.slice(0, activeTab.filePath.lastIndexOf('/'))
-      : null;
+    const tabParent = activeTab?.filePath ? pathDirname(activeTab.filePath) : null;
     // Drop the file's current parent so "move to same folder" isn't offered.
     const filtered = allDirs.filter(d => d.path !== tabParent);
     if (!q) return filtered;
@@ -79,7 +78,7 @@
       const newPath = result.data;
       await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: true });
       // Refresh both affected folders so the tree catches up immediately.
-      const oldParent = srcPath.slice(0, srcPath.lastIndexOf('/'));
+      const oldParent = pathDirname(srcPath);
       await projectStore.refreshFolder(oldParent).catch(() => {});
       await projectStore.refreshFolder(targetDir).catch(() => {});
     } else {

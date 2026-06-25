@@ -105,9 +105,21 @@ fn is_executable(path: &std::path::Path) -> bool {
     }
 }
 
+/// Platform binary name for the Claude CLI. On Windows the executable is
+/// `claude.exe`; every candidate path must use this or detection silently
+/// fails for CLIs installed outside PATH (volta/bun/nvm/npm-global/Homebrew).
+fn bin_name() -> &'static str {
+    if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    }
+}
+
 fn candidate_paths() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let home = dirs::home_dir();
+    let bin = bin_name();
 
     if let Ok(path_env) = std::env::var("PATH") {
         let sep = if cfg!(windows) { ';' } else { ':' };
@@ -116,38 +128,34 @@ fn candidate_paths() -> Vec<PathBuf> {
                 continue;
             }
             let mut p = PathBuf::from(dir);
-            p.push(if cfg!(windows) {
-                "claude.exe"
-            } else {
-                "claude"
-            });
+            p.push(bin);
             out.push(p);
         }
     }
 
     if let Some(h) = home.as_ref() {
-        out.push(h.join(".claude").join("local").join("claude"));
-        out.push(h.join(".local").join("bin").join("claude"));
+        out.push(h.join(".claude").join("local").join(bin));
+        out.push(h.join(".local").join("bin").join(bin));
         // Volta / fnm / asdf / bun — stable bin dirs
-        out.push(h.join(".volta").join("bin").join("claude"));
-        out.push(h.join(".fnm").join("current").join("bin").join("claude"));
-        out.push(h.join(".asdf").join("shims").join("claude"));
-        out.push(h.join(".bun").join("bin").join("claude"));
+        out.push(h.join(".volta").join("bin").join(bin));
+        out.push(h.join(".fnm").join("current").join("bin").join(bin));
+        out.push(h.join(".asdf").join("shims").join(bin));
+        out.push(h.join(".bun").join("bin").join(bin));
         // nvm: iterate all installed Node versions under ~/.nvm/versions/node/
         let nvm_dir = h.join(".nvm").join("versions").join("node");
         if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
             for entry in entries.flatten() {
-                out.push(entry.path().join("bin").join("claude"));
+                out.push(entry.path().join("bin").join(bin));
             }
         }
         // Global npm prefixes (when set via NPM_CONFIG_PREFIX or default npm root -g)
-        out.push(h.join(".npm-global").join("bin").join("claude"));
+        out.push(h.join(".npm-global").join("bin").join(bin));
     }
 
     // Homebrew (macOS Intel + Apple Silicon, Linux)
-    out.push(PathBuf::from("/opt/homebrew/bin/claude"));
-    out.push(PathBuf::from("/usr/local/bin/claude"));
-    out.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/claude"));
+    out.push(PathBuf::from("/opt/homebrew/bin").join(bin));
+    out.push(PathBuf::from("/usr/local/bin").join(bin));
+    out.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin").join(bin));
 
     out
 }
@@ -566,7 +574,8 @@ mod tests {
 
     #[test]
     fn candidate_paths_includes_path_entries() {
-        std::env::set_var("PATH", "/tmp/one:/tmp/two");
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        std::env::set_var("PATH", format!("/tmp/one{sep}/tmp/two"));
         let c = candidate_paths();
         let strs: Vec<String> = c.iter().map(|p| p.to_string_lossy().to_string()).collect();
         assert!(strs.iter().any(|s| s.contains("/tmp/one")));
@@ -577,14 +586,18 @@ mod tests {
     fn candidate_paths_includes_node_manager_dirs() {
         use std::path::Path;
         let c = candidate_paths();
-        // Spot-check that we scan common Node version manager locations.
-        // Use Path::ends_with so it compares components (cross-platform).
+        let bin = bin_name();
+        // Spot-check that we scan common Node version manager locations. Assert
+        // against bin_name() (claude.exe on Windows) and Path::ends_with so the
+        // check compares components and holds cross-platform.
         assert!(c
             .iter()
-            .any(|p| p.ends_with(Path::new(".volta/bin/claude"))));
-        assert!(c.iter().any(|p| p.ends_with(Path::new(".bun/bin/claude"))));
+            .any(|p| p.ends_with(Path::new(&format!(".volta/bin/{bin}")))));
         assert!(c
             .iter()
-            .any(|p| p.ends_with(Path::new(".asdf/shims/claude"))));
+            .any(|p| p.ends_with(Path::new(&format!(".bun/bin/{bin}")))));
+        assert!(c
+            .iter()
+            .any(|p| p.ends_with(Path::new(&format!(".asdf/shims/{bin}")))));
     }
 }

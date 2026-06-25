@@ -29,6 +29,18 @@ function isNonEditorTextInput(e: KeyboardEvent): boolean {
 }
 
 /**
+ * Panel-scoped commands that must still fire while a non-editor text input is
+ * focused — these are invoked precisely *from* the AI composer (start a fresh
+ * session, save the chat), so the general non-editor-input suppression must not
+ * swallow them.
+ */
+const INPUT_ALLOWED_COMMANDS = new Set<string>([
+  'ai-talk-new-session',
+  'ai-agent-new-session',
+  'ai-talk-save-chat',
+]);
+
+/**
  * Build the global keydown handler. Handles non-customizable shortcuts
  * (new-window, save, project-search, zoom, Cmd+1-9, Escape-zen) inline,
  * then dispatches customizable ones through the command registry.
@@ -118,9 +130,11 @@ export function createKeydownHandler(ctx: AppShortcutContext) {
     }
 
     // Customizable shortcuts — match against shortcutsStore, dispatch via
-    // the command registry so palette and keyboard run the same handler.
-    if (inNonEditorInput) return;
+    // the command registry so palette and keyboard run the same handler. While
+    // a non-editor input is focused we only allow panel-scoped commands (AI
+    // composer session/save), suppressing the rest so they don't leak.
     for (const cmdId of shortcutsStore.allCommandIds) {
+      if (inNonEditorInput && !INPUT_ALLOWED_COMMANDS.has(cmdId)) continue;
       const shortcut = shortcutsStore.get(cmdId);
       if (shortcut && matchesShortcut(e, shortcut)) {
         e.preventDefault();
