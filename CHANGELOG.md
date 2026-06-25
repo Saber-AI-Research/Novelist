@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-25
+
+### Added
+
+- **Drag-to-split multi-panel editing.** The editor area is now a dynamic set of
+  resizable columns instead of a fixed two-pane split. Drag a file from the
+  sidebar or a tab onto a pane's left/right edge to open it in a new column, or
+  its center to open/move it into that pane; reorder tabs within a pane and drag
+  a tab out to a fresh column. Empty columns collapse automatically (up to four
+  columns).
+- **AI chat: assistant replies interleave text and tool-use cards in the order
+  they streamed.** Text written before a tool call now renders above the card
+  and text after it below, instead of grouping all text then all cards.
+
+### Changed
+
+- **Overlay auto-hiding scrollbars.** Scrollbars are now thin, rounded, themed,
+  and transparent at rest — they fade in only while you hover a scroll area or
+  are actively scrolling, so the writing surface stays clean.
+- **The sidebar collapse handle is hidden until you hover the sidebar edge.**
+
+### Fixed
+
+- **Claude CLI detection on Windows.** Installations via volta / fnm / asdf /
+  bun / nvm / npm-global / Homebrew were missed because the candidate paths
+  looked for `claude` instead of `claude.exe`.
+- **AI Agent (Codex): a large prompt could hang the turn.** The Codex backend
+  now reads stdout while writing the prompt to stdin, avoiding a pipe deadlock.
+- **Themed HTML export and the move-file palette work on Windows** (no more
+  hardcoded `/tmp`; folder paths use a separator-agnostic dirname).
+- **AI panel shortcuts** (new session / save chat) fire again while typing in
+  the composer.
+- **WebDAV auto-sync** starts correctly after a project is opened or switched.
+- **File watcher** no longer stalls the runtime while hashing large changed
+  files, and bounds the buffered size of AI HTTP responses.
+
 ## [0.3.0] - 2026-06-24
 
 ### Added
