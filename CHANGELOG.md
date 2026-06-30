@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-30
+
+### Added
+
+- **Typora-style editable tables.** GFM tables now render as a styled table at
+  all times and are edited *in place* — click a cell and type, and the table
+  keeps its layout instead of dropping to raw `| --- |` markdown. Tab / Enter
+  navigate between cells (Tab past the last cell appends a row), and both
+  hover toolbars and a right-click menu insert/delete rows & columns and set
+  column alignment. Edits are written back to the Markdown source on blur.
+
+### Fixed
+
+- **Files edited outside Novelist now reload automatically.** Previously an
+  externally-changed file often needed a manual re-open. Two gaps were closed:
+  single-file mode (a file opened without a project) started no watcher at all,
+  and projects under a symlinked path (`/tmp`, `/var`, external drives, or
+  iCloud "Desktop & Documents") had their macOS file-system events dropped. The
+  watcher now follows the canonical path, and a 1-second polling fallback
+  reloads any tracked open file as a universal safety net — without disturbing
+  the editor on your own saves.
+
 ## [0.3.1] - 2026-06-25
 
 ### Added
