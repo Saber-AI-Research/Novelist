@@ -74,6 +74,46 @@ Regression coverage: 21 tests in
 `tests/unit/editor/image-block-deco.test.ts` covering decoration strategy,
 height map, coordinate mapping, zoom impact.
 
+## Editable tables (Typora-style)
+
+`app/lib/editor/table.ts`. GFM tables are **always** rendered as a styled
+`<table>` widget (block `Decoration.replace` via `tableBlockDecoField`,
+StateField — block decos must not come from a ViewPlugin). Unlike math/mermaid,
+the cursor entering the table does **not** reveal raw markdown: cells are
+`contenteditable` and edited in place. Hard-won details:
+
+- **Cell editing is an isolated island.** Cells are `contenteditable=true`
+  inside a `contenteditable=false` wrapper; `ignoreEvent()` returns `true` so
+  CM6 doesn't process widget events. Keyboard/input events that originate in a
+  cell are `stopPropagation()`-ed at the wrapper so CM6's keymap/input handling
+  never fires. **`Mod+A` must be handled manually** (select the cell's
+  contents): WebKit's native select-all otherwise targets the outer
+  `.cm-content` editing host, selecting the whole document and stealing focus.
+- **Commit timing.** Edits commit back to the markdown source on `focusout`
+  that leaves the table (and on `Escape`), and immediately on any structural
+  change. `commitFromDom` reads cell text via `cellDomToMarkdown`, keeps
+  alignments from the current source, and dispatches one replace transaction.
+  Commit is skipped mid-IME-composition and deferred to `compositionend`.
+- **`updateDOM` preserves focus.** A commit changes the doc → the StateField
+  rebuilds the widget. `TableWidget.updateDOM` patches non-focused cells in
+  place and returns `true` when the shape is unchanged, so cell focus/caret
+  survive. It returns `false` on a shape change (add/remove row/col) to force a
+  fresh DOM; `tableFocusPlugin` then restores focus to the intended cell via a
+  module-level `pendingFocus` keyed by the table's source-range start.
+- **Range is resolved fresh, never stored.** `currentTableRange` uses
+  `view.posAtDOM(tableEl)` + the syntax tree, so commits stay correct after
+  edits to other tables shift positions.
+- **Serialization is compact** (`| a | b |`, no column realignment) for clean
+  diffs; literal `|` in a cell is escaped to `\|`. Structural ops
+  (`insertRow`/`deleteRow`/`insertColumn`/`deleteColumn`/`setAlignment`) are
+  pure model transforms. Both a focus-anchored toolbar (row + column gutters)
+  and a right-click context menu (reusing the global `.context-menu` classes)
+  trigger them.
+
+Coverage: pure logic in `tests/unit/editor/table.test.ts` (parse, serialize,
+DOM→markdown, model ops); interaction in `tests/e2e/specs/table-edit.spec.ts`
+(edit/commit, Tab-append-row, CJK, context-menu delete, Escape, toolbar).
+
 ## Slash command menu
 
 Notion-style `/` block-insertion menu, implemented in

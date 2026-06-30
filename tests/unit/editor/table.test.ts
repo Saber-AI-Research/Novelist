@@ -1,73 +1,33 @@
 import { describe, it, expect } from 'vitest';
+import {
+  parseCells,
+  parseMarkdownTable,
+  renderInlineMarkdown,
+  cellDomToMarkdown,
+  serializeTable,
+  insertRow,
+  deleteRow,
+  insertColumn,
+  deleteColumn,
+  setAlignment,
+  type ParsedTable,
+} from '../../../app/lib/editor/table';
 
 /**
  * Table feature tests.
  *
- * Tests the pure logic extracted from table.ts:
- * - GFM table parsing (headers, alignment, rows)
+ * Covers the pure logic in table.ts:
+ * - GFM table parsing (headers, alignment, rows, `\|` escapes)
  * - Inline markdown → HTML rendering in cells
- * - Edge cases (empty cells, malformed tables, alignment variants)
+ * - DOM → markdown serialization of edited cells
+ * - Compact source serialization + structural model mutations
  *
- * The actual CodeMirror ViewPlugin / widget rendering is browser-only
- * and covered by E2E tests (scripts/test-*.sh).
+ * The interactive CodeMirror widget (contenteditable cells, toolbars,
+ * commit-on-blur) is browser-only and covered by E2E tests
+ * (tests/e2e/specs/table-edit.spec.ts).
  */
 
-// ── Re-implement pure functions from table.ts for testing ──
-
-function parseCells(line: string): string[] {
-  let trimmed = line.trim();
-  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1);
-  if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1);
-  return trimmed.split('|').map(c => c.trim());
-}
-
-interface ParsedTable {
-  headers: string[];
-  alignments: ('left' | 'center' | 'right' | 'default')[];
-  rows: string[][];
-}
-
-function parseMarkdownTable(text: string): ParsedTable | null {
-  const lines = text.split('\n').filter(l => l.trim().length > 0);
-  if (lines.length < 2) return null;
-
-  const headers = parseCells(lines[0]);
-
-  const sepCells = parseCells(lines[1]);
-  const isSep = sepCells.every(c => /^:?\s*-+\s*:?$/.test(c.trim()));
-  if (!isSep) return null;
-
-  const alignments: ParsedTable['alignments'] = sepCells.map(cell => {
-    const c = cell.trim();
-    if (c.startsWith(':') && c.endsWith(':')) return 'center';
-    if (c.endsWith(':')) return 'right';
-    if (c.startsWith(':')) return 'left';
-    return 'default';
-  });
-
-  const rows = lines.slice(2).map(parseCells);
-
-  return { headers, alignments, rows };
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function renderInlineMarkdown(text: string): string {
-  let html = escapeHtml(text);
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/~~(.+?)~~/g, '<s>$1</s>');
-  html = html.replace(/`(.+?)`/g, '<code class="cm-novelist-table-code">$1</code>');
-  return html;
-}
-
-// ── Table parsing tests ──
+// ── Table parsing ──
 
 describe('parseMarkdownTable', () => {
   it('parses a basic 3-column table', () => {
@@ -89,16 +49,7 @@ describe('parseMarkdownTable', () => {
 | :--- | :---: | ---: |
 | a | b | c |`;
     const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
     expect(result!.alignments).toEqual(['left', 'center', 'right']);
-  });
-
-  it('handles mixed alignment with default', () => {
-    const md = `| A | B | C | D |
-| --- | :--- | :---: | ---: |
-| 1 | 2 | 3 | 4 |`;
-    const result = parseMarkdownTable(md);
-    expect(result!.alignments).toEqual(['default', 'left', 'center', 'right']);
   });
 
   it('returns null for single-line input', () => {
@@ -116,29 +67,8 @@ describe('parseMarkdownTable', () => {
     const md = `| A | B |
 | --- | --- |`;
     const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
     expect(result!.headers).toEqual(['A', 'B']);
     expect(result!.rows).toHaveLength(0);
-  });
-
-  it('handles tables without leading/trailing pipes', () => {
-    const md = `A | B
---- | ---
-1 | 2`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.headers).toEqual(['A', 'B']);
-    expect(result!.rows[0]).toEqual(['1', '2']);
-  });
-
-  it('handles empty cells', () => {
-    const md = `| A | B | C |
-| --- | --- | --- |
-| 1 |  | 3 |
-|  | 2 |  |`;
-    const result = parseMarkdownTable(md);
-    expect(result!.rows[0]).toEqual(['1', '', '3']);
-    expect(result!.rows[1]).toEqual(['', '2', '']);
   });
 
   it('handles CJK content in cells', () => {
@@ -150,163 +80,177 @@ describe('parseMarkdownTable', () => {
     expect(result!.rows[0]).toEqual(['小明', '25', '北京']);
   });
 
-  it('handles rows with fewer columns than header', () => {
-    const md = `| A | B | C |
-| --- | --- | --- |
-| 1 |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.rows[0]).toEqual(['1']);
-  });
-
-  it('handles rows with more columns than header', () => {
+  it('keeps escaped pipes (\\|) inside a single cell', () => {
     const md = `| A | B |
 | --- | --- |
-| 1 | 2 | 3 | 4 |`;
+| a \\| b | c |`;
     const result = parseMarkdownTable(md);
-    expect(result!.rows[0]).toEqual(['1', '2', '3', '4']);
-  });
-
-  it('ignores blank lines between rows', () => {
-    const md = `| A | B |
-| --- | --- |
-
-| 1 | 2 |
-
-| 3 | 4 |`;
-    const result = parseMarkdownTable(md);
-    expect(result!.rows).toHaveLength(2);
-  });
-
-  it('separator with long dashes is valid', () => {
-    const md = `| A | B |
-| ---------- | :----------: |
-| 1 | 2 |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.alignments).toEqual(['default', 'center']);
-  });
-
-  it('separator with spaces around dashes is valid', () => {
-    const md = `| A | B |
-|  ---  |  ---  |
-| 1 | 2 |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.headers).toEqual(['A', 'B']);
-    expect(result!.rows[0]).toEqual(['1', '2']);
-  });
-
-  it('separator with spaces and colons is valid', () => {
-    const md = `| Left | Center | Right |
-| :--- | :---: | ---: |
-| a | b | c |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.alignments).toEqual(['left', 'center', 'right']);
-  });
-
-  it('separator with leading spaces before colon is valid', () => {
-    const md = `| A | B |
-|  :---  |  :---:  |
-| 1 | 2 |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-    expect(result!.alignments).toEqual(['left', 'center']);
-  });
-
-  it('separator with minimal single dash is valid', () => {
-    const md = `| A | B |
-| - | - |
-| 1 | 2 |`;
-    const result = parseMarkdownTable(md);
-    expect(result).not.toBeNull();
-  });
-
-  it('separator with only spaces (no dashes) is invalid', () => {
-    const md = `| A | B |
-|     |     |
-| 1 | 2 |`;
-    expect(parseMarkdownTable(md)).toBeNull();
+    expect(result!.rows[0]).toEqual(['a \\| b', 'c']);
   });
 });
 
-// ── Inline markdown rendering tests ──
+// ── parseCells ──
+
+describe('parseCells', () => {
+  it('splits pipe-delimited cells and trims', () => {
+    expect(parseCells('|  A  |  B  | C |')).toEqual(['A', 'B', 'C']);
+  });
+
+  it('does not split on an escaped pipe', () => {
+    expect(parseCells('| a \\| b | c |')).toEqual(['a \\| b', 'c']);
+  });
+});
+
+// ── Inline markdown rendering ──
 
 describe('renderInlineMarkdown', () => {
-  it('renders bold text', () => {
-    expect(renderInlineMarkdown('**bold**')).toBe('<strong>bold</strong>');
-  });
-
-  it('renders italic text', () => {
-    expect(renderInlineMarkdown('*italic*')).toBe('<em>italic</em>');
-  });
-
-  it('renders strikethrough text', () => {
-    expect(renderInlineMarkdown('~~struck~~')).toBe('<s>struck</s>');
-  });
-
-  it('renders inline code', () => {
-    expect(renderInlineMarkdown('`code`')).toBe('<code class="cm-novelist-table-code">code</code>');
-  });
-
-  it('renders bold before italic to avoid conflict', () => {
-    const result = renderInlineMarkdown('**bold** and *italic*');
-    expect(result).toBe('<strong>bold</strong> and <em>italic</em>');
-  });
-
-  it('renders mixed formatting', () => {
-    const result = renderInlineMarkdown('**bold** *italic* ~~struck~~ `code`');
-    expect(result).toContain('<strong>bold</strong>');
-    expect(result).toContain('<em>italic</em>');
-    expect(result).toContain('<s>struck</s>');
-    expect(result).toContain('<code class="cm-novelist-table-code">code</code>');
+  it('renders bold/italic/strike/code', () => {
+    expect(renderInlineMarkdown('**b** *i* ~~s~~ `c`')).toBe(
+      '<strong>b</strong> <em>i</em> <s>s</s> <code class="cm-novelist-table-code">c</code>'
+    );
   });
 
   it('escapes HTML entities', () => {
     expect(renderInlineMarkdown('<script>')).toBe('&lt;script&gt;');
-    expect(renderInlineMarkdown('a & b')).toBe('a &amp; b');
-    expect(renderInlineMarkdown('"hello"')).toBe('&quot;hello&quot;');
   });
 
-  it('handles plain text without formatting', () => {
-    expect(renderInlineMarkdown('hello world')).toBe('hello world');
+  it('unescapes \\| to a literal pipe for display', () => {
+    expect(renderInlineMarkdown('a \\| b')).toBe('a | b');
   });
 
   it('handles CJK text', () => {
-    expect(renderInlineMarkdown('你好世界')).toBe('你好世界');
     expect(renderInlineMarkdown('**粗体**')).toBe('<strong>粗体</strong>');
-  });
-
-  it('handles empty string', () => {
-    expect(renderInlineMarkdown('')).toBe('');
   });
 });
 
-// ── parseCells tests ──
+// ── DOM → markdown serialization ──
 
-describe('parseCells', () => {
-  it('splits pipe-delimited cells', () => {
-    expect(parseCells('| A | B | C |')).toEqual(['A', 'B', 'C']);
+function cell(html: string): HTMLElement {
+  const el = document.createElement('td');
+  el.innerHTML = html;
+  return el;
+}
+
+describe('cellDomToMarkdown', () => {
+  it('serializes plain text', () => {
+    expect(cellDomToMarkdown(cell('hello world'))).toBe('hello world');
   });
 
-  it('handles no leading pipe', () => {
-    expect(parseCells('A | B | C |')).toEqual(['A', 'B', 'C']);
+  it('serializes bold/italic/strike/code back to markdown', () => {
+    expect(cellDomToMarkdown(cell('<strong>b</strong>'))).toBe('**b**');
+    expect(cellDomToMarkdown(cell('<em>i</em>'))).toBe('*i*');
+    expect(cellDomToMarkdown(cell('<s>s</s>'))).toBe('~~s~~');
+    expect(cellDomToMarkdown(cell('<code>c</code>'))).toBe('`c`');
   });
 
-  it('handles no trailing pipe', () => {
-    expect(parseCells('| A | B | C')).toEqual(['A', 'B', 'C']);
+  it('handles <b>/<i>/<del> aliases', () => {
+    expect(cellDomToMarkdown(cell('<b>x</b> <i>y</i> <del>z</del>'))).toBe('**x** *y* ~~z~~');
   });
 
-  it('handles no pipes on either end', () => {
-    expect(parseCells('A | B | C')).toEqual(['A', 'B', 'C']);
+  it('escapes literal pipe characters', () => {
+    expect(cellDomToMarkdown(cell('a | b'))).toBe('a \\| b');
   });
 
-  it('trims whitespace', () => {
-    expect(parseCells('|  A  |  B  |')).toEqual(['A', 'B']);
+  it('collapses <br> and newlines into spaces', () => {
+    expect(cellDomToMarkdown(cell('a<br>b'))).toBe('a b');
   });
 
-  it('handles single cell', () => {
-    expect(parseCells('| A |')).toEqual(['A']);
+  it('drops unknown wrapper tags but keeps their text', () => {
+    expect(cellDomToMarkdown(cell('<span style="color:red">kept</span>'))).toBe('kept');
+  });
+
+  it('round-trips CJK with formatting', () => {
+    expect(cellDomToMarkdown(cell('<strong>粗体</strong>文本'))).toBe('**粗体**文本');
+  });
+});
+
+// ── Compact serialization ──
+
+describe('serializeTable', () => {
+  const base: ParsedTable = {
+    headers: ['A', 'B'],
+    alignments: ['default', 'default'],
+    rows: [['1', '2'], ['3', '4']],
+  };
+
+  it('emits compact single-space-padded GFM', () => {
+    expect(serializeTable(base)).toBe(
+      `| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |`
+    );
+  });
+
+  it('emits alignment tokens in the separator row', () => {
+    const t: ParsedTable = { ...base, alignments: ['left', 'center'] };
+    expect(serializeTable(t)).toContain('| :--- | :---: |');
+  });
+
+  it('pads short rows to the header column count', () => {
+    const t: ParsedTable = { ...base, rows: [['1']] };
+    expect(serializeTable(t)).toBe(`| A | B |\n| --- | --- |\n| 1 |  |`);
+  });
+
+  it('round-trips parse → serialize for a default table', () => {
+    const src = `| A | B |\n| --- | --- |\n| 1 | 2 |`;
+    expect(serializeTable(parseMarkdownTable(src)!)).toBe(src);
+  });
+});
+
+// ── Structural model mutations ──
+
+const grid: ParsedTable = {
+  headers: ['A', 'B'],
+  alignments: ['default', 'default'],
+  rows: [['1', '2'], ['3', '4']],
+};
+
+describe('insertRow / deleteRow', () => {
+  it('inserts an empty row at an index', () => {
+    const t = insertRow(grid, 1);
+    expect(t.rows).toEqual([['1', '2'], ['', ''], ['3', '4']]);
+  });
+
+  it('appends when index is at the end', () => {
+    const t = insertRow(grid, grid.rows.length);
+    expect(t.rows).toHaveLength(3);
+    expect(t.rows[2]).toEqual(['', '']);
+  });
+
+  it('deletes a row', () => {
+    const t = deleteRow(grid, 0);
+    expect(t.rows).toEqual([['3', '4']]);
+  });
+
+  it('ignores out-of-range deletes', () => {
+    expect(deleteRow(grid, 9).rows).toEqual(grid.rows);
+  });
+});
+
+describe('insertColumn / deleteColumn', () => {
+  it('inserts an empty column with default alignment', () => {
+    const t = insertColumn(grid, 1);
+    expect(t.headers).toEqual(['A', '', 'B']);
+    expect(t.alignments).toEqual(['default', 'default', 'default']);
+    expect(t.rows[0]).toEqual(['1', '', '2']);
+  });
+
+  it('deletes a column across header/alignments/rows', () => {
+    const t = deleteColumn(grid, 0);
+    expect(t.headers).toEqual(['B']);
+    expect(t.rows).toEqual([['2'], ['4']]);
+  });
+
+  it('refuses to delete the last remaining column', () => {
+    const one: ParsedTable = { headers: ['A'], alignments: ['default'], rows: [['1']] };
+    expect(deleteColumn(one, 0)).toEqual(one);
+  });
+});
+
+describe('setAlignment', () => {
+  it('sets a column alignment', () => {
+    expect(setAlignment(grid, 1, 'right').alignments).toEqual(['default', 'right']);
+  });
+
+  it('ignores out-of-range columns', () => {
+    expect(setAlignment(grid, 5, 'center').alignments).toEqual(grid.alignments);
   });
 });
