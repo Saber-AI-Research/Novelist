@@ -529,6 +529,11 @@ mod tests {
     /// external edits silently require a manual reload. Before the fix (watching
     /// the symlinked path), FSEvents delivered canonical paths that notify
     /// dropped, so ZERO edits were detected. Guards that regression.
+    ///
+    /// Unix-only: it builds a symlink via `std::os::unix::fs::symlink`, and the
+    /// canonical-path/FSEvents issue it guards is a Unix concern (Windows uses
+    /// ReadDirectoryChangesW with different path semantics).
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_watcher_detects_rapid_external_edits() {
         let tmp = TempDir::new().unwrap();
