@@ -205,6 +205,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'start_file_watcher': case 'stop_file_watcher':
           case 'register_open_file': case 'unregister_open_file':
           case 'register_write_ignore': return null;
+          case 'poll_external_changes': return [];
           case 'get_recent_projects': {
             // Mirror Rust sort: pinned first, then sort_order asc, then last_opened desc.
             const sorted = recentProjects.slice().sort((a, b) => {

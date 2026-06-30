@@ -215,8 +215,18 @@ pub async fn start_file_watcher(
     )
     .map_err(|e| AppError::Custom(format!("Failed to create file watcher: {e}")))?;
 
+    // Watch the CANONICAL path, not the original. macOS FSEvents reports
+    // fully-resolved paths; notify's backend drops events whose path doesn't
+    // sit under the watched prefix. If we watch a symlinked root (e.g. a
+    // project under /tmp, /var, an external mount, or iCloud "Desktop &
+    // Documents" where ~/Documents is a symlink), every event arrives in
+    // canonical form and is silently discarded → the open file never reloads
+    // on external edits. Watching the canonical dir makes the prefixes match;
+    // `normalize_event_path` then rewrites delivered paths back onto the
+    // original prefix the frontend knows. (When the two are equal this is a
+    // no-op, so non-symlinked /Users projects are unaffected.)
     watcher
-        .watch(&dir, RecursiveMode::Recursive)
+        .watch(&canonical_dir, RecursiveMode::Recursive)
         .map_err(|e| AppError::Custom(format!("Failed to watch directory: {e}")))?;
 
     // Cancellation channel for the processor task
@@ -425,11 +435,268 @@ pub async fn register_write_ignore(
     Ok(())
 }
 
+/// Polling fallback for external-edit detection.
+///
+/// The notify watcher only covers a single recursively-watched project dir, so
+/// it misses files opened in single-file mode (no project → no watcher) and can
+/// miss events on symlinked roots or when the OS coalesces/drops FSEvents. This
+/// command re-checks every *tracked open file* directly and returns the paths
+/// whose content changed on disk, so the frontend can reload them on a short
+/// interval regardless of watcher coverage.
+///
+/// Cheap by design: an mtime stat gates the blake3 hash, so unchanged files
+/// cost one `stat` each. Self-writes are absorbed via the same 2s `ignore_set`
+/// the watcher uses — as long as the poll interval is shorter than that window,
+/// a save is hashed-and-suppressed (its new hash committed) before the window
+/// expires, so it never surfaces as a spurious external change.
+#[tauri::command]
+#[specta::specta]
+pub async fn poll_external_changes(
+    state: tauri::State<'_, FileWatcherState>,
+) -> Result<Vec<String>, AppError> {
+    poll_external_changes_inner(&state)
+}
+
+fn poll_external_changes_inner(state: &FileWatcherState) -> Result<Vec<String>, AppError> {
+    // Snapshot tracked (path, hash, mtime) under the lock; release before IO.
+    let snapshot: Vec<(PathBuf, blake3::Hash, SystemTime)> = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        guard
+            .tracked_files
+            .iter()
+            .map(|(p, t)| (p.clone(), t.hash, t.mtime))
+            .collect()
+    };
+
+    // Off-lock: stat-gate, then hash only the files whose mtime moved.
+    let mut candidates: Vec<(PathBuf, blake3::Hash, SystemTime)> = Vec::new();
+    for (path, _old_hash, old_mtime) in snapshot {
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let new_mtime = meta.modified().unwrap_or(old_mtime);
+        if new_mtime == old_mtime {
+            continue;
+        }
+        let Ok(new_hash) = hash_file(&path) else { continue };
+        candidates.push((path, new_hash, new_mtime));
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Re-lock briefly: commit new hash/mtime, suppress self-writes, collect the
+    // genuinely-changed paths to report.
+    let mut changed = Vec::new();
+    let mut guard = state
+        .inner
+        .lock()
+        .map_err(|e| AppError::Custom(e.to_string()))?;
+    for (path, new_hash, new_mtime) in candidates {
+        let content_changed = {
+            let Some(entry) = guard.tracked_files.get_mut(&path) else { continue };
+            let changed = new_hash != entry.hash;
+            entry.hash = new_hash;
+            entry.mtime = new_mtime;
+            changed
+        };
+        if !content_changed {
+            continue; // mtime moved but bytes identical (e.g. touch)
+        }
+        if guard.ignore_set.should_ignore(&path) {
+            continue; // our own recent write
+        }
+        changed.push(path.to_string_lossy().to_string());
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// End-to-end probe of the OS watcher + debounce + hash pipeline (minus the
+    /// Tauri emit). Mirrors `start_file_watcher`: recursive notify watch on the
+    /// CANONICAL dir → 200ms debounce → `normalize_event_path` back to the
+    /// original prefix → blake3 diff.
+    ///
+    /// Critically, the watch root (`original_dir`) is a SYMLINK and all writes
+    /// go through the symlinked path — exactly the macOS case (project under
+    /// /tmp, /var, an external mount, or iCloud "Desktop & Documents") that made
+    /// external edits silently require a manual reload. Before the fix (watching
+    /// the symlinked path), FSEvents delivered canonical paths that notify
+    /// dropped, so ZERO edits were detected. Guards that regression.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_watcher_detects_rapid_external_edits() {
+        let tmp = TempDir::new().unwrap();
+        let real_dir = tmp.path().canonicalize().unwrap();
+        // A symlink that points at the real project dir, used as the watch root
+        // and for every write — i.e. the path the frontend passed in.
+        let original_dir = tmp.path().parent().unwrap().join("novelist-link");
+        let _ = fs::remove_file(&original_dir);
+        std::os::unix::fs::symlink(&real_dir, &original_dir).unwrap();
+
+        // Production: watch the canonical dir, normalize events back to original.
+        let canonical_dir = original_dir.canonicalize().unwrap();
+        assert_ne!(canonical_dir, original_dir, "test needs a real symlink");
+
+        let dir = canonical_dir.clone();
+        // The file path the frontend tracks is the ORIGINAL (symlinked) form.
+        let file = original_dir.join("note.md");
+        fs::write(&file, "v0").unwrap();
+        let mut tracked = blake3::hash(b"v0");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+        let canonical_for_events = canonical_dir.clone();
+        let original_for_events = original_dir.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    if let notify::EventKind::Any
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Create(_)
+                    | notify::EventKind::Remove(_) = event.kind
+                    {
+                        for path in event.paths {
+                            // Same rewrite as production: canonical → original.
+                            let path = normalize_event_path(
+                                path,
+                                &canonical_for_events,
+                                &original_for_events,
+                            );
+                            let _ = tx.send(path);
+                        }
+                    }
+                }
+            },
+            notify::Config::default(),
+        )
+        .unwrap();
+        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
+
+        // Collected detections (path, new content).
+        let detections = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let det = detections.clone();
+        let file_for_task = file.clone();
+        let processor = tokio::spawn(async move {
+            loop {
+                let first = match tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await
+                {
+                    Ok(Some(p)) => p,
+                    _ => break, // idle past timeout → burst done
+                };
+                let mut paths: HashSet<PathBuf> = HashSet::new();
+                paths.insert(first);
+                let debounce = tokio::time::sleep(Duration::from_millis(200));
+                tokio::pin!(debounce);
+                loop {
+                    tokio::select! {
+                        p = rx.recv() => match p { Some(p) => { paths.insert(p); }, None => break },
+                        _ = &mut debounce => break,
+                    }
+                }
+                for p in paths {
+                    if p != file_for_task || !p.is_file() {
+                        continue;
+                    }
+                    if let Ok(new_hash) = hash_file(&p) {
+                        if new_hash != tracked {
+                            tracked = new_hash;
+                            let content = fs::read_to_string(&p).unwrap_or_default();
+                            det.lock().unwrap().push(content);
+                        }
+                    }
+                }
+            }
+        });
+
+        // Let the FSEvents stream warm up before the first write.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // 20 rapid in-place edits, ~30ms apart (faster than the debounce window
+        // so many coalesce — we only require the LAST state to be detected).
+        for i in 1..=20u32 {
+            fs::write(&file, format!("v{i}")).unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+
+        // Wait for the processor to drain and idle out.
+        let _ = tokio::time::timeout(Duration::from_secs(3), processor).await;
+
+        let seen = detections.lock().unwrap().clone();
+        assert!(
+            !seen.is_empty(),
+            "watcher detected ZERO external edits — auto-reload would never fire"
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("v20"),
+            "final external content not detected; saw sequence: {seen:?}"
+        );
+    }
+
+    fn track(state: &FileWatcherState, path: &Path) {
+        let hash = hash_file(path).unwrap();
+        let mtime = fs::metadata(path).unwrap().modified().unwrap();
+        state.inner.lock().unwrap().tracked_files.insert(
+            path.to_path_buf(),
+            TrackedFile {
+                path: path.to_path_buf(),
+                hash,
+                mtime,
+            },
+        );
+    }
+
+    /// The polling fallback reports an open file edited on disk — the mechanism
+    /// that makes single-file-mode and symlinked-project tabs auto-reload even
+    /// when the notify watcher never fires.
+    #[test]
+    fn test_poll_detects_external_edit() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track(&state, &file);
+
+        // No change yet → nothing reported.
+        assert!(poll_external_changes_inner(&state).unwrap().is_empty());
+
+        // External edit (distinct mtime — filesystems are second/ms-granular).
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&file, "external edit").unwrap();
+
+        let changed = poll_external_changes_inner(&state).unwrap();
+        assert_eq!(changed, vec![file.to_string_lossy().to_string()]);
+
+        // A second poll with no further change reports nothing (hash committed).
+        assert!(poll_external_changes_inner(&state).unwrap().is_empty());
+    }
+
+    /// A self-write registered in the ignore set must NOT be reported as an
+    /// external change — otherwise saving would reload the editor under the
+    /// user, resetting cursor/scroll.
+    #[test]
+    fn test_poll_suppresses_self_write() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track(&state, &file);
+
+        // Simulate the app's own save: register the ignore, then change bytes.
+        state.inner.lock().unwrap().ignore_set.register(&file);
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&file, "saved by app").unwrap();
+
+        // Suppressed (within the 2s ignore window) — and the new hash is
+        // committed, so the next poll stays quiet too.
+        assert!(poll_external_changes_inner(&state).unwrap().is_empty());
+        assert!(poll_external_changes_inner(&state).unwrap().is_empty());
+    }
 
     #[test]
     fn test_hash_file() {

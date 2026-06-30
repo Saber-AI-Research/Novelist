@@ -162,10 +162,10 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     await handleCliOpen(event.payload);
   }, fn => { unlistenCliOpen = fn; });
 
-  bindEvent<{ path: string }>('file-changed', async (event) => {
-    const { path } = event.payload;
-
-    // Refresh tab content if a currently-open file changed on disk.
+  // Reload an open tab when its file changed on disk (or surface a conflict if
+  // the tab has unsaved edits). Shared by the notify `file-changed` event and
+  // the polling fallback below.
+  async function handleExternalChange(path: string, refreshSidebar: boolean) {
     const tab = tabsStore.findByPath(path);
     if (tab) {
       if (!tab.isDirty) {
@@ -181,10 +181,16 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     // Refresh the sidebar folder containing the changed path, IF it's
     // been loaded (expanded at least once). refreshFolder is a no-op for
     // folders whose children are still undefined.
-    const parent = pathDirname(path);
-    if (parent) {
-      await projectStore.refreshFolder(parent);
+    if (refreshSidebar) {
+      const parent = pathDirname(path);
+      if (parent) {
+        await projectStore.refreshFolder(parent);
+      }
     }
+  }
+
+  bindEvent<{ path: string }>('file-changed', async (event) => {
+    await handleExternalChange(event.payload.path, true);
   }, fn => { unlistenFileChanged = fn; });
 
   bindEvent<{ path: string }>('directory-changed', async (event) => {
@@ -196,6 +202,32 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
       projectStore.refreshLoadedFolders().catch(() => {});
     }
   }, 15_000);
+
+  // Polling fallback for external-edit auto-reload. The notify watcher only
+  // covers an open *project* directory, so files opened in single-file mode
+  // (no project → no watcher) — and files under symlinked roots, or edits the
+  // OS coalesces/drops — would otherwise never reload without a manual
+  // re-open. The backend re-hashes every tracked open file (mtime-gated, with
+  // self-write suppression) and returns the ones that changed. The 1s interval
+  // sits comfortably under the watcher's 2s self-write ignore window so saves
+  // are never reported as external edits. Cheap: usually a handful of `stat`s.
+  let polling = false;
+  const externalPollInterval = window.setInterval(async () => {
+    if (polling) return; // don't overlap if a tick runs long
+    polling = true;
+    try {
+      const result = await commands.pollExternalChanges();
+      if (result.status === 'ok') {
+        for (const path of result.data) {
+          await handleExternalChange(path, true);
+        }
+      }
+    } catch (e) {
+      reportEventError('poll-external-changes', e);
+    } finally {
+      polling = false;
+    }
+  }, 1_000);
 
   // Cross-window file rename broadcast: another window auto-renamed a file we
   // may have open. Update our tab paths and refresh the affected sidebar folder.
@@ -251,6 +283,7 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     unlistenRecentProjectsUpdated?.();
     unlistenCliOpen?.();
     window.clearInterval(refreshInterval);
+    window.clearInterval(externalPollInterval);
     window.removeEventListener('novelist-goto-line', handleGotoLine);
   };
 }

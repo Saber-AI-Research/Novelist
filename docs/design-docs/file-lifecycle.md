@@ -10,6 +10,42 @@ dirty-state flaps.
   otherwise think external change → prompts conflict dialog on user's
   own save). `write_file` records the written content's hash; watcher
   events matching recent hashes are dropped.
+
+## External-edit auto-reload (watcher + polling fallback)
+
+A non-dirty open tab reloads automatically when its file changes on disk;
+a dirty tab raises the conflict dialog instead. Both flow through
+`handleExternalChange()` in `app/lib/composables/app-events.svelte.ts`, fed
+by **two** independent sources:
+
+1. **notify watcher** (`start_file_watcher`) — instant (<200ms debounce), but
+   only covers the single recursively-watched **project** directory.
+2. **Polling fallback** (`poll_external_changes`, called every 1s from
+   `app-events`) — re-hashes every *tracked open file* (mtime-gated `stat`,
+   then BLAKE3) and returns the changed paths.
+
+The poll exists because the watcher has real coverage gaps that left external
+edits requiring a manual re-open:
+
+- **Single-file mode** (a file opened with no project, e.g. `Open File`, CLI,
+  drag) starts **no** watcher at all — only the poll reloads it.
+- **Symlinked roots.** macOS FSEvents reports canonical paths; a project under
+  a symlink (`/tmp`, `/var`, an external mount, iCloud "Desktop & Documents"
+  where `~/Documents` is a symlink) can have its events dropped. Two defenses:
+  `start_file_watcher` now watches the **canonical** dir (with
+  `normalize_event_path` mapping events back to the original prefix), and the
+  poll catches anything still missed.
+- **Coalesced/dropped OS events.** The poll is a backstop.
+
+Self-write safety: the poll reuses the watcher's 2s `ignore_set`. Because the
+1s poll interval is shorter than that window, a save is hashed-and-suppressed
+(its new hash committed) before the window expires, so it never resurfaces as a
+spurious external change that would reset the editor under the user.
+
+Note both reload paths are wired inside App.svelte's post-first-paint
+`requestAnimationFrame`, and `setInterval` is throttled while the window is
+hidden — so a backgrounded Novelist catches up within ~1s of being refocused,
+which is exactly when the user is looking at it.
 - `register_rename_ignore(old, new)` is called *before* the rename so the
   watcher doesn't emit stale events for either path during the transition.
 - `file-changed` handler in `app/lib/composables/app-events.svelte.ts`

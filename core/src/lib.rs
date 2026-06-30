@@ -71,8 +71,8 @@ use services::file_routing::{
     pick_open_event_target, route_single_file_open_cmd, submit_file_open_bid, FileRoutingState,
 };
 use services::file_watcher::{
-    register_open_file, register_write_ignore, start_file_watcher, stop_file_watcher,
-    unregister_open_file, FileWatcherState,
+    poll_external_changes, register_open_file, register_write_ignore, start_file_watcher,
+    stop_file_watcher, unregister_open_file, FileWatcherState,
 };
 use services::plugin_host::sandbox::PluginHostState;
 use services::rope_document::{
@@ -329,6 +329,7 @@ pub fn run() {
             register_open_file,
             unregister_open_file,
             register_write_ignore,
+            poll_external_changes,
             get_recent_projects,
             add_recent_project,
             remove_recent_project,
@@ -467,6 +468,7 @@ pub fn run() {
             register_open_file,
             unregister_open_file,
             register_write_ignore,
+            poll_external_changes,
             get_recent_projects,
             add_recent_project,
             remove_recent_project,

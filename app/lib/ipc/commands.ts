@@ -135,6 +135,7 @@ export const commands = {
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
 	unregisterOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("unregister_open_file", { path })),
 	registerWriteIgnore: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_write_ignore", { path })),
+	pollExternalChanges: () => typedError<string[], string>(__TAURI_INVOKE("poll_external_changes")),
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
 	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
