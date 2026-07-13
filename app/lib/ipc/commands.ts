@@ -135,6 +135,22 @@ export const commands = {
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
 	unregisterOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("unregister_open_file", { path })),
 	registerWriteIgnore: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_write_ignore", { path })),
+	/**
+	 *  Polling fallback for external-edit detection.
+	 * 
+	 *  The notify watcher only covers a single recursively-watched project dir, so
+	 *  it misses files opened in single-file mode (no project → no watcher) and can
+	 *  miss events on symlinked roots or when the OS coalesces/drops FSEvents. This
+	 *  command re-checks every *tracked open file* directly and returns the paths
+	 *  whose content changed on disk, so the frontend can reload them on a short
+	 *  interval regardless of watcher coverage.
+	 * 
+	 *  Cheap by design: an mtime stat gates the blake3 hash, so unchanged files
+	 *  cost one `stat` each. Self-writes are absorbed via the same 2s `ignore_set`
+	 *  the watcher uses — as long as the poll interval is shorter than that window,
+	 *  a save is hashed-and-suppressed (its new hash committed) before the window
+	 *  expires, so it never surfaces as a spurious external change.
+	 */
 	pollExternalChanges: () => typedError<string[], string>(__TAURI_INVOKE("poll_external_changes")),
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
@@ -335,6 +351,12 @@ export const commands = {
 	 *  effectively means no-op if the selector doesn't exist).
 	 */
 	setWindowAppearance: (dark: boolean) => __TAURI_INVOKE<void>("set_window_appearance", { dark }),
+	/**
+	 *  Open the native WebView developer tools for this window. Compiled in all
+	 *  builds because the `devtools` Cargo feature is enabled by default (see
+	 *  Cargo.toml). Gated in the UI behind Developer Mode (F12).
+	 */
+	openDevtools: () => __TAURI_INVOKE<void>("open_devtools"),
 	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
 	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
 	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),

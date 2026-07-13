@@ -65,7 +65,7 @@ use commands::template_files::{
     create_file_with_body, delete_template_file, duplicate_bundled_template, list_template_files,
     read_template_file, rename_template_file, write_template_file,
 };
-use commands::window::set_window_appearance;
+use commands::window::{open_devtools, set_window_appearance};
 use serde::{Deserialize, Serialize};
 use services::file_routing::{
     pick_open_event_target, route_single_file_open_cmd, submit_file_open_bid, FileRoutingState,
@@ -426,6 +426,7 @@ pub fn run() {
             codex_cli_kill,
             refresh_menu,
             set_window_appearance,
+            open_devtools,
             get_sync_config,
             save_sync_config,
             sync_now,
@@ -565,6 +566,7 @@ pub fn run() {
             codex_cli_kill,
             refresh_menu,
             set_window_appearance,
+            open_devtools,
         ]);
 
     #[cfg(feature = "codegen")]

@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 # must stay enabled explicitly: tauri-specta <= rc.24 enabled them
 # transitively, rc.25 stopped — without `wry` the build loses
 # `tauri::Wry`/windowing entirely.
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"

@@ -108,6 +108,21 @@ export const en: TranslationMap = {
   'search.noResults': 'No results found',
   'search.showingFirst200': 'Showing first 200 matches',
 
+  // --- Editor Find / Replace (Cmd+F) ---
+  'find.search': 'Find',
+  'find.searchPlaceholder': 'Find',
+  'find.replace': 'Replace',
+  'find.replacePlaceholder': 'Replace',
+  'find.next': 'Next',
+  'find.previous': 'Previous',
+  'find.all': 'Select all',
+  'find.matchCase': 'Match case',
+  'find.wholeWord': 'Whole word',
+  'find.regexp': 'Regex',
+  'find.replaceOne': 'Replace',
+  'find.replaceAll': 'Replace all',
+  'find.close': 'Close (Esc)',
+
   // --- Snapshot ---
   'snapshot.title': 'SNAPS',
   'snapshot.namePlaceholder': 'Snapshot name...',
@@ -359,6 +374,7 @@ export const en: TranslationMap = {
   'command.generatePinyin': 'Copy Pinyin to Clipboard',
   'command.runBenchmark': 'Run Performance Benchmark (150K lines)',
   'command.runScrollTest': 'Run Scroll+Edit Stability Test',
+  'command.toggleDevtools': 'Open Developer Tools',
   'command.imageHostUploadAll': 'Upload all local images in this document',
 
   // --- Slash Commands ---
@@ -410,6 +426,9 @@ export const en: TranslationMap = {
   'settings.group.writingSurface': 'Writing surface',
   'settings.group.editorBehavior': 'Editor behavior',
   'settings.group.sidebar': 'Sidebar',
+  'settings.group.developer': 'Developer',
+  'settings.developerMode': 'Developer Mode',
+  'settings.developerMode.hint': 'Enable to open the WebView DevTools with F12.',
 
   'settings.autoSave.off': 'Off',
   'settings.autoSave.1min': '1 min',

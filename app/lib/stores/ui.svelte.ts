@@ -8,6 +8,7 @@ const ZOOM_KEY = 'novelist-zoom';
 const ZOOM_AUTO_INIT_KEY = 'novelist-zoom-auto-inited';
 const ZOOM_USER_SET_KEY = 'novelist-zoom-user-set';
 const ZOOM_DPI_V2_MIGRATED_KEY = 'novelist-zoom-dpi-v2-migrated';
+const DEVELOPER_MODE_KEY = 'novelist-developer-mode';
 
 interface EditorSettings {
   fontFamily: string;
@@ -68,6 +69,8 @@ class UiStore {
   splitRatio = $state(readNumber(SPLIT_RATIO_KEY, 0.5, 0.2, 0.8));
   zenMode = $state(false);
   settingsOpen = $state(false);
+  /** When on, F12 opens the native WebView DevTools. Persisted per-machine. */
+  developerMode = $state<boolean>(localStorage.getItem(DEVELOPER_MODE_KEY) === 'true');
   editorSettings = $state<EditorSettings>(loadSettings());
   zoomLevel = $state(readNumber(ZOOM_KEY, 1, 0.5, 2.0));
 
@@ -108,6 +111,10 @@ class UiStore {
   toggleTemplate() { this.toggleRightPanel('template'); }
   toggleZen() { this.zenMode = !this.zenMode; }
   toggleSettings() { this.settingsOpen = !this.settingsOpen; }
+  setDeveloperMode(on: boolean) {
+    this.developerMode = on;
+    localStorage.setItem(DEVELOPER_MODE_KEY, String(on));
+  }
 
   setSidebarWidth(width: number) {
     this.sidebarWidth = Math.max(160, Math.min(480, width));

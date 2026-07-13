@@ -35,6 +35,7 @@ const commandI18nKeys: Record<string, string> = {
   'ai-talk-new-session': 'command.aiTalkNewSession',
   'ai-agent-new-session': 'command.aiAgentNewSession',
   'ai-talk-save-chat': 'command.aiTalkSaveChat',
+  'toggle-devtools': 'command.toggleDevtools',
 };
 
 /**
@@ -98,6 +99,10 @@ const defaultShortcuts: Record<string, string> = {
   'editor-heading': 'Cmd+H',
   'editor-code-inline': 'Cmd+E',
   'editor-strikethrough': 'Cmd+Shift+X',
+
+  // Developer — opens native WebView DevTools (only fires when Developer
+  // Mode is enabled in Settings; the command handler gates on it).
+  'toggle-devtools': 'F12',
 };
 
 /** Command IDs that are editor-formatting actions (used to group in Settings). */

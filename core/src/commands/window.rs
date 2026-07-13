@@ -49,3 +49,12 @@ pub fn set_window_appearance(window: tauri::WebviewWindow, dark: bool) {
         let _ = (window, dark);
     }
 }
+
+/// Open the native WebView developer tools for this window. Compiled in all
+/// builds because the `devtools` Cargo feature is enabled by default (see
+/// Cargo.toml). Gated in the UI behind Developer Mode (F12).
+#[tauri::command]
+#[specta::specta]
+pub fn open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}

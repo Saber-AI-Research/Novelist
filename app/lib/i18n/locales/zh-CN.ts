@@ -108,6 +108,21 @@ export const zhCN: TranslationMap = {
   'search.noResults': '未找到结果',
   'search.showingFirst200': '显示前 200 条匹配结果',
 
+  // --- Editor Find / Replace (Cmd+F) ---
+  'find.search': '查找',
+  'find.searchPlaceholder': '查找',
+  'find.replace': '替换',
+  'find.replacePlaceholder': '替换',
+  'find.next': '下一个',
+  'find.previous': '上一个',
+  'find.all': '全部选中',
+  'find.matchCase': '区分大小写',
+  'find.wholeWord': '全字匹配',
+  'find.regexp': '正则',
+  'find.replaceOne': '替换',
+  'find.replaceAll': '全部替换',
+  'find.close': '关闭 (Esc)',
+
   // --- Snapshot ---
   'snapshot.title': '快照',
   'snapshot.namePlaceholder': '快照名称...',
@@ -359,6 +374,7 @@ export const zhCN: TranslationMap = {
   'command.generatePinyin': '复制拼音到剪贴板',
   'command.runBenchmark': '运行性能基准测试 (150K 行)',
   'command.runScrollTest': '运行滚动+编辑稳定性测试',
+  'command.toggleDevtools': '打开开发者工具',
   'command.imageHostUploadAll': '上传当前文档中的所有本地图片',
 
   // --- Slash Commands ---
@@ -410,6 +426,9 @@ export const zhCN: TranslationMap = {
   'settings.group.writingSurface': '写作区',
   'settings.group.editorBehavior': '编辑行为',
   'settings.group.sidebar': '侧边栏',
+  'settings.group.developer': '开发者',
+  'settings.developerMode': '开发者模式',
+  'settings.developerMode.hint': '开启后可用 F12 打开 WebView 开发者工具。',
 
   'settings.autoSave.off': '关闭',
   'settings.autoSave.1min': '1 分钟',

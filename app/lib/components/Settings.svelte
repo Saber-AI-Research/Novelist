@@ -921,6 +921,17 @@
           </div>
         </div>
 
+        <div class="settings-group" data-testid="settings-developer-section">
+          <h4 class="settings-group-title">{t('settings.group.developer')}</h4>
+          <SettingsSwitch
+            label={t('settings.developerMode')}
+            description={t('settings.developerMode.hint')}
+            checked={uiStore.developerMode}
+            testId="settings-developer-mode-switch"
+            onCheckedChange={(v) => uiStore.setDeveloperMode(v)}
+          />
+        </div>
+
       {:else if activeSection === 'theme'}
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.theme')}</h3>
 

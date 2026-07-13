@@ -10,7 +10,8 @@ import { GFM } from '@lezer/markdown';
 import { Highlight, Footnote, FrontMatter, InlineMath, DisplayMath } from './markdown-extensions';
 import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle, bracketMatching, indentOnInput, indentUnit } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
-import { searchKeymap, highlightSelectionMatches, openSearchPanel, closeSearchPanel, searchPanelOpen } from '@codemirror/search';
+import { searchKeymap, highlightSelectionMatches, search } from '@codemirror/search';
+import { createNovelistSearchPanel, openOrRefocusSearch } from './search-panel';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { wysiwygPlugin, linkClickPlugin, imagePastePlugin } from './wysiwyg';
 import { unifiedLineSelectionPlugin } from './selection-line';
@@ -25,15 +26,14 @@ import './wysiwyg.css';
 
 export const highlightMatchCompartment = new Compartment();
 
-/**
- * Cmd+F toggles the search panel: opens when closed, closes when open.
- * The panel's own Escape binding still works as a secondary close path.
- */
-const toggleSearchPanel = (view: EditorView): boolean =>
-  searchPanelOpen(view.state) ? closeSearchPanel(view) : openSearchPanel(view);
+// Custom top-positioned Find/Replace panel (vertical layout + i18n). Shared
+// across all three editor extension sets. The panel itself lives in
+// ./search-panel; Cmd+F is bound to `openOrRefocusSearch` (VSCode-style: never
+// closes on re-press, reseeds + selects instead — Escape closes).
+const novelistSearch = search({ top: true, createPanel: createNovelistSearchPanel });
 
 // searchKeymap ships its own `Mod-f: openSearchPanel` binding which wins before
-// our override in keymap.of(). Strip it so the toggle binding below runs instead.
+// our override in keymap.of(). Strip it so the Cmd+F binding below runs instead.
 const searchKeymapNoModF = searchKeymap.filter(b => b.key !== 'Mod-f');
 
 /**
@@ -383,8 +383,18 @@ const novelistTheme = EditorView.theme({
   '.cm-panels.cm-panels-bottom': {
     borderTop: '1px solid var(--novelist-border)',
   },
+  // Vertical Find/Replace panel: the search row sits above the replace row so
+  // the two text fields align in a column (VSCode-style). Each `.cm-search-row`
+  // is a horizontal flex line holding a field + its buttons/options. Extra
+  // right padding leaves room for the absolutely-positioned close button.
   '.cm-panel.cm-search': {
-    padding: '8px 10px 10px',
+    position: 'relative',
+    padding: '10px 32px 10px 10px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  '.cm-search-row': {
     display: 'flex',
     flexWrap: 'wrap',
     alignItems: 'center',
@@ -402,10 +412,10 @@ const novelistTheme = EditorView.theme({
     accentColor: 'var(--novelist-accent)',
     margin: 0,
   },
-  '.cm-panel.cm-search br': {
-    flexBasis: '100%',
-    height: 0,
-    margin: 0,
+  // Both text fields grow to fill their row so the search and replace inputs
+  // share the same width when stacked vertically.
+  '.cm-search-row .cm-textfield': {
+    flex: '1 1 200px',
   },
   '.cm-textfield': {
     backgroundColor: 'var(--novelist-bg)',
@@ -556,8 +566,9 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
       ...defaultKeymap,
       ...historyKeymap,
       ...searchKeymapNoModF,
-      { key: 'Mod-f', run: toggleSearchPanel },
+      { key: 'Mod-f', run: openOrRefocusSearch },
     ]),
+    novelistSearch,
   ];
 
   // Disable WYSIWYG for tall docs to prevent height-map drift
@@ -616,11 +627,12 @@ function createLargeFileExtensions(): Extension[] {
     // uniform height, making scroll position calculation exact.
     novelistTheme,
     scrollStabilizer,
+    novelistSearch,
     keymap.of([
       ...defaultKeymap,
       ...historyKeymap,
       ...searchKeymapNoModF,
-      { key: 'Mod-f', run: toggleSearchPanel },
+      { key: 'Mod-f', run: openOrRefocusSearch },
     ]),
   ];
 }
@@ -637,9 +649,10 @@ function createReadOnlyExtensions(): Extension[] {
     unifiedLineSelectionPlugin,
     EditorView.lineWrapping,
     novelistTheme,
+    novelistSearch,
     keymap.of([
       ...searchKeymapNoModF,
-      { key: 'Mod-f', run: toggleSearchPanel },
+      { key: 'Mod-f', run: openOrRefocusSearch },
     ]),
   ];
 }

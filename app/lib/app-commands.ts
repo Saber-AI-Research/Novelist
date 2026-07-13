@@ -273,6 +273,15 @@ export function registerAppCommands(ctx: AppCommandContext) {
     const result = await runScrollEditTest();
     alert(result);
   }});
+  // Developer Mode: F12 opens the native WebView DevTools. Gated at
+  // handler-time — a no-op until the user enables Developer Mode in
+  // Settings, so the command/shortcut stays registered without leaking
+  // the inspector to ordinary users.
+  reg({ id: 'toggle-devtools', labelKey: 'command.toggleDevtools', shortcut: shortcutsStore.get('toggle-devtools'), handler: async () => {
+    if (!uiStore.developerMode) return;
+    const { commands } = await import('$lib/ipc/commands');
+    await commands.openDevtools();
+  }});
   // Portable builds skip the updater plugin on the Rust side (Task 2),
   // so the manual "Check for updates" affordance is gated at click-time:
   // the command is always registered (avoids palette/menu race), and the
