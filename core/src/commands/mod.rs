@@ -17,6 +17,7 @@ pub mod recent;
 pub mod settings;
 pub mod snapshot;
 pub mod stats;
+pub mod styled_copy;
 #[cfg(feature = "sync")]
 pub mod sync;
 pub mod template;
