@@ -6,6 +6,12 @@
   import { t } from '$lib/i18n';
   import PublishDialog from './PublishDialog.svelte';
 
+  interface Props {
+    paneId: string;
+  }
+
+  let { paneId }: Props = $props();
+
   let menuOpen = $state(false);
   let dialogChannel = $state<ChannelConfig | null>(null);
   let channels = $state<ChannelConfig[]>([]);
@@ -41,10 +47,9 @@
 
   async function openPublishDialog(c: ChannelConfig) {
     menuOpen = false;
-    const tab = tabsStore.activeTab;
+    const tab = tabsStore.getPaneActiveTab(paneId);
     if (!tab) return;
-    // Read current document content from the editor — fall back to the
-    // tab's stored content if the editor view isn't ready.
+    // Online Publish intentionally remains disk-backed.
     dialogChannel = c;
     activeDoc = await loadActiveDoc(tab.filePath);
   }

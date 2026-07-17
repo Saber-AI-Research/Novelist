@@ -192,7 +192,7 @@
 </div>
   {#if paneTabs.length > 0}
     <div class="share-slot">
-      <EditorShareMenu />
+      <EditorShareMenu paneId={effectivePaneId} />
     </div>
   {/if}
 </div>
