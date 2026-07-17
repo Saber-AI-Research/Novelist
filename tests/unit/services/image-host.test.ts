@@ -97,6 +97,19 @@ describe('resolveActiveHost', () => {
     expect(host?.id).toBe('g');
   });
 
+  it('falls through to global active when project override is stale', async () => {
+    const { resolveActiveHost } = await import('$lib/services/image-host');
+    const host = resolveActiveHost(
+      {
+        hosts: [{ id: 'g', name: 'Global', provider: 'imgur', client_id: 'g' } as never],
+        active_host_id: 'g',
+        auto_on_paste: false,
+      },
+      'removed-project-host',
+    );
+    expect(host?.id).toBe('g');
+  });
+
   it('returns null when no host is configured', async () => {
     const { resolveActiveHost } = await import('$lib/services/image-host');
     const host = resolveActiveHost(

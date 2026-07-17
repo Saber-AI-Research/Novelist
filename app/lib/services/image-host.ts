@@ -34,11 +34,11 @@ export function resolveActiveHost(
   settings: ImageHostSettings_Serialize,
   projectActiveHostId: string | null | undefined,
 ): HostConfig | null {
-  const id = (projectActiveHostId && projectActiveHostId.length > 0)
-    ? projectActiveHostId
-    : settings.active_host_id;
-  if (!id) return null;
-  return settings.hosts.find(h => h.id === id) ?? null;
+  const projectHost = projectActiveHostId
+    ? settings.hosts.find((host) => host.id === projectActiveHostId)
+    : undefined;
+  if (projectHost) return projectHost;
+  return settings.hosts.find((host) => host.id === settings.active_host_id) ?? null;
 }
 
 async function loadActiveHost(projectActiveHostId?: string | null): Promise<HostConfig> {
