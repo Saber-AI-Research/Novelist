@@ -42,6 +42,26 @@ export type StyledCopySanitizerFailureReason =
   | 'unsafe_image_url'
   | 'unsafe_style';
 
+export type StyledCopyAssetFailureReason =
+  | 'unsafe_source'
+  | 'malformed_source'
+  | 'malformed_source_encoding'
+  | 'unresolved_source'
+  | 'unsupported_image_type'
+  | 'invalid_image_bytes'
+  | 'mermaid_source_too_large'
+  | 'mermaid_unsafe_svg'
+  | 'mermaid_invalid_dimensions'
+  | 'mermaid_render_failed'
+  | 'upload_failed'
+  | 'invalid_hosted_url';
+
+export interface StyledCopyAssetFailure {
+  assetId: string;
+  assetKind: 'image' | 'mermaid';
+  reason: StyledCopyAssetFailureReason;
+}
+
 export type StyledCopyBlockingError =
   | {
       code: 'document_too_complex';
@@ -73,6 +93,17 @@ export type StyledCopyBlockingError =
       assetId: string;
       expected: StyledCopyAssetMode;
       actual: StyledCopyAssetMode;
+    }
+  | {
+      code: 'asset_resolution_failed';
+      failures: StyledCopyAssetFailure[];
+    }
+  | {
+      code: 'image_host_unavailable';
+    }
+  | {
+      code: 'asset_upload_failed';
+      failures: StyledCopyAssetFailure[];
     };
 
 export type StyledCopyResult<T> =
