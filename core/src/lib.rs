@@ -55,6 +55,9 @@ use commands::settings::{
 };
 use commands::snapshot::{create_snapshot, delete_snapshot, list_snapshots, restore_snapshot};
 use commands::stats::{get_writing_stats, record_writing_stats};
+use commands::styled_copy::{
+    convert_markdown_to_styled_html, read_styled_copy_image, write_styled_clipboard,
+};
 #[cfg(feature = "sync")]
 use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
 use commands::template::{
@@ -77,7 +80,7 @@ use services::file_watcher::{
 use services::plugin_host::sandbox::PluginHostState;
 use services::rope_document::{
     rope_apply_edit, rope_close, rope_get_lines, rope_line_to_char, rope_open, rope_save,
-    RopeDocumentState,
+    rope_snapshot, RopeDocumentState,
 };
 use specta::Type;
 use tauri::{Emitter, Manager};
@@ -352,6 +355,7 @@ pub fn run() {
             rope_save,
             rope_close,
             rope_line_to_char,
+            rope_snapshot,
             read_draft_note,
             write_draft_note,
             delete_draft_note,
@@ -400,6 +404,9 @@ pub fn run() {
             upload_post_image_wordpress_com,
             upload_post_image_medium,
             convert_markdown_to_html,
+            convert_markdown_to_styled_html,
+            read_styled_copy_image,
+            write_styled_clipboard,
             verify_publish_channel,
             list_publish_tags,
             read_clipboard_image,
@@ -492,6 +499,7 @@ pub fn run() {
             rope_save,
             rope_close,
             rope_line_to_char,
+            rope_snapshot,
             read_draft_note,
             write_draft_note,
             delete_draft_note,
@@ -540,6 +548,9 @@ pub fn run() {
             upload_post_image_wordpress_com,
             upload_post_image_medium,
             convert_markdown_to_html,
+            convert_markdown_to_styled_html,
+            read_styled_copy_image,
+            write_styled_clipboard,
             verify_publish_channel,
             list_publish_tags,
             read_clipboard_image,

@@ -212,6 +212,7 @@ export const commands = {
 	ropeClose: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_close", { fileId })),
 	/**  Get the character offset for a given line number (0-indexed). */
 	ropeLineToChar: (fileId: string, line: number) => typedError<number, string>(__TAURI_INVOKE("rope_line_to_char", { fileId, line })),
+	ropeSnapshot: (fileId: string) => typedError<RopeSnapshot, string>(__TAURI_INVOKE("rope_snapshot", { fileId })),
 	readDraftNote: (projectDir: string, filePath: string) => typedError<string | null, string>(__TAURI_INVOKE("read_draft_note", { projectDir, filePath })),
 	writeDraftNote: (projectDir: string, filePath: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_draft_note", { projectDir, filePath, content })),
 	deleteDraftNote: (projectDir: string, filePath: string) => typedError<null, string>(__TAURI_INVOKE("delete_draft_note", { projectDir, filePath })),
@@ -288,6 +289,9 @@ export const commands = {
 	 *  WP.com (Medium consumes Markdown directly).
 	 */
 	convertMarkdownToHtml: (markdown: string) => typedError<string, string>(__TAURI_INVOKE("convert_markdown_to_html", { markdown })),
+	convertMarkdownToStyledHtml: (markdown: string) => typedError<string, string>(__TAURI_INVOKE("convert_markdown_to_styled_html", { markdown })),
+	readStyledCopyImage: (path: string, allowedRoots: string[]) => typedError<StyledCopyImage, string>(__TAURI_INVOKE("read_styled_copy_image", { path, allowedRoots })),
+	writeStyledClipboard: (html: string, plainText: string) => typedError<null, string>(__TAURI_INVOKE("write_styled_clipboard", { html, plainText })),
 	/**
 	 *  Read-only credentials check per platform. Returns a short
 	 *  human-friendly status line like "Connected as alice" on success;
@@ -1047,6 +1051,13 @@ export type RopeDocumentMeta = {
 	total_bytes: number,
 };
 
+export type RopeSnapshot = {
+	text: string,
+	generation: number,
+	total_lines: number,
+	total_chars: number,
+};
+
 export type RouteResult = {
 	/**
 	 *  `Some(label)` — Rust has delivered to the winner; FE caller may stop.
@@ -1070,6 +1081,11 @@ export type SnapshotMeta = {
 	timestamp: number,
 	file_count: number,
 	total_bytes: number,
+};
+
+export type StyledCopyImage = {
+	bytes: number[],
+	mime: string,
 };
 
 export type SyncConfig = {
