@@ -6,13 +6,25 @@ export type LinkMode = 'anchors' | 'end-references';
 
 export type CopyScope = 'selection' | 'full-document';
 
+export type StyledCopyAssetMode = 'final' | 'preview';
+
+export type ResolvedStyledCopyAssetUrl =
+  | { readonly kind: 'final'; readonly url: string }
+  | { readonly kind: 'preview'; readonly url: string };
+
+export type ResolvedStyledCopyAssetUrls = Readonly<
+  Record<string, ResolvedStyledCopyAssetUrl>
+>;
+
 export type StyledCopyWarningCode =
   | 'unsafe_link_removed'
   | 'relative_link_removed'
   | 'malformed_link'
   | 'malformed_footnote'
   | 'duplicate_footnote'
-  | 'malformed_image';
+  | 'malformed_image'
+  | 'table_structure_degraded'
+  | 'math_visual_degraded';
 
 export interface StyledCopyWarning {
   code: StyledCopyWarningCode;
@@ -20,6 +32,15 @@ export interface StyledCopyWarning {
 }
 
 export type ComplexityDimension = 'nodes' | 'depth' | 'table_rows' | 'table_columns';
+
+export type StyledCopySanitizerFailureReason =
+  | 'invalid_root'
+  | 'disallowed_tag'
+  | 'disallowed_attribute'
+  | 'invalid_attribute'
+  | 'unsafe_anchor_url'
+  | 'unsafe_image_url'
+  | 'unsafe_style';
 
 export type StyledCopyBlockingError =
   | {
@@ -37,6 +58,21 @@ export type StyledCopyBlockingError =
       code: 'malformed_table';
       tableIndex: number;
       reason: 'empty_row';
+    }
+  | {
+      code: 'sanitizer_failure';
+      reason: StyledCopySanitizerFailureReason;
+    }
+  | {
+      code: 'unresolved_asset';
+      assetId: string;
+      assetKind: 'image' | 'mermaid';
+    }
+  | {
+      code: 'resolved_asset_mode_mismatch';
+      assetId: string;
+      expected: StyledCopyAssetMode;
+      actual: StyledCopyAssetMode;
     };
 
 export type StyledCopyResult<T> =
