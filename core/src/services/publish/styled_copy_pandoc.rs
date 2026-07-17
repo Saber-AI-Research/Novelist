@@ -336,7 +336,8 @@ where
 }
 
 fn bounded_diagnostic(bytes: &[u8]) -> String {
-    let mut diagnostic = String::from_utf8_lossy(bytes).into_owned();
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut diagnostic = sanitize_diagnostic(&decoded);
     if diagnostic.len() > MAX_DIAGNOSTIC_BYTES {
         let mut end = MAX_DIAGNOSTIC_BYTES;
         while !diagnostic.is_char_boundary(end) {
@@ -345,6 +346,217 @@ fn bounded_diagnostic(bytes: &[u8]) -> String {
         diagnostic.truncate(end);
     }
     diagnostic.trim().to_string()
+}
+
+const DIAGNOSTIC_KV_KEYS: &[&str] = &[
+    "access_token",
+    "api_key",
+    "client_secret",
+    "password",
+    "secret",
+    "token",
+];
+
+const DIAGNOSTIC_JSON_KEYS: &[&str] = &[
+    "access_token",
+    "api_key",
+    "client_secret",
+    "password",
+    "secret",
+    "token",
+];
+
+fn sanitize_diagnostic(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    for line in input.split_inclusive('\n') {
+        sanitized.push_str(&redact_diagnostic_header(line));
+    }
+    for prefix in ["Bearer ", "bearer ", "Basic ", "Ghost ", "Token "] {
+        sanitized = redact_scheme_value(&sanitized, prefix);
+    }
+    for key in DIAGNOSTIC_KV_KEYS {
+        sanitized = redact_key_value(&sanitized, key);
+    }
+    for key in DIAGNOSTIC_JSON_KEYS {
+        sanitized = redact_json_string(&sanitized, key);
+    }
+    sanitized
+}
+
+fn redact_diagnostic_header(line: &str) -> String {
+    let Some(colon) = line.find(':') else {
+        return line.to_string();
+    };
+    let header = line[..colon].trim().to_ascii_lowercase();
+    if !matches!(
+        header.as_str(),
+        "authorization" | "cookie" | "set-cookie" | "x-api-key" | "x-auth-token"
+    ) {
+        return line.to_string();
+    }
+
+    let after_colon = &line[colon + 1..];
+    let without_line_end = after_colon.trim_end_matches(['\r', '\n']);
+    let leading_len = without_line_end
+        .find(|character: char| !character.is_whitespace())
+        .unwrap_or(without_line_end.len());
+    if leading_len == without_line_end.len() {
+        return line.to_string();
+    }
+
+    let mut redacted = String::with_capacity(line.len());
+    redacted.push_str(&line[..colon + 1]);
+    redacted.push_str(&without_line_end[..leading_len]);
+    redacted.push_str("<redacted>");
+    redacted.push_str(&after_colon[without_line_end.len()..]);
+    redacted
+}
+
+fn redact_scheme_value(input: &str, prefix: &str) -> String {
+    let mut redacted = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(index) = rest.find(prefix) {
+        redacted.push_str(&rest[..index + prefix.len()]);
+        rest = &rest[index + prefix.len()..];
+        let value_end = rest
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '"' | '\'' | ',' | ';' | ')' | '&')
+            })
+            .unwrap_or(rest.len());
+        if value_end == 0 {
+            continue;
+        }
+        redacted.push_str("<redacted>");
+        rest = &rest[value_end..];
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
+fn redact_key_value(input: &str, key: &str) -> String {
+    let mut redacted = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(index) = find_diagnostic_key(rest, key) else {
+            redacted.push_str(rest);
+            break;
+        };
+        let after_key = &rest[index + key.len()..];
+        let whitespace_len = after_key
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(after_key.len());
+        let after_whitespace = &after_key[whitespace_len..];
+        if !after_whitespace.starts_with('=') {
+            redacted.push_str(&rest[..index + key.len()]);
+            rest = &rest[index + key.len()..];
+            continue;
+        }
+
+        let after_equals = &after_whitespace[1..];
+        let value_whitespace_len = after_equals
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(after_equals.len());
+        let value = &after_equals[value_whitespace_len..];
+        let value_start = index + key.len() + whitespace_len + 1 + value_whitespace_len;
+        redacted.push_str(&rest[..value_start]);
+        if let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '"' | '\''))
+        {
+            redacted.push(quote);
+            let quoted = &value[quote.len_utf8()..];
+            let value_end = quoted.find(quote).unwrap_or(quoted.len());
+            redacted.push_str("<redacted>");
+            rest = &quoted[value_end..];
+        } else {
+            let value_end = value
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '&' | ';' | ',' | '"' | '\'' | '}')
+                })
+                .unwrap_or(value.len());
+            redacted.push_str("<redacted>");
+            rest = &value[value_end..];
+        }
+    }
+    redacted
+}
+
+fn find_diagnostic_key(input: &str, key: &str) -> Option<usize> {
+    let lower = input.to_ascii_lowercase();
+    let mut start = 0;
+    while let Some(relative) = lower[start..].find(key) {
+        let index = start + relative;
+        let has_boundary = index == 0
+            || matches!(
+                input.as_bytes()[index - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'?' | b'&' | b';' | b','
+            );
+        if has_boundary {
+            return Some(index);
+        }
+        start = index + key.len();
+    }
+    None
+}
+
+fn redact_json_string(input: &str, key: &str) -> String {
+    let needle = format!("\"{}\"", key.to_ascii_lowercase());
+    let mut redacted = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(index) = lower.find(&needle) else {
+            redacted.push_str(rest);
+            break;
+        };
+        let after_key_index = index + needle.len();
+        let after_key = &rest[after_key_index..];
+        let first_whitespace_len = after_key
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(after_key.len());
+        let after_first_whitespace = &after_key[first_whitespace_len..];
+        if !after_first_whitespace.starts_with(':') {
+            redacted.push_str(&rest[..after_key_index]);
+            rest = after_key;
+            continue;
+        }
+
+        let after_colon = &after_first_whitespace[1..];
+        let second_whitespace_len = after_colon
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(after_colon.len());
+        let value = &after_colon[second_whitespace_len..];
+        if !value.starts_with('"') {
+            let value_start = after_key_index + first_whitespace_len + 1 + second_whitespace_len;
+            redacted.push_str(&rest[..value_start]);
+            rest = value;
+            continue;
+        }
+
+        let value_start = after_key_index + first_whitespace_len + 1 + second_whitespace_len;
+        redacted.push_str(&rest[..value_start + 1]);
+        let quoted = &rest[value_start + 1..];
+        let mut closing_quote = None;
+        let mut escaped = false;
+        for (offset, character) in quoted.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                closing_quote = Some(offset);
+                break;
+            }
+        }
+        redacted.push_str("<redacted>");
+        match closing_quote {
+            Some(offset) => rest = &quoted[offset..],
+            None => break,
+        }
+    }
+    redacted
 }
 
 #[cfg(test)]
@@ -539,6 +751,120 @@ mod tests {
         assert!(error.len() <= MAX_DIAGNOSTIC_BYTES + 32, "{}", error.len());
         assert!(!error.contains("END_SECRET"));
         assert!(error.is_char_boundary(error.len()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostics_redact_headers_schemes_params_and_json_secrets() {
+        let dir = TempDir::new().unwrap();
+        let secrets = [
+            "AUTH_HEADER_SECRET_123",
+            "COOKIE_HEADER_SECRET_456",
+            "API_HEADER_SECRET_789",
+            "BEARER_SCHEME_SECRET_111",
+            "BASIC_SCHEME_SECRET_222",
+            "GHOST_SCHEME_SECRET_333",
+            "TOKEN_SCHEME_SECRET_444",
+            "TOKEN_PARAM_SECRET_555",
+            "API_KEY_PARAM_SECRET_666",
+            "ACCESS_TOKEN_PARAM_SECRET_777",
+            "PASSWORD_PARAM_SECRET_888",
+            "CLIENT_SECRET_PARAM_SECRET_999",
+            "SECRET_PARAM_SECRET_000",
+            "JSON_PASSWORD_SECRET_ABC",
+            "JSON_TOKEN_SECRET_DEF",
+        ];
+        let diagnostics = format!(
+            "Could not parse line 12\n\
+Authorization: Bearer {}\n\
+Cookie: session={}\n\
+X-API-Key: {}\n\
+filter Bearer {} Basic {} Ghost {} Token {}\n\
+https://example.test/?token={}&api_key={}\n\
+access_token={}&password={}&client_secret={}&secret={}\n\
+{{\"password\":\"{}\",\"token\":\"{}\"}}",
+            secrets[0],
+            secrets[1],
+            secrets[2],
+            secrets[3],
+            secrets[4],
+            secrets[5],
+            secrets[6],
+            secrets[7],
+            secrets[8],
+            secrets[9],
+            secrets[10],
+            secrets[11],
+            secrets[12],
+            secrets[13],
+            secrets[14],
+        );
+        let (binary, _, _) = make_fake_pandoc(
+            &dir,
+            REQUIRED_EXTENSIONS,
+            b"",
+            diagnostics.as_bytes(),
+            7,
+            None,
+        );
+
+        let error = styled_markdown_to_html_with_binary_and_timeout(
+            "x",
+            binary.to_str().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("Could not parse line 12"), "{error}");
+        assert!(error.contains("<redacted>"), "{error}");
+        for secret in secrets {
+            assert!(!error.contains(secret), "leaked {secret}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostics_redact_partial_secret_crossing_truncation_boundary() {
+        let dir = TempDir::new().unwrap();
+        let key = "access_token=";
+        let secret = "BOUNDARY_SECRET_VALUE_0123456789";
+        let partial = &secret[..8];
+        let diagnostics = format!(
+            "{}?{}{}",
+            "x".repeat(MAX_DIAGNOSTIC_BYTES - 1 - key.len() - partial.len()),
+            key,
+            secret
+        );
+        let (binary, _, _) = make_fake_pandoc(
+            &dir,
+            REQUIRED_EXTENSIONS,
+            b"",
+            diagnostics.as_bytes(),
+            7,
+            None,
+        );
+
+        let error = styled_markdown_to_html_with_binary_and_timeout(
+            "x",
+            binary.to_str().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("?access_token=<redact"), "{error}");
+        assert!(!error.contains(secret), "leaked full secret: {error}");
+        assert!(!error.contains(partial), "leaked partial secret: {error}");
+        assert!(error.len() <= MAX_DIAGNOSTIC_BYTES + 32, "{}", error.len());
+    }
+
+    #[test]
+    fn diagnostics_preserve_ordinary_actionable_pandoc_errors() {
+        let message = "Could not parse line 12: unexpected token near 章节";
+        assert_eq!(bounded_diagnostic(message.as_bytes()), message);
     }
 
     #[cfg(unix)]
