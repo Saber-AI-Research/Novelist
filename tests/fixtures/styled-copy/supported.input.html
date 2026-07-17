@@ -1,0 +1,31 @@
+<h1 id="source-heading" class="title" style="color:red" data-source="pandoc" onclick="alert(1)">安全语义核心</h1>
+<p id="source-paragraph">段落 <em>强调</em>，<strong>粗体</strong>，<del>删除</del>，<mark>高亮</mark>，<a href="https://example.com/章节" title="外部资料" target="_blank" rel="opener">外链</a>，<img src="./图片/封面 1.png" alt="封面图" title="第一章" srcset="unsafe@2x.png 2x" style="width:999px">。<br>换行 <code>inline()</code> H<sub>2</sub>O x<sup>2</sup></p>
+<blockquote cite="https://ignored.example"><p>引用中的中文。</p></blockquote>
+<ul class="source-list">
+  <li>无序一</li>
+  <li><p>无序二</p><ol start="3" reversed><li>嵌套三</li></ol></li>
+</ul>
+<table id="source-table" style="border:99px">
+  <thead><tr><th colspan="2">章节</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="2">第一章</td><td>完成</td></tr>
+    <tr><td>复核</td></tr>
+  </tbody>
+  <tfoot><tr><td colspan="2">合计</td></tr></tfoot>
+</table>
+<p>行内数学 <span class="math inline" style="position:fixed">\(E=mc^2\)</span></p>
+<p><span class="math display" id="source-equation">\[x = y + 1\]</span></p>
+<pre class="sourceCode rust" data-language="wrong"><code class="sourceCode language-ts"><span class="kw">const</span> <span class="va">章节</span> = <span class="st">&quot;一&quot;</span>;
+</code></pre>
+<pre><code class="sourceCode language-mystery"><span class="mystery-token">unknown()</span>
+</code></pre>
+<pre class="mermaid" onclick="alert(2)"><code>graph TD;
+A--&gt;B</code></pre>
+<hr id="source-rule">
+<p>脚注正文<a href="#fn-one" id="fnref-one" class="footnote-ref" role="doc-noteref" data-footnote="one"><sup>1</sup></a>。</p>
+<section id="footnotes" class="footnotes footnotes-end-of-document" role="doc-endnotes">
+  <hr>
+  <ol>
+    <li id="fn-one" role="doc-endnote"><p>脚注内容 <a href="https://example.com/reference">资料</a><a href="#fnref-one" class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+  </ol>
+</section>
