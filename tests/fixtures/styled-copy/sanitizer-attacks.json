@@ -1,0 +1,11 @@
+[
+  { "property": "background-color", "value": "url(javascript:alert(1))" },
+  { "property": "color", "value": "var(--source-color)" },
+  { "property": "color", "value": "expression(alert(1))" },
+  { "property": "color", "value": "#1f2328!important" },
+  { "property": "color", "value": "\\75rl(javascript:alert(1))" },
+  { "property": "color", "value": "#1f2328\u0001" },
+  { "property": "position", "value": "fixed" },
+  { "property": "z-index", "value": "2147483647" },
+  { "property": "letter-spacing", "value": "-1px" }
+]
