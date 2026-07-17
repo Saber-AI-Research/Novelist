@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Check from '@lucide/svelte/icons/check';
+  import Copy from '@lucide/svelte/icons/copy';
+  import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import { projectStore } from '$lib/stores/project.svelte';
   import {
     createStyledCopyController,
@@ -15,7 +18,6 @@
     WechatTheme,
   } from '$lib/utils/styled-copy/types';
   import { t } from '$lib/i18n';
-  import { IconClipboard } from './icons';
 
   interface Props {
     source: StyledCopySource;
@@ -230,17 +232,13 @@
       onclick={() => { void controller.copy(); }}
     >
       {#if busy}
-        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M21 12a9 9 0 1 1-6.2-8.6" />
-        </svg>
+        <LoaderCircle class="spin" size={14} aria-hidden="true" />
         <span>{state.status === 'converting' ? t('styledCopy.converting') : t('styledCopy.copying')}</span>
       {:else if state.status === 'copied'}
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="m20 6-11 11-5-5" />
-        </svg>
+        <Check size={14} aria-hidden="true" />
         <span>{t('styledCopy.copied')}</span>
       {:else}
-        <IconClipboard size={14} />
+        <Copy size={14} aria-hidden="true" />
         <span>{t('styledCopy.copy')}</span>
       {/if}
     </button>
@@ -440,7 +438,7 @@
     cursor: not-allowed;
   }
 
-  .spin {
+  :global(.spin) {
     animation: spin 800ms linear infinite;
   }
 
@@ -474,6 +472,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spin { animation: none; }
+    :global(.spin) { animation: none; }
   }
 </style>

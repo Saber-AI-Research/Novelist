@@ -148,9 +148,11 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
 
     const copyButton = app.getByTestId('styled-copy-copy');
     await expect(copyButton).toBeEnabled();
+    await expect(copyButton.locator('svg.lucide-copy')).toBeVisible();
     const before = await copyButton.boundingBox();
     await copyButton.click();
     await expect(copyButton).toContainText('Copied');
+    await expect(copyButton.locator('svg.lucide-check')).toBeVisible();
     const after = await copyButton.boundingBox();
     expect(after).toEqual(before);
 
@@ -174,14 +176,19 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
     await openStyledCopy(app);
 
     await expect(app.getByTestId('styled-copy-error')).toContainText('Settings > Publish');
-    await expect(app.getByTestId('styled-copy-copy')).toBeDisabled();
+    const copyButton = app.getByTestId('styled-copy-copy');
+    await expect(copyButton).toBeDisabled();
+    await expect(copyButton.locator('svg.lucide-copy')).toBeVisible();
+    const errorBounds = await copyButton.boundingBox();
     await expectDialogFitsViewport(app);
 
     await mockState.setStyledConversionError(null);
     await mockState.setStyledConversionBlocked(true);
     await app.getByTestId('styled-target-zhihu').check();
-    await expect(app.getByTestId('styled-copy-copy')).toBeDisabled();
-    await expect(app.getByTestId('styled-copy-copy')).toContainText('Converting…');
+    await expect(copyButton).toBeDisabled();
+    await expect(copyButton).toContainText('Converting…');
+    await expect(copyButton.locator('svg.lucide-loader-circle')).toBeVisible();
+    expect(await copyButton.boundingBox()).toEqual(errorBounds);
     await app.locator('.modal-backdrop').click({ position: { x: 8, y: 8 } });
     await expect(app.getByRole('dialog')).toHaveCount(0);
     await mockState.setStyledConversionBlocked(false);
