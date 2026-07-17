@@ -765,6 +765,7 @@ export const zhCN: TranslationMap = {
   'publish.mode.online': '在线发布',
   'publish.mode.styled': '样式复制',
   'publish.loadingOnline': '正在加载发布渠道…',
+  'publish.loadOnlineFailed': '无法加载此发布渠道的已保存文档，请重试。',
   'publish.title': '标题',
   'publish.titleRequired': '标题不能为空。',
   'publish.coverImage': '封面图（拖放或点击选择）',

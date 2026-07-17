@@ -765,6 +765,7 @@ export const en: TranslationMap = {
   'publish.mode.online': 'Online Publish',
   'publish.mode.styled': 'Styled Copy',
   'publish.loadingOnline': 'Loading publish channel…',
+  'publish.loadOnlineFailed': 'Unable to load the saved document for this publish channel. Try again.',
   'publish.title': 'Title',
   'publish.titleRequired': 'Title is required.',
   'publish.coverImage': 'Cover image (drag-drop or pick)',
