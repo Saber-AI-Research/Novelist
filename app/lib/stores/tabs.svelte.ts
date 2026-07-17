@@ -64,7 +64,6 @@ const editorViews = new Map<string, EditorView>();
 const viewportModeTabs = new Set<string>();
 
 export interface ViewportSnapshotMetadata {
-  fileId: string;
   manager: ViewportManager;
 }
 
@@ -102,7 +101,7 @@ export function registerViewportSnapshotMetadata(
   metadata: ViewportSnapshotMetadata,
 ) {
   viewportModeTabs.add(tabId);
-  viewportSnapshotMetadata.set(tabId, metadata);
+  viewportSnapshotMetadata.set(tabId, { manager: metadata.manager });
 }
 
 export function getViewportSnapshotMetadata(

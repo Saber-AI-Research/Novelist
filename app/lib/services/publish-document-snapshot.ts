@@ -79,7 +79,8 @@ export function capturePublishDocumentSnapshot(
 
   if (isTabViewportMode(tab.id)) {
     const metadata = getViewportSnapshotMetadata(tab.id);
-    if (!metadata?.fileId || !metadata.manager) {
+    const manager = metadata?.manager;
+    if (!manager?.fileId) {
       return {
         kind: 'blocked',
         code: 'viewport_snapshot_unavailable',
@@ -88,7 +89,7 @@ export function capturePublishDocumentSnapshot(
       };
     }
 
-    const offset = metadata.manager.baseCharOffset;
+    const offset = manager.baseCharOffset;
     const mainSelection = main.from < main.to
       ? {
           from: offset + main.from,
@@ -101,7 +102,7 @@ export function capturePublishDocumentSnapshot(
       kind: 'rope',
       paneId,
       tabId: tab.id,
-      fileId: metadata.fileId,
+      fileId: manager.fileId,
       filePath: tab.filePath,
       documentDir,
       projectDir,

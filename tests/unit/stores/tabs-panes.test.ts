@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, beforeEach, vi } from 'vitest';
+import type { ViewportManager } from '$lib/editor/viewport';
 
 /**
  * [contract] tabsStore — split-pane management, tab lifecycle, and the
@@ -38,6 +39,10 @@ import {
   getEditorContent,
 } from '$lib/stores/tabs.svelte';
 import { commands } from '$lib/ipc/commands';
+
+function fakeViewportManager(fileId: string, baseCharOffset: number): ViewportManager {
+  return { fileId, baseCharOffset } as unknown as ViewportManager;
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -398,21 +403,21 @@ describe('[contract] editorView registry + saved EditorState helpers', () => {
     expect(isTabViewportMode('tab-v')).toBe(false);
   });
 
-  it('registers complete viewport snapshot metadata and clears it with the view', () => {
+  it('registers manager-owned viewport metadata and clears it with the view', () => {
     const fakeView = { state: { doc: { toString: () => 'window' } } } as any;
-    const manager = { fileId: 'rope-file-1', baseCharOffset: 42 } as any;
+    const manager = fakeViewportManager('rope-file-1', 42);
     registerEditorView('tab-meta', fakeView);
 
-    registerViewportSnapshotMetadata('tab-meta', {
-      fileId: 'rope-file-1',
+    const contradictoryMetadata = {
+      fileId: 'stale-rope-file',
       manager,
-    });
+    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
+    registerViewportSnapshotMetadata('tab-meta', contradictoryMetadata);
 
+    expectTypeOf<Parameters<typeof registerViewportSnapshotMetadata>[1]>()
+      .toEqualTypeOf<{ manager: ViewportManager }>();
     expect(isTabViewportMode('tab-meta')).toBe(true);
-    expect(getViewportSnapshotMetadata('tab-meta')).toEqual({
-      fileId: 'rope-file-1',
-      manager,
-    });
+    expect(getViewportSnapshotMetadata('tab-meta')).toEqual({ manager });
 
     unregisterEditorView('tab-meta');
     expect(isTabViewportMode('tab-meta')).toBe(false);

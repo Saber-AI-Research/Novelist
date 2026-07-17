@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
+import type { ViewportManager } from '$lib/editor/viewport';
 
 const { readFile } = vi.hoisted(() => ({ readFile: vi.fn() }));
 
@@ -21,6 +22,10 @@ import {
 import { capturePublishDocumentSnapshot } from '$lib/services/publish-document-snapshot';
 
 const registeredViews: Array<{ tabId: string; view: EditorView }> = [];
+
+function fakeViewportManager(fileId: string, baseCharOffset: number): ViewportManager {
+  return { fileId, baseCharOffset } as unknown as ViewportManager;
+}
 
 function mountView(
   tabId: string,
@@ -158,8 +163,12 @@ describe('[contract] capturePublishDocumentSnapshot', () => {
     const localFrom = windowText.indexOf(selectionText);
     const localTo = localFrom + selectionText.length;
     const view = mountView(tab.id, windowText, { anchor: localFrom, head: localTo });
-    const manager = { fileId: 'rope-file-1', baseCharOffset: 10_000 } as any;
-    registerViewportSnapshotMetadata(tab.id, { fileId: 'rope-file-1', manager });
+    const manager = fakeViewportManager('manager-rope-file', 10_000);
+    const contradictoryMetadata = {
+      fileId: 'stale-rope-file',
+      manager,
+    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
+    registerViewportSnapshotMetadata(tab.id, contradictoryMetadata);
 
     const result = capturePublishDocumentSnapshot('pane-1');
 
@@ -167,7 +176,7 @@ describe('[contract] capturePublishDocumentSnapshot', () => {
       kind: 'rope',
       paneId: 'pane-1',
       tabId: tab.id,
-      fileId: 'rope-file-1',
+      fileId: 'manager-rope-file',
       filePath: '/project/large.md',
       documentDir: '/project',
       projectDir: null,
@@ -196,14 +205,16 @@ describe('[contract] capturePublishDocumentSnapshot', () => {
     expect(commands.readFile).not.toHaveBeenCalled();
   });
 
-  it('blocks a viewport source when registered metadata lacks a file ID or manager', () => {
+  it('blocks a viewport source when the registered manager has an empty file ID', () => {
     tabsStore.openTab('/project/large.md', 'stored text must not be used');
     const tab = tabsStore.activeTab!;
     mountView(tab.id, 'partial window');
-    registerViewportSnapshotMetadata(tab.id, {
-      fileId: '',
-      manager: null as any,
-    });
+    const manager = fakeViewportManager('', 0);
+    const contradictoryMetadata = {
+      fileId: 'stale-nonempty-file',
+      manager,
+    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
+    registerViewportSnapshotMetadata(tab.id, contradictoryMetadata);
 
     expect(capturePublishDocumentSnapshot('pane-1')).toEqual({
       kind: 'blocked',
