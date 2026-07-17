@@ -6,16 +6,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * save / close and the offset helpers, mocking the IPC layer.
  */
 
-const { ropeGetLines, ropeLineToChar, ropeApplyEdit, ropeSave, ropeClose } = vi.hoisted(() => ({
+const { ropeGetLines, ropeLineToChar, ropeApplyEdit, ropeSnapshot, ropeSave, ropeClose } = vi.hoisted(() => ({
   ropeGetLines: vi.fn(),
   ropeLineToChar: vi.fn(),
   ropeApplyEdit: vi.fn(),
+  ropeSnapshot: vi.fn(),
   ropeSave: vi.fn(),
   ropeClose: vi.fn(),
 }));
 
 vi.mock('$lib/ipc/commands', () => ({
-  commands: { ropeGetLines, ropeLineToChar, ropeApplyEdit, ropeSave, ropeClose },
+  commands: { ropeGetLines, ropeLineToChar, ropeApplyEdit, ropeSnapshot, ropeSave, ropeClose },
 }));
 
 import { ViewportManager, WINDOW_SIZE, viewportReplace } from '$lib/editor/viewport';
@@ -58,6 +59,7 @@ beforeEach(() => {
   ropeGetLines.mockReset();
   ropeLineToChar.mockReset();
   ropeApplyEdit.mockReset();
+  ropeSnapshot.mockReset();
   ropeSave.mockReset();
   ropeClose.mockReset();
 });
@@ -178,6 +180,39 @@ describe('[contract] dispatchEdit', () => {
     mgr.dispatchEdit(0, 0, 'x');
     await (mgr as any).editQueue;
     expect(mgr.totalLines).toBe(99);
+  });
+});
+
+describe('[contract] snapshot', () => {
+  it('waits for queued edits before requesting one Rope snapshot', async () => {
+    let finishEdit!: (value: unknown) => void;
+    ropeApplyEdit.mockImplementation(() => new Promise(resolve => { finishEdit = resolve; }));
+    ropeSnapshot.mockResolvedValue({
+      status: 'ok',
+      data: { text: '未保存', generation: 4, total_lines: 1, total_chars: 3 },
+    });
+    const mgr = new ViewportManager('rope-file', 1);
+    mgr.dispatchEdit(0, 0, '未保存');
+
+    const pending = mgr.snapshot();
+    await Promise.resolve();
+    expect(ropeSnapshot).not.toHaveBeenCalled();
+
+    finishEdit({ status: 'ok', data: 1 });
+    await expect(pending).resolves.toEqual({
+      text: '未保存',
+      generation: 4,
+      total_lines: 1,
+      total_chars: 3,
+    });
+    expect(ropeSnapshot).toHaveBeenCalledOnce();
+    expect(ropeSnapshot).toHaveBeenCalledWith('rope-file');
+  });
+
+  it('throws the generated Rope snapshot error', async () => {
+    ropeSnapshot.mockResolvedValue({ status: 'error', error: 'snapshot unavailable' });
+    const mgr = new ViewportManager('rope-file', 1);
+    await expect(mgr.snapshot()).rejects.toThrow('snapshot unavailable');
   });
 });
 

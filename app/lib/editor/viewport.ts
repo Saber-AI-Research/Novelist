@@ -224,6 +224,13 @@ export class ViewportManager {
     return result.status === 'ok';
   }
 
+  async snapshot() {
+    await this.editQueue;
+    const result = await commands.ropeSnapshot(this.fileId);
+    if (result.status !== 'ok') throw new Error(result.error);
+    return result.data;
+  }
+
   async close() {
     if (!this.alive) return;
     this.alive = false;

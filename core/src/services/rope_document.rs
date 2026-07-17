@@ -65,6 +65,14 @@ pub struct ViewportContent {
     pub total_lines: usize,
 }
 
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct RopeSnapshot {
+    pub text: String,
+    pub generation: u64,
+    pub total_lines: usize,
+    pub total_chars: usize,
+}
+
 /// Open a large file into a Rope. Returns metadata.
 #[tauri::command]
 #[specta::specta]
@@ -251,6 +259,55 @@ pub fn rope_line_to_char(
         .ok_or_else(|| AppError::Custom(format!("Rope document not found: {}", file_id)))?;
     let clamped = line.min(doc.rope.len_lines().saturating_sub(1));
     Ok(doc.rope.line_to_char(clamped))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rope_snapshot(
+    file_id: String,
+    state: tauri::State<'_, RopeDocumentState>,
+) -> Result<RopeSnapshot, AppError> {
+    snapshot_document(state.inner(), &file_id).await
+}
+
+async fn snapshot_document(
+    state: &RopeDocumentState,
+    file_id: &str,
+) -> Result<RopeSnapshot, AppError> {
+    snapshot_document_with(state, file_id, build_rope_snapshot).await
+}
+
+async fn snapshot_document_with<F>(
+    state: &RopeDocumentState,
+    file_id: &str,
+    stringify: F,
+) -> Result<RopeSnapshot, AppError>
+where
+    F: FnOnce(Rope, u64) -> RopeSnapshot + Send + 'static,
+{
+    let (rope, generation) = {
+        let docs = lock_docs!(state)?;
+        let doc = docs
+            .get(file_id)
+            .ok_or_else(|| AppError::Custom(format!("Rope document not found: {file_id}")))?;
+        (doc.rope.clone(), doc.generation)
+    };
+
+    tokio::task::spawn_blocking(move || stringify(rope, generation))
+        .await
+        .map_err(|_| AppError::Custom("Rope snapshot task failed".to_string()))
+}
+
+fn build_rope_snapshot(rope: Rope, generation: u64) -> RopeSnapshot {
+    let total_lines = rope.len_lines();
+    let total_chars = rope.len_chars();
+    let text = rope.to_string();
+    RopeSnapshot {
+        text,
+        generation,
+        total_lines,
+        total_chars,
+    }
 }
 
 #[cfg(test)]
@@ -509,5 +566,87 @@ mod tests {
 
         let hash_after = blake3::hash(doc.rope.to_string().as_bytes());
         assert_eq!(hash_before, hash_after);
+    }
+
+    #[tokio::test]
+    async fn snapshot_preserves_cjk_generation_counts_and_dirty_state() {
+        let content = "第一章\n未保存的落霞与孤鹜齐飞\n";
+        let (state, file_id) = make_state_with_doc(content);
+        {
+            let mut docs = state.docs.lock().unwrap();
+            let doc = docs.get_mut(&file_id).unwrap();
+            doc.dirty = true;
+            doc.generation = 7;
+        }
+
+        let snapshot = snapshot_document(&state, &file_id).await.unwrap();
+
+        assert_eq!(snapshot.text, content);
+        assert_eq!(snapshot.generation, 7);
+        assert_eq!(snapshot.total_lines, Rope::from_str(content).len_lines());
+        assert_eq!(snapshot.total_chars, content.chars().count());
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&file_id).unwrap();
+        assert!(doc.dirty);
+        assert_eq!(doc.generation, 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshot_releases_lock_and_uses_one_consistent_clone() {
+        use std::sync::{Arc, Barrier};
+
+        let original = "原始内容\n第二行\n";
+        let (state, file_id) = make_state_with_doc(original);
+        {
+            let mut docs = state.docs.lock().unwrap();
+            let doc = docs.get_mut(&file_id).unwrap();
+            doc.dirty = true;
+            doc.generation = 11;
+        }
+        let state = Arc::new(state);
+        let stringify_started = Arc::new(Barrier::new(2));
+        let stringify_release = Arc::new(Barrier::new(2));
+        let task_state = state.clone();
+        let task_file_id = file_id.clone();
+        let task_started = stringify_started.clone();
+        let task_release = stringify_release.clone();
+        let task = tokio::spawn(async move {
+            snapshot_document_with(&task_state, &task_file_id, move |rope, generation| {
+                task_started.wait();
+                task_release.wait();
+                build_rope_snapshot(rope, generation)
+            })
+            .await
+        });
+
+        stringify_started.wait();
+        {
+            let mut docs = state.docs.lock().unwrap();
+            let doc = docs.get_mut(&file_id).unwrap();
+            doc.rope.insert(0, "后来编辑\n");
+            doc.generation = 12;
+        }
+        stringify_release.wait();
+        let snapshot = task.await.unwrap().unwrap();
+
+        assert_eq!(snapshot.text, original);
+        assert_eq!(snapshot.generation, 11);
+        assert_eq!(snapshot.total_lines, Rope::from_str(original).len_lines());
+        assert_eq!(snapshot.total_chars, original.chars().count());
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&file_id).unwrap();
+        assert!(doc.rope.to_string().starts_with("后来编辑\n"));
+        assert!(doc.dirty);
+        assert_eq!(doc.generation, 12);
+    }
+
+    #[tokio::test]
+    async fn snapshot_rejects_unknown_document() {
+        let state = RopeDocumentState::new();
+        let error = snapshot_document(&state, "missing")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Rope document not found"), "{error}");
     }
 }
