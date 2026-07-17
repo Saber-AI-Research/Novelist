@@ -24,6 +24,7 @@
   let dialogSource = $state<EditorPublishDocumentSnapshot | RopePublishDocumentSnapshot | null>(null);
   let channels = $state<ChannelConfig[]>([]);
   let buttonEl = $state<HTMLButtonElement | null>(null);
+  let openOperation = 0;
 
   onMount(() => {
     void reloadChannels();
@@ -54,17 +55,27 @@
   }
 
   async function openPublishDialog(c: ChannelConfig) {
+    const operation = ++openOperation;
     menuOpen = false;
     const tab = tabsStore.getPaneActiveTab(paneId);
     if (!tab) return;
     // Online Publish intentionally remains disk-backed.
-    dialogSource = captureStyledCopySource();
+    const source = captureStyledCopySource();
+    let doc: Awaited<ReturnType<typeof loadActiveDoc>>;
+    try {
+      doc = await loadActiveDoc(tab.filePath);
+    } catch {
+      return;
+    }
+    if (operation !== openOperation || !doc) return;
+    dialogSource = source;
     dialogChannel = c;
-    activeDoc = await loadActiveDoc(tab.filePath);
-    if (activeDoc) dialogMode = 'online';
+    activeDoc = doc;
+    dialogMode = 'online';
   }
 
   function openStyledCopyDialog() {
+    openOperation += 1;
     menuOpen = false;
     dialogSource = captureStyledCopySource();
     dialogMode = 'styled';
@@ -95,6 +106,7 @@
   }
 
   function closeDialog() {
+    openOperation += 1;
     dialogMode = null;
     dialogSource = null;
     dialogChannel = null;

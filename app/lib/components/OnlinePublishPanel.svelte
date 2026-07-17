@@ -88,6 +88,7 @@
   let errorMessage = $state<string | null>(null);
   let successUrl = $state<string | null>(null);
   let corruptDraftNotice = $state(false);
+  let exitPromise: Promise<boolean> | null = null;
 
   $effect(() => {
     onPublishingChange?.(publishing);
@@ -191,6 +192,10 @@
   });
 
   onDestroy(() => {
+    if (coverPreviewUrl) {
+      URL.revokeObjectURL(coverPreviewUrl);
+      coverPreviewUrl = null;
+    }
     persistenceController.handleDestroy().catch((err) => {
       console.warn('[publish] destroy flush rejected:', err instanceof Error ? err.message : err);
     });
@@ -335,16 +340,26 @@
     }
   }
 
+  function persistBeforeExit(): Promise<boolean> {
+    if (exitPromise) return exitPromise;
+    exitPromise = (async () => {
+      try {
+        await persistenceController.handleClose();
+        return true;
+      } catch (err) {
+        errorMessage = `${t('publish.draftPersistFailed')}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        return false;
+      } finally {
+        exitPromise = null;
+      }
+    })();
+    return exitPromise;
+  }
+
   async function handleClose() {
-    try {
-      await persistenceController.handleClose();
-    } catch (err) {
-      errorMessage = `${t('publish.draftPersistFailed')}: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      return;
-    }
-    onClose();
+    if (await persistBeforeExit()) onClose();
   }
 
   function safeHandleClose(): void {
@@ -357,6 +372,11 @@
 
   export function requestClose(): void {
     if (!publishing) safeHandleClose();
+  }
+
+  export async function prepareForModeSwitch(): Promise<boolean> {
+    if (publishing) return false;
+    return persistBeforeExit();
   }
 
   async function openInBrowser() {

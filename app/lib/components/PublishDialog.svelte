@@ -42,8 +42,18 @@
   let onlinePanel = $state<OnlinePublishPanel>();
   let publishing = $state(false);
   let loadingOnline = $state(false);
+  let onlineLoadError = $state(false);
+  let switchingMode = $state(false);
+  let onlineLoadGeneration = 0;
+
+  function invalidateOnlineLoad(): number {
+    loadingOnline = false;
+    return ++onlineLoadGeneration;
+  }
 
   function requestClose(): void {
+    if (switchingMode) return;
+    invalidateOnlineLoad();
     if (mode === 'online' && onlinePanel) {
       if (!publishing) onlinePanel.requestClose();
       return;
@@ -52,18 +62,42 @@
   }
 
   async function switchMode(nextMode: PublishDialogMode): Promise<void> {
-    if (publishing || mode === nextMode) return;
-    mode = nextMode;
-    if (nextMode !== 'online' || (onlineChannel && onlineDoc) || channels.length === 0) return;
+    if (publishing || switchingMode || mode === nextMode) return;
+    const generation = invalidateOnlineLoad();
+    onlineLoadError = false;
+
+    if (nextMode === 'styled') {
+      if (mode === 'online' && onlinePanel) {
+        switchingMode = true;
+        const canSwitch = await onlinePanel.prepareForModeSwitch();
+        switchingMode = false;
+        if (generation !== onlineLoadGeneration || !canSwitch) return;
+      }
+      if (generation === onlineLoadGeneration) mode = 'styled';
+      return;
+    }
+
+    mode = 'online';
+    if ((onlineChannel && onlineDoc) || channels.length === 0) return;
 
     loadingOnline = true;
     const nextChannel = channels[0];
-    const nextDoc = await loadOnlineDoc(nextChannel);
-    if (mode === 'online' && nextDoc) {
+    try {
+      const nextDoc = await loadOnlineDoc(nextChannel);
+      if (generation !== onlineLoadGeneration || mode !== 'online') return;
+      if (!nextDoc) {
+        onlineLoadError = true;
+        return;
+      }
       onlineChannel = nextChannel;
       onlineDoc = nextDoc;
+    } catch {
+      if (generation === onlineLoadGeneration && mode === 'online') {
+        onlineLoadError = true;
+      }
+    } finally {
+      if (generation === onlineLoadGeneration) loadingOnline = false;
     }
-    loadingOnline = false;
   }
 </script>
 
@@ -84,7 +118,7 @@
             name="publish-mode"
             value="online"
             checked={mode === 'online'}
-            disabled={publishing}
+            disabled={publishing || switchingMode}
             data-testid="publish-mode-online"
             onchange={() => { void switchMode('online'); }}
           />
@@ -96,14 +130,14 @@
             name="publish-mode"
             value="styled"
             checked={mode === 'styled'}
-            disabled={publishing}
+            disabled={publishing || switchingMode}
             data-testid="publish-mode-styled"
             onchange={() => { void switchMode('styled'); }}
           />
           <span>{t('publish.mode.styled')}</span>
         </label>
       </div>
-      <button class="close-button" type="button" onclick={requestClose} aria-label={t('publish.closeDialog')}>
+      <button class="close-button" type="button" onclick={requestClose} disabled={switchingMode} aria-label={t('publish.closeDialog')}>
         <IconClose size={14} />
       </button>
     </div>
@@ -120,6 +154,8 @@
           />
         {:else if loadingOnline}
           <div class="mode-status">{t('publish.loadingOnline')}</div>
+        {:else if onlineLoadError}
+          <div class="mode-status" data-testid="publish-online-load-error">{t('publish.loadOnlineFailed')}</div>
         {:else}
           <div class="mode-status">{t('share.noChannels')}</div>
         {/if}

@@ -1,8 +1,10 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/app-fixture';
+import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 const FULL_SOURCE = '# 冻结全文\n\n前文 未保存选择文本 后文';
 const SELECTED_SOURCE = '未保存选择文本';
+const CHAPTER_PATH = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
 const GHOST_CHANNEL = {
   id: 'ghost-main',
   name: 'Editorial Ghost',
@@ -36,6 +38,12 @@ async function openStyledCopy(app: Page) {
   await app.getByTestId('share-menu-pane-1').click();
   await app.getByTestId('share-styled-copy').click();
   await expect(app.getByRole('dialog')).toBeVisible();
+}
+
+async function settleApp(app: Page) {
+  await app.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
 }
 
 async function expectDialogFitsViewport(app: Page) {
@@ -216,5 +224,125 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
     await expect(app.getByText('Editorial Ghost', { exact: true })).toBeVisible();
     calls = await mockState.getInvokeCalls();
     expect(calls.filter((call) => call.command === 'read_file')).toHaveLength(readsBeforeSwitch + 1);
+  });
+
+  test('does not reopen Online after a pending channel open is superseded and closed', async ({ app, mockState }) => {
+    await mockState.setPublishChannels([GHOST_CHANNEL]);
+    await mockState.setReadFileBlocked(CHAPTER_PATH, true);
+    const readsBeforeOpen = (await mockState.getInvokeCalls()).filter((call) => call.command === 'read_file').length;
+
+    await app.getByTestId('share-menu-pane-1').click();
+    await app.getByRole('menuitem', { name: /Publish to Editorial Ghost/ }).click();
+    await expect.poll(async () => (
+      await mockState.getInvokeCalls()
+    ).filter((call) => call.command === 'read_file').length).toBe(readsBeforeOpen + 1);
+    await app.getByTestId('share-menu-pane-1').click();
+    await app.getByTestId('share-styled-copy').click();
+    await expect(app.getByTestId('publish-mode-styled')).toBeChecked();
+
+    await mockState.setReadFileBlocked(CHAPTER_PATH, false);
+    await settleApp(app);
+
+    await expect(app.getByTestId('publish-mode-styled')).toBeChecked();
+    await app.getByLabel('Close publish dialog').click();
+    await expect(app.getByRole('dialog')).toHaveCount(0);
+  });
+
+  test('contains a rejected pending channel open without exposing native details', async ({ app, mockState }) => {
+    await mockState.setPublishChannels([GHOST_CHANNEL]);
+    await mockState.setReadFileBlocked(CHAPTER_PATH, true);
+
+    await app.getByTestId('share-menu-pane-1').click();
+    await app.getByRole('menuitem', { name: /Publish to Editorial Ghost/ }).click();
+    await mockState.rejectBlockedRead('native path and credential detail');
+    await settleApp(app);
+
+    await expect(app.getByRole('dialog')).toHaveCount(0);
+    await expect(app.getByText(/native path and credential detail/)).toHaveCount(0);
+  });
+
+  test('ignores a stale lazy Online result while a newer load remains pending', async ({ app, mockState }) => {
+    await mockState.setPublishChannels([GHOST_CHANNEL]);
+    await openStyledCopy(app);
+    await mockState.setReadFileBlocked(CHAPTER_PATH, true);
+
+    await app.getByTestId('publish-mode-online').check();
+    await expect(app.getByText('Loading publish channel…')).toBeVisible();
+    await app.getByTestId('publish-mode-styled').check();
+    await app.getByTestId('publish-mode-online').check();
+    await expect(app.getByText('Loading publish channel…')).toBeVisible();
+
+    await mockState.releaseNextBlockedRead();
+    await settleApp(app);
+    await expect(app.getByText('Loading publish channel…')).toBeVisible();
+
+    await mockState.releaseNextBlockedRead();
+    await expect(app.getByText('Editorial Ghost', { exact: true })).toBeVisible();
+  });
+
+  test('shows a localized Online load error for rejected and null lazy loaders', async ({ app, mockState }) => {
+    await mockState.setPublishChannels([GHOST_CHANNEL]);
+    await openStyledCopy(app);
+    await mockState.setReadFileBlocked(CHAPTER_PATH, true);
+
+    await app.getByTestId('publish-mode-online').check();
+    await mockState.rejectBlockedRead('native rejection detail');
+    await expect(app.getByTestId('publish-online-load-error')).toHaveText(
+      'Unable to load the saved document for this publish channel. Try again.',
+    );
+    await expect(app.getByText(/No publish channels configured/)).toHaveCount(0);
+
+    await app.getByTestId('publish-mode-styled').check();
+    await mockState.setReadFileBlocked(CHAPTER_PATH, true);
+    await app.getByTestId('publish-mode-online').check();
+    await mockState.failNextBlockedRead('non-Error native failure');
+    await expect(app.getByTestId('publish-online-load-error')).toHaveText(
+      'Unable to load the saved document for this publish channel. Try again.',
+    );
+  });
+
+  test('awaits Online persistence before unmount and revokes the cover preview URL', async ({ app, mockState }) => {
+    await mockState.setPublishChannels([GHOST_CHANNEL]);
+    await app.getByTestId('share-menu-pane-1').click();
+    await app.getByRole('menuitem', { name: /Publish to Editorial Ghost/ }).click();
+    await expect(app.locator('#pub-title')).toBeVisible();
+    await app.evaluate(() => {
+      const originalCreate = URL.createObjectURL.bind(URL);
+      const originalRevoke = URL.revokeObjectURL.bind(URL);
+      const created: string[] = [];
+      const revoked: string[] = [];
+      Reflect.set(window, '__TASK7_CREATED_URLS__', created);
+      Reflect.set(window, '__TASK7_REVOKED_URLS__', revoked);
+      URL.createObjectURL = (object) => {
+        const url = originalCreate(object);
+        created.push(url);
+        return url;
+      };
+      URL.revokeObjectURL = (url) => {
+        revoked.push(String(url));
+        originalRevoke(url);
+      };
+    });
+    const imageTransfer = await app.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'cover.png', { type: 'image/png' }));
+      return transfer;
+    });
+    await app.locator('.cover-drop').dispatchEvent('drop', { dataTransfer: imageTransfer });
+    await expect(app.locator('.cover-drop img')).toHaveAttribute('src', /^blob:/);
+
+    await mockState.setPublishDraftWritesBlocked(true);
+    await app.getByTestId('publish-mode-styled').check();
+    await expect(app.locator('#pub-title')).toBeVisible();
+    await expect(app.getByTestId('publish-mode-online')).toBeDisabled();
+    await expect(app.getByTestId('publish-mode-styled')).toBeDisabled();
+
+    await mockState.setPublishDraftWritesBlocked(false);
+    await expect(app.getByTestId('styled-copy-preview')).toBeVisible();
+    const urls = await app.evaluate(() => ({
+      created: Reflect.get(window, '__TASK7_CREATED_URLS__'),
+      revoked: Reflect.get(window, '__TASK7_REVOKED_URLS__'),
+    }));
+    expect(urls.revoked).toEqual(urls.created);
   });
 });
