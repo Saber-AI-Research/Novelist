@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { i18n } from '$lib/i18n';
 import { en } from '$lib/i18n/locales/en';
+import { zhCN } from '$lib/i18n/locales/zh-CN';
 
 const LOCALE_KEY = 'novelist-locale';
 
@@ -16,6 +17,10 @@ beforeEach(() => {
 });
 
 describe('[contract] i18n basic translation', () => {
+  it('keeps English and Simplified Chinese locale keys in exact parity', () => {
+    expect(Object.keys(zhCN).sort()).toEqual(Object.keys(en).sort());
+  });
+
   it('returns the key itself when no translation exists (safe fallback)', () => {
     const missing = '__definitely_not_a_key__';
     expect(i18n.t(missing)).toBe(missing);
