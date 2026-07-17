@@ -8,6 +8,12 @@ import {
   MOCK_PROJECT_CONFIG,
   type MockFileEntry,
 } from './mock-data';
+import type { ChannelConfig, FormDraft } from '../../../app/lib/ipc/commands';
+
+export interface MockInvokeCall {
+  command: string;
+  args: Record<string, unknown>;
+}
 
 /**
  * Dispatch a synthetic keyboard event directly to the DOM,
@@ -44,6 +50,7 @@ async function dispatchKey(page: Page, key: string, opts: {
 }
 
 export const test = base.extend<{
+  browserErrors: string[];
   app: Page;
   /** Dispatch keyboard shortcut directly to DOM (bypasses browser interception) */
   appKeys: {
@@ -59,10 +66,26 @@ export const test = base.extend<{
     emitEvent: (event: string, payload: unknown) => Promise<void>;
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
     renameFile: (oldPath: string, newPath: string) => Promise<void>;
+    setPublishChannels: (channels: ChannelConfig[]) => Promise<void>;
+    setPublishDrafts: (forms: Record<string, FormDraft>) => Promise<void>;
+    setPublishBlocked: (blocked: boolean) => Promise<void>;
+    setPublishError: (message: string | null) => Promise<void>;
+    setStyledConversionBlocked: (blocked: boolean) => Promise<void>;
+    setStyledConversionError: (message: string | null) => Promise<void>;
+    getInvokeCalls: () => Promise<MockInvokeCall[]>;
     reset: () => Promise<void>;
   };
 }>({
-  app: async ({ page }, use) => {
+  browserErrors: async ({ page }, use) => {
+    const errors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(`console: ${message.text()}`);
+    });
+    page.on('pageerror', (error) => errors.push(`page: ${error.message}`));
+    await use(errors);
+  },
+
+  app: async ({ page, browserErrors: _browserErrors }, use) => {
     await page.addInitScript({
       content: buildTauriMockScript({
         files: MOCK_FILES,
@@ -125,6 +148,69 @@ export const test = base.extend<{
           ([o, n]) => (window as any).__TAURI_MOCK_STATE__.renameFile(o, n),
           [oldPath, newPath] as const,
         );
+      },
+      async setPublishChannels(channels: ChannelConfig[]) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setPublishChannels');
+          if (typeof setter !== 'function') throw new Error('Publish channel setter unavailable');
+          setter.call(state, value);
+        }, channels);
+      },
+      async setPublishDrafts(forms: Record<string, FormDraft>) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setPublishDrafts');
+          if (typeof setter !== 'function') throw new Error('Publish draft setter unavailable');
+          setter.call(state, value);
+        }, forms);
+      },
+      async setPublishBlocked(blocked: boolean) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setPublishBlocked');
+          if (typeof setter !== 'function') throw new Error('Publish blocker unavailable');
+          setter.call(state, value);
+        }, blocked);
+      },
+      async setPublishError(message: string | null) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setPublishError');
+          if (typeof setter !== 'function') throw new Error('Publish error setter unavailable');
+          setter.call(state, value);
+        }, message);
+      },
+      async setStyledConversionBlocked(blocked: boolean) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledConversionBlocked');
+          if (typeof setter !== 'function') throw new Error('Styled conversion blocker unavailable');
+          setter.call(state, value);
+        }, blocked);
+      },
+      async setStyledConversionError(message: string | null) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledConversionError');
+          if (typeof setter !== 'function') throw new Error('Styled conversion error setter unavailable');
+          setter.call(state, value);
+        }, message);
+      },
+      async getInvokeCalls() {
+        return app.evaluate(() => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const calls: unknown = Reflect.get(state, 'invokeCalls');
+          if (!Array.isArray(calls)) throw new Error('Invoke calls unavailable');
+          return calls;
+        });
       },
       async reset() {
         await app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.reset());

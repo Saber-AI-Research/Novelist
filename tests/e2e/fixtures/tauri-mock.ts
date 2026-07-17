@@ -30,6 +30,15 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const eventListeners = {};
       let aiStreamCounter = 0;
       let claudeCliDetectResult = null;
+      let publishChannels = [];
+      let publishDrafts = {};
+      let publishBlocked = false;
+      let publishError = null;
+      const publishWaiters = [];
+      let styledConversionBlocked = false;
+      let styledConversionError = null;
+      const styledConversionWaiters = [];
+      const invokeCalls = [];
       const aiSessions = {};
       // In-memory project snippet templates. Keyed by id.
       // Each entry: { summary: TemplateFileSummary, body: string }
@@ -103,7 +112,22 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         return entry;
       }
 
+      function styledHtml(markdown) {
+        const escaped = String(markdown)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;')
+          .replace(/\\r?\\n/g, '<br>');
+        return '<h1>Styled preview</h1><p>' + escaped + '</p>';
+      }
+
       function handleInvoke(cmd, args) {
+        invokeCalls.push({
+          command: cmd,
+          args: JSON.parse(JSON.stringify(args || {})),
+        });
         switch (cmd) {
           case 'read_file': return writtenFiles[args.path] ?? fileContents[args.path] ?? '';
           case 'write_file': writtenFiles[args.path] = args.content; return null;
@@ -234,6 +258,49 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           case 'check_pandoc': return { installed: false, version: null };
           case 'export_project': return 'mock-export.pdf';
+          case 'get_publish_settings': return { channels: publishChannels.map(channel => ({ ...channel })) };
+          case 'set_publish_settings': publishChannels = (args.settings?.channels || []).map(channel => ({ ...channel })); return null;
+          case 'read_publish_form_drafts': return {
+            forms: JSON.parse(JSON.stringify(publishDrafts)),
+            invalid_channel_ids: [],
+          };
+          case 'write_publish_form_draft':
+            publishDrafts[args.channelId] = JSON.parse(JSON.stringify(args.form));
+            return null;
+          case 'list_publish_tags': return ['restored', 'existing'];
+          case 'convert_markdown_to_html': return '<p>Converted online body</p>';
+          case 'convert_markdown_to_styled_html': {
+            const finish = () => {
+              if (styledConversionError) throw styledConversionError;
+              return styledHtml(args.markdown);
+            };
+            if (!styledConversionBlocked) return finish();
+            return new Promise((resolve, reject) => styledConversionWaiters.push(() => {
+              try { resolve(finish()); } catch (error) { reject(error); }
+            }));
+          }
+          case 'write_styled_clipboard': return null;
+          case 'read_styled_copy_image': return { bytes: [137, 80, 78, 71], mime: 'image/png' };
+          case 'get_image_host_settings': return { hosts: [], active_host_id: null, auto_upload_on_paste: false };
+          case 'upload_post_image_ghost': return {
+            url: 'https://ghost.example/assets/' + args.filename,
+            attachment_id: 0,
+          };
+          case 'publish_to_ghost': {
+            const finish = () => {
+              if (publishError) throw publishError;
+              return {
+                url: 'https://ghost.example/final-title/',
+                remote_id: 'post-1',
+                operation: 'created',
+                provider_revision: null,
+              };
+            };
+            if (!publishBlocked) return finish();
+            return new Promise((resolve, reject) => publishWaiters.push(() => {
+              try { resolve(finish()); } catch (error) { reject(error); }
+            }));
+          }
           case 'list_plugins': return scaffoldedPlugins.slice();
           case 'get_plugin_commands': return [];
           case 'scaffold_plugin': {
@@ -469,6 +536,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get files() { return files.map(f => ({ ...f })); },
         get projectDir() { return projectDir; },
         get recentProjects() { return recentProjects.map(p => ({ ...p })); },
+        get invokeCalls() { return invokeCalls.map(call => ({ command: call.command, args: JSON.parse(JSON.stringify(call.args)) })); },
         seedRecentProjects(list) {
           recentProjects.length = 0;
           for (const p of list) recentProjects.push({ ...p });
@@ -518,10 +586,31 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           Object.keys(writtenFiles).forEach(k => delete writtenFiles[k]);
           createdFiles.length = 0;
           deletedFiles.length = 0;
+          invokeCalls.length = 0;
         },
         // AI bridge test helpers — let specs simulate streamed responses
         // and control whether the Claude CLI is "installed".
         setClaudeCliDetectResult(v) { claudeCliDetectResult = v; },
+        setPublishChannels(channels) {
+          publishChannels = (channels || []).map(channel => ({ ...channel }));
+        },
+        setPublishDrafts(forms) {
+          publishDrafts = JSON.parse(JSON.stringify(forms || {}));
+        },
+        setPublishBlocked(blocked) {
+          publishBlocked = blocked;
+          if (!blocked) {
+            for (const release of publishWaiters.splice(0)) release();
+          }
+        },
+        setPublishError(message) { publishError = message; },
+        setStyledConversionBlocked(blocked) {
+          styledConversionBlocked = blocked;
+          if (!blocked) {
+            for (const release of styledConversionWaiters.splice(0)) release();
+          }
+        },
+        setStyledConversionError(message) { styledConversionError = message; },
         emitAiChunk(streamId, text) {
           this.emitEvent('ai-stream://' + streamId, { kind: 'chunk', data: JSON.stringify({ choices: [{ delta: { content: text } }] }) });
         },
