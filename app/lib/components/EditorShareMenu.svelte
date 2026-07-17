@@ -2,9 +2,15 @@
   import { onMount } from 'svelte';
   import { commands, type ChannelConfig } from '$lib/ipc/commands';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { projectStore } from '$lib/stores/project.svelte';
   import { commandRegistry } from '$lib/stores/commands.svelte';
+  import {
+    capturePublishDocumentSnapshot,
+    type EditorPublishDocumentSnapshot,
+    type RopePublishDocumentSnapshot,
+  } from '$lib/services/publish-document-snapshot';
   import { t } from '$lib/i18n';
-  import PublishDialog from './PublishDialog.svelte';
+  import PublishDialog, { type PublishDialogMode } from './PublishDialog.svelte';
 
   interface Props {
     paneId: string;
@@ -14,6 +20,8 @@
 
   let menuOpen = $state(false);
   let dialogChannel = $state<ChannelConfig | null>(null);
+  let dialogMode = $state<PublishDialogMode | null>(null);
+  let dialogSource = $state<EditorPublishDocumentSnapshot | RopePublishDocumentSnapshot | null>(null);
   let channels = $state<ChannelConfig[]>([]);
   let buttonEl = $state<HTMLButtonElement | null>(null);
 
@@ -50,20 +58,45 @@
     const tab = tabsStore.getPaneActiveTab(paneId);
     if (!tab) return;
     // Online Publish intentionally remains disk-backed.
+    dialogSource = captureStyledCopySource();
     dialogChannel = c;
     activeDoc = await loadActiveDoc(tab.filePath);
+    if (activeDoc) dialogMode = 'online';
   }
 
-  let activeDoc = $state<{ dir: string; text: string } | null>(null);
+  function openStyledCopyDialog() {
+    menuOpen = false;
+    dialogSource = captureStyledCopySource();
+    dialogMode = 'styled';
+    dialogChannel = null;
+    activeDoc = null;
+  }
 
-  async function loadActiveDoc(filePath: string): Promise<{ dir: string; text: string } | null> {
+  function captureStyledCopySource(): EditorPublishDocumentSnapshot | RopePublishDocumentSnapshot | null {
+    const result = capturePublishDocumentSnapshot(paneId);
+    return result.kind === 'editor' || result.kind === 'rope' ? result : null;
+  }
+
+  async function loadPaneActiveDoc() {
+    const tab = tabsStore.getPaneActiveTab(paneId);
+    return tab ? loadActiveDoc(tab.filePath) : null;
+  }
+
+  let activeDoc = $state<{ dir: string; text: string; projectDir: string; filePath: string } | null>(null);
+
+  async function loadActiveDoc(
+    filePath: string,
+  ): Promise<{ dir: string; text: string; projectDir: string; filePath: string } | null> {
     const r = await commands.readFile(filePath);
     if (r.status !== 'ok') return null;
     const dir = filePath.split('/').slice(0, -1).join('/');
-    return { dir, text: r.data };
+    const projectDir = projectStore.dirPath ?? dir;
+    return { dir, text: r.data, projectDir, filePath };
   }
 
   function closeDialog() {
+    dialogMode = null;
+    dialogSource = null;
     dialogChannel = null;
     activeDoc = null;
   }
@@ -75,6 +108,7 @@
   onclick={toggleMenu}
   title={t('share.button')}
   aria-label={t('share.button')}
+  data-testid="share-menu-{paneId}"
 >
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M4 8L8 4L12 8" />
@@ -87,6 +121,15 @@
   <div class="share-menu" role="menu">
     <button class="share-item" role="menuitem" onclick={() => runCommand('image-host.upload-all')}>
       {t('share.uploadImages')}
+    </button>
+    <div class="share-divider"></div>
+    <button
+      class="share-item"
+      role="menuitem"
+      data-testid="share-styled-copy"
+      onclick={openStyledCopyDialog}
+    >
+      {t('share.styledCopy')}
     </button>
     {#if channels.length > 0}
       <div class="share-divider"></div>
@@ -103,8 +146,16 @@
   </div>
 {/if}
 
-{#if dialogChannel && activeDoc}
-  <PublishDialog channel={dialogChannel} doc={activeDoc} onClose={closeDialog} />
+{#if dialogMode && (dialogMode === 'styled' || (dialogChannel && activeDoc))}
+  <PublishDialog
+    initialMode={dialogMode}
+    {channels}
+    source={dialogSource}
+    channel={dialogChannel}
+    doc={activeDoc}
+    loadOnlineDoc={loadPaneActiveDoc}
+    onClose={closeDialog}
+  />
 {/if}
 
 <style>
