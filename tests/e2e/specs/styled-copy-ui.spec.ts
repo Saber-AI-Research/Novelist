@@ -414,9 +414,17 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
     await expect(app.locator('#pub-title')).toBeVisible();
     await expect(app.getByTestId('publish-mode-online')).toBeDisabled();
     await expect(app.getByTestId('publish-mode-styled')).toBeDisabled();
+    const publishButton = app.getByRole('button', { name: 'Publish', exact: true });
+    await expect.soft(publishButton).toBeDisabled();
+    await publishButton.dispatchEvent('click');
+    let calls = await mockState.getInvokeCalls();
+    expect(calls.filter((call) => call.command === 'publish_to_ghost')).toHaveLength(0);
 
     await mockState.setPublishDraftWritesBlocked(false);
     await expect(app.getByTestId('styled-copy-preview')).toBeVisible();
+    await settleApp(app);
+    calls = await mockState.getInvokeCalls();
+    expect(calls.filter((call) => call.command === 'publish_to_ghost')).toHaveLength(0);
     const urls = await app.evaluate(() => ({
       created: Reflect.get(window, '__TASK7_CREATED_URLS__'),
       revoked: Reflect.get(window, '__TASK7_REVOKED_URLS__'),

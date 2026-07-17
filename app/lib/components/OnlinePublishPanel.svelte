@@ -88,6 +88,7 @@
   let errorMessage = $state<string | null>(null);
   let successUrl = $state<string | null>(null);
   let corruptDraftNotice = $state(false);
+  let exitLocked = $state(false);
   let exitPromise: Promise<boolean> | null = null;
 
   $effect(() => {
@@ -304,6 +305,7 @@
   }
 
   async function doPublish() {
+    if (publishing || exitLocked) return;
     if (!title.trim()) {
       errorMessage = t('publish.titleRequired');
       return;
@@ -342,20 +344,24 @@
 
   function persistBeforeExit(): Promise<boolean> {
     if (exitPromise) return exitPromise;
-    exitPromise = (async () => {
+    exitLocked = true;
+    const operation = (async () => {
       try {
         await persistenceController.handleClose();
         return true;
       } catch (err) {
+        exitLocked = false;
         errorMessage = `${t('publish.draftPersistFailed')}: ${
           err instanceof Error ? err.message : String(err)
         }`;
         return false;
-      } finally {
-        exitPromise = null;
       }
     })();
-    return exitPromise;
+    exitPromise = operation;
+    void operation.finally(() => {
+      if (exitPromise === operation) exitPromise = null;
+    });
+    return operation;
   }
 
   async function handleClose() {
@@ -363,6 +369,7 @@
   }
 
   function safeHandleClose(): void {
+    if (publishing || exitLocked) return;
     handleClose().catch((err) => {
       errorMessage = `${t('publish.draftPersistFailed')}: ${
         err instanceof Error ? err.message : String(err)
@@ -371,7 +378,7 @@
   }
 
   export function requestClose(): void {
-    if (!publishing) safeHandleClose();
+    if (!publishing && !exitLocked) safeHandleClose();
   }
 
   export async function prepareForModeSwitch(): Promise<boolean> {
@@ -402,7 +409,7 @@
       <div class="success-banner">
         <span>{t('publish.success')}</span>
         <button class="link-btn" onclick={openInBrowser}>{t('publish.openInBrowser')}</button>
-        <button class="close-btn" onclick={safeHandleClose}>{t('publish.close')}</button>
+        <button class="close-btn" onclick={safeHandleClose} disabled={publishing || exitLocked}>{t('publish.close')}</button>
       </div>
     {:else}
       <div class="form">
@@ -522,8 +529,8 @@
         {/if}
 
         <div class="footer">
-          <button class="ghost-btn" onclick={safeHandleClose} disabled={publishing}>{t('publish.cancel')}</button>
-          <button class="primary-btn" onclick={doPublish} disabled={publishing}>
+          <button class="ghost-btn" onclick={safeHandleClose} disabled={publishing || exitLocked}>{t('publish.cancel')}</button>
+          <button class="primary-btn" onclick={doPublish} disabled={publishing || exitLocked}>
             {publishing ? t('publish.publishing') : t('publish.publish')}
           </button>
         </div>
@@ -729,7 +736,7 @@
     border: none; background: var(--novelist-accent); color: white;
     border-radius: 4px; cursor: pointer;
   }
-  .primary-btn:disabled, .ghost-btn:disabled { opacity: 0.5; cursor: default; }
+  .primary-btn:disabled, .ghost-btn:disabled, .close-btn:disabled { opacity: 0.5; cursor: default; }
   .link-btn { background: none; border: none; color: var(--novelist-accent); cursor: pointer; padding: 0; font-size: 14px; text-decoration: underline; }
   .close-btn { background: none; border: 1px solid var(--novelist-border); border-radius: 3px; padding: 2px 8px; font-size: 12px; cursor: pointer; margin-left: auto; }
 </style>

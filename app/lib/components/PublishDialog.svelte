@@ -71,7 +71,7 @@
         switchingMode = true;
         const canSwitch = await onlinePanel.prepareForModeSwitch();
         switchingMode = false;
-        if (generation !== onlineLoadGeneration || !canSwitch) return;
+        if (generation !== onlineLoadGeneration || !canSwitch || publishing) return;
       }
       if (generation === onlineLoadGeneration) mode = 'styled';
       return;
