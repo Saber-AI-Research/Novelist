@@ -77,6 +77,14 @@ export const test = base.extend<{
     setPublishDraftWritesBlocked: (blocked: boolean) => Promise<void>;
     setStyledConversionBlocked: (blocked: boolean) => Promise<void>;
     setStyledConversionError: (message: string | null) => Promise<void>;
+    setStyledConversionHtml: (html: string | null) => Promise<void>;
+    setStyledImageResults: (results: Record<string, { bytes: number[]; mime: string } | { error: string }>) => Promise<void>;
+    setStyledImageHostSettings: (settings: {
+      hosts: Array<Record<string, unknown>>;
+      active_host_id: string | null;
+      auto_on_paste: boolean;
+    }) => Promise<void>;
+    setStyledUploadResults: (results: Record<string, { url: string } | { error: string }>) => Promise<void>;
     getInvokeCalls: () => Promise<MockInvokeCall[]>;
     reset: () => Promise<void>;
   };
@@ -252,6 +260,46 @@ export const test = base.extend<{
           if (typeof setter !== 'function') throw new Error('Styled conversion error setter unavailable');
           setter.call(state, value);
         }, message);
+      },
+      async setStyledConversionHtml(html: string | null) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledConversionHtml');
+          if (typeof setter !== 'function') throw new Error('Styled conversion HTML setter unavailable');
+          setter.call(state, value);
+        }, html);
+      },
+      async setStyledImageResults(results: Record<string, { bytes: number[]; mime: string } | { error: string }>) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledImageResults');
+          if (typeof setter !== 'function') throw new Error('Styled image result setter unavailable');
+          setter.call(state, value);
+        }, results);
+      },
+      async setStyledImageHostSettings(settings: {
+        hosts: Array<Record<string, unknown>>;
+        active_host_id: string | null;
+        auto_on_paste: boolean;
+      }) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledImageHostSettings');
+          if (typeof setter !== 'function') throw new Error('Styled image-host settings setter unavailable');
+          setter.call(state, value);
+        }, settings);
+      },
+      async setStyledUploadResults(results: Record<string, { url: string } | { error: string }>) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setStyledUploadResults');
+          if (typeof setter !== 'function') throw new Error('Styled upload result setter unavailable');
+          setter.call(state, value);
+        }, results);
       },
       async getInvokeCalls() {
         return app.evaluate(() => {

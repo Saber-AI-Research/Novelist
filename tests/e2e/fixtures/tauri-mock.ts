@@ -41,6 +41,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const publishDraftWriteWaiters = [];
       let styledConversionBlocked = false;
       let styledConversionError = null;
+      let styledConversionHtml = null;
+      let styledImageResults = {};
+      let styledImageHostSettings = { hosts: [], active_host_id: null, auto_on_paste: false };
+      let styledUploadResults = {};
       const styledConversionWaiters = [];
       const invokeCalls = [];
       const aiSessions = {};
@@ -291,7 +295,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'convert_markdown_to_styled_html': {
             const finish = () => {
               if (styledConversionError) throw styledConversionError;
-              return styledHtml(args.markdown);
+              return styledConversionHtml ?? styledHtml(args.markdown);
             };
             if (!styledConversionBlocked) return finish();
             return new Promise((resolve, reject) => styledConversionWaiters.push(() => {
@@ -299,8 +303,20 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             }));
           }
           case 'write_styled_clipboard': return null;
-          case 'read_styled_copy_image': return { bytes: [137, 80, 78, 71], mime: 'image/png' };
-          case 'get_image_host_settings': return { hosts: [], active_host_id: null, auto_upload_on_paste: false };
+          case 'read_styled_copy_image': {
+            const result = styledImageResults[args.path];
+            if (result?.error) throw new Error(result.error);
+            return result ?? { bytes: [137, 80, 78, 71], mime: 'image/png' };
+          }
+          case 'get_image_host_settings': return JSON.parse(JSON.stringify(styledImageHostSettings));
+          case 'upload_image_imgur': {
+            const result = styledUploadResults[args.filename];
+            if (result?.error) throw new Error(result.error);
+            return {
+              url: result?.url ?? 'https://imgur.example/' + args.filename,
+              remote_key: null,
+            };
+          }
           case 'upload_post_image_ghost': return {
             url: 'https://ghost.example/assets/' + args.filename,
             attachment_id: 0,
@@ -657,6 +673,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
         },
         setStyledConversionError(message) { styledConversionError = message; },
+        setStyledConversionHtml(html) { styledConversionHtml = html; },
+        setStyledImageResults(results) { styledImageResults = JSON.parse(JSON.stringify(results || {})); },
+        setStyledImageHostSettings(settings) { styledImageHostSettings = JSON.parse(JSON.stringify(settings)); },
+        setStyledUploadResults(results) { styledUploadResults = JSON.parse(JSON.stringify(results || {})); },
         emitAiChunk(streamId, text) {
           this.emitEvent('ai-stream://' + streamId, { kind: 'chunk', data: JSON.stringify({ choices: [{ delta: { content: text } }] }) });
         },

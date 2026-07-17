@@ -201,6 +201,77 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
     expect(calls.filter((call) => call.command === 'write_styled_clipboard')).toHaveLength(0);
   });
 
+  test('lists every upload failure and keeps Copy unavailable without touching the clipboard', async ({ app, mockState }) => {
+    await app.setViewportSize({ width: 900, height: 700 });
+    await mockState.setStyledConversionHtml([
+      '<p>Local assets</p>',
+      '<img src="first.png" alt="First asset">',
+      '<img src="second.png" alt="Second asset">',
+    ].join(''));
+    await mockState.setStyledImageResults({
+      [`${MOCK_PROJECT_DIR}/first.png`]: {
+        bytes: [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 215, 99, 248, 207, 192, 240, 31, 0, 5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130],
+        mime: 'image/png',
+      },
+      [`${MOCK_PROJECT_DIR}/second.png`]: {
+        bytes: [71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 128, 0, 0, 0, 0, 0, 255, 255, 255, 33, 249, 4, 1, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 68, 1, 0, 59],
+        mime: 'image/gif',
+      },
+    });
+    await mockState.setStyledImageHostSettings({
+      hosts: [{ id: 'styled-host', name: 'Styled Host', provider: 'imgur', client_id: 'mock-client' }],
+      active_host_id: 'styled-host',
+      auto_on_paste: false,
+    });
+    await mockState.setStyledUploadResults({
+      'first.png': { error: 'native provider credential detail' },
+      'second.png': { url: 'http://unsafe.example/second.png' },
+    });
+    await openStyledCopy(app);
+
+    const copyButton = app.getByTestId('styled-copy-copy');
+    await expect(copyButton).toBeEnabled();
+    await expect(copyButton.locator('svg.lucide-copy')).toBeVisible();
+    const readyBounds = await copyButton.boundingBox();
+    await copyButton.click();
+
+    const error = app.getByTestId('styled-copy-error');
+    await expect(error).toContainText(
+      'Some assets could not be uploaded. Review each item below, then try Copy again.',
+    );
+    await expect(error).toContainText(
+      'image-1: Upload failed. Check the image host connection and try again.',
+    );
+    await expect(error).toContainText(
+      'image-2: The image host returned an unsafe URL. Check the host configuration and try again.',
+    );
+    await expect(error).not.toContainText('native provider credential detail');
+    await expect(copyButton).toBeDisabled();
+    await expect(copyButton.locator('svg.lucide-copy')).toBeVisible();
+    expect(await copyButton.boundingBox()).toEqual(readyBounds);
+
+    let calls = await mockState.getInvokeCalls();
+    expect(calls.filter((call) => call.command === 'write_styled_clipboard')).toHaveLength(0);
+    await expectDialogFitsViewport(app);
+
+    await mockState.setStyledUploadResults({
+      'first.png': { url: 'https://uploads.example/first.png' },
+      'second.png': { url: 'https://uploads.example/second.png' },
+    });
+    await app.route('https://uploads.example/**', (route) => route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: '',
+    }));
+    await app.getByTestId('styled-target-zhihu').check();
+    await expect(copyButton).toBeEnabled();
+    await copyButton.click();
+    await expect(copyButton).toContainText('Copied');
+
+    calls = await mockState.getInvokeCalls();
+    expect(calls.filter((call) => call.command === 'write_styled_clipboard')).toHaveLength(1);
+  });
+
   test('forces full-document scope when the frozen source has no selection', async ({ app }) => {
     await app.evaluate(() => {
       const view = (window as any).__novelist_view;
