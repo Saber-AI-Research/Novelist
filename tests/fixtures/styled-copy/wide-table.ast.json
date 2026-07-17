@@ -1,0 +1,74 @@
+{
+  "type": "document",
+  "children": [
+    {
+      "type": "paragraph",
+      "children": [{ "type": "math", "display": false, "expression": "a+b" }]
+    },
+    {
+      "type": "table",
+      "children": [
+        {
+          "type": "table-row",
+          "section": "head",
+          "children": [
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列1" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列2" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列3" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列4" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列5" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列6" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列7" }] },
+            { "type": "table-cell", "header": true, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "列8" }] }
+          ]
+        },
+        {
+          "type": "table-row",
+          "section": "body",
+          "children": [
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 2, "children": [{ "type": "text", "value": "分组A" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A1" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A2" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A3" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A4" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A5" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A6" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "A7" }] }
+          ]
+        },
+        {
+          "type": "table-row",
+          "section": "body",
+          "children": [
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B1" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B2" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B3" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B4" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B5" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B6" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "B7" }] }
+          ]
+        },
+        {
+          "type": "table-row",
+          "section": "foot",
+          "children": [
+            { "type": "table-cell", "header": false, "colSpan": 7, "rowSpan": 1, "children": [{ "type": "text", "value": "合计" }] },
+            { "type": "table-cell", "header": false, "colSpan": 1, "rowSpan": 1, "children": [{ "type": "text", "value": "100" }] }
+          ]
+        },
+        {
+          "type": "table-row",
+          "section": "foot",
+          "children": [
+            { "type": "table-cell", "header": false, "colSpan": 8, "rowSpan": 1, "children": [{ "type": "text", "value": "脚注汇总" }] }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [{ "type": "math", "display": true, "expression": "sum=100" }]
+    }
+  ]
+}
