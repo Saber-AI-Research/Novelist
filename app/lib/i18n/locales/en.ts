@@ -754,8 +754,8 @@ export const en: TranslationMap = {
   // --- Editor share menu ---
   'share.button': 'Share / Export / Publish',
   'share.uploadImages': 'Upload Local Images to…',
-  'share.styledCopy': 'Styled Copy',
   'share.publishTo': 'Publish to',
+  'share.styledCopy': 'Styled Copy',
   'share.noChannels': 'No publish channels configured. Add one in Settings → Publish.',
 
   // --- Publish dialog ---

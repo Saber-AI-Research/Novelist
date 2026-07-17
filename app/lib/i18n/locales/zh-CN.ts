@@ -754,8 +754,8 @@ export const zhCN: TranslationMap = {
   // --- Editor share menu ---
   'share.button': '分享 / 导出 / 发布',
   'share.uploadImages': '上传本地图片到…',
-  'share.styledCopy': '样式复制',
   'share.publishTo': '发布到',
+  'share.styledCopy': '样式复制',
   'share.noChannels': '尚未配置发布渠道，请在 设置 → 发布 中添加。',
 
   // --- Publish dialog ---
