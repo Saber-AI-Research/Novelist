@@ -8,6 +8,7 @@
 pub mod types;
 
 pub mod pandoc_html;
+pub mod styled_copy_pandoc;
 
 // Provider modules added one at a time as each is implemented.
 pub mod ghost;
