@@ -1,0 +1,69 @@
+{
+  "type": "document",
+  "children": [
+    {
+      "type": "paragraph",
+      "children": [
+        { "type": "text", "value": "保留 " },
+        { "type": "text", "value": "可见" },
+        { "type": "text", "value": "；" },
+        {
+          "type": "link",
+          "href": "https://safe.example/文章",
+          "title": null,
+          "children": [{ "type": "text", "value": "安全外链" }]
+        },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "危险一" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "危险二" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "相对" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "内部" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "文件" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "数据" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "对象" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "协议相对" },
+        { "type": "text", "value": "；" },
+        { "type": "text", "value": "空链接" },
+        { "type": "text", "value": "；" },
+        {
+          "type": "image",
+          "asset": {
+            "kind": "image",
+            "id": "image-1",
+            "source": "data:image/png;base64,AAAA",
+            "alt": "逻辑数据图",
+            "title": "待后续验证"
+          }
+        },
+        { "type": "text", "value": "。" }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        { "type": "text", "value": "坏脚注" },
+        { "type": "superscript", "children": [{ "type": "text", "value": "9" }] },
+        { "type": "text", "value": "仍可读。" }
+      ]
+    },
+    {
+      "type": "endnotes",
+      "children": [
+        {
+          "type": "endnote",
+          "number": 1,
+          "children": [
+            { "type": "paragraph", "children": [{ "type": "text", "value": "首个脚注" }] }
+          ]
+        }
+      ]
+    }
+  ]
+}

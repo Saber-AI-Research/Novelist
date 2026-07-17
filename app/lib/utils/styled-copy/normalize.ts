@@ -26,6 +26,7 @@ interface FootnoteEntry {
 interface FootnoteIndex {
   entries: FootnoteEntry[];
   numberById: Map<string, number>;
+  duplicates: Array<{ container: Element; id: string }>;
 }
 
 interface NormalizeContext {
@@ -93,6 +94,36 @@ const INLINE_WHITESPACE_PARENTS = new Set([
   'TH',
 ]);
 
+const DROP_WITH_CONTENT_TAGS = new Set([
+  'AUDIO',
+  'BASE',
+  'BUTTON',
+  'CANVAS',
+  'EMBED',
+  'FIELDSET',
+  'FORM',
+  'FRAME',
+  'FRAMESET',
+  'HEAD',
+  'IFRAME',
+  'INPUT',
+  'LINK',
+  'MATH',
+  'META',
+  'NOSCRIPT',
+  'OBJECT',
+  'OPTION',
+  'SCRIPT',
+  'SELECT',
+  'SOURCE',
+  'STYLE',
+  'SVG',
+  'TEMPLATE',
+  'TEXTAREA',
+  'TRACK',
+  'VIDEO',
+]);
+
 export function normalizePandocHtml(html: string): StyledCopyResult<SemanticDocument> {
   const sourceDocument = new DOMParser().parseFromString(html, 'text/html');
   const sourceBody = sourceDocument.body;
@@ -106,7 +137,7 @@ export function normalizePandocHtml(html: string): StyledCopyResult<SemanticDocu
   const warnings = createWarningCollector();
   const context: NormalizeContext = {
     warnings,
-    footnotes: indexFootnotes(sourceBody, warnings),
+    footnotes: indexFootnotes(sourceBody),
     imageCount: 0,
     mermaidCount: 0,
   };
@@ -134,6 +165,7 @@ function transformNode(sourceNode: Node, context: NormalizeContext): SemanticNod
   if (sourceNode.nodeType !== Node.ELEMENT_NODE) return [];
 
   const element = sourceNode as Element;
+  if (DROP_WITH_CONTENT_TAGS.has(element.tagName)) return [];
   if (isFootnotesContainer(element)) {
     return [transformEndnotes(element, context)];
   }
@@ -144,6 +176,11 @@ function transformNode(sourceNode: Node, context: NormalizeContext): SemanticNod
       ? context.footnotes.numberById.get(target.slice(1))
       : undefined;
     if (number !== undefined) return [{ type: 'footnote-reference', number }];
+    context.warnings.add({
+      code: 'malformed_footnote',
+      ...(target ? { payload: target } : {}),
+    });
+    return transformChildren(element, context);
   }
   if (isMathElement(element)) return [transformMath(element)];
   if (isMermaidBlock(element)) return [transformMermaid(element, context)];
@@ -177,12 +214,7 @@ function transformNode(sourceNode: Node, context: NormalizeContext): SemanticNod
     case 'SUB':
       return [{ type: 'subscript', children: transformChildren(element, context) }];
     case 'A':
-      return [{
-        type: 'link',
-        href: rawAttribute(element, 'href'),
-        title: optionalRawAttribute(element, 'title'),
-        children: transformChildren(element, context),
-      }];
+      return transformLink(element, context);
     case 'IMG':
       return [transformImage(element, context)];
     case 'BLOCKQUOTE':
@@ -282,6 +314,31 @@ function transformImage(element: Element, context: NormalizeContext) {
   };
 }
 
+function transformLink(element: Element, context: NormalizeContext): SemanticNode[] {
+  const rawHref = rawAttribute(element, 'href');
+  const href = rawHref.trim();
+  if (!href) {
+    context.warnings.add({ code: 'malformed_link' });
+    return transformChildren(element, context);
+  }
+
+  try {
+    const parsed = new URL(href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return [{
+        type: 'link',
+        href,
+        title: optionalRawAttribute(element, 'title'),
+        children: transformChildren(element, context),
+      }];
+    }
+    context.warnings.add({ code: 'unsafe_link_removed', payload: href });
+  } catch {
+    context.warnings.add({ code: 'relative_link_removed', payload: href });
+  }
+  return transformChildren(element, context);
+}
+
 function transformCodeBlock(element: Element): CodeBlockNode {
   const code = Array.from(element.children).find((child) => child.tagName === 'CODE') ?? element;
   const language = extractCodeLanguage(code) ?? extractCodeLanguage(element);
@@ -354,6 +411,11 @@ function transformMermaid(element: Element, context: NormalizeContext) {
 }
 
 function transformEndnotes(container: Element, context: NormalizeContext): EndnotesNode {
+  for (const duplicate of context.footnotes.duplicates) {
+    if (duplicate.container === container) {
+      context.warnings.add({ code: 'duplicate_footnote', payload: duplicate.id });
+    }
+  }
   const children: EndnoteNode[] = context.footnotes.entries
     .filter((entry) => entry.container === container)
     .map((entry) => ({
@@ -364,9 +426,10 @@ function transformEndnotes(container: Element, context: NormalizeContext): Endno
   return { type: 'endnotes', children };
 }
 
-function indexFootnotes(root: Element, warnings: WarningCollector): FootnoteIndex {
+function indexFootnotes(root: Element): FootnoteIndex {
   const entries: FootnoteEntry[] = [];
   const numberById = new Map<string, number>();
+  const duplicates: Array<{ container: Element; id: string }> = [];
   const containers = descendants(root).filter(isFootnotesContainer);
 
   for (const container of containers) {
@@ -375,7 +438,7 @@ function indexFootnotes(root: Element, warnings: WarningCollector): FootnoteInde
       const id = rawAttribute(element, 'id');
       if (!id) continue;
       if (numberById.has(id)) {
-        warnings.add({ code: 'duplicate_footnote', payload: id });
+        duplicates.push({ container, id });
         continue;
       }
       const number = entries.length + 1;
@@ -384,7 +447,7 @@ function indexFootnotes(root: Element, warnings: WarningCollector): FootnoteInde
     }
   }
 
-  return { entries, numberById };
+  return { entries, numberById, duplicates };
 }
 
 function descendants(root: Element): Element[] {

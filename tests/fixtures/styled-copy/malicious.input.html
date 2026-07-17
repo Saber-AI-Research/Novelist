@@ -1,0 +1,13 @@
+<p id="source-id" class="source-class" style="position:fixed" data-secret="hidden" onclick="alert(1)" name="source-name">保留 <u class="unknown-wrapper">可见</u>；<a href="https://safe.example/文章" onclick="steal()">安全外链</a>；<a href="javascript:alert(1)">危险一</a>；<a href="javascript:alert(1)">危险二</a>；<a href="./chapter-2">相对</a>；<a href="#section">内部</a>；<a href="file:///tmp/private">文件</a>；<a href="data:text/html,bad">数据</a>；<a href="blob:https://example.com/id">对象</a>；<a href="//protocol.example/path">协议相对</a>；<a href="">空链接</a>；<img src="data:image/png;base64,AAAA" alt="逻辑数据图" title="待后续验证" srcset="javascript:bad 2x" onerror="alert(2)">。</p>
+<p>坏脚注<a href="#missing-note" class="footnote-ref" id="source-ref" role="doc-noteref"><sup>9</sup></a>仍可读。</p>
+<section id="footnotes" class="footnotes" role="doc-endnotes"><ol>
+  <li id="fn-duplicate" role="doc-endnote"><p>首个脚注<a href="#source-ref" class="footnote-back" role="doc-backlink">返回</a></p></li>
+  <li id="fn-duplicate" role="doc-endnote"><p>重复脚注必须丢弃</p></li>
+</ol></section>
+<script>DROP_SCRIPT_TEXT</script>
+<style>DROP_STYLE_TEXT</style>
+<template><p>DROP_TEMPLATE_TEXT</p></template>
+<iframe src="https://evil.example" srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;">DROP_FRAME_TEXT</iframe>
+<form action="javascript:alert(1)"><p>DROP_FORM_TEXT</p><input value="DROP_INPUT_VALUE"></form>
+<object data="javascript:alert(1)">DROP_OBJECT_TEXT</object>
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>DROP_SVG_SCRIPT</script><text>DROP_SVG_TEXT</text></svg>
