@@ -82,3 +82,91 @@ describe('[contract] normalizePandocHtml untrusted markup', () => {
     }
   });
 });
+
+function nestedBlockquotes(depth: number): string {
+  return `${'<blockquote>'.repeat(depth)}${'</blockquote>'.repeat(depth)}`;
+}
+
+function tableWith(rows: number, columns: number): string {
+  const row = `<tr>${'<td>x</td>'.repeat(columns)}</tr>`;
+  return `<table><tbody>${row.repeat(rows)}</tbody></table>`;
+}
+
+describe('[contract] normalizePandocHtml structural preflight', () => {
+  it('accepts exactly 50,000 produced nodes and blocks node 50,001', () => {
+    const atLimit = normalizePandocHtml('<br>'.repeat(50_000));
+    const overLimit = normalizePandocHtml('<br>'.repeat(50_001));
+
+    expect(atLimit.kind).toBe('ok');
+    expect(overLimit).toEqual({
+      kind: 'error',
+      error: {
+        code: 'document_too_complex',
+        dimension: 'nodes',
+        maximum: 50_000,
+        actual: 50_001,
+      },
+    });
+  });
+
+  it('counts the first semantic node at depth 1 and blocks depth 129', () => {
+    expect(normalizePandocHtml(nestedBlockquotes(128)).kind).toBe('ok');
+    expect(normalizePandocHtml(nestedBlockquotes(129))).toEqual({
+      kind: 'error',
+      error: {
+        code: 'document_too_complex',
+        dimension: 'depth',
+        maximum: 128,
+        actual: 129,
+      },
+    });
+  });
+
+  it('does not count transparent or dropped source elements as semantic nodes', () => {
+    const transparent = `<div>${'<span></span>'.repeat(50_001)}<p>可见</p></div>`;
+
+    expect(normalizePandocHtml(transparent)).toEqual({
+      kind: 'ok',
+      value: {
+        type: 'document',
+        children: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: '可见' }],
+        }],
+      },
+      warnings: [],
+    });
+  });
+
+  it('enforces table row and column limits independently', () => {
+    expect(normalizePandocHtml(tableWith(500, 1)).kind).toBe('ok');
+    expect(normalizePandocHtml(tableWith(1, 100)).kind).toBe('ok');
+    expect(normalizePandocHtml(tableWith(501, 1))).toEqual({
+      kind: 'error',
+      error: {
+        code: 'document_too_complex',
+        dimension: 'table_rows',
+        maximum: 500,
+        actual: 501,
+        tableIndex: 0,
+      },
+    });
+    expect(normalizePandocHtml(tableWith(1, 101))).toEqual({
+      kind: 'error',
+      error: {
+        code: 'document_too_complex',
+        dimension: 'table_columns',
+        maximum: 100,
+        actual: 101,
+        tableIndex: 0,
+      },
+    });
+  });
+
+  it('blocks a structurally empty table row without returning a partial AST', () => {
+    expect(normalizePandocHtml('<p>before</p><table><tbody><tr></tr></tbody></table><p>after</p>')).toEqual({
+      kind: 'error',
+      error: { code: 'malformed_table', tableIndex: 0, reason: 'empty_row' },
+    });
+  });
+});
