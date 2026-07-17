@@ -32,6 +32,8 @@ import {
   registerEditorView,
   unregisterEditorView,
   isTabViewportMode,
+  registerViewportSnapshotMetadata,
+  getViewportSnapshotMetadata,
   getEditorView,
   getEditorContent,
 } from '$lib/stores/tabs.svelte';
@@ -389,10 +391,32 @@ describe('[contract] editorView registry + saved EditorState helpers', () => {
     const fakeView = { state: { doc: { toString: () => 'window' } } } as any;
     registerEditorView('tab-v', fakeView, true);
     expect(isTabViewportMode('tab-v')).toBe(true);
+    expect(getViewportSnapshotMetadata('tab-v')).toBeUndefined();
     // Must NOT read from the partial view.
     expect(getEditorContent('tab-v')).toBeNull();
     unregisterEditorView('tab-v');
     expect(isTabViewportMode('tab-v')).toBe(false);
+  });
+
+  it('registers complete viewport snapshot metadata and clears it with the view', () => {
+    const fakeView = { state: { doc: { toString: () => 'window' } } } as any;
+    const manager = { fileId: 'rope-file-1', baseCharOffset: 42 } as any;
+    registerEditorView('tab-meta', fakeView);
+
+    registerViewportSnapshotMetadata('tab-meta', {
+      fileId: 'rope-file-1',
+      manager,
+    });
+
+    expect(isTabViewportMode('tab-meta')).toBe(true);
+    expect(getViewportSnapshotMetadata('tab-meta')).toEqual({
+      fileId: 'rope-file-1',
+      manager,
+    });
+
+    unregisterEditorView('tab-meta');
+    expect(isTabViewportMode('tab-meta')).toBe(false);
+    expect(getViewportSnapshotMetadata('tab-meta')).toBeUndefined();
   });
 
   it('save/get/deleteSavedEditorState roundtrip', () => {

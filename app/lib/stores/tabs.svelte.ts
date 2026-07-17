@@ -14,6 +14,7 @@ import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
 import { t } from '$lib/i18n';
 import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
 import type { EditorView } from '@codemirror/view';
+import type { ViewportManager } from '$lib/editor/viewport';
 
 interface TabState {
   id: string;
@@ -62,6 +63,13 @@ const editorViews = new Map<string, EditorView>();
  */
 const viewportModeTabs = new Set<string>();
 
+export interface ViewportSnapshotMetadata {
+  fileId: string;
+  manager: ViewportManager;
+}
+
+const viewportSnapshotMetadata = new Map<string, ViewportSnapshotMetadata>();
+
 /**
  * Saved CM6 EditorStates per tab, preserving undo history across tab switches.
  */
@@ -85,12 +93,28 @@ export function registerEditorView(tabId: string, view: EditorView, isViewportMo
     viewportModeTabs.add(tabId);
   } else {
     viewportModeTabs.delete(tabId);
+    viewportSnapshotMetadata.delete(tabId);
   }
+}
+
+export function registerViewportSnapshotMetadata(
+  tabId: string,
+  metadata: ViewportSnapshotMetadata,
+) {
+  viewportModeTabs.add(tabId);
+  viewportSnapshotMetadata.set(tabId, metadata);
+}
+
+export function getViewportSnapshotMetadata(
+  tabId: string,
+): ViewportSnapshotMetadata | undefined {
+  return viewportSnapshotMetadata.get(tabId);
 }
 
 export function unregisterEditorView(tabId: string) {
   editorViews.delete(tabId);
   viewportModeTabs.delete(tabId);
+  viewportSnapshotMetadata.delete(tabId);
 }
 
 export function isTabViewportMode(tabId: string): boolean {
@@ -183,6 +207,7 @@ class TabsStore {
             savedEditorStates.delete(tab.id);
             editorViews.delete(tab.id);
             viewportModeTabs.delete(tab.id);
+            viewportSnapshotMetadata.delete(tab.id);
           }
         }
       }
