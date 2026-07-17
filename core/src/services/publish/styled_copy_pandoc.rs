@@ -222,21 +222,36 @@ async fn run_bounded_process(
     let stdout_task = tokio::spawn(drain_bounded(stdout, stdout_limit, Some(overflow_tx)));
     let stderr_task = tokio::spawn(drain_bounded(stderr, MAX_DIAGNOSTIC_BYTES, None));
 
-    let sleep = tokio::time::sleep(timeout);
-    tokio::pin!(sleep);
+    let (deadline_tx, deadline_cancel_rx) = std::sync::mpsc::channel();
+    let (deadline_signal_tx, mut deadline_signal_rx) = oneshot::channel();
+    let deadline_thread = std::thread::spawn(move || {
+        if deadline_cancel_rx.recv_timeout(timeout)
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            let _ = deadline_signal_tx.send(());
+        }
+    });
     let mut overflow_channel_open = true;
+    let mut deadline_channel_open = true;
     let wait_result = loop {
         tokio::select! {
             status = child.wait() => break status.map(Some).map_err(|_| ProcessFailure::Wait),
-            _ = &mut sleep => break Ok(None),
             overflow = &mut overflow_rx, if overflow_channel_open => {
                 match overflow {
                     Ok(()) => break Err(ProcessFailure::OutputOverflow),
                     Err(_) => overflow_channel_open = false,
                 }
             }
+            deadline = &mut deadline_signal_rx, if deadline_channel_open => {
+                match deadline {
+                    Ok(()) => break Ok(None),
+                    Err(_) => deadline_channel_open = false,
+                }
+            }
         }
     };
+    let _ = deadline_tx.send(());
+    let _ = deadline_thread.join();
 
     let status = match wait_result {
         Ok(Some(status)) => status,
