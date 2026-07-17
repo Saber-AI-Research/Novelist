@@ -30,11 +30,15 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const eventListeners = {};
       let aiStreamCounter = 0;
       let claudeCliDetectResult = null;
+      let blockedReadPath = null;
+      const blockedReadWaiters = [];
       let publishChannels = [];
       let publishDrafts = {};
       let publishBlocked = false;
       let publishError = null;
       const publishWaiters = [];
+      let publishDraftWritesBlocked = false;
+      const publishDraftWriteWaiters = [];
       let styledConversionBlocked = false;
       let styledConversionError = null;
       const styledConversionWaiters = [];
@@ -129,7 +133,17 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           args: JSON.parse(JSON.stringify(args || {})),
         });
         switch (cmd) {
-          case 'read_file': return writtenFiles[args.path] ?? fileContents[args.path] ?? '';
+          case 'read_file': {
+            const read = () => writtenFiles[args.path] ?? fileContents[args.path] ?? '';
+            if (blockedReadPath === args.path) {
+              return new Promise((resolve, reject) => blockedReadWaiters.push({
+                path: args.path,
+                resolve: () => resolve(read()),
+                reject,
+              }));
+            }
+            return read();
+          }
           case 'write_file': writtenFiles[args.path] = args.content; return null;
           case 'get_file_encoding': return 'utf-8';
           case 'list_directory': {
@@ -264,9 +278,14 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             forms: JSON.parse(JSON.stringify(publishDrafts)),
             invalid_channel_ids: [],
           };
-          case 'write_publish_form_draft':
-            publishDrafts[args.channelId] = JSON.parse(JSON.stringify(args.form));
-            return null;
+          case 'write_publish_form_draft': {
+            const finish = () => {
+              publishDrafts[args.channelId] = JSON.parse(JSON.stringify(args.form));
+              return null;
+            };
+            if (!publishDraftWritesBlocked) return finish();
+            return new Promise((resolve) => publishDraftWriteWaiters.push(() => resolve(finish())));
+          }
           case 'list_publish_tags': return ['restored', 'existing'];
           case 'convert_markdown_to_html': return '<p>Converted online body</p>';
           case 'convert_markdown_to_styled_html': {
@@ -591,6 +610,27 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         // AI bridge test helpers — let specs simulate streamed responses
         // and control whether the Claude CLI is "installed".
         setClaudeCliDetectResult(v) { claudeCliDetectResult = v; },
+        setReadFileBlocked(path, blocked) {
+          blockedReadPath = blocked ? path : null;
+          if (!blocked) {
+            const pending = blockedReadWaiters.splice(0);
+            for (const waiter of pending) waiter.resolve();
+          }
+        },
+        releaseNextBlockedRead() {
+          const waiter = blockedReadWaiters.shift();
+          if (!waiter) throw new Error('No blocked read is pending');
+          waiter.resolve();
+        },
+        failNextBlockedRead(message) {
+          const waiter = blockedReadWaiters.shift();
+          if (!waiter) throw new Error('No blocked read is pending');
+          waiter.reject(message);
+        },
+        rejectBlockedRead(message) {
+          blockedReadPath = null;
+          for (const waiter of blockedReadWaiters.splice(0)) waiter.reject(new Error(message));
+        },
         setPublishChannels(channels) {
           publishChannels = (channels || []).map(channel => ({ ...channel }));
         },
@@ -604,6 +644,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
         },
         setPublishError(message) { publishError = message; },
+        setPublishDraftWritesBlocked(blocked) {
+          publishDraftWritesBlocked = blocked;
+          if (!blocked) {
+            for (const release of publishDraftWriteWaiters.splice(0)) release();
+          }
+        },
         setStyledConversionBlocked(blocked) {
           styledConversionBlocked = blocked;
           if (!blocked) {

@@ -66,10 +66,15 @@ export const test = base.extend<{
     emitEvent: (event: string, payload: unknown) => Promise<void>;
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
     renameFile: (oldPath: string, newPath: string) => Promise<void>;
+    setReadFileBlocked: (path: string, blocked: boolean) => Promise<void>;
+    releaseNextBlockedRead: () => Promise<void>;
+    failNextBlockedRead: (message: string) => Promise<void>;
+    rejectBlockedRead: (message: string) => Promise<void>;
     setPublishChannels: (channels: ChannelConfig[]) => Promise<void>;
     setPublishDrafts: (forms: Record<string, FormDraft>) => Promise<void>;
     setPublishBlocked: (blocked: boolean) => Promise<void>;
     setPublishError: (message: string | null) => Promise<void>;
+    setPublishDraftWritesBlocked: (blocked: boolean) => Promise<void>;
     setStyledConversionBlocked: (blocked: boolean) => Promise<void>;
     setStyledConversionError: (message: string | null) => Promise<void>;
     getInvokeCalls: () => Promise<MockInvokeCall[]>;
@@ -149,6 +154,42 @@ export const test = base.extend<{
           [oldPath, newPath] as const,
         );
       },
+      async setReadFileBlocked(path: string, blocked: boolean) {
+        await app.evaluate(([filePath, value]) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setReadFileBlocked');
+          if (typeof setter !== 'function') throw new Error('Read-file blocker unavailable');
+          setter.call(state, filePath, value);
+        }, [path, blocked] as const);
+      },
+      async releaseNextBlockedRead() {
+        await app.evaluate(() => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const release: unknown = Reflect.get(state, 'releaseNextBlockedRead');
+          if (typeof release !== 'function') throw new Error('Blocked read releaser unavailable');
+          release.call(state);
+        });
+      },
+      async failNextBlockedRead(message: string) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const fail: unknown = Reflect.get(state, 'failNextBlockedRead');
+          if (typeof fail !== 'function') throw new Error('Blocked read failure control unavailable');
+          fail.call(state, value);
+        }, message);
+      },
+      async rejectBlockedRead(message: string) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const reject: unknown = Reflect.get(state, 'rejectBlockedRead');
+          if (typeof reject !== 'function') throw new Error('Blocked read rejecter unavailable');
+          reject.call(state, value);
+        }, message);
+      },
       async setPublishChannels(channels: ChannelConfig[]) {
         await app.evaluate((value) => {
           const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
@@ -184,6 +225,15 @@ export const test = base.extend<{
           if (typeof setter !== 'function') throw new Error('Publish error setter unavailable');
           setter.call(state, value);
         }, message);
+      },
+      async setPublishDraftWritesBlocked(blocked: boolean) {
+        await app.evaluate((value) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const setter: unknown = Reflect.get(state, 'setPublishDraftWritesBlocked');
+          if (typeof setter !== 'function') throw new Error('Publish draft write blocker unavailable');
+          setter.call(state, value);
+        }, blocked);
       },
       async setStyledConversionBlocked(blocked: boolean) {
         await app.evaluate((value) => {
