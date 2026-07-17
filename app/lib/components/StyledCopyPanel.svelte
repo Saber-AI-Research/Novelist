@@ -78,13 +78,18 @@
 
   function failureReason(reason: StyledCopyAssetFailureReason): string {
     switch (reason) {
-      case 'mermaid_source_too_large':
-      case 'mermaid_unsafe_svg':
-      case 'mermaid_invalid_dimensions':
-      case 'mermaid_render_failed': return t('styledCopy.assetFailure.mermaid');
+      case 'unsafe_source': return t('styledCopy.assetFailure.unsafeSource');
+      case 'malformed_source': return t('styledCopy.assetFailure.malformedSource');
+      case 'malformed_source_encoding': return t('styledCopy.assetFailure.malformedEncoding');
+      case 'unresolved_source': return t('styledCopy.assetFailure.unresolvedSource');
+      case 'unsupported_image_type': return t('styledCopy.assetFailure.unsupportedType');
+      case 'invalid_image_bytes': return t('styledCopy.assetFailure.invalidBytes');
+      case 'mermaid_source_too_large': return t('styledCopy.assetFailure.mermaidTooLarge');
+      case 'mermaid_unsafe_svg': return t('styledCopy.assetFailure.mermaidUnsafe');
+      case 'mermaid_invalid_dimensions': return t('styledCopy.assetFailure.mermaidDimensions');
+      case 'mermaid_render_failed': return t('styledCopy.assetFailure.mermaidRender');
       case 'upload_failed': return t('styledCopy.assetFailure.upload');
       case 'invalid_hosted_url': return t('styledCopy.assetFailure.hostedUrl');
-      default: return t('styledCopy.assetFailure.image');
     }
   }
 
@@ -102,11 +107,16 @@
       case 'pandoc_output_too_large': return t('styledCopy.error.tooLarge');
       case 'pandoc_conversion_failed': return t('styledCopy.error.conversion');
       case 'document_too_complex': return t('styledCopy.error.tooComplex');
+      case 'malformed_document': return t('styledCopy.error.malformedDocument');
+      case 'malformed_table': return t('styledCopy.error.malformedTable');
+      case 'sanitizer_failure': return t('styledCopy.error.sanitizer');
+      case 'unresolved_asset': return t('styledCopy.error.unresolvedAsset');
+      case 'resolved_asset_mode_mismatch': return t('styledCopy.error.assetMode');
       case 'image_host_unavailable': return t('styledCopy.error.imageHost');
       case 'asset_resolution_failed': return t('styledCopy.error.assets');
       case 'asset_upload_failed': return t('styledCopy.error.upload');
       case 'clipboard_write_failed': return t('styledCopy.error.clipboard');
-      default: return t('styledCopy.error.processing');
+      case 'invalid_clipboard_payload': return t('styledCopy.error.clipboardPayload');
     }
   }
 </script>
