@@ -57,6 +57,57 @@ test.describe('Editor', () => {
     await expect(cmContent).toContainText('中文测试文本');
   });
 
+  test('math-heavy wrapped lines keep inline formulas selectable and arrow-editable', async ({ app }) => {
+    const doc =
+      '每根轴携带：**名字**、**类型** $\\tau\\in\\{\\mathrm{par},\\ \\mathrm{red}_M,\\ ' +
+      '\\mathrm{batch},\\ \\mathrm{time},\\ \\mathrm{mem}\\}$（$\\mathrm{red}_M$ ' +
+      '参数化于交换幺半群 $M$，§5.3）、**层级标记**（logical / execution / physical）。' +
+      '空积 $\\mathbf{1}$（单点空间）是张量单位。';
+    const mathRanges = Array.from(doc.matchAll(/\$[^$]+\$/g), match => ({
+      from: match.index,
+      to: match.index + match[0].length,
+    }));
+    expect(mathRanges).toHaveLength(4);
+
+    await app.evaluate(async ({ source }) => {
+      await (window as any).__test_api__.setActiveEditorDocument(source, { anchor: 0, head: 0 });
+    }, { source: doc });
+    await expect(app.locator('.cm-novelist-math-inline')).toHaveCount(4);
+
+    await app.evaluate(({ anchor, head }) => {
+      const view = (window as any).__novelist_view;
+      view.dispatch({ selection: { anchor, head } });
+    }, {
+      anchor: mathRanges[0].from + 1,
+      head: mathRanges[2].to - 1,
+    });
+
+    await expect(app.locator('.cm-novelist-math-inline')).toHaveCount(1);
+    const sourceStyle = await app.locator('.cm-novelist-math-source').first().evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+      };
+    });
+    expect(sourceStyle).toEqual({ paddingLeft: '0px', paddingRight: '0px' });
+
+    await app.evaluate(({ anchor }) => {
+      const view = (window as any).__novelist_view;
+      view.dispatch({ selection: { anchor } });
+      view.focus();
+    }, { anchor: mathRanges[0].from - 1 });
+
+    await app.keyboard.press('ArrowRight');
+    await expect.poll(() => app.evaluate(() => (window as any).__novelist_view.state.selection.main.head))
+      .toBe(mathRanges[0].from);
+    await expect(app.locator('.cm-novelist-math-inline')).toHaveCount(3);
+
+    await app.keyboard.press('ArrowRight');
+    await expect.poll(() => app.evaluate(() => (window as any).__novelist_view.state.selection.main.head))
+      .toBe(mathRanges[0].from + 1);
+  });
+
   test('external reload is deferred while IME composition is active', async ({ app, mockState }) => {
     const filePath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
     const initialContent = await app.evaluate(() => (window as any).__novelist_view.state.doc.toString());

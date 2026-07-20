@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EditorState, type Extension } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
+import { cursorCharLeft, cursorCharRight, selectCharRight } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
 import { wysiwygPlugin } from '$lib/editor/wysiwyg';
 import { createEditorExtensions } from '$lib/editor/setup';
@@ -182,6 +183,117 @@ describe('wysiwygPlugin — runtime decoration validation', () => {
       view!.dispatch({ changes: { from: mid, insert: 'z' } });
       view!.dispatch({ selection: { anchor: view!.state.doc.length } });
     }).not.toThrow();
+  });
+
+  it('reveals inline math when the cursor moves to its boundary on the same line', () => {
+    const doc = 'before $x + y$ after';
+    const mathFrom = doc.indexOf('$');
+    const state = EditorState.create({
+      doc,
+      selection: { anchor: mathFrom - 1 },
+      extensions: createEditorExtensions(),
+    });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(1);
+
+    view.dispatch({ selection: { anchor: mathFrom } });
+
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(0);
+    expect(view.dom.querySelector('.cm-novelist-math-source')).not.toBeNull();
+  });
+
+  it('moves left and right through inline math source instead of skipping the widget', () => {
+    const doc = 'A $x$ B';
+    const mathFrom = doc.indexOf('$');
+    const mathTo = doc.indexOf('$', mathFrom + 1) + 1;
+    const state = EditorState.create({
+      doc,
+      selection: { anchor: mathFrom - 1 },
+      extensions: createEditorExtensions(),
+    });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(cursorCharRight(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathFrom);
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(0);
+
+    expect(cursorCharRight(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathFrom + 1);
+
+    view.dispatch({ selection: { anchor: mathTo + 1 } });
+    expect(cursorCharLeft(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathTo);
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(0);
+
+    expect(cursorCharLeft(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathTo - 1);
+  });
+
+  it('extends a keyboard selection into inline math one source character at a time', () => {
+    const doc = 'A $xy$ B';
+    const mathFrom = doc.indexOf('$');
+    const state = EditorState.create({
+      doc,
+      selection: { anchor: mathFrom - 1 },
+      extensions: createEditorExtensions(),
+    });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(selectCharRight(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathFrom);
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(0);
+
+    expect(selectCharRight(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(mathFrom + 1);
+  });
+
+  it('reveals every inline formula touched by a selection on a math-heavy line', () => {
+    const doc =
+      '每根轴携带：**名字**、**类型** $\\tau\\in\\{\\mathrm{par},\\ \\mathrm{red}_M,\\ ' +
+      '\\mathrm{batch},\\ \\mathrm{time},\\ \\mathrm{mem}\\}$（$\\mathrm{red}_M$ ' +
+      '参数化于交换幺半群 $M$，§5.3）。空积 $\\mathbf{1}$ 是张量单位。';
+    const mathRanges = Array.from(doc.matchAll(/\$[^$]+\$/g), match => ({
+      from: match.index,
+      to: match.index + match[0].length,
+    }));
+    expect(mathRanges).toHaveLength(4);
+    const state = EditorState.create({
+      doc,
+      selection: { anchor: mathRanges[0].from + 1, head: mathRanges[2].to - 1 },
+      extensions: createEditorExtensions(),
+    });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(view.dom.querySelectorAll('.cm-novelist-math-inline')).toHaveLength(1);
+  });
+
+  it('rebuilds display-math source styling when the selection enters the block', () => {
+    const doc = 'before\n\n$$\nx + y\n$$\n\nafter';
+    const mathContent = doc.indexOf('x + y') + 1;
+    const state = EditorState.create({
+      doc,
+      selection: { anchor: 0 },
+      extensions: createEditorExtensions(),
+    });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(view.dom.querySelector('.cm-novelist-math-display')).not.toBeNull();
+
+    view.dispatch({ selection: { anchor: mathContent } });
+
+    expect(view.dom.querySelector('.cm-novelist-math-display')).toBeNull();
+    expect(view.dom.querySelector('.cm-novelist-math-block-line')).not.toBeNull();
   });
 
   it('simulates the user crash file (01.md from /Users/.../小说模板/) — frontmatter + inline math + links + IME-like insert', () => {

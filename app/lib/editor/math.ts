@@ -16,14 +16,14 @@ import { syntaxTree } from '@codemirror/language';
 import { StateField, type EditorState, type Range } from '@codemirror/state';
 import { imeComposingField } from './ime-guard';
 
-interface BlockRange {
+interface MathRange {
   from: number;
   to: number;
 }
 
-interface DisplayMathBlockState {
+interface MathDecorationState {
   decorations: DecorationSet;
-  ranges: BlockRange[];
+  ranges: MathRange[];
 }
 
 /* ── Lazy-loaded KaTeX ────────────────────────────────────── */
@@ -140,25 +140,29 @@ class DisplayMathWidget extends WidgetType {
   ignoreEvent(): boolean { return false; }
 }
 
-/* ── Cursor helpers (reused from wysiwyg.ts pattern) ──────── */
+/* ── Selection helpers ───────────────────────────────────── */
 
-function makeCursorSet(state: EditorState): number[] {
-  return state.selection.ranges.map(r => r.head).sort((a, b) => a - b);
+function selectionTouchesRange(state: EditorState, from: number, to: number): boolean {
+  return state.selection.ranges.some((selection) => {
+    if (selection.empty) {
+      // Include both delimiters. This lets the first ArrowLeft/ArrowRight
+      // landing on a rendered formula boundary reveal its editable source.
+      return selection.from >= from && selection.from <= to;
+    }
+
+    // A Shift+Arrow selection whose active end just reached a delimiter must
+    // reveal the source before the next keypress, or visual cursor motion will
+    // skip across the replacement widget as one unit.
+    if (selection.head === from || selection.head === to) return true;
+
+    // Non-empty selections use half-open overlap semantics so a selection
+    // merely adjacent to a formula does not expand it.
+    return selection.from < to && selection.to > from;
+  });
 }
 
-function cursorInRangeFast(heads: number[], from: number, to: number): boolean {
-  let lo = 0, hi = heads.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (heads[mid] < from) lo = mid + 1; else hi = mid;
-  }
-  return lo < heads.length && heads[lo] <= to;
-}
-
-function selectionTouchesRanges(state: EditorState, ranges: readonly BlockRange[]): boolean {
-  if (ranges.length === 0) return false;
-  const cursorHeads = makeCursorSet(state);
-  return ranges.some(range => cursorInRangeFast(cursorHeads, range.from, range.to));
+function selectionTouchesRanges(state: EditorState, ranges: readonly MathRange[]): boolean {
+  return ranges.some(range => selectionTouchesRange(state, range.from, range.to));
 }
 
 /* ── Block decorations (StateField) — display math ────────── */
@@ -167,10 +171,9 @@ function selectionTouchesRanges(state: EditorState, ranges: readonly BlockRange[
 let _mathEditorView: EditorView | null = null;
 function getMathEditorView(): EditorView | null { return _mathEditorView; }
 
-function buildDisplayMathBlockState(state: EditorState): DisplayMathBlockState {
+function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
   const decos: Range<Decoration>[] = [];
-  const ranges: BlockRange[] = [];
-  const cursorHeads = makeCursorSet(state);
+  const ranges: MathRange[] = [];
   let hasMath = false;
 
   syntaxTree(state).iterate({
@@ -179,7 +182,7 @@ function buildDisplayMathBlockState(state: EditorState): DisplayMathBlockState {
       hasMath = true;
       ranges.push({ from: node.from, to: node.to });
 
-      if (cursorInRangeFast(cursorHeads, node.from, node.to)) return false;
+      if (selectionTouchesRange(state, node.from, node.to)) return false;
 
       const fullText = state.doc.sliceString(node.from, node.to);
       const lines = fullText.split('\n');
@@ -206,7 +209,7 @@ function buildDisplayMathBlockState(state: EditorState): DisplayMathBlockState {
   return { decorations: Decoration.set(decos, true), ranges };
 }
 
-const mathBlockDecoField = StateField.define<DisplayMathBlockState>({
+const mathBlockDecoField = StateField.define<MathDecorationState>({
   create(state) { return buildDisplayMathBlockState(state); },
   update(value, tr) {
     if (tr.docChanged) return buildDisplayMathBlockState(tr.state);
@@ -228,10 +231,10 @@ const mathBlockDecoField = StateField.define<DisplayMathBlockState>({
 
 /* ── Inline/line decorations (ViewPlugin) ─────────────────── */
 
-function buildMathInlineDecos(view: EditorView): DecorationSet {
+function buildMathInlineState(view: EditorView): MathDecorationState {
   const { state } = view;
   const decos: Range<Decoration>[] = [];
-  const cursorHeads = makeCursorSet(state);
+  const ranges: MathRange[] = [];
   let hasMath = false;
 
   for (const { from, to } of view.visibleRanges) {
@@ -242,9 +245,10 @@ function buildMathInlineDecos(view: EditorView): DecorationSet {
         // --- Inline math $...$ ---
         if (node.name === 'InlineMath') {
           hasMath = true;
-          const cursorInside = cursorInRangeFast(cursorHeads, node.from, node.to);
+          ranges.push({ from: node.from, to: node.to });
+          const selectionTouches = selectionTouchesRange(state, node.from, node.to);
 
-          if (!cursorInside) {
+          if (!selectionTouches) {
             const tex = state.doc.sliceString(node.from + 1, node.to - 1);
             // Defensive: CM6 forbids ViewPlugin Decoration.replace that crosses
             // a line break. InlineMath should never cross lines per the parser,
@@ -285,7 +289,8 @@ function buildMathInlineDecos(view: EditorView): DecorationSet {
         // --- Display math $$...$$ (cursor-inside styling only) ---
         if (node.name === 'DisplayMath') {
           hasMath = true;
-          if (!cursorInRangeFast(cursorHeads, node.from, node.to)) return false;
+          ranges.push({ from: node.from, to: node.to });
+          if (!selectionTouchesRange(state, node.from, node.to)) return false;
 
           // Cursor inside: show raw source with styled background
           const lineDeco = Decoration.line({ class: 'cm-novelist-math-block-line' });
@@ -321,19 +326,23 @@ function buildMathInlineDecos(view: EditorView): DecorationSet {
     ensureKatex();
   }
 
-  return Decoration.set(decos, true);
+  return {
+    decorations: Decoration.set(decos, true),
+    ranges,
+  };
 }
 
 class MathInlinePluginClass {
   decorations: DecorationSet;
-  private lastCursorLine = -1;
+  private ranges: MathRange[];
   private editorView: EditorView;
 
   constructor(view: EditorView) {
     this.editorView = view;
     _mathEditorView = view;
-    this.decorations = buildMathInlineDecos(view);
-    this.lastCursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+    const state = buildMathInlineState(view);
+    this.decorations = state.decorations;
+    this.ranges = state.ranges;
   }
 
   update(update: ViewUpdate) {
@@ -348,20 +357,30 @@ class MathInlinePluginClass {
     // decoration now crosses a line and CM6 throws RangeError on the next
     // render. Rebuilding produces a fresh set consistent with the new doc.
     if (update.docChanged || update.viewportChanged || (wasComposing && !isComposing)) {
-      this.decorations = buildMathInlineDecos(update.view);
-      this.lastCursorLine = update.state.doc.lineAt(update.state.selection.main.head).number;
+      this.rebuild(update.view);
       return;
     }
 
     if (isComposing) return;
 
-    if (update.selectionSet) {
-      const newLine = update.state.doc.lineAt(update.state.selection.main.head).number;
-      if (newLine !== this.lastCursorLine) {
-        this.decorations = buildMathInlineDecos(update.view);
-        this.lastCursorLine = newLine;
-      }
+    if (syntaxTree(update.state) !== syntaxTree(update.startState)) {
+      this.rebuild(update.view);
+      return;
     }
+
+    if (
+      update.selectionSet &&
+      (selectionTouchesRanges(update.startState, this.ranges) ||
+        selectionTouchesRanges(update.state, this.ranges))
+    ) {
+      this.rebuild(update.view);
+    }
+  }
+
+  private rebuild(view: EditorView) {
+    const state = buildMathInlineState(view);
+    this.decorations = state.decorations;
+    this.ranges = state.ranges;
   }
 
   destroy() {

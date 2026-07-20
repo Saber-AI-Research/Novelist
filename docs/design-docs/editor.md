@@ -75,6 +75,29 @@ Regression coverage: 21 tests in
 `tests/unit/editor/image-block-deco.test.ts` covering decoration strategy,
 height map, coordinate mapping, zoom impact.
 
+## Inline math editing
+
+`app/lib/editor/math.ts` renders `$...$` as inline replacement widgets only
+while no selection interacts with the formula. Preserve these interaction
+rules:
+
+- A collapsed cursor at either `$` delimiter counts as inside the formula.
+  This lets the first ArrowLeft/ArrowRight key reveal source before the next
+  key moves through it.
+- A non-empty selection reveals every formula it overlaps, not only the
+  formula containing the selection head. A Shift+Arrow endpoint sitting on a
+  delimiter also reveals that formula.
+- Selection-only updates may skip decoration rebuilds only when neither the
+  old nor new selection touches a cached math range. Comparing only cursor
+  line numbers breaks same-line navigation between rendered formulas.
+- `.cm-novelist-math-source` must not have horizontal padding. CodeMirror can
+  split a mark decoration around nested delimiter marks and visual line wraps;
+  padding on every split fragment creates gaps and selection artifacts.
+
+Runtime coverage lives in
+`tests/integration/editor/wysiwyg-runtime.test.ts`; WebKit keyboard and computed
+style coverage lives in `tests/e2e/specs/editor.spec.ts`.
+
 ## Editable tables (Typora-style)
 
 `app/lib/editor/table.ts`. GFM tables are **always** rendered as a styled
@@ -387,11 +410,19 @@ Two subtleties:
   other `contenteditable` widgets still get the OS text menu so
   spell-check / Look Up stay available. All non-editable chrome continues
   to have the native menu suppressed.
+- **Submenu positioning uses unscaled layout coordinates.** App zoom is a
+  `transform: scale(...)` on the root element. `getBoundingClientRect()`
+  returns scaled viewport coordinates, while `position: fixed` offsets inside
+  that transformed root are applied in pre-transform coordinates. The Block
+  Type submenu divides trigger geometry, measured submenu size, and visual
+  viewport bounds by the root scale before choosing right/left placement and
+  clamping. Feeding scaled rectangles directly back into `left`/`top` makes
+  the submenu drift away from its trigger at non-default zoom.
 
 Regression coverage: `tests/e2e/specs/editor-context-menu.spec.ts`
 (selection-state item visibility, Esc/outside-click dismissal, Select All
-behavior, Cut actually mutating the doc, and non-editor chrome not opening
-the editor menu).
+behavior, Cut actually mutating the doc, zoom-aware Block Type submenu
+geometry, and non-editor chrome not opening the editor menu).
 
 ## Editor formatting helpers
 

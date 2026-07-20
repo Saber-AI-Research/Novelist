@@ -291,6 +291,54 @@ test.describe('Editor context menu', () => {
     expect(restored).toEqual(initial);
   });
 
+  test('Block Type submenu stays attached to its trigger at non-default app zoom', async ({ app }) => {
+    const zoom = 1.3;
+    await app.evaluate((scale) => {
+      const root = document.documentElement;
+      root.style.transform = `scale(${scale})`;
+      root.style.transformOrigin = 'top left';
+      root.style.width = `${100 / scale}%`;
+      root.style.height = `${100 / scale}%`;
+    }, zoom);
+
+    await app.locator('.cm-content').evaluate((content) => {
+      content.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 120,
+        clientY: 80,
+      }));
+    });
+    const trigger = app.getByTestId('editor-ctx-block-type');
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+
+    const submenu = app.getByTestId('editor-ctx-block-submenu');
+    await expect(submenu).toBeVisible();
+    const geometry = await app.evaluate(() => {
+      const trigger = document.querySelector<HTMLElement>('[data-testid="editor-ctx-block-type"]')!;
+      const submenu = document.querySelector<HTMLElement>('[data-testid="editor-ctx-block-submenu"]')!;
+      const triggerRect = trigger.getBoundingClientRect();
+      const submenuRect = submenu.getBoundingClientRect();
+      const opensRight = submenuRect.left >= triggerRect.right - 0.5;
+      return {
+        horizontalGap: opensRight
+          ? submenuRect.left - triggerRect.right
+          : triggerRect.left - submenuRect.right,
+        topDelta: submenuRect.top - triggerRect.top,
+        submenuRight: submenuRect.right,
+        submenuBottom: submenuRect.bottom,
+        viewportWidth: window.visualViewport?.width ?? window.innerWidth,
+        viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+      };
+    });
+
+    expect(geometry.horizontalGap).toBeCloseTo(4 * zoom, 0);
+    expect(Math.abs(geometry.topDelta)).toBeLessThanOrEqual(1);
+    expect(geometry.submenuRight).toBeLessThanOrEqual(geometry.viewportWidth);
+    expect(geometry.submenuBottom).toBeLessThanOrEqual(geometry.viewportHeight);
+  });
+
   test('typing > over selected CJK text converts whole lines and preserves focus @task23', async ({ app, appKeys }) => {
     const doc = '你好\n世界\n终章';
     const initial = await app.evaluate(async (content) => {

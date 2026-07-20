@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-20
+
+### Fixed
+
+- Inline math on long, wrapped, math-heavy lines now reveals every formula
+  touched by a selection and lets ArrowLeft/ArrowRight and Shift+Arrow move
+  through `$...$` source one character at a time instead of skipping rendered
+  widgets. Source decoration fragments no longer create selection gaps.
+- The editor's Block Type submenu now stays attached to its parent item at
+  non-default application zoom, including viewport-aware left/right flipping
+  and vertical clamping.
+
 ## [0.4.0] - 2026-07-20
 
 ### Added

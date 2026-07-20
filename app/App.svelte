@@ -464,6 +464,10 @@ let paletteOpen = $state(false);
   let blockTypeSubmenuPosition = $state<{ left: number; top: number } | null>(null);
   const CONTEXT_SUBMENU_GAP = 4;
   const CONTEXT_VIEWPORT_MARGIN = 8;
+  function getRootScale(): number {
+    const scaleMatch = document.documentElement.style.transform.match(/scale\(([^)]+)\)/);
+    return scaleMatch ? parseFloat(scaleMatch[1]) || 1 : 1;
+  }
   // Read-alias so markup expressions like `editorCtxMenu.x` stay byte-identical.
   // Writes (oncontextmenu handler below) go through `editorCtx.state = ...`.
   const editorCtxMenu = $derived(editorCtx.state);
@@ -480,20 +484,35 @@ let paletteOpen = $state(false);
     if (!blockTypeTrigger || !blockTypeSubmenu) return;
     const triggerRect = blockTypeTrigger.getBoundingClientRect();
     const submenuRect = blockTypeSubmenu.getBoundingClientRect();
-    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+    const scale = getRootScale();
+    const visualViewport = window.visualViewport;
+    const viewportLeft = (visualViewport?.offsetLeft ?? 0) / scale;
+    const viewportTop = (visualViewport?.offsetTop ?? 0) / scale;
+    const viewportRight = viewportLeft + (visualViewport?.width ?? window.innerWidth) / scale;
+    const viewportBottom = viewportTop + (visualViewport?.height ?? window.innerHeight) / scale;
+    const triggerLeft = triggerRect.left / scale;
+    const triggerRight = triggerRect.right / scale;
+    const triggerTop = triggerRect.top / scale;
+    const submenuWidth = submenuRect.width / scale;
+    const submenuHeight = submenuRect.height / scale;
 
-    let left = triggerRect.right + CONTEXT_SUBMENU_GAP;
-    if (left + submenuRect.width > viewportWidth - CONTEXT_VIEWPORT_MARGIN) {
-      left = triggerRect.left - submenuRect.width - CONTEXT_SUBMENU_GAP;
+    let left = triggerRight + CONTEXT_SUBMENU_GAP;
+    if (left + submenuWidth > viewportRight - CONTEXT_VIEWPORT_MARGIN) {
+      left = triggerLeft - submenuWidth - CONTEXT_SUBMENU_GAP;
     }
     left = Math.min(
-      Math.max(CONTEXT_VIEWPORT_MARGIN, left),
-      Math.max(CONTEXT_VIEWPORT_MARGIN, viewportWidth - CONTEXT_VIEWPORT_MARGIN - submenuRect.width),
+      Math.max(viewportLeft + CONTEXT_VIEWPORT_MARGIN, left),
+      Math.max(
+        viewportLeft + CONTEXT_VIEWPORT_MARGIN,
+        viewportRight - CONTEXT_VIEWPORT_MARGIN - submenuWidth,
+      ),
     );
     const top = Math.min(
-      Math.max(CONTEXT_VIEWPORT_MARGIN, triggerRect.top),
-      Math.max(CONTEXT_VIEWPORT_MARGIN, viewportHeight - CONTEXT_VIEWPORT_MARGIN - submenuRect.height),
+      Math.max(viewportTop + CONTEXT_VIEWPORT_MARGIN, triggerTop),
+      Math.max(
+        viewportTop + CONTEXT_VIEWPORT_MARGIN,
+        viewportBottom - CONTEXT_VIEWPORT_MARGIN - submenuHeight,
+      ),
     );
     blockTypeSubmenuPosition = { left, top };
   }
@@ -760,8 +779,7 @@ let paletteOpen = $state(false);
       const view = getActiveEditorView();
       if (!view) { editorCtx.state = null; return; }
       const { from, to } = view.state.selection.main;
-      const scaleMatch = document.documentElement.style.transform.match(/scale\(([^)]+)\)/);
-      const zoom = scaleMatch ? parseFloat(scaleMatch[1]) || 1 : 1;
+      const zoom = getRootScale();
       editorCtx.state = {
         x: e.clientX / zoom,
         y: e.clientY / zoom,

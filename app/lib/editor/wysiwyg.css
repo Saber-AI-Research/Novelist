@@ -331,8 +331,7 @@
   font-family: var(--novelist-mono-font, ui-monospace, 'SF Mono', 'Cascadia Code', monospace);
   font-size: 0.9em;
   background: color-mix(in srgb, var(--novelist-code-bg) 50%, transparent);
-  border-radius: 3px;
-  padding: 1px 3px;
+  border-radius: 2px;
 }
 
 /* Display math block lines when cursor is inside */
