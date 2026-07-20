@@ -454,67 +454,43 @@ pub(crate) async fn modified_key_confined(
 ///   truncated to 128 bits, which is deterministic and collision-resistant
 ///   at project-file scale.
 pub fn document_key(project_dir: &Path, file_path: &Path) -> Result<String, AppError> {
-    let project = normalize_separators(project_dir);
-    let file = normalize_separators(file_path);
+    let project = normalized_path_text(project_dir);
+    let file = normalized_path_text(file_path);
 
-    if file.as_os_str().is_empty() {
+    if file.is_empty() {
         return Err(AppError::InvalidInput("Empty document path".to_string()));
     }
-    if file.to_string_lossy().contains('\0') {
+    if file.contains('\0') {
         return Err(AppError::PathNotAllowed(
             "Document path contains a null byte".to_string(),
         ));
     }
-    for component in file.components() {
-        if matches!(component, Component::ParentDir) {
-            return Err(AppError::PathNotAllowed(format!(
-                "Path traversal not allowed: {}",
-                file_path.display()
-            )));
-        }
-    }
 
-    let relative: PathBuf = if file.is_absolute() || file.has_root() {
-        file.strip_prefix(&project)
-            .map_err(|_| {
-                AppError::PathNotAllowed(format!(
-                    "Path is outside project: {}",
-                    file_path.display()
-                ))
-            })?
-            .to_path_buf()
+    let relative = if normalized_path_is_rooted(file_path, &file) {
+        strip_normalized_project_prefix(&project, &file).ok_or_else(|| {
+            AppError::PathNotAllowed(format!("Path is outside project: {}", file_path.display()))
+        })?
     } else {
-        file.clone()
+        file.as_str()
     };
 
-    if relative.as_os_str().is_empty() {
+    if relative.is_empty() {
         return Err(AppError::InvalidInput(
             "Document path resolves to project root".to_string(),
         ));
     }
 
     let mut segments: Vec<String> = Vec::new();
-    for component in relative.components() {
+    for component in relative.split('/') {
         match component {
-            Component::Normal(part) => {
-                let text = part.to_string_lossy().to_string();
-                if !text.is_empty() {
-                    segments.push(encode_segment(&text));
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
+            "" | "." => {}
+            ".." => {
                 return Err(AppError::PathNotAllowed(format!(
                     "Path traversal not allowed: {}",
                     file_path.display()
                 )));
             }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(AppError::PathNotAllowed(format!(
-                    "Path is outside project: {}",
-                    file_path.display()
-                )));
-            }
+            part => segments.push(encode_segment(part)),
         }
     }
 
@@ -562,12 +538,47 @@ fn safe_truncate_for_key(s: &str, budget: usize) -> &str {
     &s[..end]
 }
 
-fn normalize_separators(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if s.contains('\\') {
-        PathBuf::from(s.replace('\\', "/"))
+fn normalized_path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn normalized_path_is_rooted(path: &Path, normalized: &str) -> bool {
+    path.is_absolute()
+        || path.has_root()
+        || normalized.starts_with('/')
+        || matches!(
+            normalized.as_bytes(),
+            [drive, b':', b'/', ..] if drive.is_ascii_alphabetic()
+        )
+}
+
+fn strip_normalized_project_prefix<'a>(project: &str, file: &'a str) -> Option<&'a str> {
+    let project = if project == "/" {
+        project
     } else {
-        path.to_path_buf()
+        project.trim_end_matches('/')
+    };
+    if normalized_path_eq(file, project) {
+        return Some("");
+    }
+    if project == "/" {
+        return file.strip_prefix('/');
+    }
+    let prefix = file.get(..project.len())?;
+    if !normalized_path_eq(prefix, project) {
+        return None;
+    }
+    file.get(project.len()..)?.strip_prefix('/')
+}
+
+fn normalized_path_eq(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 

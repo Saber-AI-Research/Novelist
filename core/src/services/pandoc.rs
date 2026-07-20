@@ -1442,7 +1442,8 @@ async fn commit_sibling_output(temp_path: &Path, output_path: &Path) -> Result<(
     let output_path = output_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         (|| {
-            let file = std::fs::OpenOptions::new().read(true).open(&temp_path)?;
+            // FlushFileBuffers requires a write-capable handle on Windows.
+            let file = std::fs::OpenOptions::new().write(true).open(&temp_path)?;
             file.sync_all()?;
             drop(file);
             replace_sibling_output(&temp_path, &output_path)
