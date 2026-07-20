@@ -1471,7 +1471,7 @@ fn replace_sibling_output(temp_path: &Path, output_path: &Path) -> Result<(), st
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
-        if output_path.exists() {
+        let replace_error = if output_path.exists() {
             let replaced = unsafe {
                 ReplaceFileW(
                     output.as_ptr(),
@@ -1485,11 +1485,13 @@ fn replace_sibling_output(temp_path: &Path, output_path: &Path) -> Result<(), st
             if replaced != 0 {
                 return Ok(());
             }
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error);
-            }
-        }
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        // ReplaceFileW can reject otherwise replaceable files because of
+        // inherited ACL metadata. MoveFileExW provides the same same-volume
+        // replace operation and is the required fallback for that case.
         let moved = unsafe {
             MoveFileExW(
                 temp.as_ptr(),
@@ -1498,7 +1500,16 @@ fn replace_sibling_output(temp_path: &Path, output_path: &Path) -> Result<(), st
             )
         };
         if moved == 0 {
-            return Err(std::io::Error::last_os_error());
+            let move_error = std::io::Error::last_os_error();
+            if let Some(replace_error) = replace_error {
+                return Err(std::io::Error::new(
+                    move_error.kind(),
+                    format!(
+                        "ReplaceFileW failed: {replace_error}; MoveFileExW failed: {move_error}"
+                    ),
+                ));
+            }
+            return Err(move_error);
         }
         Ok(())
     }

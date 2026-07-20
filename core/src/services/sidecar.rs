@@ -474,7 +474,7 @@ pub fn document_key(project_dir: &Path, file_path: &Path) -> Result<String, AppE
         }
     }
 
-    let relative: PathBuf = if file.is_absolute() {
+    let relative: PathBuf = if file.is_absolute() || file.has_root() {
         file.strip_prefix(&project)
             .map_err(|_| {
                 AppError::PathNotAllowed(format!(
