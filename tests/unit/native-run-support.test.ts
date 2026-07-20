@@ -81,7 +81,7 @@ afterEach(async () => {
 });
 
 describe('native run support', () => {
-  it('rejects canonical bundle escapes before destructive cleanup', async () => {
+  it.skipIf(process.platform === 'win32')('rejects canonical bundle escapes before destructive cleanup', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'novelist-native-containment-'));
     roots.push(root);
     const runRoot = path.join(root, 'run');

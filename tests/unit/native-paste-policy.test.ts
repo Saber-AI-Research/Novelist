@@ -11,7 +11,7 @@ const paths = {
 };
 
 async function source(path: string): Promise<string> {
-  return readFile(path, 'utf8');
+  return (await readFile(path, 'utf8')).replaceAll('\r\n', '\n');
 }
 
 describe('Task 24 native paste policy', () => {
