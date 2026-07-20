@@ -229,6 +229,10 @@ const slashMenuField = StateField.define<SlashMenuState | null>({
   },
 });
 
+export function isSlashMenuOpen(state: EditorView['state']): boolean {
+  return Boolean(state.field(slashMenuField, false)?.active);
+}
+
 // --- Menu DOM ---
 
 class SlashMenuWidget {

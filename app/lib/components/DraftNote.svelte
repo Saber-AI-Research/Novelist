@@ -8,6 +8,9 @@
   import { commands } from '$lib/ipc/commands';
   import { projectStore } from '$lib/stores/project.svelte';
   import { t } from '$lib/i18n';
+  import { registerRenameFlushProvider } from '$lib/services/rename-coordinator';
+  import { handleDraftSaveFireAndForget, writeDraftNoteStrict } from '$lib/services/draft-notes';
+  import { pathStartsWithChild } from '$lib/utils/path';
 
   interface Props {
     filePath: string;
@@ -18,6 +21,8 @@
   let view: EditorView | null = null;
   let currentFilePath = '';
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingSave: Promise<void> | null = null;
+  let queuedSave = false;
   let isDirty = $state(false);
 
   const draftTheme = EditorView.theme({
@@ -65,21 +70,64 @@
       keymap.of([
         ...defaultKeymap,
         ...historyKeymap,
-        { key: 'Mod-s', run: () => { saveDraft(); return true; } },
+        {
+          key: 'Mod-s',
+          run: () => {
+            handleDraftSaveFireAndForget(saveDraft(), handleDraftSaveFailure);
+            return true;
+          },
+        },
       ]),
     ];
   }
 
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveDraft(), 2000);
+    saveTimer = setTimeout(() => {
+      handleDraftSaveFireAndForget(saveDraft(), handleDraftSaveFailure);
+    }, 2000);
   }
 
-  async function saveDraft() {
-    if (!view || !projectStore.dirPath || !currentFilePath) return;
+  function handleDraftSaveFailure(message: string) {
+    isDirty = true;
+    console.warn(message);
+  }
+
+  function saveDraft(): Promise<void> {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (!view || !projectStore.dirPath || !currentFilePath) return pendingSave ?? Promise.resolve();
+    if (pendingSave) {
+      queuedSave = true;
+      return pendingSave.then(() => {
+        if (!queuedSave) return;
+        queuedSave = false;
+        return saveDraft();
+      });
+    }
     const content = view.state.doc.toString();
-    await commands.writeDraftNote(projectStore.dirPath, currentFilePath, content);
-    isDirty = false;
+    const savePromise = writeDraftNoteStrict(projectStore.dirPath, currentFilePath, content)
+      .then(() => {
+        if (view?.state.doc.toString() === content) isDirty = false;
+      })
+      .catch((error) => {
+        isDirty = true;
+        throw error;
+      })
+      .finally(() => {
+        if (pendingSave === savePromise) pendingSave = null;
+      });
+    pendingSave = savePromise;
+    return savePromise;
+  }
+
+  async function flushForRename(oldPath: string) {
+    if (!currentFilePath) return;
+    if (currentFilePath !== oldPath && !pathStartsWithChild(currentFilePath, oldPath)) return;
+    if (isDirty) await saveDraft();
+    if (pendingSave) await pendingSave;
   }
 
   async function loadDraft(path: string) {
@@ -107,16 +155,18 @@
 
   $effect(() => {
     if (filePath && container && filePath !== currentFilePath) {
-      loadDraft(filePath);
+      handleDraftSaveFireAndForget(loadDraft(filePath), handleDraftSaveFailure);
     }
   });
 
   onMount(() => {
+    const unregisterRenameFlush = registerRenameFlushProvider(flushForRename);
     return () => {
+      unregisterRenameFlush();
       if (saveTimer) clearTimeout(saveTimer);
       if (view && isDirty) {
         // Fire-and-forget save on unmount
-        saveDraft();
+        handleDraftSaveFireAndForget(saveDraft(), handleDraftSaveFailure);
       }
       if (view) {
         view.destroy();

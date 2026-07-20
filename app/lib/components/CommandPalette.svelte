@@ -20,7 +20,7 @@
     if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, results.length - 1); }
     if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }
     if (e.key === 'Enter' && results[selectedIndex]) {
-      results[selectedIndex].handler();
+      commandRegistry.execute(results[selectedIndex].id);
       onClose();
     }
   }
@@ -53,7 +53,7 @@
             class="palette-item"
             class:selected={i === selectedIndex}
             data-testid="palette-result-{i}"
-            onclick={() => { cmd.handler(); onClose(); }}
+            onclick={() => { commandRegistry.execute(cmd.id); onClose(); }}
             onmouseenter={() => { selectedIndex = i; }}
           >
             <span class="palette-labels">

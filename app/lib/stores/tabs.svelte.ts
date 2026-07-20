@@ -1,4 +1,5 @@
 import { commands } from '$lib/ipc/commands';
+import { renameItemAfterSidecarFlush } from '$lib/services/rename-coordinator';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
 import { isScratchFile, nextScratchDisplayName } from '$lib/utils/scratch';
@@ -10,9 +11,16 @@ import {
   applyH1Substitution,
 } from '$lib/utils/placeholder';
 import { extractFirstH1 } from '$lib/utils/h1';
-import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
+import { projectStore } from '$lib/stores/project.svelte';
 import { t } from '$lib/i18n';
 import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
+import { sanitizeFilenameStem } from '$lib/utils/filename';
+import {
+  loadManagedName,
+  migrateManagedNameCachePath,
+  updateManagedNameAnchor,
+} from '$lib/services/managed-name-persistence';
+import { isImeComposing } from '$lib/editor/ime-guard';
 import type { EditorView } from '@codemirror/view';
 import type { ViewportManager } from '$lib/editor/viewport';
 
@@ -25,6 +33,7 @@ interface TabState {
   scrollPosition: number;
   cursorPosition: number;
   version: number;
+  externalState: 'present' | 'deleted';
   /**
    * Deprecated since v0.2.4 — see spec 2026-05-07-v0.2.4-rename-and-macros.md.
    * Field retained so existing call sites and IPC mocks compile; no longer
@@ -47,6 +56,46 @@ interface TabState {
 interface OpenTabOptions {
   /** Deprecated since v0.2.4 — kept for call-site compatibility. */
   justCreated?: boolean;
+}
+
+interface ManagedRenameOptions {
+  reconcileCurrentH1?: boolean;
+}
+
+export interface PathRetargetResult {
+  changed: number;
+  status: 'ok' | 'warning';
+  failedOperations: string[];
+}
+
+type IpcResult = { status: 'ok' } | { status: 'error'; error: unknown };
+
+async function runPathSyncOperation(
+  operation: string,
+  run: () => Promise<IpcResult>,
+): Promise<string | null> {
+  try {
+    const result = await run();
+    return result.status === 'ok' ? null : operation;
+  } catch {
+    return operation;
+  }
+}
+
+function finishPathRetarget(changed: number, failedOperations: string[]): PathRetargetResult {
+  if (failedOperations.length > 0) {
+    console.warn(
+      `Path retarget completed with synchronization failures: ${failedOperations.join(', ')}`,
+    );
+    window.dispatchEvent(new CustomEvent('novelist-operation-error', {
+      detail: { message: t('file.pathSyncFailed') },
+    }));
+  }
+  return {
+    changed,
+    status: failedOperations.length > 0 ? 'warning' : 'ok',
+    failedOperations,
+  };
 }
 
 /**
@@ -141,6 +190,40 @@ interface PaneState {
 const MAX_PANES = 4;
 /** Smallest a pane column may be shrunk to (fraction of the row). */
 const MIN_PANE_WEIGHT = 0.15;
+
+function bumpNameUntilFree(newName: string, siblings: string[], currentName: string): string {
+  const taken = new Set(siblings);
+  taken.delete(currentName);
+  if (!taken.has(newName)) return newName;
+  const dot = newName.lastIndexOf('.');
+  const stem = dot > 0 ? newName.slice(0, dot) : newName;
+  const ext = dot > 0 ? newName.slice(dot) : '';
+  for (let n = 2; n < 10000; n++) {
+    const candidate = `${stem} ${n}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return newName;
+}
+
+function fallbackNameFromH1(currentName: string, h1: string, siblings: string[]): string | null {
+  const stem = sanitizeAutoNameStem(h1);
+  if (stem.length === 0) return null;
+  const dot = currentName.lastIndexOf('.');
+  const ext = dot > 0 ? currentName.slice(dot) : '';
+  const newName = `${stem}${ext}`;
+  if (newName === currentName) return null;
+  return bumpNameUntilFree(newName, siblings, currentName);
+}
+
+function sanitizeAutoNameStem(h1: string): string {
+  const stem = sanitizeFilenameStem(h1);
+  return /[\p{L}\p{N}]/u.test(stem) ? stem : '';
+}
+
+function filenameStem(fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  return dot > 0 ? fileName.slice(0, dot) : fileName;
+}
 
 class TabsStore {
   panes = $state<PaneState[]>([{ id: 'pane-1', tabs: [], activeTabId: null }]);
@@ -264,14 +347,24 @@ class TabsStore {
     }
   }
 
-  private async syncWatcherAfterPathChange(oldPath: string, newPath: string) {
-    if (oldPath === newPath) return;
+  private async syncWatcherAfterPathChange(oldPath: string, newPath: string): Promise<string[]> {
+    if (oldPath === newPath) return [];
+    const failures: string[] = [];
     if (this.findAllByPath(oldPath).length === 0) {
-      await commands.unregisterOpenFile(oldPath).catch(() => {});
+      const failed = await runPathSyncOperation(
+        'unregister-open-file',
+        () => commands.unregisterOpenFile(oldPath),
+      );
+      if (failed) failures.push(failed);
     }
     if (this.findAllByPath(newPath).length > 0) {
-      await commands.registerOpenFile(newPath).catch(() => {});
+      const failed = await runPathSyncOperation(
+        'register-open-file',
+        () => commands.registerOpenFile(newPath),
+      );
+      if (failed) failures.push(failed);
     }
+    return failures;
   }
 
   /**
@@ -282,29 +375,36 @@ class TabsStore {
     oldPath: string,
     newPath: string,
     options: { broadcast?: boolean } = {},
-  ): Promise<number> {
+  ): Promise<PathRetargetResult> {
     const count = this.findAllByPath(oldPath).length;
+    const failures: string[] = [];
     if (count > 0) {
       this.updatePath(oldPath, newPath);
-      await this.syncWatcherAfterPathChange(oldPath, newPath);
+      if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
+      failures.push(...await this.syncWatcherAfterPathChange(oldPath, newPath));
     }
     if (options.broadcast) {
-      await commands.broadcastFileRenamed(oldPath, newPath).catch(() => {});
+      const failed = await runPathSyncOperation(
+        'broadcast-file-renamed',
+        () => commands.broadcastFileRenamed(oldPath, newPath),
+      );
+      if (failed) failures.push(failed);
     }
-    return count;
+    return finishPathRetarget(count, failures);
   }
 
   /**
    * Re-point a single tab, preserving other tabs that still reference the old
    * path. Use this for Save As flows where the old file remains on disk.
    */
-  async retargetTabPath(tabId: string, newPath: string): Promise<boolean> {
+  async retargetTabPath(tabId: string, newPath: string): Promise<PathRetargetResult> {
     const tab = this.allTabs.find(t => t.id === tabId);
-    if (!tab) return false;
+    if (!tab) return finishPathRetarget(0, []);
     const oldPath = tab.filePath;
     this.updateFilePath(tabId, newPath);
-    await this.syncWatcherAfterPathChange(oldPath, newPath);
-    return true;
+    if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
+    const failures = await this.syncWatcherAfterPathChange(oldPath, newPath);
+    return finishPathRetarget(1, failures);
   }
 
   /**
@@ -316,8 +416,9 @@ class TabsStore {
     oldRoot: string,
     newRoot: string,
     options: { broadcast?: boolean } = {},
-  ): Promise<number> {
+  ): Promise<PathRetargetResult> {
     const changes = new Map<string, string>();
+    const failures: string[] = [];
     for (const pane of this.panes) {
       for (const tab of pane.tabs) {
         if (tab.filePath === oldRoot) {
@@ -330,12 +431,17 @@ class TabsStore {
 
     for (const [oldPath, newPath] of changes) {
       this.updatePath(oldPath, newPath);
-      await this.syncWatcherAfterPathChange(oldPath, newPath);
+      if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
+      failures.push(...await this.syncWatcherAfterPathChange(oldPath, newPath));
     }
     if (options.broadcast) {
-      await commands.broadcastFileRenamed(oldRoot, newRoot).catch(() => {});
+      const failed = await runPathSyncOperation(
+        'broadcast-file-renamed',
+        () => commands.broadcastFileRenamed(oldRoot, newRoot),
+      );
+      if (failed) failures.push(failed);
     }
-    return changes.size;
+    return finishPathRetarget(changes.size, failures);
   }
 
   /**
@@ -343,9 +449,12 @@ class TabsStore {
    * Returns the new path (== old path if no rename). Safe to call after every
    * successful writeFile — both manual Cmd+S and auto-save funnel here.
    *
-   * Gated implicitly: the user's new-file template must include `{title}`.
-   * Using `{title}` is the user's explicit signal that filenames should
-   * follow the H1 heading.
+   * Gated by explicit persisted managed-name state: only runs for files whose
+   * on-disk sidecar records `status: 'managed'`. Enrollment happens at file
+   * creation time via `enableManagedNameForCreatedFile` when the source
+   * template contains canonical `{title}`. Manual rename does NOT detach —
+   * only the Sidebar `Stop Auto Naming` action (or another explicit call to
+   * `detachManagedName`) flips status to `detached`.
    *
    *  Path A — placeholder first-time rename:
    *    File still matches `isPlaceholder()` and has a non-empty H1.
@@ -353,23 +462,28 @@ class TabsStore {
    *
    *  Path B — ongoing sync:
    *    File is past the placeholder stage; we compare the just-saved H1
-   *    against the per-tab `lastSyncedH1`. If changed and the old H1 still
-   *    appears in the current filename, swap that substring for the new H1.
-   *    Manually renamed files have no anchor to find, so sync auto-detaches.
+   *    against `state.currentH1` (falling back to the tab's `lastSyncedH1`).
+   *    If the old H1 anchor is still present in the filename we swap it in
+   *    place; if the anchor is absent (e.g. after a manual rename) we fall
+   *    back to a sanitized H1 basename plus the existing extension, keeping
+   *    the file managed.
    */
-  async tryRenameAfterSave(filePath: string, content: string): Promise<string> {
-    // NOT the legacy `autoRenameFromH1` checkbox — that setting lost its UI
-    // in 1e0ab6e and users with a persisted `false` could never re-enable it.
-    // (47bc5f3 accidentally reverted this line to the checkbox; see the
-    // docstring above, which always described the template gate.)
-    if (!newFileSettings.template.includes('{title}')) return filePath;
+  async tryRenameAfterSave(
+    filePath: string,
+    content: string,
+    options: ManagedRenameOptions = {},
+  ): Promise<string> {
+    if (!projectStore.dirPath) return filePath;
     if (isScratchFile(filePath)) return filePath;
 
-    // Find the tab so we can read/update `lastSyncedH1`. Save-from-another-pane
-    // is possible; we update every matching tab via `updatePath` after rename.
+    const loaded = await loadManagedName(projectStore.dirPath, filePath);
+    if (loaded.kind !== 'ready' || loaded.state.status !== 'managed') return filePath;
+
+    const state = loaded.state;
     const tab = this.findByPath(filePath);
-    const oldH1 = tab?.lastSyncedH1 ?? '';
+    const oldH1 = tab?.lastSyncedH1 ?? state.currentH1 ?? '';
     const newH1 = extractFirstH1(content) ?? '';
+    const newH1Stem = sanitizeAutoNameStem(newH1);
 
     const fileName = pathBasename(filePath) || filePath;
     const parentDir = pathDirname(filePath) || filePath;
@@ -381,8 +495,8 @@ class TabsStore {
     // Built-in placeholder families (Untitled N, 第N章, …) plus the user
     // template's own rendered placeholder (e.g. 第{N}章-{title} →
     // 第1章-Untitled.md), which the static pattern list can't enumerate.
-    if (isPlaceholder(fileName) || isTemplateTitlePlaceholder(fileName, newFileSettings.template)) {
-      if (newH1.trim().length === 0) {
+    if (isPlaceholder(fileName) || isTemplateTitlePlaceholder(fileName, state.templateRaw)) {
+      if (newH1Stem.length === 0) {
         // No H1 yet; nothing to do. Don't update anchor either — let next
         // save with a real H1 fall through here again.
         return filePath;
@@ -390,59 +504,78 @@ class TabsStore {
       const list = await commands.listDirectory(parentDir, null);
       const siblings = list.status === 'ok' ? list.data.map(e => e.name) : [];
       const newName = renameFromH1(fileName, newH1, siblings)
-        ?? renameFromTemplateTitleSlot(fileName, newH1, newFileSettings.template, siblings);
+        ?? renameFromTemplateTitleSlot(fileName, newH1, state.templateRaw, siblings);
       if (!newName) {
-        // `renameFromH1` returned null (sanitized H1 empty or computed name
-        // would equal current). We DID observe an H1; record it so Path B
-        // can pick up future changes.
-        this.setLastSyncedH1ByPath(filePath, newH1);
+        if (filenameStem(fileName) === newH1Stem) {
+          const written = await updateManagedNameAnchor(projectStore.dirPath, filePath, state, newH1);
+          if (written) this.setLastSyncedH1ByPath(filePath, newH1);
+        }
         return filePath;
       }
-      const result = await commands.renameItem(filePath, newName, true);
+      const result = await renameItemAfterSidecarFlush(projectStore.dirPath, filePath, newName, true);
       if (result.status !== 'ok') {
         console.warn('Auto-rename failed:', result.error);
         return filePath;
       }
-      const newPath = result.data;
-      await this.retargetOpenPath(filePath, newPath, { broadcast: true });
-      this.setLastSyncedH1ByPath(newPath, newH1);
+      const newPath = result.data.new_path;
+      await this.retargetOpenPath(filePath, newPath, { broadcast: false });
+      const migrated = await loadManagedName(projectStore.dirPath, newPath);
+      const written = await updateManagedNameAnchor(
+        projectStore.dirPath,
+        newPath,
+        migrated.kind === 'ready' ? migrated.state : state,
+        newH1,
+      );
+      if (written) this.setLastSyncedH1ByPath(newPath, newH1);
       return newPath;
     }
 
-    if (newH1 === oldH1) return filePath; // no change
+    if (newH1 === oldH1 && !options.reconcileCurrentH1) return filePath; // no change
 
     // -------- Path B: ongoing sync --------
     // If we have no anchor (e.g. tab opened before this feature, or file
     // opened from disk with no H1), adopt the current H1 silently so the
     // next *change* has something to compare against.
     if (oldH1.length === 0) {
-      this.setLastSyncedH1ByPath(filePath, newH1);
+      if (newH1Stem.length > 0) {
+        const written = await updateManagedNameAnchor(projectStore.dirPath, filePath, state, newH1);
+        if (written) this.setLastSyncedH1ByPath(filePath, newH1);
+      }
       return filePath;
     }
     // User emptied the H1 — keep filename, do NOT update anchor (so retyping
     // the same H1 short-circuits via `newH1 === oldH1`).
-    if (newH1.trim().length === 0) {
+    if (newH1Stem.length === 0) {
       return filePath;
     }
 
     const list = await commands.listDirectory(parentDir, null);
     const siblings = list.status === 'ok' ? list.data.map(e => e.name) : [];
-    const newName = applyH1Substitution(fileName, oldH1, newH1, siblings);
+    const newName = applyH1Substitution(fileName, oldH1, newH1, siblings)
+      ?? fallbackNameFromH1(fileName, newH1, siblings);
     if (!newName) {
-      // Manual-rename detach OR sanitize-equal. Update anchor so we don't
-      // keep retrying the same comparison every save.
-      this.setLastSyncedH1ByPath(filePath, newH1);
+      if (filenameStem(fileName) === newH1Stem) {
+        const written = await updateManagedNameAnchor(projectStore.dirPath, filePath, state, newH1);
+        if (written) this.setLastSyncedH1ByPath(filePath, newH1);
+      }
       return filePath;
     }
 
-    const result = await commands.renameItem(filePath, newName, true);
+    const result = await renameItemAfterSidecarFlush(projectStore.dirPath, filePath, newName, true);
     if (result.status !== 'ok') {
       console.warn('Auto-rename failed:', result.error);
       return filePath;
     }
-    const newPath = result.data;
-    await this.retargetOpenPath(filePath, newPath, { broadcast: true });
-    this.setLastSyncedH1ByPath(newPath, newH1);
+    const newPath = result.data.new_path;
+    await this.retargetOpenPath(filePath, newPath, { broadcast: false });
+    const migrated = await loadManagedName(projectStore.dirPath, newPath);
+    const written = await updateManagedNameAnchor(
+      projectStore.dirPath,
+      newPath,
+      migrated.kind === 'ready' ? migrated.state : state,
+      newH1,
+    );
+    if (written) this.setLastSyncedH1ByPath(newPath, newH1);
     return newPath;
   }
 
@@ -472,6 +605,7 @@ class TabsStore {
       scrollPosition: 0,
       cursorPosition: 0,
       version: 0,
+      externalState: 'present',
       justCreated: options.justCreated === true,
       lastSyncedH1: extractFirstH1(content) ?? '',
     });
@@ -496,6 +630,7 @@ class TabsStore {
       scrollPosition: 0,
       cursorPosition: 0,
       version: 0,
+      externalState: 'present',
       justCreated: options.justCreated === true,
       lastSyncedH1: extractFirstH1(content) ?? '',
     });
@@ -744,17 +879,19 @@ class TabsStore {
   markSaved(id: string) {
     for (const pane of this.panes) {
       const tab = pane.tabs.find(t => t.id === id);
-      if (tab) { tab.isDirty = false; return; }
+      if (tab) { tab.isDirty = false; tab.externalState = 'present'; return; }
     }
   }
 
   /**
    * Update a tab's file path (used by Save As to re-point a scratch file).
    *
-   * Intentionally does NOT reset `lastSyncedH1`. The H1→filename sync's
-   * Path B (see `tryRenameAfterSave`) detects "old anchor not in new
-   * filename" and self-detaches, which is exactly the correct behavior
-   * after a manual rename / Save As.
+   * Intentionally does NOT reset `lastSyncedH1`. Detachment is driven only
+   * by explicit persisted managed-name state (see `tryRenameAfterSave`), so
+   * a manual rename / Save As keeps managed files managed. When the old H1
+   * anchor is absent from the new filename Path B falls back to a sanitized
+   * H1 basename; only the Sidebar `Stop Auto Naming` action (or another
+   * explicit `detachManagedName` call) flips status to detached.
    */
   updateFilePath(id: string, newPath: string) {
     for (const pane of this.panes) {
@@ -771,7 +908,10 @@ class TabsStore {
   markSavedByPath(filePath: string) {
     for (const pane of this.panes) {
       for (const tab of pane.tabs) {
-        if (tab.filePath === filePath) tab.isDirty = false;
+        if (tab.filePath === filePath) {
+          tab.isDirty = false;
+          tab.externalState = 'present';
+        }
       }
     }
   }
@@ -782,6 +922,7 @@ class TabsStore {
       if (tab) {
         tab.content = newContent;
         tab.isDirty = false;
+        tab.externalState = 'present';
         tab.version += 1;
         // External-edit policy: refresh anchor silently so the next save
         // doesn't see a stale `lastSyncedH1` and try to rename based on
@@ -792,6 +933,18 @@ class TabsStore {
         return;
       }
     }
+  }
+
+  markExternalDeleted(id: string) {
+    for (const pane of this.panes) {
+      const tab = pane.tabs.find(t => t.id === id);
+      if (tab) { tab.externalState = 'deleted'; return; }
+    }
+  }
+
+  isTabImeComposing(id: string): boolean {
+    const view = editorViews.get(id);
+    return view ? isImeComposing(view) : false;
   }
 
   // Search ALL panes

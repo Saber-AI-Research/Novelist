@@ -9,6 +9,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	readFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_file", { path })),
 	writeFile: (path: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_file", { path, content })),
+	writeFileIfUnchanged: (projectDir: string, path: string, expectedContent: string | null, content: string) => typedError<WriteFileIfUnchangedResult, string>(__TAURI_INVOKE("write_file_if_unchanged", { projectDir, path, expectedContent, content })),
 	/**
 	 *  Returns the detected encoding for a file that was previously read via `read_file`.
 	 *  Returns `"UTF-8"` if the file is UTF-8 (or was never read).
@@ -29,14 +30,24 @@ export const commands = {
 	 *  When `allow_collision_bump` is Some(true), appends " 2", " 3", … on collision.
 	 *  Defaults to error-on-collision when None or Some(false).
 	 */
-	renameItem: (oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<string, string>(__TAURI_INVOKE("rename_item", { oldPath, newName, allowCollisionBump })),
+	renameItem: (projectDir: string, oldPath: string, newName: string, allowCollisionBump: boolean | null) => typedError<RenameItemResult, string>(__TAURI_INVOKE("rename_item", { projectDir, oldPath, newName, allowCollisionBump })),
+	computeDocumentKey: (projectDir: string, filePath: string) => typedError<string, string>(__TAURI_INVOKE("compute_document_key", { projectDir, filePath })),
+	readManagedNameState: (projectDir: string, filePath: string) => typedError<{
+	version: number,
+	status: ManagedNameStatus,
+	templateRaw: string,
+	currentH1: string,
+	documentKey: string,
+} | null, string>(__TAURI_INVOKE("read_managed_name_state", { projectDir, filePath })),
+	writeManagedNameState: (projectDir: string, filePath: string, state: ManagedNameStateV1) => typedError<null, string>(__TAURI_INVOKE("write_managed_name_state", { projectDir, filePath, state })),
+	deleteManagedNameState: (projectDir: string, filePath: string) => typedError<null, string>(__TAURI_INVOKE("delete_managed_name_state", { projectDir, filePath })),
 	/**  Emit a global Tauri event so other windows can update their tab state. */
 	broadcastFileRenamed: (oldPath: string, newPath: string) => typedError<null, string>(__TAURI_INVOKE("broadcast_file_renamed", { oldPath, newPath })),
 	/**
 	 *  Move a file or folder into `target_dir`. Auto-numbers on collision
 	 *  ("a.md" -> "a 2.md"). Rejects moving a folder into its own descendant.
 	 */
-	moveItem: (sourcePath: string, targetDir: string) => typedError<string, string>(__TAURI_INVOKE("move_item", { sourcePath, targetDir })),
+	moveItem: (projectDir: string, sourcePath: string, targetDir: string) => typedError<RenameItemResult, string>(__TAURI_INVOKE("move_item", { projectDir, sourcePath, targetDir })),
 	deleteItem: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { path })),
 	checkPandoc: () => typedError<PandocStatus_Serialize, string>(__TAURI_INVOKE("check_pandoc")),
 	/**
@@ -44,7 +55,9 @@ export const commands = {
 	 *  to auto-detection). Empty string is treated as `None`.
 	 */
 	setPandocPath: (path: string | null) => typedError<null, string>(__TAURI_INVOKE("set_pandoc_path", { path })),
-	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[]) => typedError<string, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs })),
+	stageExportCss: (requestId: string, css: string) => typedError<string, string>(__TAURI_INVOKE("stage_export_css", { requestId, css })),
+	cancelExportProject: (requestId: string) => typedError<boolean, string>(__TAURI_INVOKE("cancel_export_project", { requestId })),
+	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[], requestId: string | null, projectDir: string | null) => typedError<ExportProjectResult_Serialize, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs, requestId, projectDir })),
 	detectProject: (dirPath: string) => typedError<{
 	project: ProjectMeta,
 	outline: OutlineConfig,
@@ -137,21 +150,19 @@ export const commands = {
 	registerWriteIgnore: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_write_ignore", { path })),
 	/**
 	 *  Polling fallback for external-edit detection.
-	 * 
+	 *
 	 *  The notify watcher only covers a single recursively-watched project dir, so
 	 *  it misses files opened in single-file mode (no project → no watcher) and can
 	 *  miss events on symlinked roots or when the OS coalesces/drops FSEvents. This
 	 *  command re-checks every *tracked open file* directly and returns the paths
 	 *  whose content changed on disk, so the frontend can reload them on a short
 	 *  interval regardless of watcher coverage.
-	 * 
+	 *
 	 *  Cheap by design: an mtime stat gates the blake3 hash, so unchanged files
-	 *  cost one `stat` each. Self-writes are absorbed via the same 2s `ignore_set`
-	 *  the watcher uses — as long as the poll interval is shorter than that window,
-	 *  a save is hashed-and-suppressed (its new hash committed) before the window
-	 *  expires, so it never surfaces as a spurious external change.
+	 *  cost one `stat` each. Self-writes are suppressed only when the observed hash
+	 *  equals the exact encoded hash registered by the Rust write path.
 	 */
-	pollExternalChanges: () => typedError<string[], string>(__TAURI_INVOKE("poll_external_changes")),
+	pollExternalChanges: () => typedError<ExternalFileChangePayload[], string>(__TAURI_INVOKE("poll_external_changes")),
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
 	addRecentProject: (path: string, name: string) => typedError<null, string>(__TAURI_INVOKE("add_recent_project", { path, name })),
 	removeRecentProject: (path: string) => typedError<null, string>(__TAURI_INVOKE("remove_recent_project", { path })),
@@ -255,16 +266,12 @@ export const commands = {
 	cliShimStatus: () => typedError<CliShimStatus, string>(__TAURI_INVOKE("cli_shim_status")),
 	installCliShim: () => typedError<CliShimStatus, string>(__TAURI_INVOKE("install_cli_shim")),
 	/**
-	 *  Read an image file and return it as a data URI (e.g. `data:image/png;base64,...`).
-	 *  Used by the WYSIWYG editor to render local images without the asset protocol.
+	 *  Read a Markdown image through a project/document capability. `reference`
+	 *  remains relative to `base_dir`; both are confined under `allowed_root`.
+	 *  Every path component is opened relative to retained directory handles, and
+	 *  symlinks are rejected before any image bytes are read.
 	 */
-	readImageDataUri: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_image_data_uri", { path })),
-	/**
-	 *  Read a file as raw bytes for upload. The frontend uses this to load
-	 *  local image files referenced in Markdown into memory before handing
-	 *  them to one of the `upload_image_*` commands.
-	 */
-	readImageBytes: (path: string) => typedError<number[], string>(__TAURI_INVOKE("read_image_bytes", { path })),
+	readImageBytes: (baseDir: string, reference: string) => typedError<number[], string>(__TAURI_INVOKE("read_image_bytes", { baseDir, reference })),
 	uploadImageQiniu: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_qiniu", { bytes, filename, mime, config })),
 	uploadImageAliyunOss: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_aliyun_oss", { bytes, filename, mime, config })),
 	uploadImageS3: (bytes: number[], filename: string, mime: string, config: ProviderConfig_Deserialize) => typedError<UploadResult, string>(__TAURI_INVOKE("upload_image_s3", { bytes, filename, mime, config })),
@@ -275,16 +282,18 @@ export const commands = {
 	getImageHostSettings: () => typedError<ImageHostSettings_Serialize, string>(__TAURI_INVOKE("get_image_host_settings")),
 	/**  Replace the global `image_hosts` settings block atomically. */
 	setImageHostSettings: (settings: ImageHostSettings_Deserialize) => typedError<null, string>(__TAURI_INVOKE("set_image_host_settings", { settings })),
-	publishToGhost: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_ghost", { input, config })),
-	publishToWordpressSelfHosted: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_self_hosted", { input, config })),
-	publishToWordpressCom: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_wordpress_com", { input, config })),
-	publishToMedium: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult, string>(__TAURI_INVOKE("publish_to_medium", { input, config })),
+	publishToGhost: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult_Serialize, string>(__TAURI_INVOKE("publish_to_ghost", { input, config })),
+	publishToWordpressSelfHosted: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult_Serialize, string>(__TAURI_INVOKE("publish_to_wordpress_self_hosted", { input, config })),
+	publishToWordpressCom: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult_Serialize, string>(__TAURI_INVOKE("publish_to_wordpress_com", { input, config })),
+	publishToMedium: (input: PublishInput_Deserialize, config: PlatformConfig) => typedError<PublishResult_Serialize, string>(__TAURI_INVOKE("publish_to_medium", { input, config })),
+	verifyWordpressSelfHostedUpdate: (updateTarget: UpdateTarget_Deserialize, config: PlatformConfig) => typedError<null, string>(__TAURI_INVOKE("verify_wordpress_self_hosted_update", { updateTarget, config })),
+	verifyWordpressComUpdate: (updateTarget: UpdateTarget_Deserialize, config: PlatformConfig) => typedError<null, string>(__TAURI_INVOKE("verify_wordpress_com_update", { updateTarget, config })),
 	uploadPostImageGhost: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_ghost", { bytes, filename, mime, config })),
 	uploadPostImageWordpressSelfHosted: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_wordpress_self_hosted", { bytes, filename, mime, config })),
 	uploadPostImageWordpressCom: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_wordpress_com", { bytes, filename, mime, config })),
 	uploadPostImageMedium: (bytes: number[], filename: string, mime: string, config: PlatformConfig) => typedError<PostImageUploadResult, string>(__TAURI_INVOKE("upload_post_image_medium", { bytes, filename, mime, config })),
 	/**
-	 *  Convert Markdown to HTML via the bundled / system Pandoc binary.
+	 *  Convert Markdown to HTML via the user-configured or discovered system Pandoc binary.
 	 *  Used by the frontend orchestrator before submitting to Ghost / WP /
 	 *  WP.com (Medium consumes Markdown directly).
 	 */
@@ -309,6 +318,85 @@ export const commands = {
 	getPublishSettings: () => typedError<PublishSettings, string>(__TAURI_INVOKE("get_publish_settings")),
 	setPublishSettings: (settings: PublishSettings) => typedError<null, string>(__TAURI_INVOKE("set_publish_settings", { settings })),
 	/**
+	 *  Task 14: read the persisted per-channel Publish form drafts for one
+	 *  document. Returns an empty snapshot when the sidecar does not yet
+	 *  exist. Malformed top-level JSON surfaces as `AppError::Json`;
+	 *  per-channel parse errors are surfaced in `invalidChannelIds` so a
+	 *  broken entry cannot hide sibling channels.
+	 */
+	readPublishFormDrafts: (projectDir: string, filePath: string) => typedError<PublishFormDraftsSnapshot_Serialize, string>(__TAURI_INVOKE("read_publish_form_drafts", { projectDir, filePath })),
+	/**
+	 *  Read only the durable remote identity for one document/channel.
+	 *  Credentials and sibling channel state never cross this boundary.
+	 */
+	readPublishRemoteState: (projectDir: string, filePath: string, channelId: string) => typedError<{
+	post_id: string,
+	url?: string | null,
+	revision?: string | null,
+	provider_revision?: ProviderRevision_Serialize | null,
+	capability?: BindingCapability | null,
+} | null, string>(__TAURI_INVOKE("read_publish_remote_state", { projectDir, filePath, channelId })),
+	/**
+	 *  Task 14: persist one channel's Publish form draft while preserving
+	 *  that channel's `remote` identity and `cover` reference. Uses the
+	 *  Task 3 atomic sidecar update helper so writes are safe under
+	 *  concurrent renames/publishes.
+	 */
+	writePublishFormDraft: (projectDir: string, filePath: string, channelId: string, form: FormDraft_Deserialize) => typedError<null, string>(__TAURI_INVOKE("write_publish_form_draft", { projectDir, filePath, channelId, form })),
+	/**
+	 *  Atomically persist a successful create/update result. Provider capability
+	 *  is derived from Rust-owned channel settings, never trusted from the UI.
+	 */
+	persistPublishResult: (projectDir: string, filePath: string, channelId: string, result: PublishResult_Deserialize) => typedError<RemoteIdentity_Serialize, string>(__TAURI_INVOKE("persist_publish_result", { projectDir, filePath, channelId, result })),
+	/**
+	 *  Persist one channel's cover transactionally: validate and store the
+	 *  content-addressed asset, atomically update only `ChannelState.cover`, then
+	 *  run reference-safe cleanup. Form fields, remote identity, and siblings are
+	 *  preserved by `update_publish_sidecar`.
+	 */
+	storePublishCover: (projectDir: string, filePath: string, channelId: string, bytes: number[], declaredMime: string) => typedError<PublishCoverAsset, string>(__TAURI_INVOKE("store_publish_cover", { projectDir, filePath, channelId, bytes, declaredMime })),
+	/**
+	 *  Restore the validated cover payload for one document/channel. A channel
+	 *  without a cover returns `None`; a sidecar reference whose asset is missing
+	 *  is an integrity error rather than a blank successful preview.
+	 */
+	loadPublishCover: (projectDir: string, filePath: string, channelId: string) => typedError<{
+	cover: CoverRef,
+	bytes: number[],
+	filename: string,
+	mime: string,
+} | null, string>(__TAURI_INVOKE("load_publish_cover", { projectDir, filePath, channelId })),
+	/**
+	 *  Clear only the target channel's cover and then prune assets that no
+	 *  sidecar references. Missing sidecars/channels/covers are idempotent.
+	 */
+	clearPublishCover: (projectDir: string, filePath: string, channelId: string) => typedError<null, string>(__TAURI_INVOKE("clear_publish_cover", { projectDir, filePath, channelId })),
+	/**
+	 *  Task 20: bind an existing remote post to a local document + channel
+	 *  after authenticated verification.
+	 *
+	 *  Contract:
+	 *  - The frontend supplies `project_dir`, `file_path`, `channel_id`,
+	 *    and one `url_or_id` string. Credentials are NEVER passed in;
+	 *    they are looked up on the Rust side by channel id from persisted
+	 *    global settings.
+	 *  - Verification is provider-specific: Ghost + both WordPress variants
+	 *    authenticate-GET the referenced post and return an [`Updatable`]
+	 *    [`VerifiedBinding`]. Medium returns a typed unsupported/insufficient-
+	 *    scope error because its Integration Token API does not expose an
+	 *    authenticated post-read/ownership endpoint. A successful `/v1/me`
+	 *    token check alone is never treated as verified post identity.
+	 *  - Sidecar mutation is atomic and touches ONLY the target channel's
+	 *    `remote` field: `form`, `cover`, and every sibling channel are
+	 *    preserved byte-identical.
+	 *  - Any verification failure returns `AppError::Custom` with a typed
+	 *    `PublishError` message. Sidecar bytes are unchanged on any failure.
+	 *
+	 *  [`Updatable`]: crate::services::publish::binding::BindingCapability::Updatable
+	 *  [`UnsupportedUpdate`]: crate::services::publish::binding::BindingCapability::UnsupportedUpdate
+	 */
+	bindLegacyPublication: (projectDir: string, filePath: string, channelId: string, urlOrId: string) => typedError<VerifiedBinding_Serialize, string>(__TAURI_INVOKE("bind_legacy_publication", { projectDir, filePath, channelId, urlOrId })),
+	/**
 	 *  Write raw bytes (passed as base64) to a file. Used by the frontend to save
 	 *  pasted/dropped images without UTF-8 encoding corruption.
 	 */
@@ -330,6 +418,7 @@ export const commands = {
 	deleteAiSession: (projectDir: string, kind: AiSessionKind, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_ai_session", { projectDir, kind, id })),
 	listAiPromptAssets: (projectDir: string) => typedError<AiPromptAssets, string>(__TAURI_INVOKE("list_ai_prompt_assets", { projectDir })),
 	writeAiMemory: (projectDir: string, body: string) => typedError<null, string>(__TAURI_INVOKE("write_ai_memory", { projectDir, body })),
+	saveAiChat: (projectDir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("save_ai_chat", { projectDir, filename, body })),
 	claudeCliDetect: () => __TAURI_INVOKE<{
 	path: string,
 	version: string | null,
@@ -350,7 +439,7 @@ export const commands = {
 	 *  in. Without this, a dark-themed app on a default-appearance NSWindow gets
 	 *  a bright 1px highlight at the very top, because macOS draws the highlight
 	 *  for *light* windows.
-	 * 
+	 *
 	 *  No-op on non-macOS and on macOS versions predating `NSAppearance` (which
 	 *  effectively means no-op if the selector doesn't exist).
 	 */
@@ -408,6 +497,30 @@ export type AiSessionFile = {
 export type AiSessionKind = "talk" | "agent";
 
 /**
+ *  Whether the caller can subsequently `update` a verified remote
+ *  identity via the standard `PublishInput.update_target` flow, or the
+ *  provider/API state requires a separate, explicit user action such as
+ *  creating a new copy.
+ */
+export type BindingCapability =
+/**
+ *  Ghost, WordPress self-hosted, WordPress.com. Persist the returned
+ *  typed revision as `RemoteIdentity.provider_revision` and the
+ *  legacy flat value as `RemoteIdentity.revision`; the typed value is
+ *  ready to feed `UpdateTarget.expected_revision` on the next publish.
+ */
+{ kind: "updatable" } |
+/**
+ *  Verified remote identity exists, but the provider/API cannot
+ *  update it in place. This type remains useful for verified create
+ *  results and a future explicit New Copy flow; Task 20 must not
+ *  manufacture it for unverifiable Medium legacy-post binds.
+ */
+{ kind: "unsupported_update"; data: {
+	reason: UnsupportedUpdateReason,
+} };
+
+/**
  *  Body format selector. Ghost / WordPress consume HTML; Medium
  *  consumes Markdown natively.
  */
@@ -419,6 +532,32 @@ export type ChannelConfig = {
 	/**  User-facing label, e.g. "Personal Ghost". */
 	name: string,
 } & PlatformConfig;
+
+/**
+ *  Per-channel state: the last saved form the user typed, the remote
+ *  post identity if any, and the cover reference if any.
+ */
+export type ChannelState = ChannelState_Serialize | ChannelState_Deserialize;
+
+/**
+ *  Per-channel state: the last saved form the user typed, the remote
+ *  post identity if any, and the cover reference if any.
+ */
+export type ChannelState_Deserialize = {
+	form?: FormDraft_Deserialize,
+	remote?: RemoteIdentity_Deserialize | null,
+	cover?: CoverRef | null,
+};
+
+/**
+ *  Per-channel state: the last saved form the user typed, the remote
+ *  post identity if any, and the cover reference if any.
+ */
+export type ChannelState_Serialize = {
+	form: FormDraft_Serialize,
+	remote?: RemoteIdentity_Serialize | null,
+	cover?: CoverRef | null,
+};
 
 export type ChapterStats = {
 	file_name: string,
@@ -520,6 +659,27 @@ export type CodexTurnRequest = {
 	session_uuid: string,
 };
 
+/**
+ *  Reference to a stored cover asset. Serialized inside the Publish
+ *  sidecar's per-channel state.
+ *
+ *  * `content_hash` is the hex BLAKE3 digest of the raw bytes; it doubles
+ *    as the on-disk filename stem so the reference is durable across
+ *    application restarts and repository moves.
+ *  * `extension` is the canonical lowercase file extension we assigned
+ *    at write time (`"png"` / `"jpg"` / `"gif"` / `"webp"`).
+ *  * `mime` is the content-derived MIME string (never the caller's
+ *    claimed value).
+ *  * `bytes` is the raw payload length; used at cleanup time to catch
+ *    accidental truncation.
+ */
+export type CoverRef = {
+	content_hash: string,
+	extension: string,
+	mime: string,
+	bytes: number,
+};
+
 export type DailyStats = {
 	date: string,
 	words_written: number,
@@ -539,6 +699,25 @@ export type EffectiveSettings = {
 	is_project_scoped: boolean,
 };
 
+export type ExportProjectResult = ExportProjectResult_Serialize | ExportProjectResult_Deserialize;
+
+export type ExportProjectResult_Deserialize = {
+	message: string,
+	warning?: PandocFailure_Deserialize | null,
+};
+
+export type ExportProjectResult_Serialize = {
+	message: string,
+	warning?: PandocFailure_Serialize | null,
+};
+
+export type ExternalFileChangePayload = {
+	/**  Canonical path used as the stable identity for watcher and poll dedupe. */
+	identity: string,
+	/**  Every currently registered frontend path for this identity. */
+	paths: string[],
+};
+
 export type FileEntry = {
 	name: string,
 	path: string,
@@ -551,6 +730,41 @@ export type FileEntry = {
 	 *  platforms or filesystems that don't expose it (e.g. older ext4).
 	 */
 	ctime: number | null,
+};
+
+/**
+ *  The strictly-user-editable subset of the Publish dialog. Additions
+ *  here MUST also appear in the "no credential / no transient state"
+ *  tests below.
+ */
+export type FormDraft = FormDraft_Serialize | FormDraft_Deserialize;
+
+/**
+ *  The strictly-user-editable subset of the Publish dialog. Additions
+ *  here MUST also appear in the "no credential / no transient state"
+ *  tests below.
+ */
+export type FormDraft_Deserialize = {
+	title?: string,
+	tags?: string[],
+	excerpt?: string | null,
+	slug?: string | null,
+	status?: string | null,
+	destination?: string | null,
+};
+
+/**
+ *  The strictly-user-editable subset of the Publish dialog. Additions
+ *  here MUST also appear in the "no credential / no transient state"
+ *  tests below.
+ */
+export type FormDraft_Serialize = {
+	title: string,
+	tags: string[],
+	excerpt?: string | null,
+	slug?: string | null,
+	status?: string | null,
+	destination?: string | null,
 };
 
 /**  Shape written to `~/.novelist/settings.json`. */
@@ -633,6 +847,16 @@ export type ImageHostSettings_Serialize = {
 	active_host_id?: string | null,
 	auto_on_paste: boolean,
 };
+
+export type ManagedNameStateV1 = {
+	version: number,
+	status: ManagedNameStatus,
+	templateRaw: string,
+	currentH1: string,
+	documentKey: string,
+};
+
+export type ManagedNameStatus = "managed" | "detached";
 
 /**
  *  All human-readable labels used in the menu. The frontend builds
@@ -733,6 +957,172 @@ export type OutlineConfig = {
 	order?: string[],
 };
 
+/**
+ *  A structured diagnostic emitted by every failure path in this
+ *  module. Serializable to JSON for logs and IPC — safe by construction.
+ */
+export type PandocFailure = PandocFailure_Serialize | PandocFailure_Deserialize;
+
+/**
+ *  A structured diagnostic emitted by every failure path in this
+ *  module. Serializable to JSON for logs and IPC — safe by construction.
+ */
+export type PandocFailure_Deserialize = {
+	/**  Which point in the pipeline failed. Always populated. */
+	stage: PandocStage,
+	/**
+	 *  User-facing English message. Never contains secrets or document
+	 *  contents — safe to render verbatim.
+	 */
+	message: string,
+	/**
+	 *  Absolute path of the resolved Pandoc binary when known.
+	 *  `None` on `Discovery` failures.
+	 */
+	resolved_binary?: string | null,
+	/**  Target output format ("html" / "pdf" / "docx" / "epub" / …). */
+	format?: string | null,
+	/**
+	 *  Sanitized argv summary — each user-supplied `--flag=value` has
+	 *  its value redacted if the flag name suggests a secret. Positional
+	 *  paths remain visible; environment is NEVER included.
+	 */
+	argv_summary?: string[],
+	/**
+	 *  Exit code, when applicable (`ExitNonZero` and sometimes
+	 *  `TimeoutOrCancel`). Killed-by-signal → `None`.
+	 */
+	exit_code?: number | null,
+	/**
+	 *  Truncated stderr, always <= [`STDERR_BUDGET`] bytes, cut at a
+	 *  UTF-8 code-point boundary. Empty when no stderr was emitted.
+	 */
+	stderr_excerpt?: string,
+	/**
+	 *  Whether `stderr_excerpt` was truncated below the original
+	 *  length. Lets callers show a "(truncated)" hint.
+	 */
+	stderr_truncated?: boolean,
+	/**
+	 *  Optional source-file context (path only — never contents).
+	 *  Populated on `InputRead` and on export runs where the caller
+	 *  wants the diagnostic to name the offending file.
+	 */
+	source_path?: string | null,
+	/**
+	 *  Optional list of paths probed during `Discovery`, so the UI
+	 *  can show "we looked here, here, and here" without a full
+	 *  environment dump.
+	 */
+	probed_paths?: string[],
+};
+
+/**
+ *  A structured diagnostic emitted by every failure path in this
+ *  module. Serializable to JSON for logs and IPC — safe by construction.
+ */
+export type PandocFailure_Serialize = {
+	/**  Which point in the pipeline failed. Always populated. */
+	stage: PandocStage,
+	/**
+	 *  User-facing English message. Never contains secrets or document
+	 *  contents — safe to render verbatim.
+	 */
+	message: string,
+	/**
+	 *  Absolute path of the resolved Pandoc binary when known.
+	 *  `None` on `Discovery` failures.
+	 */
+	resolved_binary?: string | null,
+	/**  Target output format ("html" / "pdf" / "docx" / "epub" / …). */
+	format?: string | null,
+	/**
+	 *  Sanitized argv summary — each user-supplied `--flag=value` has
+	 *  its value redacted if the flag name suggests a secret. Positional
+	 *  paths remain visible; environment is NEVER included.
+	 */
+	argv_summary?: string[],
+	/**
+	 *  Exit code, when applicable (`ExitNonZero` and sometimes
+	 *  `TimeoutOrCancel`). Killed-by-signal → `None`.
+	 */
+	exit_code?: number | null,
+	/**
+	 *  Truncated stderr, always <= [`STDERR_BUDGET`] bytes, cut at a
+	 *  UTF-8 code-point boundary. Empty when no stderr was emitted.
+	 */
+	stderr_excerpt?: string,
+	/**
+	 *  Whether `stderr_excerpt` was truncated below the original
+	 *  length. Lets callers show a "(truncated)" hint.
+	 */
+	stderr_truncated?: boolean,
+	/**
+	 *  Optional source-file context (path only — never contents).
+	 *  Populated on `InputRead` and on export runs where the caller
+	 *  wants the diagnostic to name the offending file.
+	 */
+	source_path?: string | null,
+	/**
+	 *  Optional list of paths probed during `Discovery`, so the UI
+	 *  can show "we looked here, here, and here" without a full
+	 *  environment dump.
+	 */
+	probed_paths?: string[],
+};
+
+/**
+ *  One of the well-defined stages at which a Pandoc export can fail.
+ *
+ *  Serialization is `snake_case` so a frontend can pattern-match on
+ *  the string without a codegen dependency.
+ */
+export type PandocStage =
+/**
+ *  The binary could not be located via override, PATH, or the
+ *  deterministic probe list.
+ */
+"discovery" |
+/**
+ *  Reading the input file or decoding its legacy-encoded bytes as
+ *  text failed before Pandoc was spawned.
+ */
+"input_read" |
+/**
+ *  The child process could not be spawned (e.g. permission denied
+ *  after resolution, missing dylib, or fork failure).
+ */
+"spawn" |
+/**
+ *  The wait on the child was aborted because it exceeded the
+ *  caller-supplied timeout, or the caller cancelled the export.
+ *  File export uses the 120-second default.
+ */
+"timeout_or_cancel" |
+/**
+ *  Pandoc returned a non-zero exit code. `exit_code` is populated
+ *  with the OS-reported value (or `None` if killed by a signal).
+ */
+"exit_non_zero" |
+/**
+ *  Pandoc succeeded but its stdout could not be decoded (only
+ *  applicable to the stdin/stdout HTML variant). The file-output
+ *  path never triggers this because Pandoc writes bytes directly.
+ */
+"output_decode" |
+/**
+ *  Pandoc completed, but its sibling temporary output could not be
+ *  durably committed to the user-selected destination.
+ */
+"output_commit" |
+/**
+ *  Post-run cleanup (temp-file removal, kill/reap on cancel, etc.)
+ *  failed. This is informational — the export itself may still
+ *  have succeeded — but we surface it so the UI can hint at disk
+ *  full / permission issues.
+ */
+"cleanup";
+
 export type PandocStatus = PandocStatus_Serialize | PandocStatus_Deserialize;
 
 export type PandocStatus_Deserialize = {
@@ -771,22 +1161,22 @@ export type PendingFile = {
 	col: number | null,
 };
 
-export type PlatformConfig = { platform: "ghost"; 
+export type PlatformConfig = { platform: "ghost";
 /**  Admin URL ending without a slash, e.g. "https://blog.example.com". */
-admin_url: string; 
+admin_url: string;
 /**  Admin API key in the canonical "<id>:<secret_hex>" form. */
-api_key: string } | { platform: "wordpress_self_hosted"; 
+api_key: string } | { platform: "wordpress_self_hosted";
 /**  Site URL ending without a slash, e.g. "https://blog.example.com". */
-site_url: string; username: string; 
+site_url: string; username: string;
 /**
  *  Application Password, the 24-char string from WP Admin →
  *  Users → Application Passwords. Spaces optional.
  */
-app_password: string } | { platform: "wordpress_com"; 
+app_password: string } | { platform: "wordpress_com";
 /**  Site id (numeric) or domain ("myblog.wordpress.com"). */
-site_id_or_domain: string; 
+site_id_or_domain: string;
 /**  OAuth2 access token from developer.wordpress.com. */
-access_token: string } | { platform: "medium"; 
+access_token: string } | { platform: "medium";
 /**
  *  Integration token from Settings → Security → Integration
  *  Tokens. The Medium UI for generating new tokens was removed
@@ -890,41 +1280,316 @@ export type ProjectMeta = {
 
 export type ProviderConfig = ProviderConfig_Serialize | ProviderConfig_Deserialize;
 
-export type ProviderConfig_Deserialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string; 
+export type ProviderConfig_Deserialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string;
 /**  CDN domain that fronts the bucket, e.g. "https://cdn.example.com". */
-domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string; 
+domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string;
 /**  Region endpoint, e.g. "oss-cn-hangzhou.aliyuncs.com". */
-endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string; 
+endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string;
 /**  Set for non-AWS S3-compatible endpoints (R2, MinIO). */
-endpoint?: string | null; 
+endpoint?: string | null;
 /**  Optional key prefix prepended before the generated object key. */
-path_prefix?: string | null; 
+path_prefix?: string | null;
 /**  Custom CDN domain. Final URL = `<custom_domain>/<key>` when set. */
 custom_domain?: string | null }) & { access_key?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; post_url?: never; secret_key?: never } | ({ provider: "imgur"; client_id: string }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; bucket?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "smms"; api_token?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; bearer?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "custom"; post_url: string; bearer?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; region?: never; secret_access_key?: never; secret_key?: never };
 
-export type ProviderConfig_Serialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string; 
+export type ProviderConfig_Serialize = ({ provider: "qiniu"; access_key: string; secret_key: string; bucket: string;
 /**  CDN domain that fronts the bucket, e.g. "https://cdn.example.com". */
-domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string; 
+domain: string }) & { access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; custom_domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never } | ({ provider: "aliyun_oss"; access_key_id: string; access_key_secret: string; bucket: string;
 /**  Region endpoint, e.g. "oss-cn-hangzhou.aliyuncs.com". */
-endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string; 
+endpoint: string; custom_domain?: string | null }) & { access_key?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "s3"; access_key_id: string; secret_access_key: string; bucket: string; region: string;
 /**  Set for non-AWS S3-compatible endpoints (R2, MinIO). */
-endpoint?: string | null; 
+endpoint?: string | null;
 /**  Optional key prefix prepended before the generated object key. */
-path_prefix?: string | null; 
+path_prefix?: string | null;
 /**  Custom CDN domain. Final URL = `<custom_domain>/<key>` when set. */
 custom_domain?: string | null }) & { access_key?: never; access_key_secret?: never; api_token?: never; bearer?: never; client_id?: never; domain?: never; post_url?: never; secret_key?: never } | ({ provider: "imgur"; client_id: string }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bearer?: never; bucket?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "smms"; api_token?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; bearer?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; post_url?: never; region?: never; secret_access_key?: never; secret_key?: never } | ({ provider: "custom"; post_url: string; bearer?: string | null }) & { access_key?: never; access_key_id?: never; access_key_secret?: never; api_token?: never; bucket?: never; client_id?: never; custom_domain?: never; domain?: never; endpoint?: never; path_prefix?: never; region?: never; secret_access_key?: never; secret_key?: never };
 
 /**
+ *  Provider-specific "modified" stamp echoed back on updates for
+ *  optimistic concurrency. Internally-tagged `provider` discriminant
+ *  mirrors [`crate::models::publish::PlatformConfig`] on the wire.
+ *  Medium is intentionally absent (see
+ *  [`PublishError::UnsupportedUpdate`]).
+ */
+export type ProviderRevision = ProviderRevision_Serialize | ProviderRevision_Deserialize;
+
+/**
+ *  Provider-specific "modified" stamp echoed back on updates for
+ *  optimistic concurrency. Internally-tagged `provider` discriminant
+ *  mirrors [`crate::models::publish::PlatformConfig`] on the wire.
+ *  Medium is intentionally absent (see
+ *  [`PublishError::UnsupportedUpdate`]).
+ */
+export type ProviderRevision_Deserialize =
+/**
+ *  Ghost's `updated_at`, ISO-8601 UTC. Ghost's Admin API
+ *  requires the caller to echo this exact string back in a
+ *  `PUT /posts/:id` body or the update is rejected 409.
+ */
+({ provider: "ghost"; updated_at: string }) & { modified?: never; modified_gmt?: never } |
+/**
+ *  WordPress's `modified` / `modified_gmt`. Both optional
+ *  because the WP REST API does not enforce echoing them; they
+ *  are informational for drift detection.
+ */
+({ provider: "wordpress"; modified?: string | null; modified_gmt?: string | null }) & { updated_at?: never };
+
+/**
+ *  Provider-specific "modified" stamp echoed back on updates for
+ *  optimistic concurrency. Internally-tagged `provider` discriminant
+ *  mirrors [`crate::models::publish::PlatformConfig`] on the wire.
+ *  Medium is intentionally absent (see
+ *  [`PublishError::UnsupportedUpdate`]).
+ */
+export type ProviderRevision_Serialize =
+/**
+ *  Ghost's `updated_at`, ISO-8601 UTC. Ghost's Admin API
+ *  requires the caller to echo this exact string back in a
+ *  `PUT /posts/:id` body or the update is rejected 409.
+ */
+({ provider: "ghost"; updated_at: string }) & { modified?: never; modified_gmt?: never } |
+/**
+ *  WordPress's `modified` / `modified_gmt`. Both optional
+ *  because the WP REST API does not enforce echoing them; they
+ *  are informational for drift detection.
+ */
+({ provider: "wordpress"; modified?: string | null; modified_gmt?: string | null }) & { updated_at?: never };
+
+/**
+ *  Durable cover payload returned to the Publish UI after store/load.
+ *  `filename` and `mime` are canonical, content-derived metadata; `bytes`
+ *  are runtime IPC data and are never serialized into the sidecar.
+ */
+export type PublishCoverAsset = {
+	cover: CoverRef,
+	bytes: number[],
+	filename: string,
+	mime: string,
+};
+
+/**
+ *  All errors a publish adapter can return. Mapped to
+ *  `AppError::Custom(...)` at the Tauri command boundary.
+ *
+ *  The new typed variants — [`Self::RemoteNotFound`],
+ *  [`Self::UpdateConflict`], [`Self::UnsupportedUpdate`] — carry
+ *  only structured provider/post context. No raw response bodies,
+ *  no headers, no request bodies. If diagnostic detail from a
+ *  provider response is ever added, it MUST be routed through
+ *  [`redact_secrets`] first.
+ *
+ *  Wire representation is internally-tagged (`kind` + `data`) so a
+ *  future command that wants to expose structured errors to the
+ *  frontend has a stable JSON shape to depend on without changing
+ *  the crate-wide `AppError` string contract. Existing publish
+ *  commands still funnel through `From<PublishError> for AppError`
+ *  as a Display string — see `core/src/commands/publish.rs`.
+ *
+ *  Display is implemented manually rather than via `#[error("...")]`
+ *  so the serde `content = "data"` tuple-variant representation and
+ *  the `Box<UpdateConflictContext>` payload access play together
+ *  without thiserror's positional-arg parser choking on `.0.field`.
+ */
+export type PublishError = PublishError_Serialize | PublishError_Deserialize;
+
+/**
+ *  All errors a publish adapter can return. Mapped to
+ *  `AppError::Custom(...)` at the Tauri command boundary.
+ *
+ *  The new typed variants — [`Self::RemoteNotFound`],
+ *  [`Self::UpdateConflict`], [`Self::UnsupportedUpdate`] — carry
+ *  only structured provider/post context. No raw response bodies,
+ *  no headers, no request bodies. If diagnostic detail from a
+ *  provider response is ever added, it MUST be routed through
+ *  [`redact_secrets`] first.
+ *
+ *  Wire representation is internally-tagged (`kind` + `data`) so a
+ *  future command that wants to expose structured errors to the
+ *  frontend has a stable JSON shape to depend on without changing
+ *  the crate-wide `AppError` string contract. Existing publish
+ *  commands still funnel through `From<PublishError> for AppError`
+ *  as a Display string — see `core/src/commands/publish.rs`.
+ *
+ *  Display is implemented manually rather than via `#[error("...")]`
+ *  so the serde `content = "data"` tuple-variant representation and
+ *  the `Box<UpdateConflictContext>` payload access play together
+ *  without thiserror's positional-arg parser choking on `.0.field`.
+ */
+export type PublishError_Deserialize = { kind: "network"; data: string } | { kind: "auth"; data: string } | { kind: "quota_exceeded"; data: string } | { kind: "bad_config"; data: string } | { kind: "server"; data: {
+	status: number,
+	message: string,
+} } | { kind: "unexpected_response"; data: string } | { kind: "pandoc_failed"; data: string } | { kind: "image_upload_failed"; data: {
+	ref_path: string,
+	cause: string,
+} } |
+/**
+ *  Update targeted a post that no longer exists on the provider
+ *  (or was never created there). Adapters map platform 404s on
+ *  update endpoints to this. Safe by construction: only carries
+ *  provider name and remote id.
+ */
+{ kind: "remote_not_found"; data: {
+	provider: string,
+	remote_id: string,
+} } |
+/**
+ *  Optimistic-concurrency check failed: the caller's
+ *  [`UpdateTarget::expected_revision`] does not match the
+ *  provider's current revision. Adapters map platform 409s to
+ *  this. Safe by construction: only structured revisions, not
+ *  raw response bodies. Payload boxed so
+ *  `Result<_, PublishError>` stays under Clippy's
+ *  `result_large_err` size threshold.
+ */
+{ kind: "update_conflict"; data: UpdateConflictContext_Deserialize } |
+/**
+ *  Provider does not support updates. `reason` is a typed enum
+ *  (see [`UnsupportedUpdateReason`]) — never a free-form string —
+ *  so provider response text cannot leak here.
+ */
+{ kind: "unsupported_update"; data: {
+	provider: string,
+	reason: UnsupportedUpdateReason,
+} };
+
+/**
+ *  All errors a publish adapter can return. Mapped to
+ *  `AppError::Custom(...)` at the Tauri command boundary.
+ *
+ *  The new typed variants — [`Self::RemoteNotFound`],
+ *  [`Self::UpdateConflict`], [`Self::UnsupportedUpdate`] — carry
+ *  only structured provider/post context. No raw response bodies,
+ *  no headers, no request bodies. If diagnostic detail from a
+ *  provider response is ever added, it MUST be routed through
+ *  [`redact_secrets`] first.
+ *
+ *  Wire representation is internally-tagged (`kind` + `data`) so a
+ *  future command that wants to expose structured errors to the
+ *  frontend has a stable JSON shape to depend on without changing
+ *  the crate-wide `AppError` string contract. Existing publish
+ *  commands still funnel through `From<PublishError> for AppError`
+ *  as a Display string — see `core/src/commands/publish.rs`.
+ *
+ *  Display is implemented manually rather than via `#[error("...")]`
+ *  so the serde `content = "data"` tuple-variant representation and
+ *  the `Box<UpdateConflictContext>` payload access play together
+ *  without thiserror's positional-arg parser choking on `.0.field`.
+ */
+export type PublishError_Serialize = { kind: "network"; data: string } | { kind: "auth"; data: string } | { kind: "quota_exceeded"; data: string } | { kind: "bad_config"; data: string } | { kind: "server"; data: {
+	status: number,
+	message: string,
+} } | { kind: "unexpected_response"; data: string } | { kind: "pandoc_failed"; data: string } | { kind: "image_upload_failed"; data: {
+	ref_path: string,
+	cause: string,
+} } |
+/**
+ *  Update targeted a post that no longer exists on the provider
+ *  (or was never created there). Adapters map platform 404s on
+ *  update endpoints to this. Safe by construction: only carries
+ *  provider name and remote id.
+ */
+{ kind: "remote_not_found"; data: {
+	provider: string,
+	remote_id: string,
+} } |
+/**
+ *  Optimistic-concurrency check failed: the caller's
+ *  [`UpdateTarget::expected_revision`] does not match the
+ *  provider's current revision. Adapters map platform 409s to
+ *  this. Safe by construction: only structured revisions, not
+ *  raw response bodies. Payload boxed so
+ *  `Result<_, PublishError>` stays under Clippy's
+ *  `result_large_err` size threshold.
+ */
+{ kind: "update_conflict"; data: UpdateConflictContext_Serialize } |
+/**
+ *  Provider does not support updates. `reason` is a typed enum
+ *  (see [`UnsupportedUpdateReason`]) — never a free-form string —
+ *  so provider response text cannot leak here.
+ */
+{ kind: "unsupported_update"; data: {
+	provider: string,
+	reason: UnsupportedUpdateReason,
+} };
+
+/**
+ *  A per-channel snapshot of the persisted `FormDraft`s, plus the ids
+ *  of any channel entries whose data could not be parsed cleanly.
+ *
+ *  This is the read shape for Task 14 (Publish form persistence): the
+ *  dialog restores by document + stable channel id, and a corrupt
+ *  entry for one channel MUST NOT hide sibling channels that are still
+ *  valid on disk. The corrupt ids are surfaced so the UI can render a
+ *  recoverable status without silently deleting or repairing the
+ *  source of truth.
+ */
+export type PublishFormDraftsSnapshot = PublishFormDraftsSnapshot_Serialize | PublishFormDraftsSnapshot_Deserialize;
+
+/**
+ *  A per-channel snapshot of the persisted `FormDraft`s, plus the ids
+ *  of any channel entries whose data could not be parsed cleanly.
+ *
+ *  This is the read shape for Task 14 (Publish form persistence): the
+ *  dialog restores by document + stable channel id, and a corrupt
+ *  entry for one channel MUST NOT hide sibling channels that are still
+ *  valid on disk. The corrupt ids are surfaced so the UI can render a
+ *  recoverable status without silently deleting or repairing the
+ *  source of truth.
+ */
+export type PublishFormDraftsSnapshot_Deserialize = {
+	/**
+	 *  Channel id -> the last saved form for that channel. Only
+	 *  entries whose per-channel `form` object round-tripped through
+	 *  serde cleanly appear here.
+	 */
+	forms?: { [key in string]: FormDraft_Deserialize },
+	/**
+	 *  Channel ids whose disk data was skipped because the id itself
+	 *  was invalid or its `form` object failed to parse. Sorted so the
+	 *  wire order is stable for tests / UX comparisons.
+	 */
+	invalid_channel_ids?: string[],
+};
+
+/**
+ *  A per-channel snapshot of the persisted `FormDraft`s, plus the ids
+ *  of any channel entries whose data could not be parsed cleanly.
+ *
+ *  This is the read shape for Task 14 (Publish form persistence): the
+ *  dialog restores by document + stable channel id, and a corrupt
+ *  entry for one channel MUST NOT hide sibling channels that are still
+ *  valid on disk. The corrupt ids are surfaced so the UI can render a
+ *  recoverable status without silently deleting or repairing the
+ *  source of truth.
+ */
+export type PublishFormDraftsSnapshot_Serialize = {
+	/**
+	 *  Channel id -> the last saved form for that channel. Only
+	 *  entries whose per-channel `form` object round-tripped through
+	 *  serde cleanly appear here.
+	 */
+	forms: { [key in string]: FormDraft_Serialize },
+	/**
+	 *  Channel ids whose disk data was skipped because the id itself
+	 *  was invalid or its `form` object failed to parse. Sorted so the
+	 *  wire order is stable for tests / UX comparisons.
+	 */
+	invalid_channel_ids: string[],
+};
+
+/**
  *  Inputs handed to a platform adapter's `publish()` function. The
  *  frontend builds this from the publish dialog plus pre-publish
- *  image rewrite.
+ *  image rewrite. The optional [`Self::update_target`] field turns
+ *  a call into an update instead of a create.
  */
 export type PublishInput = PublishInput_Serialize | PublishInput_Deserialize;
 
 /**
  *  Inputs handed to a platform adapter's `publish()` function. The
  *  frontend builds this from the publish dialog plus pre-publish
- *  image rewrite.
+ *  image rewrite. The optional [`Self::update_target`] field turns
+ *  a call into an update instead of a create.
  */
 export type PublishInput_Deserialize = {
 	title: string,
@@ -948,12 +1613,19 @@ export type PublishInput_Deserialize = {
 	 *  authenticated user.
 	 */
 	publication_id?: string | null,
+	/**
+	 *  When set, updates the referenced remote post instead of
+	 *  creating a new one. Absent (`None`) preserves legacy
+	 *  create-only behavior for every existing caller.
+	 */
+	update_target?: UpdateTarget_Deserialize | null,
 };
 
 /**
  *  Inputs handed to a platform adapter's `publish()` function. The
  *  frontend builds this from the publish dialog plus pre-publish
- *  image rewrite.
+ *  image rewrite. The optional [`Self::update_target`] field turns
+ *  a call into an update instead of a create.
  */
 export type PublishInput_Serialize = {
 	title: string,
@@ -977,18 +1649,127 @@ export type PublishInput_Serialize = {
 	 *  authenticated user.
 	 */
 	publication_id?: string | null,
+	/**
+	 *  When set, updates the referenced remote post instead of
+	 *  creating a new one. Absent (`None`) preserves legacy
+	 *  create-only behavior for every existing caller.
+	 */
+	update_target?: UpdateTarget_Serialize | null,
 };
 
-/**  Result returned to the frontend on success. */
-export type PublishResult = {
-	/**  Canonical URL of the new post on the platform. */
+/**
+ *  Whether an adapter created a new post or updated an existing one.
+ *  Defaults to [`PublishOperation::Created`] so legacy on-disk
+ *  sidecars and older frontends that omit the field parse cleanly.
+ */
+export type PublishOperation = "created" | "updated";
+
+/**
+ *  Result returned to the frontend on success. New fields
+ *  [`Self::operation`] and [`Self::provider_revision`] are additive
+ *  with `#[serde(default)]` so:
+ *  1. Existing adapters using the [`Self::created`] builder stay
+ *     forward-compatible.
+ *  2. Legacy on-disk sidecars/frontends without these fields still
+ *     deserialize (operation defaults to `Created`, revision to
+ *     `None`).
+ */
+export type PublishResult = PublishResult_Serialize | PublishResult_Deserialize;
+
+/**
+ *  Result returned to the frontend on success. New fields
+ *  [`Self::operation`] and [`Self::provider_revision`] are additive
+ *  with `#[serde(default)]` so:
+ *  1. Existing adapters using the [`Self::created`] builder stay
+ *     forward-compatible.
+ *  2. Legacy on-disk sidecars/frontends without these fields still
+ *     deserialize (operation defaults to `Created`, revision to
+ *     `None`).
+ */
+export type PublishResult_Deserialize = {
+	/**  Canonical URL of the post on the platform. */
 	url: string,
 	/**  Platform post id (string for portability across platforms). */
 	remote_id: string,
+	/**
+	 *  Whether this call created a new post or updated an existing
+	 *  one. Defaults to `Created` for backward compatibility.
+	 */
+	operation?: PublishOperation,
+	/**
+	 *  Provider-typed revision stamp — Ghost's `updated_at`,
+	 *  WordPress's `modified` fields. `None` for providers that
+	 *  don't expose one (Medium) or callers that don't need it.
+	 */
+	provider_revision?: ProviderRevision_Deserialize | null,
+};
+
+/**
+ *  Result returned to the frontend on success. New fields
+ *  [`Self::operation`] and [`Self::provider_revision`] are additive
+ *  with `#[serde(default)]` so:
+ *  1. Existing adapters using the [`Self::created`] builder stay
+ *     forward-compatible.
+ *  2. Legacy on-disk sidecars/frontends without these fields still
+ *     deserialize (operation defaults to `Created`, revision to
+ *     `None`).
+ */
+export type PublishResult_Serialize = {
+	/**  Canonical URL of the post on the platform. */
+	url: string,
+	/**  Platform post id (string for portability across platforms). */
+	remote_id: string,
+	/**
+	 *  Whether this call created a new post or updated an existing
+	 *  one. Defaults to `Created` for backward compatibility.
+	 */
+	operation: PublishOperation,
+	/**
+	 *  Provider-typed revision stamp — Ghost's `updated_at`,
+	 *  WordPress's `modified` fields. `None` for providers that
+	 *  don't expose one (Medium) or callers that don't need it.
+	 */
+	provider_revision?: ProviderRevision_Serialize | null,
 };
 
 export type PublishSettings = {
 	channels?: ChannelConfig[],
+};
+
+/**
+ *  Per-document Publish metadata. One file per document; one entry per
+ *  stable channel id inside.
+ *
+ *  Serialization is via `serde_json::to_vec_pretty` (through Task 1's
+ *  `atomic_write_json`) so sidecars are diff-friendly for the
+ *  rename-migration and QA test harnesses.
+ */
+export type PublishSidecar = PublishSidecar_Serialize | PublishSidecar_Deserialize;
+
+/**
+ *  Per-document Publish metadata. One file per document; one entry per
+ *  stable channel id inside.
+ *
+ *  Serialization is via `serde_json::to_vec_pretty` (through Task 1's
+ *  `atomic_write_json`) so sidecars are diff-friendly for the
+ *  rename-migration and QA test harnesses.
+ */
+export type PublishSidecar_Deserialize = {
+	schema_version?: number,
+	channels?: { [key in string]: ChannelState_Deserialize },
+};
+
+/**
+ *  Per-document Publish metadata. One file per document; one entry per
+ *  stable channel id inside.
+ *
+ *  Serialization is via `serde_json::to_vec_pretty` (through Task 1's
+ *  `atomic_write_json`) so sidecars are diff-friendly for the
+ *  rename-migration and QA test harnesses.
+ */
+export type PublishSidecar_Serialize = {
+	schema_version: number,
+	channels: { [key in string]: ChannelState_Serialize },
 };
 
 /**
@@ -1022,6 +1803,56 @@ export type RegisteredCommandInfo = {
 	command_id: string,
 	label: string,
 };
+
+/**
+ *  The identity of a post on the remote platform, once we've created or
+ *  bound one. `revision` is the legacy flat string retained for old
+ *  sidecars; `provider_revision` is the durable typed revision used by
+ *  current publish/update flows.
+ */
+export type RemoteIdentity = RemoteIdentity_Serialize | RemoteIdentity_Deserialize;
+
+/**
+ *  The identity of a post on the remote platform, once we've created or
+ *  bound one. `revision` is the legacy flat string retained for old
+ *  sidecars; `provider_revision` is the durable typed revision used by
+ *  current publish/update flows.
+ */
+export type RemoteIdentity_Deserialize = {
+	post_id: string,
+	url?: string | null,
+	revision?: string | null,
+	provider_revision?: ProviderRevision_Deserialize | null,
+	capability?: BindingCapability | null,
+};
+
+/**
+ *  The identity of a post on the remote platform, once we've created or
+ *  bound one. `revision` is the legacy flat string retained for old
+ *  sidecars; `provider_revision` is the durable typed revision used by
+ *  current publish/update flows.
+ */
+export type RemoteIdentity_Serialize = {
+	post_id: string,
+	url?: string | null,
+	revision?: string | null,
+	provider_revision?: ProviderRevision_Serialize | null,
+	capability?: BindingCapability | null,
+};
+
+export type RenameItemResult = {
+	new_path: string,
+	migration: RenameMigrationResult,
+};
+
+export type RenameMigrationResult = {
+	status: RenameMigrationStatus,
+	migrated: number,
+	conflicts: number,
+	errors: string[],
+};
+
+export type RenameMigrationStatus = "full_success" | "user_file_renamed_with_metadata_errors" | "idempotent_retry";
 
 export type ResolvedNewFile = {
 	template: string,
@@ -1147,6 +1978,115 @@ export type TemplateMode = "insert" | "new-file";
 
 export type TemplateSource = "bundled" | "project";
 
+/**
+ *  Closed enum of reasons a provider might not support an update
+ *  call. Deliberately closed (no free-form String) so downstream code
+ *  cannot leak provider response text through this variant. Callers
+ *  that need finer diagnostics should return
+ *  [`PublishError::Server`] or [`PublishError::UnexpectedResponse`]
+ *  with `require_success`-scrubbed content instead.
+ */
+export type UnsupportedUpdateReason =
+/**
+ *  Provider's API supports post creation but exposes no update
+ *  endpoint on this integration flow (e.g. Medium's Integration
+ *  Token API is create-only — publish works, PATCH/PUT do not).
+ */
+"create_only_api" |
+/**  Adapter implementation for updates is not yet wired. */
+"not_implemented" |
+/**  Credential lacks the OAuth scope / capability required to update. */
+"insufficient_scope" |
+/**
+ *  Underlying content type cannot be updated in place (e.g. a Ghost
+ *  email newsletter that has already sent).
+ */
+"immutable_content_type";
+
+/**
+ *  Boxed payload for [`PublishError::UpdateConflict`]. Split out
+ *  so `Result<_, PublishError>` stays under Clippy's
+ *  `result_large_err` size threshold and so the conflict shape can
+ *  be inspected as a stand-alone struct in tests and at IPC.
+ */
+export type UpdateConflictContext = UpdateConflictContext_Serialize | UpdateConflictContext_Deserialize;
+
+/**
+ *  Boxed payload for [`PublishError::UpdateConflict`]. Split out
+ *  so `Result<_, PublishError>` stays under Clippy's
+ *  `result_large_err` size threshold and so the conflict shape can
+ *  be inspected as a stand-alone struct in tests and at IPC.
+ */
+export type UpdateConflictContext_Deserialize = {
+	provider: string,
+	remote_id: string,
+	expected?: ProviderRevision_Deserialize | null,
+	actual?: ProviderRevision_Deserialize | null,
+};
+
+/**
+ *  Boxed payload for [`PublishError::UpdateConflict`]. Split out
+ *  so `Result<_, PublishError>` stays under Clippy's
+ *  `result_large_err` size threshold and so the conflict shape can
+ *  be inspected as a stand-alone struct in tests and at IPC.
+ */
+export type UpdateConflictContext_Serialize = {
+	provider: string,
+	remote_id: string,
+	expected?: ProviderRevision_Serialize | null,
+	actual?: ProviderRevision_Serialize | null,
+};
+
+/**
+ *  Optional update target on [`PublishInput`]. When present,
+ *  adapters MUST update the referenced post instead of creating a
+ *  new one. When absent (default), adapters behave exactly as
+ *  before — a create call.
+ */
+export type UpdateTarget = UpdateTarget_Serialize | UpdateTarget_Deserialize;
+
+/**
+ *  Optional update target on [`PublishInput`]. When present,
+ *  adapters MUST update the referenced post instead of creating a
+ *  new one. When absent (default), adapters behave exactly as
+ *  before — a create call.
+ */
+export type UpdateTarget_Deserialize = {
+	/**
+	 *  Platform post id — same format the adapter returned in
+	 *  [`PublishResult::remote_id`].
+	 */
+	remote_id: string,
+	/**
+	 *  Revision the caller last observed. Providers that support
+	 *  optimistic concurrency (Ghost) require this and reject
+	 *  mismatches with [`PublishError::UpdateConflict`]; providers
+	 *  that don't (WordPress) accept `None` and always overwrite.
+	 */
+	expected_revision?: ProviderRevision_Deserialize | null,
+};
+
+/**
+ *  Optional update target on [`PublishInput`]. When present,
+ *  adapters MUST update the referenced post instead of creating a
+ *  new one. When absent (default), adapters behave exactly as
+ *  before — a create call.
+ */
+export type UpdateTarget_Serialize = {
+	/**
+	 *  Platform post id — same format the adapter returned in
+	 *  [`PublishResult::remote_id`].
+	 */
+	remote_id: string,
+	/**
+	 *  Revision the caller last observed. Providers that support
+	 *  optimistic concurrency (Ghost) require this and reject
+	 *  mismatches with [`PublishError::UpdateConflict`]; providers
+	 *  that don't (WordPress) accept `None` and always overwrite.
+	 */
+	expected_revision?: ProviderRevision_Serialize | null,
+};
+
 /**  Result of a successful upload. */
 export type UploadResult = {
 	/**  Public URL the user's Markdown should reference. */
@@ -1157,6 +2097,75 @@ export type UploadResult = {
 	 *  scheme (imgur, sm.ms).
 	 */
 	remote_key: string | null,
+};
+
+/**
+ *  Canonical verified remote identity — the shape Task 21 persists into
+ *  `ChannelState.remote` via [`crate::services::publish::sidecar::
+ *  update_publish_sidecar`].
+ */
+export type VerifiedBinding = VerifiedBinding_Serialize | VerifiedBinding_Deserialize;
+
+/**
+ *  Canonical verified remote identity — the shape Task 21 persists into
+ *  `ChannelState.remote` via [`crate::services::publish::sidecar::
+ *  update_publish_sidecar`].
+ */
+export type VerifiedBinding_Deserialize = {
+	/**  The selected channel's stable id (echoed back for the frontend). */
+	channel_id: string,
+	/**
+	 *  Provider discriminant string. Task 20 currently returns verified
+	 *  bindings for `"ghost"`, `"wordpress"`, and `"wordpress_com"`;
+	 *  Medium legacy binding fails closed because `/v1/me` does not prove
+	 *  post ownership.
+	 */
+	provider: string,
+	/**  Server-returned canonical post id. */
+	remote_id: string,
+	/**
+	 *  Server-returned canonical URL (may differ from user input for
+	 *  permalink/slug URLs the server percent-encodes).
+	 */
+	url: string,
+	/**
+	 *  Provider-typed revision stamp. Absent for Medium and any future
+	 *  provider whose API exposes no revision.
+	 */
+	revision?: ProviderRevision_Deserialize | null,
+	/**  Whether Task 21 can expose Update on this channel for this post. */
+	capability: BindingCapability,
+};
+
+/**
+ *  Canonical verified remote identity — the shape Task 21 persists into
+ *  `ChannelState.remote` via [`crate::services::publish::sidecar::
+ *  update_publish_sidecar`].
+ */
+export type VerifiedBinding_Serialize = {
+	/**  The selected channel's stable id (echoed back for the frontend). */
+	channel_id: string,
+	/**
+	 *  Provider discriminant string. Task 20 currently returns verified
+	 *  bindings for `"ghost"`, `"wordpress"`, and `"wordpress_com"`;
+	 *  Medium legacy binding fails closed because `/v1/me` does not prove
+	 *  post ownership.
+	 */
+	provider: string,
+	/**  Server-returned canonical post id. */
+	remote_id: string,
+	/**
+	 *  Server-returned canonical URL (may differ from user input for
+	 *  permalink/slug URLs the server percent-encodes).
+	 */
+	url: string,
+	/**
+	 *  Provider-typed revision stamp. Absent for Medium and any future
+	 *  provider whose API exposes no revision.
+	 */
+	revision?: ProviderRevision_Serialize | null,
+	/**  Whether Task 21 can expose Update on this channel for this post. */
+	capability: BindingCapability,
 };
 
 /**  Sidebar / file-tree view preferences. */
@@ -1188,6 +2197,8 @@ export type ViewportContent = {
 	/**  Total lines in document (can change after edits) */
 	total_lines: number,
 };
+
+export type WriteFileIfUnchangedResult = "written" | "conflict";
 
 export type WritingConfig = {
 	daily_goal?: number,

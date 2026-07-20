@@ -77,7 +77,7 @@ Four tiers determine which CM6 extensions are active:
 | **Normal** | <1MB, ≤5000 lines | Full | Sized headings (`novelistHighlightStyle`) | Yes | Yes | Yes |
 | **Tall Doc** | <1MB, >5000 lines | Off | Flat headings (`flatNovelistHighlightStyle`) | Off | Yes | Yes |
 | **Large** | 1–3.5MB | Off | Off | Off | Yes | Yes |
-| **Huge** | >3.5MB | Off | Off | Yes | Off | Read-only |
+| **Huge** | ≥3.5MB | Off | Off | Yes | Off | Read-only |
 
 **Why Tall Doc mode exists**: CM6 estimates heights for off-screen lines. WYSIWYG decorations (heading font-size, blockquote styling) only apply within the viewport. The difference between estimated and actual heights accumulates over >5000 lines, causing `posAtCoords` (click → document position) to land on the wrong line.
 
@@ -152,7 +152,7 @@ Images use a `StateField` instead of a `ViewPlugin` so CM6 accounts for block wi
 imageBlockDecoField (StateField)
   ├─ Full document scan for Image nodes (only <5000 line docs)
   ├─ Decoration.replace({ block: true, widget: ImageWidget })
-  ├─ Local images: IPC read_image_data_uri → base64 data URI
+├─ Local images: window-scoped read_image_bytes capability → base64 data URI
   └─ LRU cache (64 entries) avoids repeated IPC calls
 ```
 
@@ -182,7 +182,8 @@ The frontend communicates with the Rust backend via Tauri IPC. TypeScript bindin
 
 | Module | Key Commands |
 |--------|-------------|
-| `file.rs` | `read_file` (encoding detection: UTF-8/GBK/Big5), `write_file` (atomic: temp → rename), `read_image_data_uri` (local image → base64), `list_directory`, `search_in_project` (walkdir) |
+| `file.rs` | `read_file` (encoding detection: UTF-8/GBK/Big5), `write_file` (atomic: temp → rename), `list_directory`, `search_in_project` (walkdir) |
+| `image_host.rs` | Window-owned, capability-relative `read_image_bytes` for local image preview/upload |
 | `project.rs` | `detect_project` (reads `.novelist/config.toml`) |
 | `recent.rs` | Recent project persistence |
 | `draft.rs` | Draft note CRUD |
@@ -199,6 +200,53 @@ The frontend communicates with the Rust backend via Tauri IPC. TypeScript bindin
 | `file_watcher.rs` | FSEvent file monitoring → BLAKE3 hash change detection + self-write suppression → emits `file-changed` event → frontend reload or conflict dialog |
 | `rope_document.rs` | Ropey rope data structure for huge file editing (`rope_open` / `rope_get_lines` / `rope_apply_edit`) |
 | `plugin_host/sandbox.rs` | QuickJS plugin host with permission tiers: read / write / execute |
+
+### 9.3 Pandoc export process contract
+
+Novelist does not bundle Pandoc. Discovery checks the saved override, `pandoc`
+on `PATH`, then a deterministic platform-specific list. Every `--version`
+probe has a three-second deadline; timeout kills and reaps the child. A
+successful probe reports the executable path actually passed to the OS, rather
+than the placeholder `pandoc`. Failed discovery reports only a fixed-count list
+of attempted locations whose entries are individually redacted and capped at
+512 bytes; it never includes environment variables.
+
+Before export, dirty editor tabs are saved. Project input is enumerated
+recursively in folder-first numeric order and read during that same retained,
+descriptor-relative no-follow capability pass; symlink entries and paths outside
+the project are rejected. Enumeration is bounded before buffering by total entry
+count and path bytes, then by Markdown file count, depth, and aggregate source
+bytes.
+Standalone export retains its explicitly selected path behavior. Encoding-aware
+decoding preserves GBK, Big5, Shift_JIS, and CJK content, while assembled export
+input is capped at 100 MiB and publish HTML input at 10 MiB. Conversion uses a
+unique owner-only temporary directory and a 120-second default deadline.
+
+The IPC boundary accepts no arbitrary Pandoc options. HTML theme CSS is capped
+at 1 MiB, accepts only a `:root` block of safe custom properties, and is created
+by Rust as an owner-only, create-new, request-correlated `<style>` header.
+Markdown image destinations are parsed and limited to project-relative or inline
+data images. Local raster images are opened no-follow through a retained
+capability, signature-checked, bounded, and rewritten to data URIs before Pandoc;
+raw HTML, raw TeX, YAML metadata, absolute, network, encoded traversal, and
+ambiguous resources are rejected. Safe percent-encoded CJK filenames are decoded
+before capability-confined reads. EPUB has no theme control. Timeout
+and cancellation terminate and reap the isolated Pandoc process tree before
+temporary-resource cleanup. Export, publish HTML, and styled-copy conversion use
+the same bounded stdin/stdout/stderr and descendant-cleanup lifecycle.
+
+Pandoc writes inside an owner-only temporary directory on the destination
+filesystem, preserving the selected format extension. Output growth is monitored
+and capped at 1 GiB. Novelist syncs and atomically renames that file onto the
+selected destination only after Pandoc exits successfully, so failed or
+cancelled exports cannot truncate an existing destination. Allocation or rename
+failure is reported as `output_commit`.
+
+If conversion succeeds but cleanup fails, the output remains available and the
+command returns a structured cleanup warning; the Export dialog renders that
+warning separately from a failed conversion. Discovery, timeout, input/encoding,
+non-zero exit, output decode, output commit, and cleanup details are bounded and
+redacted before the UI displays them.
 
 ## 10. Theme & Style System
 

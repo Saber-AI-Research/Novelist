@@ -27,6 +27,10 @@ export type AiContextPack = {
   estimatedChars: number;
 };
 
+export type MentionContextResolutionOptions = {
+  rejectFileReadError?: boolean;
+};
+
 export type MentionToken =
   | { kind: 'selection'; raw: string }
   | { kind: 'current-file'; raw: string }
@@ -48,9 +52,10 @@ export type SlashCommandId =
   | 'act';
 
 export type ParsedSlashCommand = {
-  id: SlashCommandId;
+  id: string;
   raw: string;
   rest: string;
+  asset?: AiPromptAsset;
 };
 
 export type SkillToken = {
@@ -225,13 +230,40 @@ export function stripMentionTokens(input: string): string {
   return input.replace(/(^|\s)@(selection|current|outline|file:[^\s]+|folder:[^\s]+)/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-export function parseSlashCommand(input: string): ParsedSlashCommand | null {
+export function normalizeSlashCommandName(name: string): string {
+  return name.normalize('NFC').toLowerCase();
+}
+
+export function isInvocableProjectCommandName(name: string): boolean {
+  return name.length > 0
+    && name.trim() === name
+    && !/[\s/\\\p{Cc}\p{Cf}\p{Cs}]/u.test(name);
+}
+
+export function isBuiltinSlashCommandName(name: string): boolean {
+  return SLASH_COMMANDS.has(normalizeSlashCommandName(name) as SlashCommandId);
+}
+
+export function parseSlashCommand(
+  input: string,
+  projectCommands: readonly AiPromptAsset[] = [],
+): ParsedSlashCommand | null {
   const trimmed = input.trimStart();
-  const m = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  const m = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
   if (!m) return null;
-  const id = m[1] as SlashCommandId;
-  if (!SLASH_COMMANDS.has(id)) return null;
-  return { id, raw: `/${id}`, rest: m[2] ?? '' };
+  const name = m[1];
+  const normalizedName = normalizeSlashCommandName(name);
+  const builtinId = normalizedName as SlashCommandId;
+  if (isBuiltinSlashCommandName(name)) {
+    return { id: builtinId, raw: `/${builtinId}`, rest: m[2] ?? '' };
+  }
+  if (!isInvocableProjectCommandName(name)) return null;
+  const asset = projectCommands.find((candidate) =>
+    isInvocableProjectCommandName(candidate.name)
+      && normalizeSlashCommandName(candidate.name) === normalizedName,
+  );
+  if (!asset) return null;
+  return { id: asset.name, raw: `/${asset.name}`, rest: m[2] ?? '', asset };
 }
 
 export function parseSkillTokens(input: string): SkillToken[] {
@@ -256,11 +288,17 @@ function findNodesByQuery(query: string): FileNode[] {
   });
 }
 
-export async function resolveProjectFileContext(query: string): Promise<AiContextItem | null> {
+export async function resolveProjectFileContext(
+  query: string,
+  options: MentionContextResolutionOptions = {},
+): Promise<AiContextItem | null> {
   const match = findNodesByQuery(query).find((n) => !n.is_dir && SUPPORTED_CONTEXT_EXTENSIONS.has(extension(n.path)));
   if (!match) return null;
   const result = await commands.readFile(match.path);
-  if (result.status === 'error') return null;
+  if (result.status === 'error') {
+    if (options.rejectFileReadError) throw new Error(String(result.error));
+    return null;
+  }
   const clipped = truncateContent(result.data, 18_000);
   return {
     id: `file:${match.path}`,
@@ -289,7 +327,10 @@ export async function resolveFolderSummaryContext(query: string): Promise<AiCont
   };
 }
 
-export async function resolveMentionContexts(input: string): Promise<AiContextItem[]> {
+export async function resolveMentionContexts(
+  input: string,
+  options: MentionContextResolutionOptions = {},
+): Promise<AiContextItem[]> {
   const out: AiContextItem[] = [];
   for (const token of parseMentions(input)) {
     if (token.kind === 'selection') {
@@ -302,7 +343,7 @@ export async function resolveMentionContexts(input: string): Promise<AiContextIt
       const item = getOutlineContext();
       if (item) out.push(item);
     } else if (token.kind === 'project-file') {
-      const item = await resolveProjectFileContext(token.query);
+      const item = await resolveProjectFileContext(token.query, options);
       if (item) out.push(item);
     } else if (token.kind === 'folder-summary') {
       const item = await resolveFolderSummaryContext(token.query);
@@ -358,5 +399,6 @@ export function skillAssetsForTokens(tokens: SkillToken[], assets: AiPromptAsset
 
 export function commandInstruction(command: ParsedSlashCommand | null): string | null {
   if (!command) return null;
+  if (command.asset) return command.asset.content;
   return BUILTIN_AI_COMMANDS[command.id] ?? null;
 }

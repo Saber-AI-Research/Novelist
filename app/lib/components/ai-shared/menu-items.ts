@@ -7,9 +7,14 @@
 
 import type { AiContextAttachment } from './attachments';
 import { searchAttachmentCandidates } from './attachments';
-import type { SlashCommandId } from './context';
+import {
+  isInvocableProjectCommandName,
+  normalizeSlashCommandName,
+  type SlashCommandId,
+} from './context';
+import type { AiPromptAsset } from './persistence';
 
-export type SlashMenuItem = { id: SlashCommandId; label: string; hint: string };
+export type SlashMenuItem = { id: string; label: string; hint: string };
 
 export const SLASH_MENU_COMMANDS: SlashMenuItem[] = [
   { id: 'rewrite', label: '/rewrite', hint: 'rewrite selected or attached prose' },
@@ -25,9 +30,21 @@ export const SLASH_MENU_COMMANDS: SlashMenuItem[] = [
   { id: 'act', label: '/act', hint: 'switch agent to act mode' },
 ];
 
-export function filterSlashCommands(query: string): SlashMenuItem[] {
-  const q = query.toLowerCase();
-  return SLASH_MENU_COMMANDS.filter((c) => c.label.includes(q));
+export function filterSlashCommands(
+  query: string,
+  projectCommands: readonly AiPromptAsset[] = [],
+): SlashMenuItem[] {
+  const q = normalizeSlashCommandName(query);
+  const seen = new Set(SLASH_MENU_COMMANDS.map((command) => normalizeSlashCommandName(command.id)));
+  const dynamic: SlashMenuItem[] = [];
+  for (const asset of projectCommands) {
+    const key = normalizeSlashCommandName(asset.name);
+    if (!isInvocableProjectCommandName(asset.name) || seen.has(key)) continue;
+    seen.add(key);
+    dynamic.push({ id: asset.name, label: `/${asset.name}`, hint: 'project command' });
+  }
+  return [...SLASH_MENU_COMMANDS, ...dynamic]
+    .filter((command) => normalizeSlashCommandName(`${command.label} ${command.hint}`).includes(q));
 }
 
 export type MentionMenuItem = {

@@ -57,11 +57,9 @@
   $effect(() => {
     if (renamingPath !== node.path || !renameInputEl) return;
     const input = renameInputEl;
-    requestAnimationFrame(() => {
-      input.focus();
-      const dotIdx = node.name.lastIndexOf('.');
-      input.setSelectionRange(0, node.is_dir ? node.name.length : (dotIdx > 0 ? dotIdx : node.name.length));
-    });
+    input.focus();
+    const dotIdx = node.name.lastIndexOf('.');
+    input.setSelectionRange(0, node.is_dir ? node.name.length : (dotIdx > 0 ? dotIdx : node.name.length));
   });
 </script>
 

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import X from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   // First-paint critical shell: keep these static.
@@ -34,6 +36,8 @@
   const loadUpdateAvailableBanner = () => import('$lib/components/UpdateAvailableBanner.svelte');
   import { updaterState } from '$lib/stores/updater-state.svelte';
   import { consumeWindowSeed } from '$lib/services/cli-open';
+  import { ProjectOpenOwner } from '$lib/services/project-open-owner';
+  import { ProjectWatcherOwner } from '$lib/services/project-watcher-owner';
   import type { TemplateFileSummary } from '$lib/ipc/commands';
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
@@ -51,7 +55,7 @@
   import { promptGoToLine } from '$lib/utils/go-to-line';
   import { pathBasename, pathDirname } from '$lib/utils/path';
   import { isScratchFile } from '$lib/utils/scratch';
-  import { registerAppCommands } from '$lib/app-commands';
+  import { BLOCK_TRANSFORM_COMMANDS, registerAppCommands } from '$lib/app-commands';
   import { wireAppEvents } from '$lib/composables/app-events.svelte';
   import { wireMenuEvents } from '$lib/composables/menu-events.svelte';
   import { useMenuSync } from '$lib/composables/menu-sync.svelte';
@@ -109,6 +113,7 @@ let paletteOpen = $state(false);
   let mindmapOverlayOpen = $state(false);
   let projectSearchOpen = $state(false);
   let newProjectDialogOpen = $state(false);
+  let operationError = $state<string | null>(null);
   // Opening the template dialog from outside TemplatePanel (e.g. from the
   // command palette) — the panel consumes this object then calls back to clear.
   let templateDialogRequest = $state<{ id: string | null; prefill?: { name?: string; body?: string } } | null>(null);
@@ -197,6 +202,11 @@ let paletteOpen = $state(false);
   import type { RecentProject } from '$lib/ipc/commands';
   let recentProjects = $state<RecentProject[]>([]);
   let projectSwitcherTrigger = $state(0);
+  const projectOpenOwner = new ProjectOpenOwner();
+  const projectWatcherOwner = new ProjectWatcherOwner({
+    stop: () => commands.stopFileWatcher(),
+    start: (projectDir) => commands.startFileWatcher(projectDir),
+  });
 
   useWindowTitle(t);
   // Keep the native menu (labels + Open Recent) synced with the current
@@ -221,6 +231,10 @@ let paletteOpen = $state(false);
     }
   }
 
+  function showOperationError(message: string): void {
+    operationError = message;
+  }
+
   /** Auto-save all dirty files before switching project. */
   async function autoSaveBeforeSwitch(): Promise<boolean> {
     const dirty = tabsStore.dirtyTabs;
@@ -229,43 +243,129 @@ let paletteOpen = $state(false);
   }
 
   async function openProjectFromPath(dirPath: string) {
-    if (projectStore.isOpen) {
-      const saved = await autoSaveBeforeSwitch();
-      if (!saved) return;
-    }
-    projectStore.isLoading = true;
-    await commands.stopFileWatcher();
+    const token = projectOpenOwner.begin(dirPath, projectStore.dirPath, projectStore.generation);
+    if (!token) return;
+    const isCurrent = () => projectOpenOwner.isCurrent(token);
+    await projectOpenOwner.run(token, async () => {
+      const previousProjectDir = projectStore.dirPath;
+      const previousOpenFiles = [...new Set(tabsStore.allTabs.map(tab => tab.filePath))];
+      let watcherStopped = false;
+      let targetWatcherStarted = false;
+      let committed = false;
+      try {
+        if (projectStore.isOpen) {
+          const saved = await autoSaveBeforeSwitch();
+          if (!saved || !isCurrent()) return;
+        }
 
-    const configResult = await commands.detectProject(dirPath);
-    const config = configResult.status === 'ok' ? configResult.data : null;
+        try {
+          await projectStore.prepareProjectSwitch(dirPath);
+        } catch {
+          return;
+        }
+        if (!isCurrent()) return;
 
-    // Load the per-project settings overlay BEFORE the initial listDirectory
-    // so the user's saved `show_hidden_files` preference applies to the first
-    // tree render. `projectStore.setProject` also kicks a load, but awaiting
-    // here guarantees the preference is known before we fetch files.
-    await settingsStore.load(dirPath);
+        projectStore.isLoading = true;
+        watcherStopped = true;
+        const stopped = await projectWatcherOwner.stop(isCurrent);
+        if (!stopped || !isCurrent()) return;
+        if (stopped.status === 'error') {
+          console.error('Failed to stop file watcher:', stopped.error);
+          showOperationError(t('project.watcherUnavailable'));
+          return;
+        }
 
-    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
-    const files = filesResult.status === 'ok' ? filesResult.data : [];
+        const configResult = await commands.detectProject(dirPath);
+        if (!isCurrent() || configResult.status !== 'ok') return;
+        const config = configResult.data;
 
-    projectStore.setProject(dirPath, config, files);
-    uiStore.sidebarVisible = true;
-    tabsStore.closeAll();
+        // Load the per-project settings overlay BEFORE the initial listDirectory
+        // so the user's saved `show_hidden_files` preference applies to the first
+        // tree render. `projectStore.setProject` also kicks a load, but awaiting
+        // here guarantees the preference is known before we fetch files.
+        const preparedSettings = await settingsStore.prepareLoad(dirPath);
+        if (!isCurrent()) return;
 
-    // Track as recent project (backend persistence for next launch)
-    const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
-    await commands.addRecentProject(dirPath, name);
+        const filesResult = await commands.listDirectory(
+          dirPath,
+          preparedSettings.effective.view.show_hidden_files,
+        );
+        if (!isCurrent() || filesResult.status !== 'ok') return;
+        const files = filesResult.data;
 
-    // Keep Cmd+number mapping stable: only append truly new projects
-    if (!recentProjects.some(p => p.path === dirPath)) {
-      recentProjects = [...recentProjects, { path: dirPath, name, last_opened: String(Math.floor(Date.now() / 1000)), pinned: false, sort_order: null }];
-    }
+        if (projectStore.isOpen) {
+          const saved = await autoSaveBeforeSwitch();
+          if (!saved || !isCurrent()) return;
+        }
 
-    // Start watching
-    const watchResult = await commands.startFileWatcher(dirPath);
-    if (watchResult.status !== 'ok') {
-      console.error('Failed to start file watcher:', watchResult.error);
-    }
+        // A project is not committed until its required watcher is live. This
+        // keeps the current project intact when native watcher setup fails.
+        const watchResult = await projectWatcherOwner.start(dirPath, isCurrent);
+        if (!isCurrent() || !watchResult) return;
+        if (watchResult.status === 'error') {
+          console.error('Failed to start file watcher:', watchResult.error);
+          showOperationError(t('project.watcherUnavailable'));
+          return;
+        }
+        targetWatcherStarted = true;
+
+        if (!projectOpenOwner.seal(token)) return;
+        committed = await projectStore.setProject(dirPath, config, files, token.id, true);
+        if (!committed || !isCurrent()) return;
+        settingsStore.commitPrepared(preparedSettings);
+        uiStore.sidebarVisible = true;
+        tabsStore.closeAll();
+
+        // Track as recent project (backend persistence for next launch)
+        const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
+        await commands.addRecentProject(dirPath, name);
+
+        // Keep Cmd+number mapping stable: only append truly new projects
+        if (isCurrent() && !recentProjects.some(p => p.path === dirPath)) {
+          recentProjects = [...recentProjects, { path: dirPath, name, last_opened: String(Math.floor(Date.now() / 1000)), pinned: false, sort_order: null }];
+        }
+      } finally {
+        try {
+          if (!committed) {
+            projectStore.isLoading = false;
+            if (targetWatcherStarted) {
+              await projectWatcherOwner.stop(() => projectStore.dirPath !== dirPath);
+            }
+            if (watcherStopped && isCurrent()) {
+              let restoreFailed = false;
+              if (previousProjectDir) {
+                const restored = await projectWatcherOwner.start(
+                  previousProjectDir,
+                  () => isCurrent() && projectStore.dirPath === previousProjectDir,
+                );
+                if (!restored || restored.status === 'error') {
+                  restoreFailed = true;
+                  console.error(
+                    'Failed to restore previous file watcher:',
+                    restored?.status === 'error' ? restored.error : 'stale restore',
+                  );
+                }
+              }
+              for (const filePath of previousOpenFiles) {
+                try {
+                  const registered = await commands.registerOpenFile(filePath);
+                  if (registered.status === 'error') {
+                    restoreFailed = true;
+                    console.error('Failed to restore tracked open file:', registered.error);
+                  }
+                } catch (error) {
+                  restoreFailed = true;
+                  console.error('Failed to restore tracked open file:', error);
+                }
+              }
+              if (restoreFailed) showOperationError(t('project.watcherUnavailable'));
+            }
+          }
+        } finally {
+          projectOpenOwner.settle(token);
+        }
+      }
+    });
   }
 
   async function openNewWindow() {
@@ -294,10 +394,11 @@ let paletteOpen = $state(false);
    * `#file=` seed. Returns true on success.
    */
   async function openSingleFile(filePath: string, line: number | null = null): Promise<boolean> {
+    await projectOpenOwner.cancel();
     const result = await commands.readFile(filePath);
     if (result.status !== 'ok') return false;
     if (!projectStore.isOpen) {
-      projectStore.enterSingleFileMode();
+      await projectStore.enterSingleFileMode();
       uiStore.sidebarVisible = false;
     }
     tabsStore.openTab(filePath, result.data);
@@ -331,7 +432,10 @@ let paletteOpen = $state(false);
     await openProjectFromPath(path);
   }
 
-  const handleNewScratchFile = () => createScratchFile();
+  const handleNewScratchFile = async () => {
+    await projectOpenOwner.cancel();
+    return createScratchFile();
+  };
   const handleNewFile = () => createNewFileInProject();
   const executeTemplateWrapper = (summary: TemplateFileSummary) => executeTemplate(summary, getActiveEditorView, t);
   function saveCurrentFileAsTemplate() {
@@ -354,10 +458,88 @@ let paletteOpen = $state(false);
 
   // --- Editor context menu (right-click inside .cm-content) ---
   const editorCtx = createEditorContextMenu(getActiveEditorView);
+  let blockTypeSubmenuOpen = $state(false);
+  let blockTypeTrigger = $state<HTMLButtonElement | null>(null);
+  let blockTypeSubmenu = $state<HTMLDivElement | null>(null);
+  let blockTypeSubmenuPosition = $state<{ left: number; top: number } | null>(null);
+  const CONTEXT_SUBMENU_GAP = 4;
+  const CONTEXT_VIEWPORT_MARGIN = 8;
   // Read-alias so markup expressions like `editorCtxMenu.x` stay byte-identical.
   // Writes (oncontextmenu handler below) go through `editorCtx.state = ...`.
   const editorCtxMenu = $derived(editorCtx.state);
-  const closeEditorCtxMenu = () => editorCtx.close();
+  function closeBlockTypeSubmenu(restoreTriggerFocus = false) {
+    blockTypeSubmenuOpen = false;
+    blockTypeSubmenuPosition = null;
+    if (restoreTriggerFocus) blockTypeTrigger?.focus();
+  }
+  function closeEditorCtxMenu() {
+    closeBlockTypeSubmenu();
+    editorCtx.close();
+  }
+  function positionBlockTypeSubmenu() {
+    if (!blockTypeTrigger || !blockTypeSubmenu) return;
+    const triggerRect = blockTypeTrigger.getBoundingClientRect();
+    const submenuRect = blockTypeSubmenu.getBoundingClientRect();
+    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+
+    let left = triggerRect.right + CONTEXT_SUBMENU_GAP;
+    if (left + submenuRect.width > viewportWidth - CONTEXT_VIEWPORT_MARGIN) {
+      left = triggerRect.left - submenuRect.width - CONTEXT_SUBMENU_GAP;
+    }
+    left = Math.min(
+      Math.max(CONTEXT_VIEWPORT_MARGIN, left),
+      Math.max(CONTEXT_VIEWPORT_MARGIN, viewportWidth - CONTEXT_VIEWPORT_MARGIN - submenuRect.width),
+    );
+    const top = Math.min(
+      Math.max(CONTEXT_VIEWPORT_MARGIN, triggerRect.top),
+      Math.max(CONTEXT_VIEWPORT_MARGIN, viewportHeight - CONTEXT_VIEWPORT_MARGIN - submenuRect.height),
+    );
+    blockTypeSubmenuPosition = { left, top };
+  }
+  async function openBlockTypeSubmenu(focusFirst = false) {
+    blockTypeSubmenuOpen = true;
+    await tick();
+    if (!blockTypeSubmenuOpen) return;
+    positionBlockTypeSubmenu();
+    if (focusFirst) {
+      await tick();
+      blockTypeSubmenu?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    }
+  }
+  function handleBlockTypeTriggerKeydown(event: KeyboardEvent) {
+    if (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.stopPropagation();
+      void openBlockTypeSubmenu(true);
+    }
+  }
+  function handleBlockTypeSubmenuKeydown(event: KeyboardEvent) {
+    const items = [...(blockTypeSubmenu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+    const activeIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowDown') nextIndex = activeIndex < 0 ? 0 : (activeIndex + 1) % items.length;
+    else if (event.key === 'ArrowUp') nextIndex = activeIndex <= 0 ? items.length - 1 : activeIndex - 1;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = items.length - 1;
+    else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeBlockTypeSubmenu(true);
+      return;
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeEditorCtxMenu();
+      getActiveEditorView()?.focus();
+      return;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (items.length > 0 && nextIndex !== null) items[nextIndex]?.focus();
+  }
   const editorCtxCut = () => editorCtx.cut();
   const editorCtxCopy = () => editorCtx.copy();
   const editorCtxPaste = () => editorCtx.paste();
@@ -404,6 +586,13 @@ let paletteOpen = $state(false);
     initShortcutsI18n(t);
     // Reveal overlay scrollbars while actively scrolling (hover reveal is CSS).
     const unlistenScrollAutoHide = initScrollAutoHide();
+    const handleOperationError = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: unknown }>).detail;
+      if (typeof detail?.message === 'string' && detail.message.trim()) {
+        showOperationError(detail.message);
+      }
+    };
+    window.addEventListener('novelist-operation-error', handleOperationError);
     // Kick off global settings load so reactive consumers see real values
     // as soon as IPC answers. Safe if no project is open — falls back to
     // ~/.novelist/settings.json defaults.
@@ -418,6 +607,28 @@ let paletteOpen = $state(false);
         toggleSettings: () => uiStore.toggleSettings(),
         save: () => activeEditorRef?.saveCurrentFile(),
         newFile: () => { projectStore.dirPath ? handleNewFile() : handleNewScratchFile(); },
+        openProject: (path: string) => openProjectFromPath(path),
+        openFile: (path: string) => openSingleFile(path),
+        getActiveEditor: () => {
+          const tab = tabsStore.activeTab;
+          const view = getActiveEditorView();
+          if (!tab || !view || !view.dom.isConnected) return null;
+          return { tabId: tab.id, filePath: tab.filePath, view };
+        },
+        setActiveEditorDocument: async (
+          content: string,
+          selection: { anchor: number; head: number },
+        ) => {
+          const { Transaction } = await import('@codemirror/state');
+          const view = getActiveEditorView();
+          if (!view || !view.dom.isConnected) throw new Error('Active editor is not ready');
+          view.dispatch({
+            changes: { from: 0, to: view.state.doc.length, insert: content },
+            selection,
+            annotations: Transaction.addToHistory.of(false),
+          });
+          view.focus();
+        },
       };
     }
 
@@ -461,7 +672,14 @@ let paletteOpen = $state(false);
     // Wait one frame so "first-paint" reflects the actual paint after mount.
     // After painting, wire the non-critical event bridges + kick off
     // deferred startup work (plugin scan, recent-projects refresh, updater).
-    requestAnimationFrame(() => {
+    const scheduleFirstFrame = (callback: FrameRequestCallback) => {
+      if ((window as typeof window & { __PW_ACTIVE__?: boolean }).__PW_ACTIVE__) {
+        window.setTimeout(() => callback(performance.now()), 0);
+      } else {
+        requestAnimationFrame(callback);
+      }
+    };
+    scheduleFirstFrame(() => {
       startupMark('frontend.app.first-paint');
       runStartupTask('startupReport', () => startupReport());
 
@@ -517,6 +735,7 @@ let paletteOpen = $state(false);
       unlistenLifecycle();
       unlistenMenu?.();
       unlistenScrollAutoHide();
+      window.removeEventListener('novelist-operation-error', handleOperationError);
     };
   });
 </script>
@@ -537,6 +756,7 @@ let paletteOpen = $state(false);
     // instead of the native WKWebView one.
     if (target.closest('.cm-content')) {
       e.preventDefault();
+      closeBlockTypeSubmenu();
       const view = getActiveEditorView();
       if (!view) { editorCtx.state = null; return; }
       const { from, to } = view.state.selection.main;
@@ -558,6 +778,21 @@ let paletteOpen = $state(false);
   }}
 />
 
+{#if operationError}
+  <div class="operation-error-toast" role="alert" data-testid="operation-error">
+    <span>{operationError}</span>
+    <button
+      type="button"
+      class="operation-error-dismiss"
+      title={t('common.dismiss')}
+      aria-label={t('common.dismiss')}
+      onclick={() => { operationError = null; }}
+    >
+      <X size={15} />
+    </button>
+  </div>
+{/if}
+
 {#if editorCtxMenu}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -570,6 +805,23 @@ let paletteOpen = $state(false);
     onclick={(e) => e.stopPropagation()}
     oncontextmenu={(e) => e.preventDefault()}
   >
+    <button
+      bind:this={blockTypeTrigger}
+      type="button"
+      role="menuitem"
+      class="context-menu-item context-menu-submenu-trigger"
+      data-testid="editor-ctx-block-type"
+      aria-haspopup="menu"
+      aria-expanded={blockTypeSubmenuOpen}
+      aria-controls="editor-block-type-submenu"
+      onclick={() => { void openBlockTypeSubmenu(); }}
+      onmouseenter={() => { void openBlockTypeSubmenu(); }}
+      onkeydown={handleBlockTypeTriggerKeydown}
+    >
+      <span>{t('editor.menu.blockType')}</span>
+      <ChevronRight class="context-menu-submenu-chevron" size={14} strokeWidth={1.75} aria-hidden="true" />
+    </button>
+    <div class="context-menu-separator"></div>
     {#if editorCtxMenu.hasSelection}
       <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-cut" onclick={() => { editorCtxCut(); closeEditorCtxMenu(); }}>{t('editor.menu.cut')}</button>
       <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-copy" onclick={() => { editorCtxCopy(); closeEditorCtxMenu(); }}>{t('editor.menu.copy')}</button>
@@ -581,6 +833,31 @@ let paletteOpen = $state(false);
     <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-paste" onclick={() => { editorCtxPaste(); closeEditorCtxMenu(); }}>{t('editor.menu.paste')}</button>
     <div class="context-menu-separator"></div>
     <button role="menuitem" class="context-menu-item" data-testid="editor-ctx-select-all" onclick={() => { editorCtxSelectAll(); closeEditorCtxMenu(); }}>{t('editor.menu.selectAll')}</button>
+    {#if blockTypeSubmenuOpen}
+      <div
+        bind:this={blockTypeSubmenu}
+        id="editor-block-type-submenu"
+        role="menu"
+        tabindex="-1"
+        class="context-menu context-submenu"
+        data-positioned={blockTypeSubmenuPosition !== null}
+        data-testid="editor-ctx-block-submenu"
+        aria-label={t('editor.menu.blockType')}
+        style:left={blockTypeSubmenuPosition ? `${blockTypeSubmenuPosition.left}px` : '0'}
+        style:top={blockTypeSubmenuPosition ? `${blockTypeSubmenuPosition.top}px` : '0'}
+        onkeydown={handleBlockTypeSubmenuKeydown}
+      >
+        {#each BLOCK_TRANSFORM_COMMANDS as command}
+          <button
+            type="button"
+            role="menuitem"
+            class="context-menu-item context-submenu-item"
+            data-testid="editor-ctx-block-{command.target}"
+            onclick={() => { editorCtxRunCommand(command.id); closeEditorCtxMenu(); }}
+          >{t(command.labelKey)}</button>
+        {/each}
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -896,6 +1173,50 @@ let paletteOpen = $state(false);
 {/if}
 
 <style>
+  .operation-error-toast {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 500;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: min(420px, calc(100vw - 32px));
+    padding: 10px 10px 10px 12px;
+    border: 1px solid color-mix(in srgb, #d24a4a 58%, var(--novelist-border));
+    border-radius: 6px;
+    background: var(--novelist-bg-secondary);
+    color: var(--novelist-text);
+    box-shadow: 0 6px 18px color-mix(in srgb, #000 16%, transparent);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .operation-error-toast span {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .operation-error-dismiss {
+    display: inline-flex;
+    flex: 0 0 26px;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--novelist-text-secondary);
+    cursor: pointer;
+  }
+
+  .operation-error-dismiss:hover {
+    background: var(--novelist-hover);
+    color: var(--novelist-text);
+  }
+
   .split-divider {
     flex-shrink: 0;
     width: 5px;

@@ -5,10 +5,13 @@ pub mod claude_bridge;
 pub mod cli_shim;
 pub mod codex_bridge;
 pub mod draft;
+#[cfg(all(target_os = "macos", feature = "e2e-testing"))]
+pub mod e2e;
 pub mod export;
 pub mod file;
 pub mod image_host;
 pub mod menu;
+pub mod naming;
 pub mod plugin;
 pub mod portable;
 pub mod project;

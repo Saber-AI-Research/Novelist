@@ -12,8 +12,9 @@ Four modes, picked by file size and line count:
 - **Tall doc** (< 1MB, > 5000 lines): No WYSIWYG decorations, flat heading
   sizes — prevents CM6 height-map drift that causes click-after-scroll jump
   bugs.
-- **Large** (1-10MB): Stripped extensions, reduced stat frequency.
-- **Huge** (> 10MB): Read-only via rope backend.
+- **Large** (1-3.5MB): Stripped editable extensions, reduced stat frequency.
+- **Huge** (≥ 3.5MB): Stripped read-only CodeMirror state. Rust-backed
+  viewport editing is a future design and is not wired into `Editor.svelte`.
 
 **Why tall-doc mode exists**: CM6 estimates heights for off-screen lines.
 WYSIWYG decorations (heading font-size changes, blockquote styling, etc.)
@@ -139,7 +140,7 @@ Notion-style `/` block-insertion menu, implemented in
   is open. **Precedence matters**: `defaultKeymap` binds arrows to
   `cursorLineUp/Down`, and without `Prec.highest` the keymap wins and the
   cursor moves instead of the menu selection. Regression test:
-  `tests/unit/editor/slash-runtime.test.ts` "ArrowDown moves selection in
+  `tests/integration/editor/slash-runtime.test.ts` "ArrowDown moves selection in
   menu without moving editor cursor".
 
 ### Widget positioning
@@ -181,11 +182,10 @@ at the top of `slash-commands.ts` and rendered via `innerHTML` into
 and swaps the icon color to `--novelist-accent` on the selected row. No
 emoji — keeps rendering consistent across locales and WebKit font fallbacks.
 
-Tests: `tests/unit/editor/slash-commands.test.ts` covers
-template/insertion logic (pure functions);
-`tests/unit/editor/slash-runtime.test.ts` builds a real `EditorView` to
-exercise the trigger, fallback, widget lifecycle (hidden-until-positioned,
-no self-destroy on null coords), and keyboard close behavior.
+Tests: `tests/integration/editor/slash-runtime.test.ts` builds a real
+`EditorView` to exercise the trigger, fallback, widget lifecycle
+(hidden-until-positioned, no self-destroy on null coords), and keyboard close
+behavior.
 
 ## Unified selection background
 
@@ -313,6 +313,53 @@ selection looks like a stack of ragged per-word ribbons. CSS
 inline fragment backgrounds are fundamentally glyph-bound. Native
 `::selection` is the only mechanism that paints the full continuation
 row, so that's what we use.
+
+## Block transforms and structural hierarchy
+
+Block formatting is one command surface backed by
+`app/lib/editor/block-transform.ts`. The 12 targets are **Paragraph**,
+**Heading 1** through **Heading 6**, **Quote**, **Unordered List**,
+**Ordered List**, **Task List**, and **Fenced Code**. Their stable command IDs
+are registered once in `app/lib/app-commands.ts`; the command palette, editor
+context menu, native menu bridge, and global shortcut router dispatch command
+IDs through `commandRegistry.execute()` rather than maintaining parallel
+handlers. Block commands without an assigned shortcut remain registry commands;
+the routing architecture does not imply an undocumented shortcut.
+
+Selected-`>` interception and structural Tab/Shift+Tab are installed in the
+normal, tall-document, and editable large-file extension sets. Large-file mode
+keeps its parser/WYSIWYG/slash-menu omissions, but includes the constant-time
+IME guard and the local structural handlers; structural hierarchy remains
+before generic `indentWithTab`. The optional slash-menu field lookup is closed
+when that extension is absent. Huge read-only mode omits all editing handlers.
+Saved editor states are root-reconfigured with the current tier extensions
+before restoration, preserving history without carrying stale editing handlers
+across normal/large/read-only boundaries.
+
+The following table is the durable behavior contract. Test titles are quoted
+exactly so changes can be audited against executable coverage.
+
+| Area | Contract | Automated guards |
+|---|---|---|
+| Command surface | Every target has one stable `editor-block-*` registration. Palette and context-menu actions invoke the same transform and each command action executes the registry once. A transforming palette action has one document-changing dispatch; a context-menu action first makes a selection-only dispatch to restore its snapshot, then the transform dispatches once. No-op and IME-refused transforms do not dispatch a document change. | `tests/unit/app-commands.test.ts` - `registers every BlockTransformTarget under one stable command id exactly once`, `%s passes the active EditorView to target %s`; `tests/e2e/specs/command-palette.spec.ts` - `Convert to Task List matches the context command without duplicate dispatch @task23`, `Enter dispatches the selected Block Type command through the registry exactly once`; `tests/unit/composables/menu-events.test.ts` - `dispatches the payload command ID through commandRegistry.execute`; `tests/unit/composables/app-shortcuts.test.ts` - `Cmd+B dispatches the bold formatting command` |
+| Logical-line selection | A cursor acts on its current logical line. A nonempty partial, reversed, CJK, or multi-range selection expands to every touched logical line, deduplicates overlaps, maps every anchor/head while preserving direction and `mainIndex`, and leaves untouching lines unchanged. | `tests/unit/editor/block-transform.test.ts` - `expands partial selections to touched full lines`, `maps CJK selection positions through inserted block prefixes`, `deduplicates touched lines across multiple ranges`, `maps all selection ranges and preserves mainIndex for multi-range edits`, `preserves reversed anchor/head direction while mapping selections` |
+| Normalize or toggle | Mixed paragraph/heading/quote/list/task lines first lose prefixes recognized by the transform parser, then receive the requested target without content loss. Only when every selected nonblank line already matches the requested non-paragraph target does that target toggle the selection to paragraphs. Paragraph removes the recognized prefixes. Empty-document paragraph is a no-op. | `tests/unit/editor/block-transform.test.ts` - `toggles an all-target heading selection back to paragraphs`, `toggles an all-target %s selection back to paragraphs`, `normalizes mixed block types to the requested heading without content loss`, `converts any supported block target back to paragraph text`, `returns null for an empty document no-op cursor selection` |
+| Indentation, markers, and blanks | Prefix recognition consumes zero or more leading quote markers, then at most one heading marker and one task, unordered, or ordered-list marker, in that order. Indentation attached to a recognized list/task marker is retained separately from the removable marker and checkbox: list-family conversions and all-target paragraph toggles preserve it. Other content whitespace and lines outside the touched set are not silently rewritten. Non-code transforms leave blank lines blank. Unordered-list normalization preserves existing `-`, `*`, or `+` markers. Ordered lists renumber from `1` per contiguous nonblank selected group. Task-list normalization preserves an existing checkbox state and a compatible `-` or `*` marker from task/UL input; unsupported `+` or markerless input deterministically receives `-`, and non-task input receives an unchecked box. This transform rule does not make `+` eligible for structural Tab hierarchy. | `tests/unit/editor/block-transform.test.ts` - `peels nested quote/list/task prefixes while preserving list indentation for paragraph`, `normalizes nested quote/list/task content to a task list without losing text`, `keeps blank lines unprefixed for non-code transforms`, `preserves existing unordered markers when normalizing mixed lines to unordered list`, `renumbers ordered lists deterministically per contiguous nonblank group`, `preserves existing task checkbox state when normalizing to task list`, `preserves supported markers, checkbox state, and indentation in mixed task-list normalization`, `uses the unchecked dash fallback for unsupported or markerless mixed task-list input`, `preserves supported task markers and indentation when converting tasks to unordered list`, `preserves indentation when an all-target %s selection toggles to paragraph`; `tests/integration/editor/block-transform-runtime.test.ts` - `preserves mixed task markers, check state, indentation, and partial CJK selection through one undo` |
+| Fenced code | Fenced Code wraps each selected contiguous line group with a backtick fence longer than any run in its body. A selection inside one unindented backtick or tilde block recognized by the transform parser unwraps only that enclosing block; a closing fence is not an opener and plain text between adjacent blocks is not absorbed. | `tests/unit/editor/block-transform.test.ts` - `wraps selected lines in a safe fenced code block`, `toggles an existing fenced code block back to its body`, `unwraps a tilde fenced block with a longer compatible closing fence`, `does not treat a closing fence line as an opener`, `does not unwrap across plain text between fenced blocks`, `unwraps only the adjacent fenced block containing the selection` |
+| Transaction, IME, and undo | A transform dispatches one CodeMirror transaction. Active IME composition returns `false` without changing document or selection; after composition settles, the command may run. One undo restores the exact source and selection, including multi-range direction and `mainIndex`. | `tests/integration/editor/block-transform-runtime.test.ts` - `dispatches one undoable transaction and restores source plus selection`, `unwraps code fences with one undo restoring all ranges and mainIndex`, `refuses to dispatch while IME composition is active, then runs after composition ends` |
+| Selected `>` input | Exact `>` input is intercepted only when CodeMirror's input-handler `from/to` replacement range is nonempty. That provided range alone chooses touched whole lines; unrelated live selections are not transform targets. CodeMirror's canonical selection mapping preserves direction, `mainIndex`, range metadata, and endpoint association through the one transaction. Selected CJK text, focus, and one-step undo remain intact. Collapsed `>` typing and any other replacement text follow ordinary CodeMirror input. Active IME composition and an open slash menu bypass interception. | `tests/integration/editor/structural-hierarchy-runtime.test.ts` - `converts exact selected > replacement to quotes without deleting selected CJK text`, `uses the nonempty input replacement range instead of an unrelated current selection`, `does not intercept a collapsed input range because another selection is nonempty`, `transforms only the provided range while mapping every current selection range`, `keeps an unrelated forward selection outside an inserted quote at its endpoint`, `keeps an unrelated reversed selection outside an inserted quote at its endpoint`, `ignores ordinary replacement text and empty-selection > typing`, `lets CodeMirror apply ordinary replacement and collapsed > input`, `bypasses selected > conversion during IME composition`, `bypasses selected > conversion while the slash menu is open`, `wires selected > conversion in normal editor setup`, `wires selected > conversion in tall editor setup`, `wires selected > conversion in large editor setup`, `reconfigures saved state across editable and read-only structural mode boundaries`, `keeps structural input and hierarchy disabled in huge read-only setup`; `tests/e2e/specs/editor-context-menu.spec.ts` - `typing > over selected CJK text converts whole lines and preserves focus @task23` |
+| Structural Tab / Shift+Tab | Before generic `indentWithTab`, Tab nests touched Quote lines by adding one quote level and nests `-`/`*` unordered and task lines by two spaces; Shift+Tab removes one level. A cursor affects its current line, and a selection acts only when every touched nonblank line is supported. Markers and checkbox state are preserved. Ordered lists, `+` lists, plain text, mixed structural/plain selections, and an open slash menu fall through to existing handling. Outdent at the hierarchy floor is a no-op with no transaction. | `tests/integration/editor/structural-hierarchy-runtime.test.ts` - `nests and unnests quote, unordered, and task lines while preserving markers and checkboxes`, `nests selected structural lines as one undoable transaction`, `uses current-line behavior for cursor Tab and has a deterministic Shift+Tab floor`, `falls through for ordered lists, plus-marker lists, ordinary text, and mixed selections`, `bypasses structural Tab while slash menu is open`, `bypasses structural Tab during IME composition and resumes after composition ends`, `maps multi-range selections through one structural transaction`, `keeps a forward hierarchy range outside the next line's inserted indent`, `keeps a reversed hierarchy range outside the next line's inserted indent`, `keeps structural hierarchy ahead of generic Tab in normal editor setup`, `keeps structural hierarchy ahead of generic Tab in tall editor setup`, `keeps structural hierarchy ahead of generic Tab in large editor setup`, `routes ordered, plus, and plain Tab through generic indent in normal editor setup`, `routes ordered, plus, and plain Tab through generic indent in tall editor setup`, `routes ordered, plus, and plain Tab through generic indent in large editor setup`, `keeps structural input and hierarchy disabled in huge read-only setup`; `tests/e2e/specs/editor-context-menu.spec.ts` - `Tab and Shift+Tab preserve list and task hierarchy selection and focus @task23` |
+| Context-menu restoration | The context menu snapshots `{from, to}` when opened. Before a block command executes it restores that forward range, dispatches through the registry, then restores editor focus. Unit and mocked-browser tests model the live range collapsing after right-click. One undo restores the tested pre-command text and forward selection; anchor/head direction is not retained by the snapshot. | `tests/unit/composables/editor-context-menu.test.ts` - `restores the snapshot range before dispatching the registered command`; `tests/e2e/specs/editor-context-menu.spec.ts` - `Block Type > Quote restores a three-line CJK selection and remains one-step undoable @task23` |
+
+Do not describe block commands as unconditional toggles: mixed selections
+normalize to the requested target. Do not intercept ordered-list or ordinary
+text Tab in the structural hierarchy extension; their behavior belongs to the
+later generic CodeMirror keymaps.
+
+Both selected-`>` and structural hierarchy implementations check active IME
+and open-slash-menu state before dispatch. The regression matrix independently
+covers all four combinations: selected `>` during IME and while slash-open,
+plus structural Tab during IME and while slash-open.
 
 ## Editor right-click menu
 

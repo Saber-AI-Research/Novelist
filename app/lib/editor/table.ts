@@ -788,8 +788,8 @@ function buildTableBlockState(state: EditorState): TableBlockState {
 const tableBlockDecoField = StateField.define<TableBlockState>({
   create(state) { return buildTableBlockState(state); },
   update(value, tr) {
-    if (tr.state.field(imeComposingField, false)) return value;
     if (tr.docChanged) return buildTableBlockState(tr.state);
+    if (tr.state.field(imeComposingField, false)) return value;
     if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
       return buildTableBlockState(tr.state);
     }

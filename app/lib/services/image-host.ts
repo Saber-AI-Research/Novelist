@@ -3,8 +3,8 @@
  * knows about provider IDs — editor and settings UI both call through here.
  *
  * Public API:
- * - uploadImage(localPath, projectDir?) — upload a single local image.
- * - uploadAllInDocument(docText, docDir) — batch-upload every local image
+ * - uploadImage(reference, scope, projectHostId?) — upload one confined image.
+ * - uploadAllInDocument(docText, scope, projectHostId?) — batch-upload local images
  *   referenced by the Markdown text; returns a per-image report.
  * - uploadInlineBytes(bytes, suggestedName, mime, projectDir?) — used by
  *   the paste/drop interceptor when bytes are already in memory.
@@ -20,6 +20,10 @@ import { commands, type HostConfig, type ImageHostSettings_Serialize, type Provi
 export type UploadReport = {
   successes: Array<{ original: string; url: string }>;
   failures: Array<{ original: string; error: string }>;
+};
+
+export type LocalImageReadScope = {
+  baseDir: string;
 };
 
 export class NoActiveHostError extends Error {
@@ -102,13 +106,31 @@ export async function dispatchUpload(
   return result.data;
 }
 
-/** Read a local file as bytes via the Rust IPC. */
-async function readLocalBytes(absPath: string): Promise<number[]> {
-  const result = await commands.readImageBytes(absPath);
+/** Read a local file through a Rust-owned project/document capability. */
+async function readLocalBytes(scope: LocalImageReadScope, reference: string): Promise<number[]> {
+  const result = await commands.readImageBytes(scope.baseDir, reference);
   if (result.status !== 'ok') {
-    throw new Error(`Failed to read ${absPath}: ${result.error}`);
+    throw new Error(`Failed to read local image: ${result.error}`);
   }
   return result.data;
+}
+
+function bytesToBase64(bytes: number[]): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/** Load a local image preview through the same confined read used by uploads. */
+export async function readLocalImageDataUri(
+  reference: string,
+  scope: LocalImageReadScope,
+): Promise<string> {
+  const bytes = await readLocalBytes(scope, reference);
+  return `data:${inferMimeFromExt(reference)};base64,${bytesToBase64(bytes)}`;
 }
 
 /** Resolve a relative Markdown image path against the document's directory. */
@@ -127,13 +149,14 @@ export function isRemoteUrl(ref: string): boolean {
 
 /** Upload a single local image and return the remote URL. */
 export async function uploadImage(
-  absPath: string,
+  reference: string,
+  scope: LocalImageReadScope,
   projectActiveHostId?: string | null,
 ): Promise<{ url: string }> {
   const host = await loadActiveHost(projectActiveHostId);
-  const filename = absPath.split('/').pop() ?? 'image.png';
+  const filename = reference.split(/[\\/]/).pop() ?? 'image.png';
   const mime = inferMimeFromExt(filename);
-  const bytes = await readLocalBytes(absPath);
+  const bytes = await readLocalBytes(scope, reference);
   const { url } = await dispatchUpload(toProviderConfig(host), bytes, filename, mime);
   return { url };
 }
@@ -159,7 +182,7 @@ export async function uploadInlineBytes(
  */
 export async function uploadAllInDocument(
   docText: string,
-  docDir: string,
+  scope: LocalImageReadScope,
   projectActiveHostId?: string | null,
 ): Promise<UploadReport> {
   const host = await loadActiveHost(projectActiveHostId);
@@ -167,11 +190,10 @@ export async function uploadAllInDocument(
   const report: UploadReport = { successes: [], failures: [] };
   for (const ref of refs) {
     if (isRemoteUrl(ref)) continue;
-    const absPath = resolveImagePath(docDir, ref);
-    const filename = absPath.split('/').pop() ?? 'image.png';
+    const filename = ref.split(/[\\/]/).pop() ?? 'image.png';
     const mime = inferMimeFromExt(filename);
     try {
-      const bytes = await readLocalBytes(absPath);
+      const bytes = await readLocalBytes(scope, ref);
       const providerCfg = toProviderConfig(host);
       const { url } = await dispatchUpload(providerCfg, bytes, filename, mime);
       report.successes.push({ original: ref, url });

@@ -1,4 +1,4 @@
-import { EditorState, Compartment, type Extension } from '@codemirror/state';
+import { EditorState, Compartment, StateEffect, type Extension } from '@codemirror/state';
 import {
   EditorView, ViewPlugin, lineNumbers, highlightActiveLine, keymap, drawSelection,
   dropCursor, rectangularSelection, scrollPastEnd, placeholder,
@@ -22,6 +22,7 @@ import { imeComposingField, imeGuardPlugin } from './ime-guard';
 import { typewriterPlugin, lineFocusPlugin } from './zen';
 import { codeLanguages } from './languages';
 import { slashCommandExtension } from './slash-commands';
+import { selectedQuoteInputHandler, structuralHierarchyKeymap } from './structural-hierarchy';
 import './wysiwyg.css';
 
 export const highlightMatchCompartment = new Compartment();
@@ -499,9 +500,9 @@ export function detectFileType(fileName: string): FileType {
 interface EditorOptions {
   wysiwyg?: boolean;
   zen?: boolean;
-  largeFile?: boolean;   // Stripped extension set (no WYSIWYG, 1-3.5MB)
+  largeFile?: boolean;   // Stripped editable extension set (1-3.5MB)
   tallDoc?: boolean;     // >5000 lines — flat heading sizes, no WYSIWYG decorations
-  readOnly?: boolean;    // View-only mode (>3.5MB)
+  readOnly?: boolean;    // View-only mode (>=3.5MB)
   /** 'tab' for real tab character, or number for spaces (2, 4, 8). Default: 4 */
   indentStyle?: 'tab' | number;
   /** Highlight matching words on selection. Default: true */
@@ -551,6 +552,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     markdown({ base: markdownLanguage, extensions: [GFM, Highlight, Footnote, FrontMatter, InlineMath, DisplayMath], codeLanguages }),
     imeComposingField,
     imeGuardPlugin,
+    selectedQuoteInputHandler,
     // NO lineWrapping for tall docs — same reason as large files:
     // CM6's height estimation for unseen wrapped lines is inaccurate,
     // especially with CJK text and bold headings. Over 5000+ lines the
@@ -560,6 +562,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     ...(options?.tallDoc ? [] : [EditorView.lineWrapping]),
     novelistTheme,
     keymap.of([
+      ...structuralHierarchyKeymap,
       indentWithTab,
       ...closeBracketsKeymap,
       ...markdownKeymap,
@@ -599,7 +602,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
 }
 
 /**
- * Minimal extension set for large files (1-10MB).
+ * Minimal extension set for editable large files (1-3.5MB).
  * Removes all extensions with O(document) per-keystroke cost:
  * - No WYSIWYG decorations
  * - No highlightSelectionMatches (scans full doc)
@@ -611,9 +614,8 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
  * Keeps:
  * - lineNumbers (virtualized by CM6)
  * - history (incremental)
- * - markdown syntax highlighting (incremental parser)
  * - search (user-initiated)
- * - lineWrapping (CSS)
+ * - IME-safe selected-quote and structural hierarchy editing
  */
 function createLargeFileExtensions(): Extension[] {
   return [
@@ -621,6 +623,9 @@ function createLargeFileExtensions(): Extension[] {
     history({ minDepth: 50 }),
     drawSelection(),
     unifiedLineSelectionPlugin,
+    imeComposingField,
+    imeGuardPlugin,
+    selectedQuoteInputHandler,
     // NO lineWrapping for large files — CM6's line-height estimation is
     // inaccurate for unseen wrapped lines, causing scroll jumps on click
     // after scrolling tens of thousands of lines. Fixed-width lines have
@@ -629,6 +634,8 @@ function createLargeFileExtensions(): Extension[] {
     scrollStabilizer,
     novelistSearch,
     keymap.of([
+      ...structuralHierarchyKeymap,
+      indentWithTab,
       ...defaultKeymap,
       ...historyKeymap,
       ...searchKeymapNoModF,
@@ -638,7 +645,7 @@ function createLargeFileExtensions(): Extension[] {
 }
 
 /**
- * Read-only extension set for very large files (>3.5MB).
+ * Read-only extension set for very large files (>=3.5MB).
  * No parser, no gutters — absolute minimum for viewing large text.
  */
 function createReadOnlyExtensions(): Extension[] {
@@ -659,4 +666,8 @@ function createReadOnlyExtensions(): Extension[] {
 
 export function createEditorState(doc: string, extensions: Extension[]): EditorState {
   return EditorState.create({ doc, extensions });
+}
+
+export function reconfigureEditorState(state: EditorState, extensions: Extension[]): EditorState {
+  return state.update({ effects: StateEffect.reconfigure.of(extensions) }).state;
 }

@@ -34,6 +34,11 @@ type EffectiveSettingsWithSidebarFontSize = Omit<EffectiveSettings, 'view'> & {
   view: ResolvedViewWithSidebarFontSize;
 };
 
+export interface PreparedSettings {
+  dirPath: string | null;
+  effective: EffectiveSettingsWithSidebarFontSize;
+}
+
 function clampSidebarFontSize(value: number | null | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_SIDEBAR_FONT_SIZE;
   return Math.max(MIN_SIDEBAR_FONT_SIZE, Math.min(MAX_SIDEBAR_FONT_SIZE, Math.round(value)));
@@ -66,6 +71,7 @@ const DEFAULT_EFFECTIVE: EffectiveSettingsWithSidebarFontSize = {
 class SettingsStore {
   effective = $state<EffectiveSettingsWithSidebarFontSize>(DEFAULT_EFFECTIVE);
   private dirPath = $state<string | null>(null);
+  private loadGeneration = 0;
 
   get isProjectScoped(): boolean {
     return this.effective.is_project_scoped;
@@ -75,9 +81,20 @@ class SettingsStore {
     return this.dirPath !== null && this.effective.is_project_scoped;
   }
 
+  private isCurrentScope(generation: number, dirPath: string | null): boolean {
+    return generation === this.loadGeneration && dirPath === this.dirPath;
+  }
+
   /** Load effective settings for the given scope. `null` = global/scratch mode. */
   async load(dirPath: string | null): Promise<void> {
-    this.dirPath = dirPath;
+    const generation = ++this.loadGeneration;
+    const prepared = await this.prepareLoad(dirPath);
+    if (generation !== this.loadGeneration) return;
+    this.dirPath = prepared.dirPath;
+    this.effective = prepared.effective;
+  }
+
+  async prepareLoad(dirPath: string | null): Promise<PreparedSettings> {
     // Running outside Tauri (e.g. unit tests under happy-dom) → invoke throws.
     // Fall back to defaults rather than propagating.
     try {
@@ -89,14 +106,26 @@ class SettingsStore {
       }
       const res = await commands.getEffectiveSettings(dirPath);
       if (res.status === 'ok') {
-        this.effective = normalizeEffectiveSettings(res.data);
+        return { dirPath, effective: normalizeEffectiveSettings(res.data) };
       } else {
         console.error('[settings] load failed:', res.error);
-        this.effective = { ...DEFAULT_EFFECTIVE, is_project_scoped: dirPath !== null };
+        return {
+          dirPath,
+          effective: { ...DEFAULT_EFFECTIVE, is_project_scoped: dirPath !== null },
+        };
       }
     } catch (e) {
-      this.effective = { ...DEFAULT_EFFECTIVE, is_project_scoped: dirPath !== null };
+      return {
+        dirPath,
+        effective: { ...DEFAULT_EFFECTIVE, is_project_scoped: dirPath !== null },
+      };
     }
+  }
+
+  commitPrepared(prepared: PreparedSettings): void {
+    this.loadGeneration += 1;
+    this.dirPath = prepared.dirPath;
+    this.effective = prepared.effective;
   }
 
   /**
@@ -179,6 +208,8 @@ class SettingsStore {
 
   /** Patch view fields. Writes to the current scope (project if open, else global). */
   async writeView(patch: Partial<ViewConfigWithSidebarFontSize>): Promise<void> {
+    const generation = this.loadGeneration;
+    const scopeDirPath = this.dirPath;
     const current = this.effective.view;
     const next: ViewConfigWithSidebarFontSize = {
       sort_mode: patch.sort_mode ?? current.sort_mode,
@@ -194,6 +225,7 @@ class SettingsStore {
       console.error('[settings] writeView failed:', res.error);
       return;
     }
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     this.effective = {
       ...this.effective,
       view: {
@@ -206,11 +238,15 @@ class SettingsStore {
   }
 
   async writeNewFile(patch: Partial<NewFileConfig>): Promise<void> {
+    const generation = this.loadGeneration;
+    const scopeDirPath = this.dirPath;
     const current = this.effective.new_file;
     const next: NewFileConfig = {
       template: patch.template ?? current.template,
       detect_from_folder: patch.detect_from_folder ?? current.detect_from_folder,
       auto_rename_from_h1: patch.auto_rename_from_h1 ?? current.auto_rename_from_h1,
+      default_dir: patch.default_dir !== undefined ? patch.default_dir : current.default_dir,
+      last_used_dir: patch.last_used_dir !== undefined ? patch.last_used_dir : current.last_used_dir,
     };
     const dirPath = this.canWriteProjectSettings ? this.dirPath : null;
     const res = dirPath
@@ -220,6 +256,7 @@ class SettingsStore {
       console.error('[settings] writeNewFile failed:', res.error);
       return;
     }
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     this.effective = {
       ...this.effective,
       new_file: {
@@ -270,6 +307,8 @@ class SettingsStore {
    * Scratch mode: update the global map.
    */
   async writePluginEnabled(pluginId: string, enabled: boolean): Promise<void> {
+    const generation = this.loadGeneration;
+    const scopeDirPath = this.dirPath;
     const dirPath = this.canWriteProjectSettings ? this.dirPath : null;
     if (!dirPath) {
       // Global mode — write full map.
@@ -282,6 +321,7 @@ class SettingsStore {
         console.error('[settings] writePluginEnabled (global) failed:', res.error);
         return;
       }
+      if (!this.isCurrentScope(generation, scopeDirPath)) return;
       this.effective = {
         ...this.effective,
         plugins: { enabled: nextMap },
@@ -291,9 +331,11 @@ class SettingsStore {
 
     // Project mode — compute delta relative to global defaults.
     const globalRes = await commands.getGlobalSettings();
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     const globalMap: Record<string, boolean> =
       globalRes.status === 'ok' ? globalRes.data.plugins?.enabled ?? {} : {};
     const projectCfg = await commands.readProjectConfig(dirPath);
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     const currentOverrides: Record<string, boolean> =
       projectCfg.status === 'ok' ? projectCfg.data.plugins?.enabled ?? {} : {};
 
@@ -314,6 +356,7 @@ class SettingsStore {
       console.error('[settings] writePluginEnabled (project) failed:', res.error);
       return;
     }
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     this.effective = {
       ...this.effective,
       plugins: {
@@ -324,9 +367,12 @@ class SettingsStore {
 
   /** Project-only: reset a plugin's override so it inherits the global default. */
   async resetPluginOverride(pluginId: string): Promise<void> {
+    const generation = this.loadGeneration;
+    const scopeDirPath = this.dirPath;
     const dirPath = this.canWriteProjectSettings ? this.dirPath : null;
     if (!dirPath) return;
     const projectCfg = await commands.readProjectConfig(dirPath);
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     const current: Record<string, boolean> =
       projectCfg.status === 'ok' ? projectCfg.data.plugins?.enabled ?? {} : {};
     if (!(pluginId in current)) return;
@@ -337,6 +383,7 @@ class SettingsStore {
       console.error('[settings] resetPluginOverride failed:', res.error);
       return;
     }
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     // Refresh resolved state from backend so the UI reflects the inherited value.
     await this.load(dirPath);
   }
@@ -357,6 +404,8 @@ class SettingsStore {
       template: this.effective.new_file.template,
       detect_from_folder: this.effective.new_file.detect_from_folder,
       auto_rename_from_h1: this.effective.new_file.auto_rename_from_h1,
+      default_dir: this.effective.new_file.default_dir,
+      last_used_dir: this.effective.new_file.last_used_dir,
     };
     const p: PluginsConfig = { enabled: { ...this.effective.plugins.enabled } };
     const res = await commands.writeGlobalSettings(v, n, p);

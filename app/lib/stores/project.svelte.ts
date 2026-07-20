@@ -2,6 +2,7 @@ import type { FileEntry, ProjectConfig } from '$lib/ipc/commands';
 import { commands } from '$lib/ipc/commands';
 import type { SortMode } from '$lib/utils/file-sort';
 import { settingsStore } from '$lib/stores/settings.svelte';
+import { flushProjectSwitch } from '$lib/services/project-switch-coordinator';
 import { pathBasename } from '$lib/utils/path';
 
 const VALID_SORT_MODES: readonly SortMode[] = [
@@ -48,6 +49,7 @@ class ProjectStore {
   files = $state<FileNode[]>([]);
   isLoading = $state(false);
   singleFileMode = $state(false);
+  generation = $state(0);
 
   /** Reads from the unified settings store so project/global overlay is respected. */
   get sortMode(): SortMode {
@@ -81,22 +83,50 @@ class ProjectStore {
     return 'No Project';
   }
 
-  enterSingleFileMode() {
+  async enterSingleFileMode(): Promise<void> {
+    const previousProjectDir = this.dirPath;
+    await this.flushProjectSwitchProviders(previousProjectDir, null);
     this.singleFileMode = true;
     this.dirPath = null;
     this.config = null;
     this.files = [];
   }
 
-  setProject(dirPath: string, config: ProjectConfig | null, files: FileEntry[]) {
+  async setProject(
+    dirPath: string,
+    config: ProjectConfig | null,
+    files: FileEntry[],
+    generation?: number,
+    providersPrepared = false,
+  ): Promise<boolean> {
+    const nextGeneration = generation ?? this.generation + 1;
+    if (nextGeneration <= this.generation) return false;
+    const previousProjectDir = this.dirPath;
+    if (previousProjectDir !== dirPath && !providersPrepared) {
+      await this.flushProjectSwitchProviders(previousProjectDir, dirPath);
+    }
+    if (nextGeneration <= this.generation) return false;
     this.dirPath = dirPath;
+    this.generation = nextGeneration;
     this.config = config;
     this.files = files.map(toNode);
     this.isLoading = false;
     this.singleFileMode = false;
-    // Kick off the settings load; UI reads reactively from `settingsStore`
-    // so no awaiting is needed here.
-    void settingsStore.load(dirPath);
+    return true;
+  }
+
+  async prepareProjectSwitch(nextProjectDir: string | null): Promise<void> {
+    const previousProjectDir = this.dirPath;
+    if (previousProjectDir !== nextProjectDir || this.singleFileMode) {
+      await this.flushProjectSwitchProviders(previousProjectDir, nextProjectDir);
+    }
+  }
+
+  private async flushProjectSwitchProviders(
+    previousProjectDir: string | null,
+    nextProjectDir: string | null,
+  ): Promise<void> {
+    await flushProjectSwitch(previousProjectDir, nextProjectDir);
   }
 
   /** Replace the project-root children. Used by legacy callers; preserves expansion state of still-present folders. */
@@ -111,7 +141,12 @@ class ProjectStore {
     });
   }
 
-  close() {
+  async close(): Promise<void> {
+    const previousProjectDir = this.dirPath;
+    const wasSingleFileMode = this.singleFileMode;
+    if (previousProjectDir !== null || wasSingleFileMode) {
+      await this.flushProjectSwitchProviders(previousProjectDir, null);
+    }
     this.dirPath = null;
     this.config = null;
     this.files = [];

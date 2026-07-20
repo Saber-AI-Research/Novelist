@@ -53,6 +53,7 @@ are **not demotable to optional extras**.
 | `app/lib/components/DraftNote.svelte` | Side-panel draft/scratchpad |
 | `app/lib/components/SnapshotPanel.svelte` | Project snapshots (point-in-time backups) |
 | `app/lib/components/StatsPanel.svelte` | Writing stats panel |
+| `app/lib/components/PublishDialog.svelte` + `OnlinePublishPanel.svelte` + `StyledCopyPanel.svelte` | Online publishing plus sanitized WeChat/Zhihu rich clipboard workflows |
 
 ## Infrastructure (engine)
 

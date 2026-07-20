@@ -1,5 +1,9 @@
 # Competitive Analysis Summary
 
+> **Status: historical research.** Architecture recommendations below record
+> early alternatives, not current product contracts. Current behavior is defined
+> by `docs/design-docs/` and the indexed feature specifications.
+
 ## Feature Coverage Matrix
 
 | 能力维度 | MiaoYan | Typora | Obsidian | Scrivener | WonderPen | Notesnook |
@@ -111,7 +115,7 @@
 | **Frontend** | **Solid.js** or **Svelte** | Minimal runtime (~7KB vs React 45KB). Fast, small. |
 | **Markdown Parser** | **markdown-it** + custom plugins | Extensible, proven, lightweight. Or tree-sitter for incremental. |
 | **File Storage** | **Plain .md files** | External tool friendly. |
-| **Project Config** | **novelist.toml** per project | Minimal metadata: outline order, export settings, plugin config. |
+| **Project Config** | **project.toml** per project | Minimal project metadata; export choices are request-local. |
 | **Plugin System** | **WASM sandboxed** or **JS via quickjs** | Safe, cross-platform, fast. |
 | **Large File Handling** | **CodeMirror 6 viewport rendering** + lazy loading | CM6 already handles millions of lines. |
 
@@ -137,7 +141,6 @@
 ~/my-novel/                     # 用户项目目录
 ├── .novelist/                  # 项目元数据（git 可忽略或可提交）
 │   ├── project.toml            # 项目配置：名称、类型(novel/paper/script)、排序
-│   ├── export.toml             # 导出配置：格式、字体、排版规则
 │   ├── plugins.toml            # 插件配置
 │   └── workspace.json          # UI 状态：打开的标签页、侧栏宽度（不提交）
 ├── chapters/
@@ -170,30 +173,12 @@
 - 性能敏感插件可选 WASM
 - 插件权限分级：只读插件（主题/语法高亮）vs 读写插件（白板/导出）vs 系统插件（文件系统/网络）
 
-### 决策 4：导出系统
+### 决策 4：导出系统（当前实现）
 
-```toml
-# .novelist/export.toml
-[pdf]
-template = "academic-paper"     # 预设模板
-font_body = "Noto Serif SC"
-font_heading = "Noto Sans SC"
-font_size = 12
-line_height = 1.8
-margin = "2.5cm"
-page_size = "A4"
-
-[docx]
-template = "publisher-submission"
-style_map = "chapters/*.md"     # 哪些文件参与导出
-
-[html]
-theme = "clean-reading"
-```
-
-- 导出配置是项目级的，和内容分离
-- 插件可注册新导出格式（如 Final Draft、LaTeX、EPUB）
-- 导出时不修改源文件，纯渲染管道
+- 导出选项仅存在于当前对话框请求中，不使用 `.novelist/export.toml`
+- Rust 只接受固定格式参数；插件不能注册 Pandoc 参数或新导出格式
+- HTML 可嵌入当前主题；EPUB、DOCX、PDF 使用固定安全参数
+- 导出时不修改源文件，完成后原子替换目标文件
 
 ### 决策 5：大文件性能策略
 

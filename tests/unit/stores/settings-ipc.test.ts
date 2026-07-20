@@ -43,6 +43,12 @@ function resetStore() {
   vi.clearAllMocks();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
 describe('[contract] settingsStore.load', () => {
   beforeEach(resetStore);
 
@@ -62,6 +68,85 @@ describe('[contract] settingsStore.load', () => {
     expect(settingsStore.effective.view.show_hidden_files).toBe(true);
     expect(settingsStore.effective.is_project_scoped).toBe(true);
     expect(settingsStore.isProjectScoped).toBe(true);
+  });
+
+  it('ignores an older project response that resolves after the latest load', async () => {
+    const loadB = deferred<any>();
+    const loadA = deferred<any>();
+    (commands.getEffectiveSettings as any).mockImplementation((dirPath: string | null) => (
+      dirPath === '/B' ? loadB.promise : loadA.promise
+    ));
+
+    const pendingB = settingsStore.load('/B');
+    const pendingA = settingsStore.load('/A');
+    loadA.resolve({
+      status: 'ok',
+      data: {
+        ...DEFAULT_EFFECTIVE,
+        view: { ...DEFAULT_EFFECTIVE.view, sort_mode: 'name-asc' },
+        is_project_scoped: true,
+      },
+    });
+    await pendingA;
+    loadB.resolve({
+      status: 'ok',
+      data: {
+        ...DEFAULT_EFFECTIVE,
+        view: { ...DEFAULT_EFFECTIVE.view, sort_mode: 'name-desc' },
+        is_project_scoped: true,
+      },
+    });
+    await pendingB;
+
+    expect(settingsStore.effective.view.sort_mode).toBe('name-asc');
+  });
+
+  it('does not project a completed write into a newer loaded scope', async () => {
+    const writeA = deferred<any>();
+    (commands.getEffectiveSettings as any).mockResolvedValue({
+      status: 'ok',
+      data: { ...DEFAULT_EFFECTIVE, is_project_scoped: true },
+    });
+    await settingsStore.load('/A');
+    (commands.writeProjectSettings as any).mockReturnValue(writeA.promise);
+    const pendingWrite = settingsStore.writeView({ sort_mode: 'name-desc' });
+    (commands.getEffectiveSettings as any).mockResolvedValue({
+      status: 'ok',
+      data: {
+        ...DEFAULT_EFFECTIVE,
+        view: { ...DEFAULT_EFFECTIVE.view, sort_mode: 'name-asc' },
+        is_project_scoped: true,
+      },
+    });
+    await settingsStore.load('/B');
+    writeA.resolve({ status: 'ok', data: null });
+    await pendingWrite;
+
+    expect(settingsStore.effective.view.sort_mode).toBe('name-asc');
+  });
+
+  it('preserves and updates new-file location fields in the complete payload', async () => {
+    settingsStore.effective = {
+      ...DEFAULT_EFFECTIVE,
+      new_file: {
+        ...DEFAULT_EFFECTIVE.new_file,
+        default_dir: '/proj/pinned',
+        last_used_dir: '/proj/recent',
+      },
+      is_project_scoped: true,
+    };
+    (settingsStore as any).dirPath = '/proj';
+    (commands.writeProjectSettings as any).mockResolvedValue({ status: 'ok', data: null });
+
+    await settingsStore.writeNewFile({ template: 'Chapter {N}' });
+
+    expect(commands.writeProjectSettings).toHaveBeenCalledWith('/proj', null, expect.objectContaining({
+      template: 'Chapter {N}',
+      default_dir: '/proj/pinned',
+      last_used_dir: '/proj/recent',
+    }), null);
+    expect(settingsStore.effective.new_file.default_dir).toBe('/proj/pinned');
+    expect(settingsStore.effective.new_file.last_used_dir).toBe('/proj/recent');
   });
 
   it('treats an opened plain folder without project.toml as global-scoped settings', async () => {
@@ -539,7 +624,13 @@ describe('[contract] settingsStore.promoteToGlobal', () => {
 
     expect(commands.writeGlobalSettings).toHaveBeenCalledWith(
       { sort_mode: 'mtime-desc', show_hidden_files: true, wrap_file_names: false, sidebar_font_size: 16 },
-      { template: 'Chapter {N}', detect_from_folder: false, auto_rename_from_h1: false },
+      {
+        template: 'Chapter {N}',
+        detect_from_folder: false,
+        auto_rename_from_h1: false,
+        default_dir: null,
+        last_used_dir: null,
+      },
       { enabled: { mindmap: false } },
     );
   });

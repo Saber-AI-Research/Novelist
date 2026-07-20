@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-20
+
+### Added
+
+- **Styled Copy for WeChat and Zhihu.** Convert a frozen selection or full
+  document into sanitized rich HTML and plain text, preview target-specific
+  formatting, resolve local images and Mermaid diagrams, and copy the final
+  payload through the native clipboard without requiring an online publishing
+  account.
+- **Safe update-in-place publishing.** Ghost, self-hosted WordPress, and
+  WordPress.com posts retain verified remote identity and revision state so
+  repeat publishing updates the same post. Legacy posts can be bound or rebound
+  explicitly, while conflict, not-found, overwrite, and New Copy paths remain
+  visible and deliberate. Medium explains its create-only limitations.
+- **Durable publishing drafts and covers.** Forms are restored per document and
+  channel, cover images are stored as content-addressed project assets, and
+  macOS Command+V image paste works directly in the cover control.
+- **Editor structure commands.** Block type actions, selected-text quote
+  conversion, and Tab/Shift+Tab hierarchy changes for quotes, lists, and tasks
+  now preserve selections, CJK input, marker semantics, and one-step undo.
+- **Managed filename controls.** Template-driven H1 naming now has persistent
+  per-document ownership with explicit stop and re-enable actions.
+
+### Changed
+
+- File moves and renames now run as journaled lifecycle transactions that flush
+  pending state, migrate draft/recovery/naming/publishing sidecars, retarget
+  open tabs, preserve encoding state, and converge safely after partial failure.
+- Project switching now establishes the destination watcher before committing
+  the new workspace and reports watcher or path-retarget failures visibly.
+- AI Agent session ownership, teardown, retry, project switching, and
+  persistence are isolated so late output cannot cross project or session
+  boundaries.
+- Pandoc execution now uses bounded process, encoding, cancellation, timeout,
+  cleanup, capability, and diagnostic contracts shared by export, publishing,
+  and Styled Copy.
+- Startup update checks now deduplicate concurrent work, honor skipped versions,
+  remain silent for expected outcomes, and avoid loading updater support in
+  portable mode.
+- CI and release workflows use locked dependencies, pinned GitHub Actions,
+  strict Rust checks, and a pinned Pandoc 3.10 contract matrix. Releases remain
+  drafts until every platform artifact and updater manifest is reviewed.
+
+### Fixed
+
+- External changes now converge through notify and polling paths without
+  replacing an active IME composition or an unsaved local buffer.
+- Publish state-read failures no longer fall through to an accidental create,
+  and local image reads reject traversal and symlink escapes.
+- Export-owned temporary stylesheets are removed after expiry, cancellation, or
+  validation failure.
+- Editor context-menu cut, project-opening races, naming retries, publish mode
+  transitions, cover preview rendering, and updater retry state are covered by
+  deterministic regressions across Chromium, WebKit, Rust, and native macOS.
+
 ## [0.3.2] - 2026-06-30
 
 ### Added

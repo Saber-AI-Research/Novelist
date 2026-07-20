@@ -5,6 +5,7 @@
 - [Node.js](https://nodejs.org/) >= 20
 - [pnpm](https://pnpm.io/) >= 9
 - [Rust](https://rustup.rs/) >= 1.77
+- [Pandoc](https://pandoc.org/installing.html) 3.10 for `pnpm verify:rust` and `pnpm verify:ci`
 - System dependencies for Tauri v2:
   - **macOS**: Xcode Command Line Tools
   - **Linux**: `libcairo2-dev libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev`

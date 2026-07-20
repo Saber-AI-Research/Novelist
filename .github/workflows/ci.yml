@@ -10,28 +10,35 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: macos-latest
+    env:
+      PANDOC_VERSION: "3.10"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 9
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: pnpm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache Cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -42,7 +49,37 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Pandoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64)
+              archive_name="pandoc-${PANDOC_VERSION}-arm64-macOS.zip"
+              archive_sha256="d9cad01d96ae774a0dc8c8c45bb1ad3e4c5ff2cc2e24f45958f5f9b7974aee34"
+              extracted_dir="pandoc-${PANDOC_VERSION}-arm64"
+              ;;
+            x86_64)
+              archive_name="pandoc-${PANDOC_VERSION}-x86_64-macOS.zip"
+              archive_sha256="6334f4d9af7c9e37e761dfad56fa5507685f6d29724ebf31c4be6d5c654a3161"
+              extracted_dir="pandoc-${PANDOC_VERSION}-x86_64"
+              ;;
+            *)
+              echo "Unsupported macOS architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          archive_path="${RUNNER_TEMP}/${archive_name}"
+          install_dir="${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}"
+          curl -fsSL \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/${archive_name}" \
+            -o "${archive_path}"
+          printf '%s  %s\n' "${archive_sha256}" "${archive_path}" | shasum -a 256 -c -
+          mkdir -p "${install_dir}"
+          ditto -x -k "${archive_path}" "${install_dir}"
+          echo "${install_dir}/${extracted_dir}/bin" >> "${GITHUB_PATH}"
 
       - name: Svelte type check
         run: pnpm check
@@ -52,7 +89,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: vitest-coverage
           path: coverage/
@@ -70,16 +107,39 @@ jobs:
 
       - name: Cargo clippy
         working-directory: core
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Cargo test
         working-directory: core
-        run: cargo test
+        run: cargo test --locked
+
+      - name: Real Pandoc 3.10 CJK and styled-copy matrices
+        run: pnpm test:rust:pandoc
+
+  check-windows-pandoc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Verify Windows Pandoc security and lifecycle
+        working-directory: core
+        run: cargo test --locked --lib windows_
+
+      - name: Windows strict Clippy
+        working-directory: core
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   check-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Linux dependencies
         run: |
@@ -93,10 +153,10 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache Cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -108,8 +168,8 @@ jobs:
 
       - name: Cargo check
         working-directory: core
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: Cargo test
         working-directory: core
-        run: cargo test
+        run: cargo test --locked

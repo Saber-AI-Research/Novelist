@@ -45,8 +45,10 @@ vi.mock('$lib/ipc/commands', () => {
         calls.push({ name: 'getImageHostSettings', args: [] });
         return ok(mockSettings);
       },
-      readImageBytes: (path: string) => {
-        calls.push({ name: 'readImageBytes', args: [path] });
+      readImageBytes: (...args: string[]) => {
+        calls.push({ name: 'readImageBytes', args });
+        const reference = args[1];
+        if (reference.startsWith('/')) return err('unsafe_image: invalid_reference');
         return ok([1, 2, 3]);
       },
       uploadImageQiniu: makeUpload('qiniu'),
@@ -177,10 +179,17 @@ describe('uploadAllInDocument', () => {
       ![remote](https://cdn.example.com/already.png)
       ![root](/abs/path.png)
     `;
-    const report = await uploadAllInDocument(doc, '/proj');
-    expect(report.successes).toHaveLength(2); // local relative + root abs
-    expect(report.failures).toHaveLength(0);
-    expect(report.successes.map(s => s.original)).toEqual(['./assets/foo.png', '/abs/path.png']);
+    const report = await uploadAllInDocument(doc, {
+      baseDir: '/proj/章节',
+    });
+    expect(report.successes).toHaveLength(1);
+    expect(report.failures).toHaveLength(1);
+    expect(report.successes.map(s => s.original)).toEqual(['./assets/foo.png']);
+    expect(report.failures.map(f => f.original)).toEqual(['/abs/path.png']);
+    expect(calls.find(call => call.name === 'readImageBytes')?.args).toEqual([
+      '/proj/章节',
+      './assets/foo.png',
+    ]);
   });
 
   it('continues past failures and reports them', async () => {
@@ -190,7 +199,7 @@ describe('uploadAllInDocument', () => {
     const { uploadAllInDocument } = await import('$lib/services/image-host');
     const report = await uploadAllInDocument(
       '![a](./a.png) ![b](./b.png)',
-      '/proj',
+      { baseDir: '/proj' },
     );
     expect(report.successes).toHaveLength(0);
     expect(report.failures).toHaveLength(2);
@@ -199,9 +208,38 @@ describe('uploadAllInDocument', () => {
 
   it('throws NoActiveHostError when no host is configured', async () => {
     const { uploadAllInDocument, NoActiveHostError } = await import('$lib/services/image-host');
-    await expect(uploadAllInDocument('![a](./a.png)', '/proj')).rejects.toBeInstanceOf(
+    await expect(uploadAllInDocument('![a](./a.png)', {
+      baseDir: '/proj',
+    })).rejects.toBeInstanceOf(
       NoActiveHostError,
     );
+  });
+
+  it('uses the registered document directory for a single-file read', async () => {
+    mockSettings.hosts = [{ id: 'h', name: 'h', provider: 'imgur', client_id: 'x' } as never];
+    mockSettings.active_host_id = 'h';
+    const { uploadAllInDocument } = await import('$lib/services/image-host');
+    await uploadAllInDocument('![](插图/封面.png)', {
+      baseDir: '/Users/writer/小说',
+    });
+    expect(calls.find(call => call.name === 'readImageBytes')?.args).toEqual([
+      '/Users/writer/小说',
+      '插图/封面.png',
+    ]);
+  });
+});
+
+describe('readLocalImageDataUri', () => {
+  it('loads preview bytes through the confined document scope', async () => {
+    const { readLocalImageDataUri } = await import('$lib/services/image-host');
+
+    await expect(
+      readLocalImageDataUri('插图/人物甲.png', { baseDir: '/project/章节' }),
+    ).resolves.toBe('data:image/png;base64,AQID');
+    expect(calls.find(call => call.name === 'readImageBytes')?.args).toEqual([
+      '/project/章节',
+      '插图/人物甲.png',
+    ]);
   });
 });
 

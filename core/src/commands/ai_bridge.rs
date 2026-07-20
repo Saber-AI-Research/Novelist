@@ -225,9 +225,7 @@ pub async fn ai_fetch_stream_start(
                     Some(Ok(bytes)) => {
                         if buf.len() + bytes.len() > MAX_RESPONSE_BYTES {
                             emit(AiStreamEvent::Error {
-                                message: format!(
-                                    "Response exceeded {MAX_RESPONSE_BYTES} bytes"
-                                ),
+                                message: format!("Response exceeded {MAX_RESPONSE_BYTES} bytes"),
                                 status: None,
                             });
                             return;

@@ -1,9 +1,11 @@
 import { isScratchFile } from './scratch';
+import { compareByMode } from './file-sort';
 
 export interface ExportFileSource {
   is_dir: boolean;
   name: string;
   path: string;
+  children?: readonly ExportFileSource[];
 }
 
 export interface ExportActiveTab {
@@ -27,9 +29,18 @@ export function collectExportFiles(
   activeTab: ExportActiveTab | null | undefined,
 ): string[] {
   if (projectDir) {
-    return projectFiles
-      .filter((f) => !f.is_dir && (f.name.endsWith('.md') || f.name.endsWith('.markdown')))
-      .map((f) => f.path);
+    const files: string[] = [];
+    const visit = (entries: readonly ExportFileSource[]) => {
+      for (const entry of [...entries].sort((a, b) => compareByMode(a, b, 'numeric-asc'))) {
+        if (entry.is_dir) {
+          if (entry.children) visit(entry.children);
+        } else if (/\.(?:md|markdown)$/i.test(entry.name)) {
+          files.push(entry.path);
+        }
+      }
+    };
+    visit(projectFiles);
+    return files;
   }
   if (activeTab && activeTab.filePath && !isScratchFile(activeTab.filePath)) {
     return [activeTab.filePath];

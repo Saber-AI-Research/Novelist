@@ -1,11 +1,10 @@
 /**
  * Large file optimizations for CodeMirror 6.
  *
- * Strategy (from design-overview.md):
+ * Strategy (matching Editor.svelte):
  * - Normal (< 1MB): Full WYSIWYG + all extensions
- * - Large (1-10MB): Disable WYSIWYG, disable expensive extensions,
- *   keep syntax highlighting + virtual scrolling
- * - Huge (> 10MB): Future Rust-backed viewport mode with ropey
+ * - Large (1-3.5MB): Disable WYSIWYG and expensive extensions
+ * - Huge (>= 3.5MB): Read-only stripped mode
  *
  * This module provides a reduced extension set for large files
  * and utilities for file size classification.
@@ -13,13 +12,13 @@
 
 export const enum FileSize {
   Normal,   // < 1 MB
-  Large,    // 1-10 MB
-  Huge,     // > 10 MB (not yet implemented)
+  Large,    // 1-3.5 MB
+  Huge,     // >= 3.5 MB, read-only
 }
 
 export function classifyFileSize(bytes: number): FileSize {
-  if (bytes > 10 * 1024 * 1024) return FileSize.Huge;
-  if (bytes > 1 * 1024 * 1024) return FileSize.Large;
+  if (bytes >= 3.5 * 1024 * 1024) return FileSize.Huge;
+  if (bytes >= 1 * 1024 * 1024) return FileSize.Large;
   return FileSize.Normal;
 }
 
@@ -37,8 +36,7 @@ export function classifyFileSize(bytes: number): FileSize {
  * Extensions that are SAFE for large files:
  * - lineNumbers (CM6 virtualizes this well)
  * - history (uses efficient change tracking)
- * - markdown syntax highlighting (CM6 parser is incremental)
  * - search keymap (user-initiated, not per-keystroke)
- * - lineWrapping (CSS-only)
  * - drawSelection (lightweight)
+ * - selected-quote and structural hierarchy handlers (action-local)
  */

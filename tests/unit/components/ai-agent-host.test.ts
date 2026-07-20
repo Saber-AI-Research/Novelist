@@ -13,6 +13,7 @@ vi.mock('$lib/ipc/commands', () => ({
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }));
 
 import {
   parseClaudeLine,
@@ -82,6 +83,21 @@ describe('ai-agent stream-json parser', () => {
     expect(parseClaudeLine(line)).toEqual({
       kind: 'tool-result',
       content: 'file1\nfile2',
+      isError: false,
+    });
+  });
+
+  it('marks an error tool_result so the owning turn can expose recovery', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', content: '权限不足', is_error: true }],
+      },
+    });
+    expect(parseClaudeLine(line)).toEqual({
+      kind: 'tool-result',
+      content: '权限不足',
+      isError: true,
     });
   });
 
@@ -96,6 +112,20 @@ describe('ai-agent stream-json parser', () => {
       kind: 'result',
       text: 'All done.',
       cost: 0.0123,
+    });
+  });
+
+  it('maps an error result envelope to a turn failure', () => {
+    const line = JSON.stringify({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'Agent execution failed',
+    });
+    expect(parseClaudeLine(line)).toEqual({
+      kind: 'failure',
+      stage: 'stream',
+      message: 'Agent execution failed',
     });
   });
 
@@ -147,6 +177,7 @@ describe('ai-agent stream-json parser', () => {
     expect(parseClaudeLine(line)).toEqual({
       kind: 'tool-result',
       content: '{"ok":true}',
+      isError: false,
     });
   });
 });
@@ -238,8 +269,23 @@ describe('[contract] host bridge wrappers', () => {
     const result = await listenClaudeStream('sess-7', handler);
     expect(listen).toHaveBeenCalledWith('claude-stream://sess-7', expect.any(Function));
     // Simulate a streamed event — callback unwraps .payload.
-    captured({ payload: { kind: 'stdout-line', data: 'hello' } });
+    captured({ payload: { kind: 'stdout-line', data: 'hello', target_label: 'main' } });
     expect(handler).toHaveBeenCalledWith({ kind: 'stdout-line', data: 'hello' });
     expect(result).toBe(unlisten);
+  });
+
+  it('listenClaudeStream drops foreign and missing target labels', async () => {
+    let captured: any = null;
+    listen.mockImplementation(async (_channel: string, cb: any) => {
+      captured = cb;
+      return vi.fn();
+    });
+    const handler = vi.fn();
+    await listenClaudeStream('sess-7', handler);
+
+    captured({ payload: { kind: 'stderr-line', data: 'foreign', target_label: 'novelist-2' } });
+    captured({ payload: { kind: 'stderr-line', data: 'missing' } });
+
+    expect(handler).not.toHaveBeenCalled();
   });
 });

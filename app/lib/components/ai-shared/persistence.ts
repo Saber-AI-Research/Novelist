@@ -1,27 +1,17 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  AiPromptAsset,
+  AiPromptAssets,
+  AiSessionFile,
+  AiSessionKind,
+} from '$lib/ipc/commands';
 
-export type AiSessionKind = 'talk' | 'agent';
-
-export type AiSessionFile = {
-  id: string;
-  kind: AiSessionKind;
-  path: string;
-  updatedAt?: number;
-};
-
-export type AiPromptAsset = {
-  id: string;
-  kind: 'command' | 'skill' | 'memory' | string;
-  path: string;
-  name: string;
-  content: string;
-};
-
-export type AiPromptAssets = {
-  commands: AiPromptAsset[];
-  skills: AiPromptAsset[];
-  memory?: AiPromptAsset | null;
-};
+export type {
+  AiPromptAsset,
+  AiPromptAssets,
+  AiSessionFile,
+  AiSessionKind,
+} from '$lib/ipc/commands';
 
 function sessionKindArg(kind: AiSessionKind): 'talk' | 'agent' {
   return kind;

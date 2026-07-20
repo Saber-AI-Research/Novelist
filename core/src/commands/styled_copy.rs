@@ -1,7 +1,17 @@
 use crate::error::AppError;
 use crate::services::publish::styled_copy_pandoc;
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, Metadata};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
+
+#[cfg(test)]
+type BeforeImageOpenHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static BEFORE_IMAGE_OPEN_HOOKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, BeforeImageOpenHook>>,
+> = std::sync::OnceLock::new();
 
 pub const MAX_STYLED_COPY_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_STYLED_CLIPBOARD_HTML_BYTES: usize = styled_copy_pandoc::MAX_HTML_BYTES;
@@ -29,60 +39,62 @@ pub async fn read_styled_copy_image(
         return Err(unsafe_asset("invalid_path"));
     }
 
-    let candidate = tokio::fs::canonicalize(PathBuf::from(path))
+    tokio::task::spawn_blocking(move || read_styled_copy_image_blocking(path, allowed_roots))
         .await
-        .map_err(|_| unsafe_asset("invalid_path"))?;
-    let mut canonical_roots = Vec::with_capacity(allowed_roots.len());
+        .map_err(|_| unsafe_asset("unreadable"))?
+}
+
+struct AllowedRoot {
+    canonical: PathBuf,
+    directory: Dir,
+}
+
+fn read_styled_copy_image_blocking(
+    path: String,
+    allowed_roots: Vec<String>,
+) -> Result<StyledCopyImage, AppError> {
+    let candidate =
+        std::fs::canonicalize(PathBuf::from(path)).map_err(|_| unsafe_asset("invalid_path"))?;
+    let mut roots = Vec::with_capacity(allowed_roots.len());
     for root in allowed_roots {
         if root.trim().is_empty() {
             return Err(unsafe_asset("invalid_root"));
         }
-        let canonical = tokio::fs::canonicalize(PathBuf::from(root))
-            .await
-            .map_err(|_| unsafe_asset("invalid_root"))?;
-        let metadata = tokio::fs::metadata(&canonical)
-            .await
-            .map_err(|_| unsafe_asset("invalid_root"))?;
-        if !metadata.is_dir() {
-            return Err(unsafe_asset("invalid_root"));
-        }
-        canonical_roots.push(canonical);
+        roots.push(acquire_allowed_root(PathBuf::from(root))?);
     }
 
-    if !canonical_roots
+    let root = roots
         .iter()
-        .any(|root| path_is_within(&candidate, root))
-    {
-        return Err(unsafe_asset("outside_allowed_roots"));
-    }
+        .find(|root| path_is_within(&candidate, &root.canonical))
+        .ok_or_else(|| unsafe_asset("outside_allowed_roots"))?;
+    let relative = candidate
+        .strip_prefix(&root.canonical)
+        .map_err(|_| unsafe_asset("outside_allowed_roots"))?;
+    let relative = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
 
-    let metadata = tokio::fs::metadata(&candidate)
-        .await
-        .map_err(|_| unsafe_asset("invalid_path"))?;
-    validate_file_metadata(&metadata)?;
+    #[cfg(test)]
+    run_before_image_open_hook(&candidate);
 
-    let mut file = tokio::fs::File::open(&candidate)
-        .await
+    let mut file = root
+        .directory
+        .open(relative)
         .map_err(|_| unsafe_asset("unreadable"))?;
-    let opened_metadata = file
-        .metadata()
-        .await
-        .map_err(|_| unsafe_asset("unreadable"))?;
+    let opened_metadata = file.metadata().map_err(|_| unsafe_asset("unreadable"))?;
     validate_file_metadata(&opened_metadata)?;
 
     let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
-    (&mut file)
+    file.by_ref()
         .take((MAX_STYLED_COPY_IMAGE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .await
         .map_err(|_| unsafe_asset("unreadable"))?;
     if bytes.len() > MAX_STYLED_COPY_IMAGE_BYTES {
         return Err(AppError::Custom("asset_too_large".to_string()));
     }
-    let after_read = file
-        .metadata()
-        .await
-        .map_err(|_| unsafe_asset("unreadable"))?;
+    let after_read = file.metadata().map_err(|_| unsafe_asset("unreadable"))?;
     validate_file_metadata(&after_read)?;
 
     let mime = detect_image_mime(&bytes)
@@ -91,6 +103,51 @@ pub async fn read_styled_copy_image(
         bytes,
         mime: mime.to_string(),
     })
+}
+
+fn acquire_allowed_root(path: PathBuf) -> Result<AllowedRoot, AppError> {
+    let directory = Dir::open_ambient_dir(&path, ambient_authority())
+        .map_err(|_| unsafe_asset("invalid_root"))?;
+    let metadata = directory
+        .dir_metadata()
+        .map_err(|_| unsafe_asset("invalid_root"))?;
+    if !metadata.is_dir() {
+        return Err(unsafe_asset("invalid_root"));
+    }
+
+    let canonical = std::fs::canonicalize(&path).map_err(|_| unsafe_asset("invalid_root"))?;
+    let current = Dir::open_ambient_dir(&canonical, ambient_authority())
+        .map_err(|_| unsafe_asset("invalid_root"))?;
+    let current_metadata = current
+        .dir_metadata()
+        .map_err(|_| unsafe_asset("invalid_root"))?;
+    if !metadata_matches(&metadata, &current_metadata) {
+        return Err(unsafe_asset("invalid_root"));
+    }
+
+    Ok(AllowedRoot {
+        canonical,
+        directory,
+    })
+}
+
+#[cfg(unix)]
+fn metadata_matches(left: &Metadata, right: &Metadata) -> bool {
+    use cap_std::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn metadata_matches(_left: &Metadata, _right: &Metadata) -> bool {
+    // cap-std omits FILE_SHARE_DELETE for retained Windows directory handles,
+    // preventing the capability root from being renamed or deleted during lookup.
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_matches(_left: &Metadata, _right: &Metadata) -> bool {
+    false
 }
 
 #[tauri::command]
@@ -125,7 +182,29 @@ fn path_is_within(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-fn validate_file_metadata(metadata: &std::fs::Metadata) -> Result<(), AppError> {
+#[cfg(test)]
+#[allow(dead_code)]
+fn install_before_image_open_hook(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
+    BEFORE_IMAGE_OPEN_HOOKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path, Box::new(hook));
+}
+
+#[cfg(test)]
+fn run_before_image_open_hook(path: &Path) {
+    let hook = BEFORE_IMAGE_OPEN_HOOKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(path);
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+fn validate_file_metadata(metadata: &Metadata) -> Result<(), AppError> {
     if !metadata.is_file() {
         return Err(unsafe_asset("not_regular_file"));
     }
@@ -233,6 +312,37 @@ mod tests {
         assert!(error.starts_with("unsafe_asset:"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn styled_copy_image_rejects_parent_symlink_swap_after_containment_check() {
+        let parent = TempDir::new().unwrap();
+        let root = parent.path().join("allowed");
+        let checked_parent = root.join("checked");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir_all(&checked_parent).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+
+        let candidate = checked_parent.join("image.png");
+        std::fs::write(&candidate, JPEG).unwrap();
+        std::fs::write(outside.join("image.png"), PNG).unwrap();
+
+        let moved_parent = root.join("checked-before-swap");
+        install_before_image_open_hook(std::fs::canonicalize(&candidate).unwrap(), {
+            let checked_parent = checked_parent.clone();
+            let outside = outside.clone();
+            move || {
+                std::fs::rename(&checked_parent, &moved_parent).unwrap();
+                std::os::unix::fs::symlink(&outside, &checked_parent).unwrap();
+            }
+        });
+
+        let error = read(&candidate, &[&root])
+            .await
+            .expect_err("swapped parent must not expose outside PNG bytes")
+            .to_string();
+        assert!(error.starts_with("unsafe_asset:"), "{error}");
+    }
+
     #[tokio::test]
     async fn styled_copy_image_rejects_empty_directory_svg_and_oversize() {
         let dir = TempDir::new().unwrap();
@@ -281,6 +391,22 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(empty_roots.starts_with("unsafe_asset:"), "{empty_roots}");
+    }
+
+    #[tokio::test]
+    async fn styled_copy_image_preserves_candidate_error_precedence() {
+        let dir = TempDir::new().unwrap();
+        let missing_candidate = dir.path().join("missing.png");
+        let missing_root = dir.path().join("missing-root");
+
+        let error = read_styled_copy_image(
+            missing_candidate.to_string_lossy().to_string(),
+            vec![missing_root.to_string_lossy().to_string()],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "unsafe_asset: invalid_path");
     }
 
     #[test]

@@ -14,6 +14,10 @@ const { h } = vi.hoisted(() => {
     listDirectory: vi.fn(),
     createFile: vi.fn(),
     createFileWithBody: vi.fn(),
+    computeDocumentKey: vi.fn(),
+    writeManagedNameState: vi.fn(),
+    readManagedNameState: vi.fn(),
+    deleteManagedNameState: vi.fn(),
   };
 
   const projectState = {
@@ -99,15 +103,23 @@ vi.mock('$lib/stores/templates.svelte', () => ({
 import {
   createScratchFile,
   createNewFileInProject,
+  currentFilenameTemplateRaw,
   executeTemplate,
+  persistManagedNameEnrollment,
   requestSaveCurrentAsTemplate,
 } from '$lib/services/new-file';
+import { clearManagedNameCache, loadManagedName } from '$lib/services/managed-name-persistence';
 
 const t = (k: string) => k;
 
 beforeEach(() => {
+  clearManagedNameCache();
   Object.values(h.cmd).forEach((fn: any) => fn.mockReset?.());
   h.cmd.registerOpenFile.mockResolvedValue({ status: 'ok' });
+  h.cmd.computeDocumentKey.mockImplementation((_project: string, path: string) => Promise.resolve({ status: 'ok', data: path.replace(/^\/proj\/?/, '') }));
+  h.cmd.writeManagedNameState.mockResolvedValue({ status: 'ok', data: null });
+  h.cmd.readManagedNameState.mockResolvedValue({ status: 'ok', data: null });
+  h.cmd.deleteManagedNameState.mockResolvedValue({ status: 'ok', data: null });
   h.projectState.dirPath = null;
   h.projectState.enterSingleFileMode.mockClear();
   h.projectState.updateFiles.mockClear();
@@ -167,6 +179,62 @@ describe('[contract] createNewFileInProject', () => {
     expect(h.cmd.createFile).toHaveBeenCalledWith('/proj', 'Chapter 1.md');
     expect(h.settingsState.recordLastUsedDir).toHaveBeenCalledWith('/proj');
     expect(h.tabsState.openTab).toHaveBeenCalledWith('/proj/Chapter 1.md', '', { justCreated: true });
+    expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+  });
+
+  it('enrolls managed naming for created files when template contains {title}', async () => {
+    h.projectState.dirPath = '/proj';
+    h.newFileState.template = '第{N}章-{title}';
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/第1章-Untitled.md' });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+    await createNewFileInProject();
+    expect(h.cmd.writeManagedNameState).toHaveBeenCalledWith('/proj', '/proj/第1章-Untitled.md', {
+      version: 1,
+      status: 'managed',
+      templateRaw: '第{N}章-{title}',
+      currentH1: '',
+      documentKey: '第1章-Untitled.md',
+    });
+  });
+
+  it('logs a safe warning without authorizing managed state when project enrollment write fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.projectState.dirPath = '/proj';
+      h.newFileState.template = '第{N}章-{title}';
+      h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+      h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/第1章-Untitled.md' });
+      h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+      h.cmd.writeManagedNameState.mockResolvedValue({ status: 'error', error: 'disk path /proj/secret.md' });
+
+      await createNewFileInProject();
+
+      expect(h.tabsState.openTab).toHaveBeenCalledWith('/proj/第1章-Untitled.md', '', { justCreated: true });
+      expect(warn).toHaveBeenCalledWith('Managed-name enrollment failed during new-file creation');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('/proj/第1章-Untitled.md');
+      await expect(loadManagedName('/proj', '/proj/第1章-Untitled.md')).resolves.toEqual({ kind: 'missing' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when project new-file template has no canonical title token', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.projectState.dirPath = '/proj';
+      h.newFileState.template = 'Chapter {N}';
+      h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+      h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/Chapter 1.md' });
+      h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+      await createNewFileInProject();
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('falls back to project root when the resolved dir probe fails', async () => {
@@ -389,6 +457,225 @@ describe('[contract] executeTemplate — new-file mode', () => {
       t,
     );
     expect(h.cmd.createFileWithBody).toHaveBeenCalledWith('/proj', 'Untitled.md', 'x');
+  });
+
+  it('logs a safe warning without authorizing managed state when template enrollment write fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.projectState.dirPath = '/proj';
+      h.templatesStoreMock.read.mockResolvedValue({ body: '# 开篇\n\ncontent' });
+      h.cmd.createFileWithBody.mockResolvedValue({ status: 'ok', data: '/proj/第1章-开篇.md' });
+      h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+      h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '# 开篇\n\ncontent' });
+      h.cmd.writeManagedNameState.mockResolvedValue({ status: 'error', error: 'disk path /proj/secret.md' });
+
+      const err = await executeTemplate(
+        {
+          id: 'x',
+          name: 'Chapter',
+          source: 'project',
+          mode: 'new-file',
+          defaultFilename: '第{N}章-{title}.md',
+        } as any,
+        () => null,
+        t,
+      );
+
+      expect(err).toBeNull();
+      expect(warn).toHaveBeenCalledWith('Managed-name enrollment failed during template file creation');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('/proj/第1章-开篇.md');
+      await expect(loadManagedName('/proj', '/proj/第1章-开篇.md')).resolves.toEqual({ kind: 'missing' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('[contract] persistManagedNameEnrollment (shared Sidebar + Cmd+N helper)', () => {
+  it('enrolls managed naming when the source template contains canonical {title}', async () => {
+    h.projectState.dirPath = '/proj';
+    h.cmd.readManagedNameState.mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '第{N}章-{title}',
+        currentH1: '',
+        documentKey: 'chapter.md',
+      },
+    });
+    await expect(persistManagedNameEnrollment(
+      '/proj',
+      '/proj/chapter.md',
+      '第{N}章-{title}',
+      '',
+      'Managed-name enrollment failed during sidebar header new-file creation',
+    )).resolves.toBe('enrolled');
+    expect(h.cmd.writeManagedNameState).toHaveBeenCalledWith('/proj', '/proj/chapter.md', {
+      version: 1,
+      status: 'managed',
+      templateRaw: '第{N}章-{title}',
+      currentH1: '',
+      documentKey: 'chapter.md',
+    });
+  });
+
+  it('does not enroll when the source template lacks canonical {title}', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await persistManagedNameEnrollment(
+        '/proj',
+        '/proj/notes.md',
+        'Chapter {N}',
+        '',
+        'Managed-name enrollment failed during sidebar header new-file creation',
+      );
+      expect(h.cmd.computeDocumentKey).not.toHaveBeenCalled();
+      expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    '/proj/board.kanban',
+    '/proj/plot.canvas',
+    '/proj/notes.txt',
+    '/proj/plugin.json',
+  ])('does not enroll non-Markdown file %s', async (filePath) => {
+    await persistManagedNameEnrollment('/proj', filePath, '{title}', '', 'warning');
+    expect(h.cmd.computeDocumentKey).not.toHaveBeenCalled();
+    expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+  });
+
+  it('confirms successful enrollment through an authoritative persistence read', async () => {
+    h.cmd.readManagedNameState.mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '{title}',
+        currentH1: '',
+        documentKey: 'chapter.md',
+      },
+    });
+    await expect(
+      persistManagedNameEnrollment('/proj', '/proj/chapter.md', '{title}', '', 'warning'),
+    ).resolves.toBe('enrolled');
+    expect(h.cmd.readManagedNameState).toHaveBeenCalledWith('/proj', '/proj/chapter.md');
+  });
+
+  it('reports failed enrollment when a successful write is not observable on read-back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.cmd.readManagedNameState.mockResolvedValueOnce({ status: 'ok', data: null });
+      await expect(
+        persistManagedNameEnrollment('/proj', '/proj/chapter.md', '{title}', '', 'safe warning'),
+      ).resolves.toBe('failed');
+      expect(warn).toHaveBeenCalledWith('safe warning');
+      await expect(loadManagedName('/proj', '/proj/chapter.md')).resolves.toEqual({ kind: 'missing' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('uses the shared Markdown H1 parser when enrolling template-created files', async () => {
+    h.projectState.dirPath = '/proj';
+    const body = '```md\n# code sample\n```\n\n真实标题\n====\n';
+    h.templatesStoreMock.read.mockResolvedValue({ body });
+    h.cmd.createFileWithBody.mockResolvedValue({ status: 'ok', data: '/proj/真实标题.md' });
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: body });
+    h.cmd.readManagedNameState.mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '{title}',
+        currentH1: '真实标题',
+        documentKey: '真实标题.md',
+      },
+    });
+
+    await executeTemplate(
+      { id: 'x', name: 'Chapter', source: 'project', mode: 'new-file', defaultFilename: '{title}' } as any,
+      () => null,
+      t,
+    );
+
+    expect(h.cmd.writeManagedNameState).toHaveBeenCalledWith(
+      '/proj',
+      '/proj/真实标题.md',
+      expect.objectContaining({ currentH1: '真实标题' }),
+    );
+  });
+
+  it('rejects typo tokens like {Title} and { title } without enrollment', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await persistManagedNameEnrollment('/proj', '/proj/a.md', 'Chapter {Title}', '', 'w1');
+      await persistManagedNameEnrollment('/proj', '/proj/b.md', 'Chapter { title }', '', 'w2');
+      await persistManagedNameEnrollment('/proj', '/proj/c.md', 'Chapter {TITLE}', '', 'w3');
+      expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('logs the static safe warning without leaking file paths when write fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.cmd.writeManagedNameState.mockResolvedValue({ status: 'error', error: 'disk /proj/secret.md' });
+      await persistManagedNameEnrollment(
+        '/proj',
+        '/proj/第1章-Untitled.md',
+        '第{N}章-{title}',
+        '',
+        'Managed-name enrollment failed during sidebar header new-file creation',
+      );
+      expect(warn).toHaveBeenCalledWith('Managed-name enrollment failed during sidebar header new-file creation');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('/proj/第1章-Untitled.md');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('never throws even if enableManagedNameForCreatedFile rejects', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      h.cmd.computeDocumentKey.mockRejectedValue(new Error('boom /proj/leak.md'));
+      await expect(
+        persistManagedNameEnrollment(
+          '/proj',
+          '/proj/chapter.md',
+          '第{N}章-{title}',
+          '',
+          'Managed-name enrollment failed during sidebar context-menu new-file creation',
+        ),
+      ).resolves.toBe('failed');
+      expect(warn).toHaveBeenCalledWith('Managed-name enrollment failed during sidebar context-menu new-file creation');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('/proj/leak.md');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('[contract] currentFilenameTemplateRaw (shared Sidebar + Cmd+N gate)', () => {
+  it('returns the resolved newFileSettings template so Sidebar shares Cmd+N enrollment gate', () => {
+    h.projectState.dirPath = '/proj';
+    h.newFileState.template = '第{N}章-{title}';
+    expect(currentFilenameTemplateRaw()).toBe('第{N}章-{title}');
+  });
+
+  it('preserves the exact literal {title} even when the raw template also has other tokens', () => {
+    h.projectState.dirPath = '/proj';
+    h.newFileState.template = '{date:YYYY}-{title}';
+    const resolved = currentFilenameTemplateRaw();
+    expect(resolved).toContain('{title}');
   });
 });
 

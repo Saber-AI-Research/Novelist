@@ -262,8 +262,8 @@ function buildMermaidBlockState(state: EditorState): MermaidBlockState {
 export const mermaidPlugin = StateField.define<MermaidBlockState>({
   create(state) { return buildMermaidBlockState(state); },
   update(value, tr) {
-    if (tr.state.field(imeComposingField, false)) return value;
     if (tr.docChanged) return buildMermaidBlockState(tr.state);
+    if (tr.state.field(imeComposingField, false)) return value;
     if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
       return buildMermaidBlockState(tr.state);
     }

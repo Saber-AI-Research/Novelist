@@ -14,14 +14,14 @@ function node(name: string, isDir: boolean, path = `/proj/${name}`): FileNode {
 }
 
 describe('projectStore tree extensions', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear();
-    projectStore.close();
+    await projectStore.close();
     vi.clearAllMocks();
   });
 
   it('expandFolder lazily loads children on first call', async () => {
-    projectStore.setProject('/proj', null, [node('sub', true)]);
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
     (commands.listDirectory as any).mockResolvedValue({
       status: 'ok',
       data: [{ name: 'a.md', path: '/proj/sub/a.md', is_dir: false, size: 0 }],
@@ -37,7 +37,7 @@ describe('projectStore tree extensions', () => {
   });
 
   it('expandFolder does not re-fetch when children already loaded', async () => {
-    projectStore.setProject('/proj', null, [node('sub', true)]);
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
     (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
 
     await projectStore.expandFolder('/proj/sub');
@@ -48,7 +48,7 @@ describe('projectStore tree extensions', () => {
   });
 
   it('collapseFolder preserves cached children', async () => {
-    projectStore.setProject('/proj', null, [node('sub', true)]);
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
     (commands.listDirectory as any).mockResolvedValue({
       status: 'ok',
       data: [{ name: 'a.md', path: '/proj/sub/a.md', is_dir: false, size: 0 }],
@@ -64,7 +64,7 @@ describe('projectStore tree extensions', () => {
 
   it('expandFolderRecursive expands the subtree and lazily loads each level', async () => {
     // Root: a/ b/   a/: a1/   a/a1/: leaf.md
-    projectStore.setProject('/proj', null, [node('a', true, '/proj/a'), node('b', true, '/proj/b')]);
+    await projectStore.setProject('/proj', null, [node('a', true, '/proj/a'), node('b', true, '/proj/b')]);
 
     (commands.listDirectory as any).mockImplementation((p: string) => {
       if (p === '/proj/a') return Promise.resolve({ status: 'ok', data: [{ name: 'a1', path: '/proj/a/a1', is_dir: true, size: 0 }] });
@@ -85,7 +85,7 @@ describe('projectStore tree extensions', () => {
   });
 
   it('collapseFolderRecursive collapses every descendant without unloading children', async () => {
-    projectStore.setProject('/proj', null, [node('a', true, '/proj/a')]);
+    await projectStore.setProject('/proj', null, [node('a', true, '/proj/a')]);
     (commands.listDirectory as any).mockImplementation((p: string) => {
       if (p === '/proj/a') return Promise.resolve({ status: 'ok', data: [{ name: 'a1', path: '/proj/a/a1', is_dir: true, size: 0 }] });
       if (p === '/proj/a/a1') return Promise.resolve({ status: 'ok', data: [{ name: 'leaf.md', path: '/proj/a/a1/leaf.md', is_dir: false, size: 0 }] });
@@ -104,7 +104,7 @@ describe('projectStore tree extensions', () => {
   });
 
   it('refreshFolder re-fetches an already-loaded folder', async () => {
-    projectStore.setProject('/proj', null, [node('sub', true)]);
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
     (commands.listDirectory as any).mockResolvedValueOnce({
       status: 'ok',
       data: [{ name: 'a.md', path: '/proj/sub/a.md', is_dir: false, size: 0 }],

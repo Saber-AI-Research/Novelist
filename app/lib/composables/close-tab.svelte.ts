@@ -28,7 +28,7 @@ export function createCloseTab() {
       const remainingTabs = tabsStore.activeTab;
 
       if (!remainingTabs && projectStore.singleFileMode) {
-        projectStore.close();
+        await projectStore.close();
       } else if (!remainingTabs && !projectStore.dirPath) {
         getCurrentWindow().destroy();
       }

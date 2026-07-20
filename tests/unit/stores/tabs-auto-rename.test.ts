@@ -21,6 +21,9 @@ vi.mock('$lib/ipc/commands', () => ({
     broadcastFileRenamed: vi.fn(),
     registerOpenFile: vi.fn(),
     unregisterOpenFile: vi.fn(),
+    readManagedNameState: vi.fn(),
+    writeManagedNameState: vi.fn(),
+    computeDocumentKey: vi.fn(),
   },
 }));
 
@@ -36,23 +39,39 @@ vi.mock('$lib/i18n', () => ({
 }));
 
 import { tabsStore } from '$lib/stores/tabs.svelte';
+import { projectStore } from '$lib/stores/project.svelte';
 import { commands } from '$lib/ipc/commands';
 import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
+import { clearManagedNameCache } from '$lib/services/managed-name-persistence';
 
 const PROJECT = '/proj';
 
 describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
   beforeEach(() => {
     localStorage.clear();
+    clearManagedNameCache();
     tabsStore.closeAll();
+    projectStore.dirPath = PROJECT;
     vi.clearAllMocks();
     (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
-    (commands.renameItem as any).mockImplementation((_old: string, name: string) =>
-      Promise.resolve({ status: 'ok', data: `${PROJECT}/${name}` }),
+    (commands.renameItem as any).mockImplementation((_project: string, _old: string, name: string) =>
+      Promise.resolve({ status: 'ok', data: { new_path: `${PROJECT}/${name}`, migration: { status: 'full_success', migrated: 0, conflicts: 0, errors: [] } } }),
     );
     (commands.broadcastFileRenamed as any).mockResolvedValue({ status: 'ok', data: null });
     (commands.registerOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
     (commands.unregisterOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.computeDocumentKey as any).mockImplementation((_project: string, path: string) => Promise.resolve({ status: 'ok', data: path.slice(PROJECT.length + 1) }));
+    (commands.writeManagedNameState as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.readManagedNameState as any).mockImplementation((_project: string, path: string) => Promise.resolve({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '第{N}章-{title}',
+        currentH1: path.includes('开篇') || path.includes('Title A') ? (path.includes('Title A') ? 'Title A' : '开篇') : '',
+        documentKey: path.slice(PROJECT.length + 1),
+      },
+    }));
   });
 
   it('does NOT rename when the template has no {title} (the designed opt-out)', async () => {
@@ -60,6 +79,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
     (newFileSettings as { template: string }).template = '第{N}章';
     try {
       tabsStore.openTab(`${PROJECT}/Untitled 1.md`, '', { justCreated: true });
+      (commands.readManagedNameState as any).mockResolvedValueOnce({ status: 'ok', data: null });
       const newPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/Untitled 1.md`, '# 开篇');
       expect(newPath).toBe(`${PROJECT}/Untitled 1.md`);
       expect(commands.renameItem).not.toHaveBeenCalled();
@@ -77,6 +97,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
 
     expect(newPath).toBe(`${PROJECT}/第1章-开篇.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/第1章-Untitled.md`,
       '第1章-开篇.md',
       true,
@@ -91,8 +112,25 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
 
     expect(newPath).toBe(`${PROJECT}/开篇.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/Untitled 1.md`,
       '开篇.md',
+      true,
+    );
+    expect(commands.broadcastFileRenamed).not.toHaveBeenCalled();
+  });
+
+  it('preserves .markdown when the first H1 replaces a placeholder name', async () => {
+    const filePath = `${PROJECT}/Untitled.markdown`;
+    tabsStore.openTab(filePath, '', { justCreated: true });
+
+    const newPath = await tabsStore.tryRenameAfterSave(filePath, '# 开篇');
+
+    expect(newPath).toBe(`${PROJECT}/开篇.markdown`);
+    expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
+      filePath,
+      '开篇.markdown',
       true,
     );
   });
@@ -108,6 +146,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
 
     expect(newPath).toBe(`${PROJECT}/第1章 开篇.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/第1章.md`,
       '第1章 开篇.md',
       true,
@@ -124,6 +163,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
 
     expect(newPath).toBe(`${PROJECT}/第二章.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/Untitled 5.md`,
       '第二章.md',
       true,
@@ -146,6 +186,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
     const finalPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/Title A.md`, '# Different Title');
     expect(finalPath).toBe(`${PROJECT}/Different Title.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/Title A.md`,
       'Different Title.md',
       true,
@@ -165,6 +206,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
     // Later save WITH an H1 still triggers the rename.
     await tabsStore.tryRenameAfterSave(`${PROJECT}/Untitled 1.md`, '# 终于有标题了');
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/Untitled 1.md`,
       '终于有标题了.md',
       true,
@@ -173,6 +215,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
 
   it('does nothing for non-placeholder filenames regardless of H1 content', async () => {
     tabsStore.openTab(`${PROJECT}/my-novel.md`, '');
+    (commands.readManagedNameState as any).mockResolvedValueOnce({ status: 'ok', data: null });
     const newPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/my-novel.md`, '# A Heading');
     expect(newPath).toBe(`${PROJECT}/my-novel.md`);
     expect(commands.renameItem).not.toHaveBeenCalled();
@@ -192,6 +235,7 @@ describe('tabsStore.tryRenameAfterSave — placeholder + H1 gating', () => {
     const newPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/Untitled 1.md`, '# 开篇');
     expect(newPath).toBe(`${PROJECT}/开篇.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/Untitled 1.md`,
       '开篇.md',
       true,

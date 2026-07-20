@@ -6,6 +6,7 @@ import {
   SLASH_MENU_COMMANDS,
 } from '$lib/components/ai-shared/menu-items';
 import type { AiContextAttachment } from '$lib/components/ai-shared/attachments';
+import type { AiPromptAsset } from '$lib/components/ai-shared/persistence';
 
 function fileCandidate(path: string, label: string): AiContextAttachment {
   return {
@@ -18,6 +19,16 @@ function fileCandidate(path: string, label: string): AiContextAttachment {
     content: '',
     estimatedChars: 0,
     truncated: false,
+  };
+}
+
+function projectCommand(project: string, name: string, content: string): AiPromptAsset {
+  return {
+    id: `commands/${name}.md`,
+    kind: 'command',
+    path: `${project}/.novelist/ai/commands/${name}.md`,
+    name,
+    content,
   };
 }
 
@@ -34,6 +45,23 @@ describe('ai-shared menu-items — slash commands', () => {
 
   it('returns empty for a query that matches nothing', () => {
     expect(filterSlashCommands('zzz')).toEqual([]);
+  });
+
+  it('includes loaded CJK project commands without replacing built-ins', () => {
+    const commandA = projectCommand('/项目甲', '甲项目命令', '项目甲指令');
+    const collision = projectCommand('/项目甲', 'plan', '不得替换内置 plan');
+    const invisible = projectCommand('/项目甲', 'plan\u200d', '不得显示的欺骗命令');
+
+    const all = filterSlashCommands('', [commandA, collision, invisible]);
+    const matches = filterSlashCommands('甲项目', [commandA, collision]);
+
+    expect(all.filter((item) => item.id === 'plan')).toHaveLength(1);
+    expect(all.some((item) => item.id === invisible.name)).toBe(false);
+    expect(matches).toEqual([{
+      id: '甲项目命令',
+      label: '/甲项目命令',
+      hint: 'project command',
+    }]);
   });
 });
 

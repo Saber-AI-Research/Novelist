@@ -18,6 +18,9 @@ later) can filter by purpose.
 Tags are placed as the first token of a `describe()` label, inside
 square brackets. A describe may have more than one tag.
 
+These bracketed labels describe the suite's **testing intent**. They are a
+Novelist convention, not Playwright tags and not task/workflow selectors.
+
 ### `[precision]` — pure function, property-level assertions
 
 The test asserts the exact output shape of a pure function given a
@@ -89,6 +92,31 @@ Discipline:
 - Assert only enough to prove the wiring is alive. Not a substitute
   for `[precision]` coverage of the same feature.
 
+## Playwright Workflow Tags
+
+Task-focused browser workflows use Playwright `@` tags in test titles, for
+example `@task23` and `@task23-negative`. They are selected with Playwright's
+regular-expression filter, `--grep`; the filter matches the composed test
+identity, including project, file, enclosing `test.describe()` labels, test
+title, and tags. These tags answer **which workflow should run**, while
+`[precision]`, `[contract]`, `[regression]`, and `[smoke]` answer **why a
+suite exists and what kind of guarantee it provides**.
+
+Keep the namespaces separate:
+
+- Put intent labels at the start of a `describe()` title.
+- Put a task workflow tag in the Playwright test title (or Playwright tag
+  metadata) and filter it with `--grep`.
+- Do not infer test precision from `@task23`, or Task 23 membership from an
+  intent label. A test may legitimately carry both kinds of metadata.
+
+`--grep` is a regex filter rather than an exact-tag lookup. Use the documented
+commands in `testing.md` for the canonical Task 23 aggregate and negative
+selections instead of inventing ad hoc filters. See Playwright's official
+[tag](https://playwright.dev/docs/test-annotations#tag-tests) and
+[`grep`](https://playwright.dev/docs/api/class-testconfig#test-config-grep)
+documentation for matching semantics.
+
 ## Examples
 
 ```ts
@@ -124,7 +152,8 @@ assertion. Follow the same pattern elsewhere:
 
 ## Where Tests Live
 
-See also `docs/design-docs/testing.md` for the three-tier strategy.
+See also `docs/design-docs/testing.md` for the current layered strategy and
+mock-versus-native boundaries.
 
 | Dir | Env | Scope | Typical tags |
 |---|---|---|---|

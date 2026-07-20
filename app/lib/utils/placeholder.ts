@@ -191,9 +191,21 @@ const PLACEHOLDER_PATTERNS: RegExp[] = [
   /^novelist_scratch_\d+\.md$/,
 ];
 
-/** True if the filename (basename, with .md) is in the auto-generated placeholder set. */
+function splitMarkdownFilename(filename: string): { stem: string; extension: string } | null {
+  const match = /\.(?:markdown|md)$/i.exec(filename);
+  if (!match) return null;
+  return {
+    stem: filename.slice(0, -match[0].length),
+    extension: match[0],
+  };
+}
+
+/** True if the Markdown filename is in the auto-generated placeholder set. */
 export function isPlaceholder(filename: string): boolean {
-  return PLACEHOLDER_PATTERNS.some(re => re.test(filename));
+  const parts = splitMarkdownFilename(filename);
+  if (!parts) return false;
+  const canonicalName = `${parts.stem}.md`;
+  return PLACEHOLDER_PATTERNS.some(re => re.test(canonicalName));
 }
 
 /**
@@ -379,24 +391,27 @@ export function renameFromH1(currentName: string, h1: string, siblings: string[]
 
 /** Map a known placeholder filename + sanitized H1 → new filename. */
 function computeNewNameForPlaceholder(currentName: string, h1Stem: string): string {
+  const parts = splitMarkdownFilename(currentName);
+  const extension = parts?.extension ?? '.md';
+  const canonicalName = `${parts?.stem ?? currentName}.md`;
   // Bare Untitled.md (from a title-only template): replace whole stem
-  if (/^Untitled\.md$/.test(currentName)) return `${h1Stem}.md`;
+  if (/^Untitled\.md$/.test(canonicalName)) return `${h1Stem}${extension}`;
   // Untitled N: replace whole stem
-  if (/^Untitled \d+\.md$/.test(currentName)) return `${h1Stem}.md`;
+  if (/^Untitled \d+\.md$/.test(canonicalName)) return `${h1Stem}${extension}`;
   // legacy scratch: replace whole stem
-  if (/^novelist_scratch_\d+\.md$/.test(currentName)) return `${h1Stem}.md`;
+  if (/^novelist_scratch_\d+\.md$/.test(canonicalName)) return `${h1Stem}${extension}`;
   // {date}<sep>Untitled <N>: keep the date prefix, drop the "Untitled N"
   // suffix. e.g. `260508_Untitled 3.md` + `开篇` → `260508_开篇.md`.
-  const datedSlotMatch = /^(\d+[-_. ])Untitled \d+\.md$/.exec(currentName);
-  if (datedSlotMatch) return `${datedSlotMatch[1]}${h1Stem}.md`;
+  const datedSlotMatch = /^(\d+[-_. ])Untitled \d+\.md$/.exec(canonicalName);
+  if (datedSlotMatch) return `${datedSlotMatch[1]}${h1Stem}${extension}`;
   // {N}<sep>Untitled with title slot: substitute "Untitled" with H1
-  const slotMatch = /^(\d+[-_. ])Untitled\.md$/.exec(currentName);
-  if (slotMatch) return `${slotMatch[1]}${h1Stem}.md`;
+  const slotMatch = /^(\d+[-_. ])Untitled\.md$/.exec(canonicalName);
+  if (slotMatch) return `${slotMatch[1]}${h1Stem}${extension}`;
   // No-slot placeholders (chapter prefixes) → append with separator
-  const stem = currentName.replace(/\.md$/, '');
+  const stem = parts?.stem ?? currentName;
   const lastChar = stem.slice(-1);
   const sep = NO_SPACE_AFTER.has(lastChar) ? '' : ' ';
-  return `${stem}${sep}${h1Stem}.md`;
+  return `${stem}${sep}${h1Stem}${extension}`;
 }
 
 function bumpStemUntilFree(newName: string, siblings: string[], currentName: string): string {
@@ -404,10 +419,12 @@ function bumpStemUntilFree(newName: string, siblings: string[], currentName: str
   taken.delete(currentName); // own name is not a collision
   if (!taken.has(newName)) return newName;
 
-  const stem = newName.replace(/\.md$/, '');
+  const parts = splitMarkdownFilename(newName);
+  const stem = parts?.stem ?? newName;
+  const extension = parts?.extension ?? '.md';
   let n = 2;
   for (let i = 0; i < 10000; i++) {
-    const candidate = `${stem} ${n}.md`;
+    const candidate = `${stem} ${n}${extension}`;
     if (!taken.has(candidate)) return candidate;
     n++;
   }
@@ -442,12 +459,16 @@ export function applyH1Substitution(
   if (sanitizedNew.length === 0) return null;
   if (sanitizedOld === sanitizedNew) return null;
 
-  const stem = currentName.replace(/\.md$/, '');
+  const extensionMatch = /\.(?:markdown|md)$/i.exec(currentName);
+  const extension = extensionMatch?.[0] ?? '.md';
+  const stem = extensionMatch
+    ? currentName.slice(0, -extension.length)
+    : currentName;
   const idx = stem.lastIndexOf(sanitizedOld);
   if (idx === -1) return null;
 
   const newStem = stem.slice(0, idx) + sanitizedNew + stem.slice(idx + sanitizedOld.length);
-  const newName = `${newStem}.md`;
+  const newName = `${newStem}${extension}`;
   // (no `newName === currentName` guard needed — earlier guards ensure
   // sanitizedOld !== sanitizedNew and idx >= 0, so the stem must differ.)
 
@@ -486,7 +507,8 @@ function templateTitleSlotMatcher(templateRaw: string): RegExp | null {
 /** True if `filename` is `templateRaw`'s rendered placeholder (Untitled fill). */
 export function isTemplateTitlePlaceholder(filename: string, templateRaw: string): boolean {
   const re = templateTitleSlotMatcher(templateRaw);
-  return re ? re.test(filename) : false;
+  const parts = splitMarkdownFilename(filename);
+  return re && parts ? re.test(`${parts.stem}.md`) : false;
 }
 
 /**
@@ -500,11 +522,13 @@ export function renameFromTemplateTitleSlot(
   templateRaw: string,
   siblings: string[],
 ): string | null {
-  const m = templateTitleSlotMatcher(templateRaw)?.exec(currentName);
+  const parts = splitMarkdownFilename(currentName);
+  if (!parts) return null;
+  const m = templateTitleSlotMatcher(templateRaw)?.exec(`${parts.stem}.md`);
   if (!m) return null;
   const sanitized = sanitizeFilenameStem(h1);
   if (sanitized.length === 0) return null;
-  const newName = `${m[1]}${sanitized}${m[3]}.md`;
+  const newName = `${m[1]}${sanitized}${m[3]}${parts.extension}`;
   if (newName === currentName) return null;
   return bumpStemUntilFree(newName, siblings, currentName);
 }

@@ -1,10 +1,12 @@
 import { ViewPlugin, Decoration, type DecorationSet, EditorView, type ViewUpdate, WidgetType } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
-import { type EditorState, type Extension, type Range, StateField } from '@codemirror/state';
+import { type EditorState, type Extension, type Range, StateEffect, StateField } from '@codemirror/state';
 import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { imeComposingField } from './ime-guard';
 import { fileManagerLabel } from '$lib/utils/platform-labels';
+import { readLocalImageDataUri } from '$lib/services/image-host';
+import { pathJoin } from '$lib/utils/path';
 
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -38,11 +40,10 @@ function getCachedImage(path: string): string | undefined {
 
 /**
  * Widget that renders an inline image preview below the markdown line.
- * Local images are loaded via Tauri IPC (read_image_data_uri) which returns
- * a base64 data URI, bypassing the need for the asset protocol feature.
+ * Local images are loaded through the window's Rust-owned image capability.
  */
 class ImageWidget extends WidgetType {
-  constructor(private src: string, private alt: string, private projectDir: string) {
+  constructor(private src: string, private alt: string, private documentDir: string) {
     super();
   }
 
@@ -77,16 +78,15 @@ class ImageWidget extends WidgetType {
     if (this.src.startsWith('http://') || this.src.startsWith('https://') || this.src.startsWith('data:')) {
       img.src = this.src;
     } else {
-      // Local file — resolve path and load via IPC
-      const resolved = this.projectDir
-        ? `${this.projectDir}/${this.src}`
-        : this.src;
-      const cached = getCachedImage(resolved);
+      const cacheKey = `${this.documentDir}\0${this.src}`;
+      const cached = getCachedImage(cacheKey);
       if (cached) {
         img.src = cached;
+      } else if (!this.documentDir) {
+        img.dispatchEvent(new Event('error'));
       } else {
-        invoke<string>('read_image_data_uri', { path: resolved }).then(dataUri => {
-          cacheImage(resolved, dataUri);
+        readLocalImageDataUri(this.src, { baseDir: this.documentDir }).then(dataUri => {
+          cacheImage(cacheKey, dataUri);
           img.src = dataUri;
         }).catch(() => {
           img.dispatchEvent(new Event('error'));
@@ -105,7 +105,7 @@ class ImageWidget extends WidgetType {
 
     const imgSrc = this.src;
     const imgAlt = this.alt;
-    const projDir = this.projectDir;
+    const documentDir = this.documentDir;
     const isLocalImg = !imgSrc.startsWith('http://') && !imgSrc.startsWith('https://') && !imgSrc.startsWith('data:');
 
     wrapper.addEventListener('contextmenu', (e) => {
@@ -114,14 +114,14 @@ class ImageWidget extends WidgetType {
       document.querySelectorAll('.cm-image-context-menu').forEach(el => el.remove());
       const pos = view.posAtDOM(wrapper);
       const line = view.state.doc.lineAt(pos);
-      new ImageContextMenu(view, imgSrc, imgAlt, line.from, line.to, e.clientX, e.clientY, isLocalImg, projDir);
+      new ImageContextMenu(view, imgSrc, imgAlt, line.from, line.to, e.clientX, e.clientY, isLocalImg, documentDir);
     });
 
     return wrapper;
   }
 
   eq(other: ImageWidget): boolean {
-    return this.src === other.src && this.alt === other.alt && this.projectDir === other.projectDir;
+    return this.src === other.src && this.alt === other.alt && this.documentDir === other.documentDir;
   }
 
   updateDOM(dom: HTMLElement, view: EditorView): boolean {
@@ -152,7 +152,7 @@ class ImageContextMenu {
     clientX: number,
     clientY: number,
     private isLocal: boolean,
-    private projectDir: string,
+    private documentDir: string,
   ) {
     this.dom = document.createElement('div');
     this.dom.className = 'cm-image-context-menu';
@@ -167,11 +167,11 @@ class ImageContextMenu {
       },
     ];
 
-    if (this.isLocal && this.projectDir) {
+    if (this.isLocal && this.documentDir) {
       items.push({
         label: fileManagerLabel(),
         action: () => {
-          const fullPath = `${this.projectDir}/${this.imgSrc}`;
+          const fullPath = pathJoin(this.documentDir, this.imgSrc);
           invoke('reveal_in_file_manager', { path: fullPath }).catch(console.error);
           this.destroy();
         },
@@ -292,10 +292,9 @@ class ImageContextMenu {
    */
   private async uploadAndReplace(): Promise<void> {
     const { uploadImage } = await import('$lib/services/image-host');
-    const fullPath = this.imgSrc.startsWith('/')
-      ? this.imgSrc
-      : `${this.projectDir}/${this.imgSrc.replace(/^\.\//, '')}`;
-    const { url } = await uploadImage(fullPath);
+    const { url } = await uploadImage(this.imgSrc, {
+      baseDir: this.documentDir,
+    });
 
     // Replace the URL portion of `![alt](src)` on the line. Match the
     // current src inside parens; preserve alt and surrounding text.
@@ -434,6 +433,22 @@ const headingClasses: Record<string, string> = {
 let _projectDir = '';
 export function setWysiwygProjectDir(dir: string) { _projectDir = dir; }
 
+export const imageDocumentDirEffect = StateEffect.define<string>();
+
+export const imageDocumentDirField = StateField.define<string>({
+  create: () => '',
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(imageDocumentDirEffect)) return effect.value;
+    }
+    return value;
+  },
+});
+
+export function setWysiwygImageDocumentDir(view: EditorView, dir: string) {
+  view.dispatch({ effects: imageDocumentDirEffect.of(dir) });
+}
+
 /** Whether to render inline image previews. Set by Editor.svelte based on settings + project type. */
 let _renderImages = true;
 export function setWysiwygRenderImages(enabled: boolean) { _renderImages = enabled; }
@@ -492,7 +507,7 @@ export const cursorImageLineField = StateField.define<number | null>({
 function buildImageBlockDecos(state: EditorState): DecorationSet {
   if (!_renderImages) return Decoration.none;
   const decos: Range<Decoration>[] = [];
-  const projectDir = _projectDir;
+  const imageDocumentDir = state.field(imageDocumentDirField, false) ?? '';
   const skipLine = state.field(cursorImageLineField, false);
 
   syntaxTree(state).iterate({
@@ -520,7 +535,7 @@ function buildImageBlockDecos(state: EditorState): DecorationSet {
 
       if (imgUrl) {
         decos.push(Decoration.replace({
-          widget: new ImageWidget(imgUrl, imgAlt, projectDir),
+            widget: new ImageWidget(imgUrl, imgAlt, imageDocumentDir),
           block: true,
         }).range(line.from, line.to));
       }
@@ -533,8 +548,11 @@ function buildImageBlockDecos(state: EditorState): DecorationSet {
 const imageBlockDecoField = StateField.define<DecorationSet>({
   create(state) { return buildImageBlockDecos(state); },
   update(value, tr) {
-    if (tr.state.field(imeComposingField, false)) return value;
+    if (tr.effects.some((effect) => effect.is(imageDocumentDirEffect))) {
+      return buildImageBlockDecos(tr.state);
+    }
     if (tr.docChanged) return buildImageBlockDecos(tr.state);
+    if (tr.state.field(imeComposingField, false)) return value;
     // Rebuild when the incremental parser finishes.
     if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
       return buildImageBlockDecos(tr.state);
@@ -1087,6 +1105,7 @@ class WysiwygPluginClass {
 }
 
 export const wysiwygPlugin: Extension = [
+  imageDocumentDirField,
   cursorImageLineField,
   imageBlockDecoField,
   ViewPlugin.fromClass(WysiwygPluginClass, {

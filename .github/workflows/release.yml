@@ -13,19 +13,39 @@ jobs:
   build-macos-arm:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Run tests
-        run: pnpm test && cd core && cargo test
+        run: pnpm check && pnpm test && cd core && cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked
+
+      - name: Install pinned Pandoc 3.10
+        env:
+          PANDOC_VERSION: '3.10'
+        run: |
+          set -euo pipefail
+          archive_name="pandoc-${PANDOC_VERSION}-arm64-macOS.zip"
+          archive_sha256="d9cad01d96ae774a0dc8c8c45bb1ad3e4c5ff2cc2e24f45958f5f9b7974aee34"
+          archive_path="${RUNNER_TEMP}/${archive_name}"
+          install_dir="${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}"
+          curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/${archive_name}" -o "${archive_path}"
+          printf '%s  %s\n' "${archive_sha256}" "${archive_path}" | shasum -a 256 -c -
+          mkdir -p "${install_dir}"
+          ditto -x -k "${archive_path}" "${install_dir}"
+          echo "${install_dir}/pandoc-${PANDOC_VERSION}-arm64/bin" >> "${GITHUB_PATH}"
+
+      - name: Real Pandoc 3.10 contract matrix
+        run: pnpm test:rust:pandoc
 
       - name: Build Tauri app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        run: pnpm tauri build -- --locked
 
       - name: Create styled DMG
         if: always()
@@ -39,7 +59,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: novelist-macos-aarch64
           path: |
@@ -71,20 +91,22 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
         with:
           version: 9
 
@@ -101,24 +123,24 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Run tests
-        run: pnpm test && cd core && cargo test
+        run: pnpm check && pnpm test && cd core && cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: core
-          args: ${{ matrix.tauri-args }}
+          args: ${{ matrix.tauri-args }} -- --locked
           tagName: ${{ github.ref_name }}
           releaseName: 'Novelist ${{ github.ref_name }}'
           releaseBody: |
             See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
 
@@ -155,42 +177,42 @@ jobs:
 
           Get-ChildItem $outDir | Format-Table Name, Length
 
-      - name: Upload Windows portable zips to release
+      - name: Upload Windows portable zips
         if: matrix.platform == 'windows-latest'
-        uses: softprops/action-gh-release@v3
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          files: core/target/release/bundle/zip/*.zip
-          tag_name: ${{ github.ref_name }}
+          name: novelist-windows-portable
+          path: core/target/release/bundle/zip/*.zip
 
   # ── Create GitHub Release with ARM artifacts + updater JSON ──
   release:
     needs: [build-macos-arm, build-other]
     runs-on: ubuntu-latest
-    # `always()` turns off the implicit `success()` gate that would otherwise
-    # skip this job whenever ANY matrix leg of `build-other` fails (e.g. a
-    # transient GitHub-hosted runner outage on one platform). We still gate on
-    # at least one upstream build succeeding so we never publish an empty
-    # release.
-    if: |
-      always() &&
-      (needs.build-macos-arm.result == 'success' || needs.build-other.result == 'success')
+    if: needs.build-macos-arm.result == 'success' && needs.build-other.result == 'success'
     steps:
       - name: Download macOS ARM artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: novelist-macos-aarch64
           path: artifacts/
-        continue-on-error: true
+
+      - name: Download Windows portable artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: novelist-windows-portable
+          path: artifacts/windows-portable/
 
       - name: Upload ARM DMG + updater files to Release
         if: hashFiles('artifacts/**/*.dmg') != '' || hashFiles('artifacts/**/*.tar.gz') != ''
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
         with:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.tar.gz
             artifacts/**/*.tar.gz.sig
+            artifacts/windows-portable/*.zip
           tag_name: ${{ github.ref_name }}
+          draft: true
 
       # `tauri-action` runs only on the Linux + Windows matrix legs, so the
       # `latest.json` it generates contains only the linux-* and windows-*
@@ -245,7 +267,9 @@ jobs:
   bump-tap:
     needs: release
     runs-on: ubuntu-latest
-    if: ${{ needs.release.result == 'success' }}
+    # A tag build leaves the GitHub release drafted. Update the tap only from a
+    # separately reviewed/manual publication flow.
+    if: ${{ false }}
     steps:
       - name: Download mac DMGs from the release
         env:
@@ -280,8 +304,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Checkout tap repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          persist-credentials: true
           repository: Saber-AI-Research/homebrew-novelist
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap

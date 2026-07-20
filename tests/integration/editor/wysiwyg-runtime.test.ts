@@ -4,6 +4,7 @@ import { EditorView } from '@codemirror/view';
 import { markdown } from '@codemirror/lang-markdown';
 import { wysiwygPlugin } from '$lib/editor/wysiwyg';
 import { createEditorExtensions } from '$lib/editor/setup';
+import { isImeComposing } from '$lib/editor/ime-guard';
 
 /**
  * Runtime integration tests for the WYSIWYG extension.
@@ -284,6 +285,41 @@ describe('wysiwygPlugin — runtime decoration validation', () => {
       // to the docChange rebuild path.
       view!.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
     }).not.toThrow();
+  });
+
+  it('exposes IME composition state to editor lifecycle guards', async () => {
+    const state = EditorState.create({ doc: '正在输入', extensions: createEditorExtensions() });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    expect(isImeComposing(view)).toBe(false);
+
+    view.contentDOM.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    expect(isImeComposing(view)).toBe(true);
+
+    view.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    expect(isImeComposing(view)).toBe(true);
+
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(isImeComposing(view)).toBe(false);
+  });
+
+  it('rebuilds block widgets on doc changes during IME composition', async () => {
+    const state = EditorState.create({ doc: '', extensions: createEditorExtensions() });
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    view = new EditorView({ state, parent });
+
+    view.contentDOM.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    view.dispatch({
+      changes: { from: 0, insert: '| A | B |\n|-|-|\n| 中 | en |\n' },
+      selection: { anchor: 27 },
+    });
+
+    await Promise.resolve();
+
+    expect(view.dom.querySelector('table.cm-novelist-rendered-table')).not.toBeNull();
   });
 
   it('does not emit cross-line or block Decoration.replace from the ViewPlugin', () => {

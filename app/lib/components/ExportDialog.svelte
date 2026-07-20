@@ -6,7 +6,8 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { collectExportFiles } from '$lib/utils/export-files';
   import { uiStore } from '$lib/stores/ui.svelte';
-  import { themeToCSS } from '$lib/themes';
+  import { EXPORT_CSS_STAGE_ERROR, stageThemeCssForExport } from '$lib/services/export-css';
+  import { formatCleanupWarning, formatExportError } from '$lib/utils/export-errors';
   import { t } from '$lib/i18n';
 
   interface Props { onClose: () => void; }
@@ -14,11 +15,19 @@
 
   let pandocAvailable = $state(false);
   let pandocVersion = $state('');
+  let pandocResolvedPath = $state('');
   let format = $state('html');
   let includeTheme = $state(true);
-  let status = $state<'idle' | 'exporting' | 'success' | 'error'>('idle');
+  let status = $state<'idle' | 'exporting' | 'success' | 'warning' | 'error'>('idle');
   let message = $state('');
   let exportFileCount = $state(0);
+  let activeExportRequestId = $state<string | null>(null);
+  let cancelRequested = $state(false);
+  let backendExportStarted = $state(false);
+  let backendCancelDecision: Promise<boolean> | null = null;
+  let preflightActive = $state(false);
+  let preflightGeneration = 0;
+  let busy = $derived(preflightActive || status === 'exporting');
 
   const formats = [
     { value: 'html', label: 'HTML' },
@@ -32,14 +41,41 @@
     if (result.status === 'ok') {
       pandocAvailable = result.data.available;
       pandocVersion = result.data.version || '';
+      pandocResolvedPath = result.data.resolved_path || '';
     }
   });
 
   async function doExport() {
+    if (busy) return;
+    preflightActive = true;
+    const generation = ++preflightGeneration;
+    try {
+      await performExport(generation);
+    } catch {
+      if (generation !== preflightGeneration) return;
+      activeExportRequestId = null;
+      backendExportStarted = false;
+      backendCancelDecision = null;
+      cancelRequested = false;
+      status = 'error';
+      message = formatExportError('');
+    } finally {
+      if (generation === preflightGeneration) preflightActive = false;
+    }
+  }
+
+  async function performExport(generation: number) {
+    if (!await tabsStore.saveAllDirty()) {
+      if (generation !== preflightGeneration) return;
+      status = 'error';
+      message = t('export.saveFailed');
+      return;
+    }
+    if (generation !== preflightGeneration) return;
     // Project mode → all markdown files; standalone mode → the active file.
     const files = collectExportFiles(projectStore.dirPath, projectStore.files, tabsStore.activeTab);
 
-    if (files.length === 0) {
+    if (files.length === 0 && !projectStore.dirPath) {
       message = projectStore.dirPath ? t('export.noFiles') : t('export.noActiveFile');
       status = 'error';
       return;
@@ -51,49 +87,125 @@
       defaultPath: `export.${ext}`,
       filters: [{ name: format.toUpperCase(), extensions: [ext] }],
     });
+    if (generation !== preflightGeneration) return;
     if (!outputPath) return;
 
     status = 'exporting';
     message = '';
     exportFileCount = files.length;
+    cancelRequested = false;
+    backendCancelDecision = null;
+    const requestId = makeExportRequestId();
+    activeExportRequestId = requestId;
 
-    // Build extra args — for HTML, inject theme CSS via pandoc --css
+    // Build extra args for the backend-owned HTML theme header.
     const extraArgs: string[] = [];
     if (format === 'html' && includeTheme) {
-      // Write a temporary CSS file with the current theme
-      const themeCSS = themeToCSS(uiStore.currentTheme);
-      const fullCSS = `${themeCSS}
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: var(--novelist-bg); color: var(--novelist-text); line-height: 1.7; }
-h1, h2, h3, h4, h5, h6 { color: var(--novelist-heading-color); }
-a { color: var(--novelist-link-color); }
-code { background: var(--novelist-code-bg); padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
-pre { background: var(--novelist-code-bg); padding: 16px; border-radius: 6px; overflow-x: auto; }
-blockquote { border-left: 3px solid var(--novelist-blockquote-border); padding-left: 16px; color: var(--novelist-text-secondary); font-style: italic; }
-table { border-collapse: collapse; width: 100%; margin: 16px 0; }
-th, td { border: 1px solid var(--novelist-border); padding: 8px 12px; text-align: left; }
-th { background: var(--novelist-bg-secondary); font-weight: 600; }
-hr { border: none; border-top: 1px solid var(--novelist-border); margin: 24px 0; }
-img { max-width: 100%; border-radius: 6px; }`;
-      // Resolve the OS temp dir (Windows has no /tmp) and use a unique name so
-      // concurrent exports don't clobber one another.
-      const { tempDir, join } = await import('@tauri-apps/api/path');
-      const cssPath = await join(await tempDir(), `novelist-export-theme-${Date.now()}.css`);
-      await commands.writeFile(cssPath, fullCSS);
-      extraArgs.push('--css', cssPath);
+      const cssStage = await stageThemeCssForExport(uiStore.currentTheme, {
+        stageCss: commands.stageExportCss,
+        deleteItem: commands.deleteItem,
+        requestId,
+        isCancelled: () => activeExportRequestId !== requestId || cancelRequested,
+        warn: (warning) => console.warn(warning),
+      });
+      if (cssStage.status === 'cancelled') {
+        activeExportRequestId = null;
+        cancelRequested = false;
+        status = cssStage.warning ? 'warning' : 'idle';
+        message = cssStage.warning ?? '';
+        return;
+      }
+      if (cssStage.status === 'error') {
+        activeExportRequestId = null;
+        cancelRequested = false;
+        status = 'error';
+        message = EXPORT_CSS_STAGE_ERROR;
+        return;
+      }
+      extraArgs.push(...cssStage.args);
     }
 
-    const result = await commands.exportProject(files, outputPath, format, extraArgs);
+    if (activeExportRequestId !== requestId || cancelRequested) {
+      activeExportRequestId = null;
+      cancelRequested = false;
+      status = 'idle';
+      return;
+    }
+
+    backendExportStarted = true;
+    const result = await commands.exportProject(
+      files,
+      outputPath,
+      format,
+      extraArgs,
+      requestId,
+      projectStore.dirPath,
+    );
+    backendExportStarted = false;
+    const cancellationAccepted = backendCancelDecision ? await backendCancelDecision : false;
+    if (activeExportRequestId !== requestId) return;
+    activeExportRequestId = null;
+    backendCancelDecision = null;
+    if (cancellationAccepted) {
+      cancelRequested = false;
+      status = 'idle';
+      message = '';
+      return;
+    }
+    cancelRequested = false;
     if (result.status === 'ok') {
-      status = 'success';
-      message = result.data;
+      if (result.data.warning) {
+        status = 'warning';
+        message = formatCleanupWarning(result.data.message, result.data.warning);
+      } else {
+        status = 'success';
+        message = result.data.message;
+      }
     } else {
       status = 'error';
-      message = result.error;
+      message = formatExportError(result.error);
     }
   }
 
+  async function cancelExport() {
+    if (!activeExportRequestId || cancelRequested) return;
+    cancelRequested = true;
+    message = '';
+    if (!backendExportStarted) return;
+    const decision = commands.cancelExportProject(activeExportRequestId).then((result) => {
+      if (result.status === 'error') {
+        console.warn('Export cancellation request failed; waiting for the export result.');
+        return false;
+      }
+      return result.data;
+    });
+    backendCancelDecision = decision;
+    const accepted = await decision;
+    if (backendCancelDecision !== decision) return;
+    if (!accepted) {
+      cancelRequested = false;
+    }
+  }
+
+  function closeOrCancel() {
+    if (status === 'exporting') {
+      void cancelExport();
+      return;
+    }
+    if (preflightActive) {
+      preflightGeneration += 1;
+      preflightActive = false;
+    }
+    onClose();
+  }
+
+  function makeExportRequestId(): string {
+    const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `export-${random}`;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') onClose();
+    if (e.key === 'Escape') closeOrCancel();
   }
 </script>
 
@@ -136,6 +248,9 @@ img { max-width: 100%; border-radius: 6px; }`;
         {#if pandocVersion}
           <span style="color: var(--novelist-text-secondary);"> &mdash; {pandocVersion}</span>
         {/if}
+        {#if pandocResolvedPath}
+          <span class="pandoc-resolved-path">{pandocResolvedPath}</span>
+        {/if}
       {:else}
         <span style="color: #f87171;">&#x2717; {t('export.pandocNotFound')}</span>
         <p class="mt-1" style="color: var(--novelist-text-secondary);">
@@ -157,8 +272,11 @@ img { max-width: 100%; border-radius: 6px; }`;
               border: 1px solid {format === f.value ? 'var(--novelist-accent)' : 'var(--novelist-border)'};
               background: {format === f.value ? 'color-mix(in srgb, var(--novelist-accent) 20%, transparent)' : 'transparent'};
               color: {format === f.value ? 'var(--novelist-accent)' : 'var(--novelist-text)'};
+  opacity: {busy ? '0.5' : '1'};
+  cursor: {busy ? 'not-allowed' : 'pointer'};
             "
             onclick={() => { format = f.value; status = 'idle'; message = ''; }}
+  disabled={busy}
           >
             {f.label}
           </button>
@@ -166,10 +284,15 @@ img { max-width: 100%; border-radius: 6px; }`;
       </div>
     </div>
 
-    <!-- Theme option (HTML/EPUB) -->
-    {#if format === 'html' || format === 'epub'}
+    <!-- Theme option (HTML) -->
+    {#if format === 'html'}
       <label class="flex items-center gap-2 mb-4 text-sm cursor-pointer" style="color: var(--novelist-text-secondary);">
-        <input type="checkbox" bind:checked={includeTheme} class="cursor-pointer" />
+        <input
+          type="checkbox"
+          bind:checked={includeTheme}
+          class="cursor-pointer"
+    disabled={busy}
+        />
         {t('export.includeTheme')} ({uiStore.currentTheme.name})
       </label>
     {/if}
@@ -185,11 +308,15 @@ img { max-width: 100%; border-radius: 6px; }`;
         </div>
       </div>
     {:else if status === 'success'}
-      <p class="text-sm mb-4" style="color: #4ade80;">
+      <p data-testid="export-status-success" class="text-sm mb-4 whitespace-pre-wrap" style="color: #4ade80;">
+        {message}
+      </p>
+    {:else if status === 'warning'}
+      <p data-testid="export-status-warning" class="text-sm mb-4 whitespace-pre-wrap" style="color: #fbbf24;">
         {message}
       </p>
     {:else if status === 'error'}
-      <p class="text-sm mb-4" style="color: #f87171;">
+      <p data-testid="export-status-error" class="text-sm mb-4 whitespace-pre-wrap" style="color: #f87171;">
         {message}
       </p>
     {/if}
@@ -203,19 +330,19 @@ img { max-width: 100%; border-radius: 6px; }`;
           color: var(--novelist-text);
           border: 1px solid var(--novelist-border);
         "
-        onclick={onClose}
+        onclick={closeOrCancel}
       >
-        {t('export.close')}
+        {status === 'exporting' ? (cancelRequested ? t('export.cancelling') : t('export.cancel')) : t('export.close')}
       </button>
       <button
         class="px-4 py-2 text-sm rounded cursor-pointer hover:opacity-80"
         style="
           background: var(--novelist-accent);
           color: #fff;
-          opacity: {!pandocAvailable || status === 'exporting' ? '0.5' : '1'};
-          cursor: {!pandocAvailable || status === 'exporting' ? 'not-allowed' : 'pointer'};
+  opacity: {!pandocAvailable || busy ? '0.5' : '1'};
+  cursor: {!pandocAvailable || busy ? 'not-allowed' : 'pointer'};
         "
-        disabled={!pandocAvailable || status === 'exporting'}
+  disabled={!pandocAvailable || busy}
         onclick={doExport}
       >
         {status === 'exporting' ? t('export.exportingButton') : t('export.export')}
@@ -231,6 +358,15 @@ img { max-width: 100%; border-radius: 6px; }`;
     border-radius: 2px;
     background: var(--novelist-bg-secondary);
     overflow: hidden;
+  }
+
+  .pandoc-resolved-path {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--novelist-text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
   }
 
   .export-progress-bar {

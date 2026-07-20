@@ -10,6 +10,7 @@
     type RopePublishDocumentSnapshot,
   } from '$lib/services/publish-document-snapshot';
   import { t } from '$lib/i18n';
+  import { pathDirname } from '$lib/utils/path';
   import PublishDialog, { type PublishDialogMode } from './PublishDialog.svelte';
 
   interface Props {
@@ -44,9 +45,13 @@
     }
   }
 
-  async function toggleMenu() {
-    if (!menuOpen) await reloadChannels();
-    menuOpen = !menuOpen;
+  function toggleMenu() {
+    if (menuOpen) {
+      menuOpen = false;
+      return;
+    }
+    menuOpen = true;
+    void reloadChannels();
   }
 
   function runCommand(id: string) {
@@ -100,7 +105,7 @@
   ): Promise<{ dir: string; text: string; projectDir: string; filePath: string } | null> {
     const r = await commands.readFile(filePath);
     if (r.status !== 'ok') return null;
-    const dir = filePath.split('/').slice(0, -1).join('/');
+    const dir = pathDirname(filePath);
     const projectDir = projectStore.dirPath ?? dir;
     return { dir, text: r.data, projectDir, filePath };
   }

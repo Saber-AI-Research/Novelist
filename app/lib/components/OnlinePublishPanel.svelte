@@ -1,12 +1,47 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
-  import { commands, type ChannelConfig, type PlatformConfig } from '$lib/ipc/commands';
-  import { dispatchPublish, toPlatformConfig, type DialogPayload } from '$lib/services/publish';
+  import {
+    commands,
+    type ChannelConfig,
+    type PlatformConfig,
+    type ProviderRevision,
+    type PublishCoverAsset,
+    type PublishResult,
+    type RemoteIdentity,
+  } from '$lib/ipc/commands';
+  import {
+    bindLegacyPublication,
+    dispatchPublish,
+    persistPublishResult,
+    PublishCommandError,
+    PublishIdentityPersistenceError,
+    readPublishRemoteState,
+    toPlatformConfig,
+    type DialogPayload,
+  } from '$lib/services/publish';
+  import {
+    beginPublishRemoteRead,
+    failPublishRemoteRead,
+    isPublishRemoteStateUnknown,
+    planPublishAttempt,
+    type PublishFailure,
+    type PublishIntent,
+    type PublishRemoteState,
+  } from '$lib/services/publish-lifecycle';
+  import {
+    createCoverObjectUrlOwner,
+    findClipboardImage,
+    readCoverFile,
+    shouldUploadPublishCover,
+    type CoverBytesInput,
+  } from '$lib/services/publish-cover';
   import { type PublishFormDraft } from '$lib/services/publish-form-persistence';
   import { createPublishDialogPersistenceController } from '$lib/services/publish-dialog-persistence-controller';
   import { registerRenameFlushProvider } from '$lib/services/rename-coordinator';
   import { registerProjectSwitchFlushProvider } from '$lib/services/project-switch-coordinator';
+  import { pathStartsWithChild } from '$lib/utils/path';
+  import { isOpenablePublishUrl } from '$lib/utils/publish-url';
   import { t } from '$lib/i18n';
 
   interface Props {
@@ -81,32 +116,197 @@
   // svelte-ignore state_referenced_locally
   let status = $state(defaultStatusFor(channel.platform));
   let destination = $state<string | undefined>(undefined);
-  let coverFile = $state<File | null>(null);
+  let coverAsset = $state<PublishCoverAsset | null>(null);
   let coverPreviewUrl = $state<string | null>(null);
+  let coverChangedForAttempt = false;
+  const coverUrlOwner = createCoverObjectUrlOwner();
+  let coverMutationTail: Promise<void> = Promise.resolve();
+  let coverMutationFailure: string | null = null;
+  let coverGeneration = 0;
+  let destroyed = false;
+  let skipDestroyFlush = false;
 
   let publishing = $state(false);
+  let binding = $state(false);
   let errorMessage = $state<string | null>(null);
+  let openRemoteError = $state<string | null>(null);
   let successUrl = $state<string | null>(null);
+  let remoteState = $state<PublishRemoteState>({ kind: 'unknown', phase: 'loading' });
+  let lifecycleState = $state<'unknown' | 'new' | 'updating' | 'updated' | 'conflict' | 'not_found' | 'unsupported' | 'corrupt'>('unknown');
+  let publishFailure = $state<PublishFailure | null>(null);
+  let bindOpen = $state(false);
+  let bindValue = $state('');
+  let bindError = $state<string | null>(null);
+  let confirmation = $state<{
+    kind: 'overwrite' | 'new_copy';
+    revision?: ProviderRevision;
+  } | null>(null);
   let corruptDraftNotice = $state(false);
   let exitLocked = $state(false);
   let exitPromise: Promise<boolean> | null = null;
+  let remoteReadOwner = '';
+  let remoteReadGeneration = 0;
+  let availableTagsRequest = '';
+  let pendingPublishResult = $state<PublishResult | null>(null);
 
-  $effect(() => {
-    onPublishingChange?.(publishing);
+  let displayRemoteIdentity = $derived.by((): RemoteIdentity | null | undefined => {
+    if (!isPublishRemoteStateUnknown(remoteState)) return remoteState;
+    return remoteState.previous?.remote;
   });
 
-  // Tag autocomplete: pre-fetch existing tags from the platform on mount.
+  $effect(() => {
+    onPublishingChange?.(publishing || binding);
+  });
+
+  function lifecycleLabel(): string {
+    if (lifecycleState === 'unknown' && isPublishRemoteStateUnknown(remoteState)) {
+      return t(remoteState.phase === 'loading' ? 'publish.state.checking' : 'publish.state.unknown');
+    }
+    return t(`publish.state.${lifecycleState}`);
+  }
+
+  function applyRemoteState(remote: RemoteIdentity | null): void {
+    remoteState = remote;
+    publishFailure = null;
+    confirmation = null;
+    if (!remote) {
+      lifecycleState = 'new';
+      return;
+    }
+    const plan = planPublishAttempt(channel.platform, remote, { kind: 'default' });
+    lifecycleState = plan.state === 'updating' ? 'updating' : plan.state;
+  }
+
+  function currentRemoteOwner(): string {
+    return JSON.stringify([doc.projectDir, doc.filePath, channel.id]);
+  }
+
+  function remoteReadIsCurrent(owner: string, generation: number): boolean {
+    return !destroyed
+      && owner === remoteReadOwner
+      && owner === currentRemoteOwner()
+      && generation === remoteReadGeneration;
+  }
+
+  async function loadAvailableTags(owner: string, generation: number): Promise<void> {
+    const request = `${owner}:${generation}`;
+    if (availableTagsRequest === request) return;
+    availableTagsRequest = request;
+    try {
+      const result = await commands.listPublishTags(toPlatformConfig(channel));
+      if (
+        !remoteReadIsCurrent(owner, generation)
+        || exitLocked
+        || isPublishRemoteStateUnknown(remoteState)
+      ) return;
+      if (result.status === 'ok') availableTags = result.data;
+    } catch {
+      if (availableTagsRequest === request) availableTagsRequest = '';
+    }
+  }
+
+  async function refreshRemoteState(owner = currentRemoteOwner()): Promise<void> {
+    const sameOwner = owner === remoteReadOwner;
+    const generation = ++remoteReadGeneration;
+    remoteReadOwner = owner;
+    if (!sameOwner) {
+      availableTags = [];
+      availableTagsRequest = '';
+    }
+    remoteState = beginPublishRemoteRead(remoteState, sameOwner);
+    lifecycleState = 'unknown';
+    publishFailure = null;
+    confirmation = null;
+    try {
+      const remote = await readPublishRemoteState({
+        projectDir: doc.projectDir,
+        filePath: doc.filePath,
+        channelId: channel.id,
+      });
+      if (!remoteReadIsCurrent(owner, generation) || exitLocked) return;
+      applyRemoteState(remote);
+      void loadAvailableTags(owner, generation);
+    } catch {
+      if (!remoteReadIsCurrent(owner, generation)) return;
+      remoteState = failPublishRemoteRead(remoteState);
+      lifecycleState = 'unknown';
+    }
+  }
+
+  function operationLocked(): boolean {
+    return publishing || binding || exitLocked || isPublishRemoteStateUnknown(remoteState);
+  }
+
+  function exitOperationLocked(): boolean {
+    return publishing || binding || exitLocked || pendingPublishResult !== null;
+  }
+
+  function retryRemoteStateLocked(): boolean {
+    return publishing
+      || binding
+      || exitLocked
+      || !isPublishRemoteStateUnknown(remoteState)
+      || remoteState.phase === 'loading';
+  }
+
+  async function retryRemoteState(): Promise<void> {
+    const pending = pendingPublishResult;
+    if (!pending) {
+      await refreshRemoteState();
+      return;
+    }
+    if (retryRemoteStateLocked()) return;
+
+    const owner = currentRemoteOwner();
+    const generation = ++remoteReadGeneration;
+    const sameOwner = owner === remoteReadOwner;
+    remoteReadOwner = owner;
+    remoteState = beginPublishRemoteRead(remoteState, sameOwner);
+    lifecycleState = 'unknown';
+    try {
+      const remote = await persistPublishResult({
+        projectDir: doc.projectDir,
+        filePath: doc.filePath,
+        channelId: channel.id,
+        result: pending,
+      });
+      if (!remoteReadIsCurrent(owner, generation)) return;
+      pendingPublishResult = null;
+      successUrl = pending.url;
+      applyRemoteState(remote);
+      lifecycleState = 'updated';
+      publishFailure = null;
+      try {
+        await persistenceController.handleAfterPublishSuccess();
+      } catch (error) {
+        errorMessage = `${t('publish.draftPersistFailed')}: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    } catch {
+      if (!remoteReadIsCurrent(owner, generation)) return;
+      remoteState = failPublishRemoteRead(remoteState);
+      lifecycleState = 'unknown';
+    }
+  }
+
+  // Tag autocomplete loads only after remote identity is confirmed.
   // Empty array for platforms that don't expose a tag-list API.
   let availableTags = $state<string[]>([]);
   let tagSuggestionsOpen = $state(false);
   let tagInputEl = $state<HTMLInputElement | null>(null);
+
+  $effect(() => {
+    const owner = currentRemoteOwner();
+    if (owner !== remoteReadOwner) void refreshRemoteState(owner);
+  });
 
   function currentFormSnapshot(): PublishFormDraft {
     return {
       title,
       tags: [...tags],
       excerpt: excerpt.trim() === '' ? undefined : excerpt,
-      slug: slug.trim() === '' ? undefined : slug,
+      slug,
       status,
       destination,
     };
@@ -146,7 +346,9 @@
     void slug;
     void status;
     void destination;
-    persistenceController.handleFieldChange();
+    if (!isPublishRemoteStateUnknown(remoteState)) {
+      persistenceController.handleFieldChange();
+    }
   });
 
   /**
@@ -164,25 +366,61 @@
   });
 
   onMount(() => {
-    const unregisterRenameFlush = registerRenameFlushProvider((oldPath) =>
-      persistenceController.handleRenameFlush(oldPath),
-    );
-    const unregisterProjectSwitchFlush = registerProjectSwitchFlushProvider(async (_previous, next) => {
-      await persistenceController.handleProjectSwitch(next);
-      if (persistenceController.isRetired) onClose();
+    const unregisterRenameFlush = registerRenameFlushProvider(async (oldPath) => {
+      if (doc.filePath !== oldPath && !pathStartsWithChild(doc.filePath, oldPath)) return;
+      if (publishing || binding || pendingPublishResult) {
+        throw new Error(t('publish.remoteStateUnavailable'));
+      }
+      exitLocked = true;
+      try {
+        await coverMutationTail;
+        if (coverMutationFailure) throw new Error(coverMutationFailure);
+        if (pendingPublishResult) throw new Error(t('publish.remoteStateUnavailable'));
+        if (isPublishRemoteStateUnknown(remoteState)) {
+          skipDestroyFlush = true;
+          onClose();
+          return;
+        }
+        await persistenceController.handleRenameFlush(oldPath);
+        skipDestroyFlush = true;
+        onClose();
+      } catch (error) {
+        exitLocked = false;
+        throw error;
+      }
     });
-    (async () => {
-      const r = await commands.listPublishTags(toPlatformConfig(channel));
-      if (r.status === 'ok') availableTags = r.data;
-    })().catch((err) => {
-      console.warn(
-        '[publish] tag autocomplete fetch rejected:',
-        err instanceof Error ? err.message : err,
-      );
+    const unregisterProjectSwitchFlush = registerProjectSwitchFlushProvider(async (previous, next) => {
+      if (previous === next) return;
+      if (publishing || binding || pendingPublishResult) {
+        throw new Error(t('publish.remoteStateUnavailable'));
+      }
+      if (next === doc.projectDir) return;
+      exitLocked = true;
+      try {
+        await coverMutationTail;
+        if (coverMutationFailure) throw new Error(coverMutationFailure);
+        if (pendingPublishResult) throw new Error(t('publish.remoteStateUnavailable'));
+        if (isPublishRemoteStateUnknown(remoteState)) {
+          skipDestroyFlush = true;
+          onClose();
+          return;
+        }
+        await persistenceController.handleProjectSwitch(next);
+        if (persistenceController.isRetired) onClose();
+      } catch (error) {
+        exitLocked = false;
+        throw error;
+      }
     });
     persistenceController.loadInitialDraft().catch((err) => {
       console.warn(
         '[publish] initial draft restore rejected:',
+        err instanceof Error ? err.message : err,
+      );
+    });
+    enqueueCoverMutation(restoreCover, true).catch((err) => {
+      console.warn(
+        '[publish] cover restore rejected:',
         err instanceof Error ? err.message : err,
       );
     });
@@ -193,13 +431,15 @@
   });
 
   onDestroy(() => {
-    if (coverPreviewUrl) {
-      URL.revokeObjectURL(coverPreviewUrl);
-      coverPreviewUrl = null;
+    destroyed = true;
+    coverGeneration += 1;
+    coverUrlOwner.clear();
+    coverPreviewUrl = null;
+    if (!skipDestroyFlush && !isPublishRemoteStateUnknown(remoteState)) {
+      persistenceController.handleDestroy().catch((err) => {
+        console.warn('[publish] destroy flush rejected:', err instanceof Error ? err.message : err);
+      });
     }
-    persistenceController.handleDestroy().catch((err) => {
-      console.warn('[publish] destroy flush rejected:', err instanceof Error ? err.message : err);
-    });
   });
 
   function selectSuggestion(name: string) {
@@ -252,33 +492,120 @@
     }
   }
 
+  function coverError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function coverActionsLocked(): boolean {
+    return operationLocked() || destroyed;
+  }
+
+  function recordCoverMutationFailure(error: unknown): void {
+    if (destroyed) return;
+    const message = coverError(error);
+    coverMutationFailure = message;
+    errorMessage = message;
+  }
+
+  function applyCoverAsset(asset: PublishCoverAsset): void {
+    const blob = new Blob([new Uint8Array(asset.bytes)], { type: asset.mime });
+    const nextUrl = coverUrlOwner.replace(blob);
+    coverAsset = asset;
+    coverPreviewUrl = nextUrl;
+  }
+
+  function enqueueCoverMutation(
+    operation: () => Promise<void>,
+    allowBeforeRemoteReady = false,
+  ): Promise<void> {
+    if (
+      destroyed
+      || publishing
+      || binding
+      || exitLocked
+      || (!allowBeforeRemoteReady && isPublishRemoteStateUnknown(remoteState))
+    ) return Promise.resolve();
+    coverGeneration += 1;
+    const run = coverMutationTail.then(operation, operation);
+    coverMutationTail = run.catch(() => {});
+    return run;
+  }
+
+  async function restoreCover(): Promise<void> {
+    try {
+      const restoreGeneration = coverGeneration;
+      const result = await commands.loadPublishCover(doc.projectDir, doc.filePath, channel.id);
+      if (destroyed || restoreGeneration !== coverGeneration) return;
+      if (result.status !== 'ok') throw new Error(result.error);
+      if (result.data) {
+        applyCoverAsset(result.data);
+        coverChangedForAttempt = false;
+      }
+      coverMutationFailure = null;
+    } catch (error) {
+      recordCoverMutationFailure(error);
+    }
+  }
+
+  async function persistCoverUnqueued(source: File | CoverBytesInput): Promise<void> {
+    try {
+      const input = source instanceof File ? await readCoverFile(source) : source;
+      const result = await commands.storePublishCover(
+        doc.projectDir,
+        doc.filePath,
+        channel.id,
+        Array.from(input.bytes),
+        input.declaredMime,
+      );
+      if (result.status !== 'ok') throw new Error(result.error);
+      if (destroyed) return;
+      applyCoverAsset(result.data);
+      coverChangedForAttempt = true;
+      coverMutationFailure = null;
+      errorMessage = null;
+    } catch (error) {
+      recordCoverMutationFailure(error);
+    }
+  }
+
+  async function ingestCover(source: File | CoverBytesInput): Promise<void> {
+    await enqueueCoverMutation(() => persistCoverUnqueued(source));
+  }
+
   async function pickCover() {
+    if (coverActionsLocked()) return;
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
     input.addEventListener('change', () => {
       const f = input.files?.[0];
-      if (f) setCover(f);
+      if (f) void ingestCover(f);
     });
     input.click();
   }
 
-  function setCover(f: File) {
-    coverFile = f;
-    if (coverPreviewUrl) URL.revokeObjectURL(coverPreviewUrl);
-    coverPreviewUrl = URL.createObjectURL(f);
-  }
-
-  function clearCover() {
-    coverFile = null;
-    if (coverPreviewUrl) URL.revokeObjectURL(coverPreviewUrl);
-    coverPreviewUrl = null;
+  async function clearCover() {
+    await enqueueCoverMutation(async () => {
+      const result = await commands.clearPublishCover(doc.projectDir, doc.filePath, channel.id);
+      if (result.status !== 'ok') {
+        recordCoverMutationFailure(result.error);
+        return;
+      }
+      if (destroyed) return;
+      coverAsset = null;
+      coverChangedForAttempt = true;
+      coverPreviewUrl = null;
+      coverUrlOwner.clear();
+      coverMutationFailure = null;
+      errorMessage = null;
+    });
   }
 
   function onCoverDrop(e: DragEvent) {
     e.preventDefault();
+    if (coverActionsLocked()) return;
     const f = e.dataTransfer?.files?.[0];
-    if (f && f.type.startsWith('image/')) setCover(f);
+    if (f) void ingestCover(f);
   }
 
   /** Read an image from the system clipboard via the Rust-side
@@ -286,26 +613,129 @@
    *  bypasses the WebKit/macOS "Paste" permission prompt that
    *  `navigator.clipboard.read()` triggers — one-click instead of two. */
   async function pasteCoverFromClipboard() {
+    if (coverActionsLocked()) return;
     errorMessage = null;
-    const r = await commands.readClipboardImage();
-    if (r.status !== 'ok') {
-      // Distinguish "no image on clipboard" from a hard failure.
-      const msg = r.error.toLowerCase();
-      if (msg.includes('no image')) {
-        errorMessage = t('publish.pasteNoImage');
-      } else {
-        errorMessage = `${t('publish.pasteFailed')}: ${r.error}`;
+    await enqueueCoverMutation(async () => {
+      const r = await commands.readClipboardImage();
+      if (r.status !== 'ok') {
+        // Distinguish "no image on clipboard" from a hard failure.
+        const msg = r.error.toLowerCase();
+        if (msg.includes('no image')) {
+          recordCoverMutationFailure(t('publish.pasteNoImage'));
+        } else {
+          recordCoverMutationFailure(`${t('publish.pasteFailed')}: ${r.error}`);
+        }
+        return;
       }
-      return;
-    }
-    const blob = new Blob([new Uint8Array(r.data.bytes)], { type: r.data.mime });
-    const ext = r.data.mime.split('/')[1] || 'png';
-    const file = new File([blob], `clipboard.${ext}`, { type: r.data.mime });
-    setCover(file);
+      await persistCoverUnqueued({
+        bytes: new Uint8Array(r.data.bytes),
+        declaredMime: r.data.mime,
+      });
+    });
   }
 
-  async function doPublish() {
-    if (publishing || exitLocked) return;
+  function onCoverPaste(event: ClipboardEvent): void {
+    if (coverActionsLocked()) return;
+    const directImage = findClipboardImage(event.clipboardData);
+    event.preventDefault();
+    if (directImage) {
+      void ingestCover(directImage);
+      return;
+    }
+    void pasteCoverFromClipboard();
+  }
+
+  function applyPublishFailure(failure: PublishFailure): void {
+    publishFailure = failure;
+    confirmation = null;
+    if (failure.state === 'error') {
+      errorMessage = failure.message;
+      return;
+    }
+    lifecycleState = failure.state;
+    errorMessage = null;
+  }
+
+  function requestNewCopy(): void {
+    if (operationLocked()) return;
+    confirmation = { kind: 'new_copy' };
+  }
+
+  function requestOverwrite(): void {
+    if (operationLocked() || publishFailure?.state !== 'conflict') return;
+    confirmation = {
+      kind: 'overwrite',
+      revision: publishFailure.actualRevision,
+    };
+  }
+
+  async function confirmRecoveryAction(): Promise<void> {
+    const pending = confirmation;
+    if (!pending || operationLocked()) return;
+    confirmation = null;
+    if (pending.kind === 'new_copy') {
+      await doPublish({ kind: 'new_copy', confirmed: true });
+      return;
+    }
+    await doPublish({
+      kind: 'overwrite',
+      confirmed: true,
+      revision: pending.revision,
+    });
+  }
+
+  function showBind(): void {
+    if (operationLocked() || channel.platform === 'medium') return;
+    bindValue = displayRemoteIdentity?.post_id ?? '';
+    bindOpen = true;
+    bindError = null;
+    confirmation = null;
+    errorMessage = null;
+  }
+
+  async function confirmBind(): Promise<void> {
+    const candidate = bindValue.trim();
+    if (!candidate || operationLocked() || channel.platform === 'medium') return;
+    binding = true;
+    bindError = null;
+    errorMessage = null;
+    try {
+      await coverMutationTail;
+      if (coverMutationFailure) throw new Error(coverMutationFailure);
+      await persistenceController.handleBeforePublish();
+      await bindLegacyPublication({
+        projectDir: doc.projectDir,
+        filePath: doc.filePath,
+        channelId: channel.id,
+        urlOrId: candidate,
+      });
+      successUrl = null;
+      openRemoteError = null;
+      bindOpen = false;
+      bindError = null;
+      await refreshRemoteState();
+    } catch {
+      bindError = t('publish.bindFailed');
+    } finally {
+      binding = false;
+    }
+  }
+
+  async function doPublish(intent: PublishIntent = { kind: 'default' }) {
+    if (operationLocked()) return;
+    if (isPublishRemoteStateUnknown(remoteState)) {
+      lifecycleState = 'unknown';
+      return;
+    }
+    const remoteForAttempt = remoteState;
+    const plan = planPublishAttempt(channel.platform, remoteForAttempt, intent);
+    if (plan.request === 'blocked') {
+      if (plan.state === 'unsupported') applyPublishFailure({ state: 'unsupported' });
+      else if (plan.state === 'conflict') {
+        applyPublishFailure({ state: 'conflict', remoteId: displayRemoteIdentity?.post_id ?? '' });
+      } else applyPublishFailure({ state: 'corrupt' });
+      return;
+    }
     if (!title.trim()) {
       errorMessage = t('publish.titleRequired');
       return;
@@ -315,6 +745,10 @@
     successUrl = null;
 
     try {
+      await coverMutationTail;
+      if (coverMutationFailure) {
+        throw new Error(coverMutationFailure);
+      }
       await persistenceController.handleBeforePublish();
       const payload: DialogPayload = {
         title: title.trim(),
@@ -324,19 +758,42 @@
         status,
         publicationId: destination,
       };
-      if (coverFile) {
-        const buf = await coverFile.arrayBuffer();
+      if (
+        coverAsset
+        && channel.platform !== 'medium'
+        && shouldUploadPublishCover(plan.request, coverChangedForAttempt)
+      ) {
         payload.coverImage = {
-          bytes: new Uint8Array(buf),
-          filename: coverFile.name,
-          mime: coverFile.type || 'image/png',
+          bytes: new Uint8Array(coverAsset.bytes),
+          filename: coverAsset.filename,
+          mime: coverAsset.mime,
         };
       }
-      const result = await dispatchPublish(channel, payload, doc);
+      const result = await dispatchPublish(channel, payload, doc, {
+        remote: remoteForAttempt,
+        intent,
+      });
+      coverChangedForAttempt = false;
+      if (!result.remoteIdentity) {
+        pendingPublishResult = result;
+        remoteState = failPublishRemoteRead(remoteState);
+        lifecycleState = 'unknown';
+        return;
+      }
       successUrl = result.url;
+      applyRemoteState(result.remoteIdentity);
+      lifecycleState = 'updated';
+      publishFailure = null;
       await persistenceController.handleAfterPublishSuccess();
     } catch (e) {
-      errorMessage = e instanceof Error ? e.message : String(e);
+      if (e instanceof PublishIdentityPersistenceError) {
+        pendingPublishResult = e.result;
+        remoteState = failPublishRemoteRead(remoteState);
+        lifecycleState = 'unknown';
+        publishFailure = null;
+        errorMessage = null;
+      } else if (e instanceof PublishCommandError) applyPublishFailure(e.failure);
+      else errorMessage = e instanceof Error ? e.message : t('publish.failed');
     } finally {
       publishing = false;
     }
@@ -347,6 +804,11 @@
     exitLocked = true;
     const operation = (async () => {
       try {
+        await coverMutationTail;
+        if (isPublishRemoteStateUnknown(remoteState)) {
+          skipDestroyFlush = true;
+          return true;
+        }
         await persistenceController.handleClose();
         return true;
       } catch (err) {
@@ -369,7 +831,7 @@
   }
 
   function safeHandleClose(): void {
-    if (publishing || exitLocked) return;
+    if (exitOperationLocked()) return;
     handleClose().catch((err) => {
       errorMessage = `${t('publish.draftPersistFailed')}: ${
         err instanceof Error ? err.message : String(err)
@@ -378,23 +840,31 @@
   }
 
   export function requestClose(): void {
-    if (!publishing && !exitLocked) safeHandleClose();
+    if (!exitOperationLocked()) safeHandleClose();
   }
 
   export async function prepareForModeSwitch(): Promise<boolean> {
-    if (publishing) return false;
+    if (exitOperationLocked()) return false;
     return persistBeforeExit();
   }
 
   async function openInBrowser() {
     // `window.open` no-ops inside the Tauri WKWebView. Route through the
     // shell plugin so the system browser handles the URL.
-    if (!successUrl) return;
+    const target = successUrl ?? displayRemoteIdentity?.url;
+    if (!target) return;
+    const allowHttp = channel.platform === 'ghost'
+      || channel.platform === 'wordpress_self_hosted';
+    if (!isOpenablePublishUrl(target, { allowHttp })) {
+      openRemoteError = t('publish.openRemoteInvalid');
+      return;
+    }
+    openRemoteError = null;
     try {
-      await shellOpen(successUrl);
-    } catch (e) {
-      console.error('[publish] shell.open failed:', e);
-      errorMessage = e instanceof Error ? e.message : String(e);
+      await shellOpen(target);
+    } catch {
+      console.error('[publish] shell.open failed');
+      openRemoteError = t('publish.openRemoteFailed');
     }
   }
 </script>
@@ -404,6 +874,102 @@
       <div class="header-name">{channel.name}</div>
       <div class="header-url">{baseUrlForChannel(channel)}</div>
     </div>
+
+    <div class="lifecycle-row" aria-live="polite">
+      <span class={`state-label state-${lifecycleState}`} data-testid="publish-state">
+        {lifecycleLabel()}
+      </span>
+      <div class="remote-actions">
+        {#if displayRemoteIdentity?.url}
+          <button class="quiet-action" data-testid="publish-open-remote" onclick={openInBrowser} disabled={operationLocked()}>
+            {t('publish.openRemote')}
+          </button>
+        {/if}
+        {#if channel.platform !== 'medium'}
+          <button
+            class="quiet-action"
+            data-testid={displayRemoteIdentity ? 'publish-rebind' : 'publish-attach-existing'}
+            onclick={showBind}
+            disabled={operationLocked()}
+          >
+            {displayRemoteIdentity ? t('publish.rebind') : t('publish.attachExisting')}
+          </button>
+        {/if}
+      </div>
+    </div>
+
+    {#if openRemoteError}
+      <div class="state-notice error-notice" data-testid="publish-open-remote-error" role="alert">
+        <span>{openRemoteError}</span>
+      </div>
+    {/if}
+
+    {#if lifecycleState === 'conflict'}
+      <div class="state-notice warning-notice" data-testid="publish-conflict">
+        <span>{t('publish.conflictMessage')}</span>
+        <div class="notice-actions">
+          <button class="quiet-action" data-testid="publish-overwrite" onclick={requestOverwrite} disabled={operationLocked()}>{t('publish.overwriteExisting')}</button>
+          <button class="quiet-action" data-testid="publish-new-copy" onclick={requestNewCopy} disabled={operationLocked()}>{t('publish.newCopy')}</button>
+        </div>
+      </div>
+    {:else if lifecycleState === 'not_found'}
+      <div class="state-notice warning-notice" data-testid="publish-not-found">
+        <span>{t('publish.notFoundMessage')}</span>
+        <button class="quiet-action" data-testid="publish-new-copy" onclick={requestNewCopy} disabled={operationLocked()}>{t('publish.newCopy')}</button>
+      </div>
+    {:else if lifecycleState === 'unsupported'}
+      <div class="state-notice warning-notice" data-testid="publish-unsupported">
+        <span>{channel.platform === 'medium' ? t('publish.mediumUnsupported') : t('publish.unsupportedMessage')}</span>
+        <button class="quiet-action" data-testid="publish-new-copy" onclick={requestNewCopy} disabled={operationLocked()}>{t('publish.newCopy')}</button>
+      </div>
+    {:else if lifecycleState === 'corrupt'}
+      <div class="state-notice error-notice" data-testid="publish-corrupt">
+        <span>{t('publish.corruptMessage')}</span>
+        <button class="quiet-action" onclick={() => { void refreshRemoteState(); }} disabled={operationLocked()}>{t('publish.retry')}</button>
+      </div>
+    {:else if lifecycleState === 'unknown' && isPublishRemoteStateUnknown(remoteState) && remoteState.phase === 'failed'}
+      <div class="state-notice error-notice" data-testid="publish-remote-uncertain">
+        <span>{t('publish.remoteStateUnavailable')}</span>
+        <button
+          class="quiet-action"
+          data-testid="publish-remote-retry"
+          onclick={() => { void retryRemoteState(); }}
+          disabled={retryRemoteStateLocked()}
+        >{t('publish.retry')}</button>
+      </div>
+    {/if}
+
+    {#if bindOpen}
+      <div class="inline-operation" data-testid="publish-bind-form">
+        <label for="publish-bind-input" class="lbl">{t('publish.remoteUrlOrId')}</label>
+        <div class="inline-fields">
+          <input id="publish-bind-input" data-testid="publish-bind-input" class="inp" bind:value={bindValue} disabled={binding} />
+          <button class="ghost-btn" onclick={() => { bindOpen = false; bindError = null; }} disabled={binding}>{t('publish.cancel')}</button>
+          <button class="primary-btn" data-testid="publish-bind-confirm" onclick={confirmBind} disabled={binding || !bindValue.trim()}>
+            {binding ? t('publish.binding') : t('publish.bind')}
+          </button>
+        </div>
+      </div>
+      {#if bindError}
+        <div class="state-notice error-notice" data-testid="publish-bind-error" role="alert">
+          <span>{bindError}</span>
+        </div>
+      {/if}
+    {/if}
+
+    {#if confirmation}
+      <div class="inline-operation confirmation" data-testid="publish-confirmation">
+        <span>{confirmation.kind === 'overwrite' ? t('publish.confirmOverwrite') : t('publish.confirmNewCopy')}</span>
+        <div class="notice-actions">
+          <button class="ghost-btn" data-testid="publish-confirm-cancel" onclick={() => { confirmation = null; }}>{t('publish.cancel')}</button>
+          <button class="primary-btn" data-testid="publish-confirm-action" onclick={confirmRecoveryAction}>{t('publish.confirm')}</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if errorMessage}
+      <div class="error-banner" data-testid="publish-cover-error">{errorMessage}</div>
+    {/if}
 
     {#if successUrl}
       <div class="success-banner">
@@ -419,26 +985,39 @@
         <div class="row">
           <div class="col">
             <span class="lbl">{t('publish.coverImage')}</span>
-            <div
-              class="cover-drop"
-              role="button"
-              tabindex="0"
-              ondragover={(e) => e.preventDefault()}
-              ondrop={onCoverDrop}
-              onclick={pickCover}
-              onkeydown={(e) => { if (e.key === 'Enter') pickCover(); }}
-            >
-              {#if coverPreviewUrl}
-                <img src={coverPreviewUrl} alt="cover preview" />
-              {:else}
-                <div class="cover-placeholder">{t('publish.coverPlaceholder')}</div>
-              {/if}
-            </div>
-            <div class="cover-actions">
-              <button class="small-btn" onclick={pickCover}>{t('publish.choose')}</button>
-              <button class="small-btn" onclick={pasteCoverFromClipboard}>{t('publish.pasteFromClipboard')}</button>
-              {#if coverFile}<button class="small-btn" onclick={clearCover}>{t('publish.remove')}</button>{/if}
-            </div>
+            {#if channel.platform === 'medium'}
+              <div class="medium-cover-note" data-testid="publish-medium-cover-note">{t('publish.mediumCoverUnsupported')}</div>
+            {:else}
+              <div
+                class="cover-drop"
+                role="button"
+                tabindex={operationLocked() ? -1 : 0}
+                aria-disabled={operationLocked()}
+                aria-label={t('publish.coverImage')}
+                data-testid="publish-cover-drop"
+                ondragover={(e) => e.preventDefault()}
+                ondrop={onCoverDrop}
+                onpaste={onCoverPaste}
+                onclick={pickCover}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void pickCover();
+                  }
+                }}
+              >
+                {#if coverPreviewUrl}
+                  <img src={coverPreviewUrl} alt="cover preview" data-testid="publish-cover-preview" />
+                {:else}
+                  <div class="cover-placeholder">{t('publish.coverPlaceholder')}</div>
+                {/if}
+              </div>
+              <div class="cover-actions">
+                <button class="small-btn" data-testid="publish-cover-choose" onclick={pickCover} disabled={operationLocked()}>{t('publish.choose')}</button>
+                <button class="small-btn" onclick={pasteCoverFromClipboard} disabled={operationLocked()}>{t('publish.pasteFromClipboard')}</button>
+                {#if coverAsset}<button class="small-btn" data-testid="publish-cover-remove" onclick={clearCover} disabled={operationLocked()}>{t('publish.remove')}</button>{/if}
+              </div>
+            {/if}
           </div>
 
           <div class="col">
@@ -524,14 +1103,10 @@
           <div class="draft-notice" data-testid="publish-draft-recovered">{t('publish.draftUnreadable')}</div>
         {/if}
 
-        {#if errorMessage}
-          <div class="error-banner">{errorMessage}</div>
-        {/if}
-
         <div class="footer">
-          <button class="ghost-btn" onclick={safeHandleClose} disabled={publishing || exitLocked}>{t('publish.cancel')}</button>
-          <button class="primary-btn" onclick={doPublish} disabled={publishing || exitLocked}>
-            {publishing ? t('publish.publishing') : t('publish.publish')}
+          <button class="ghost-btn" onclick={safeHandleClose} disabled={exitOperationLocked()}>{t('publish.cancel')}</button>
+          <button class="primary-btn" data-testid="publish-submit" onclick={() => doPublish()} disabled={operationLocked()}>
+            {publishing ? t('publish.publishing') : displayRemoteIdentity ? t('publish.update') : t('publish.publish')}
           </button>
         </div>
       </div>
@@ -545,6 +1120,44 @@
   }
   .header-name { font-weight: 600; font-size: 14px; }
   .header-url { font-size: 12px; color: var(--novelist-text-secondary); }
+
+  .lifecycle-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    min-height: 26px; margin-bottom: 8px;
+  }
+  .state-label {
+    display: inline-flex; align-items: center; min-height: 22px;
+    padding: 2px 8px; border-radius: 4px;
+    background: var(--novelist-sidebar-hover); color: var(--novelist-text-secondary);
+    font-size: 11px; font-weight: 600;
+  }
+  .state-updating, .state-updated { color: var(--novelist-accent); background: color-mix(in srgb, var(--novelist-accent) 12%, transparent); }
+  .state-conflict, .state-not_found, .state-unsupported { color: #b06f0e; background: rgba(217, 149, 26, 0.12); }
+  .state-corrupt { color: #d24a4a; background: rgba(210, 74, 74, 0.12); }
+  .remote-actions, .notice-actions, .inline-fields { display: flex; align-items: center; gap: 8px; }
+  .quiet-action {
+    border: none; background: transparent; color: var(--novelist-accent);
+    padding: 3px 4px; border-radius: 3px; font-size: 12px; cursor: pointer;
+  }
+  .quiet-action:hover { background: var(--novelist-sidebar-hover); }
+  .quiet-action:disabled { opacity: 0.5; cursor: default; }
+  .state-notice, .inline-operation {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 7px 10px; margin-bottom: 8px; border-radius: 0 3px 3px 0;
+    font-size: 12px;
+  }
+  .warning-notice { border-left: 3px solid #d9951a; background: rgba(217, 149, 26, 0.1); }
+  .error-notice { border-left: 3px solid #d24a4a; background: rgba(210, 74, 74, 0.1); }
+  .inline-operation { border-left: 3px solid var(--novelist-accent); background: color-mix(in srgb, var(--novelist-accent) 8%, transparent); }
+  .inline-operation > .lbl { margin: 0; flex: 0 0 auto; }
+  .inline-fields { flex: 1; min-width: 0; }
+  .inline-fields .inp { flex: 1; min-width: 120px; }
+  .confirmation > span { color: var(--novelist-text-secondary); }
+  .medium-cover-note {
+    min-height: 140px; display: flex; align-items: center; justify-content: center;
+    padding: 16px; border: 1px dashed var(--novelist-border); border-radius: 4px;
+    color: var(--novelist-text-secondary); font-size: 12px; text-align: center;
+  }
 
   .form { display: flex; flex-direction: column; gap: 8px; }
   .lbl { font-size: 12px; color: var(--novelist-text-secondary); margin-top: 6px; display: block; }
@@ -570,7 +1183,16 @@
     overflow: hidden;
     cursor: pointer;
   }
-  .cover-drop img { max-width: 100%; max-height: 100%; }
+  .cover-drop img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  .cover-drop:focus-visible {
+    outline: 2px solid var(--novelist-accent);
+    outline-offset: 2px;
+  }
   .cover-placeholder { font-size: 12px; color: var(--novelist-text-secondary); padding: 0 8px; text-align: center; }
   .cover-actions { display: flex; gap: 6px; margin-top: 6px; }
   .small-btn {
@@ -736,7 +1358,7 @@
     border: none; background: var(--novelist-accent); color: white;
     border-radius: 4px; cursor: pointer;
   }
-  .primary-btn:disabled, .ghost-btn:disabled, .close-btn:disabled { opacity: 0.5; cursor: default; }
+  .primary-btn:disabled, .ghost-btn:disabled, .close-btn:disabled, .small-btn:disabled { opacity: 0.5; cursor: default; }
   .link-btn { background: none; border: none; color: var(--novelist-accent); cursor: pointer; padding: 0; font-size: 14px; text-decoration: underline; }
   .close-btn { background: none; border: 1px solid var(--novelist-border); border-radius: 3px; padding: 2px 8px; font-size: 12px; cursor: pointer; margin-left: auto; }
 </style>

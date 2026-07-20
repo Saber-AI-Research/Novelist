@@ -42,7 +42,6 @@
     skillAssetsForTokens,
     stripMentionTokens,
     stripSkillTokens,
-    type SlashCommandId,
   } from '$lib/components/ai-shared/context';
   import {
     listAiPromptAssets,
@@ -52,6 +51,7 @@
     writeAiSession,
     type AiPromptAsset,
   } from '$lib/components/ai-shared/persistence';
+  import { aiChatBasename, saveAiChat } from '$lib/services/ai-chat';
   import { aiTalkSessions, type DisplayMessage } from './sessions.svelte';
   import { promptPresets } from './presets.svelte';
   import { commands } from '$lib/ipc/commands';
@@ -180,7 +180,7 @@
     attachments = [];
   }
 
-  function pickCommand(id: SlashCommandId) {
+  function pickCommand(id: string) {
     chatInput = `/${id} `;
   }
 
@@ -588,15 +588,12 @@
       setTimeout(() => (saveStatus = null), 3000);
       return;
     }
-    const chatsDir = `${projectDir}/.novelist/chats`;
     const stamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+$/, '');
     const filename = `${safeFilename(session.title)}-${stamp}.md`;
     const body = messagesToMarkdown(session.title, messages);
     try {
-      // createFileWithBody handles mkdir -p of the parent dir.
-      const result = await commands.createFileWithBody(chatsDir, filename, body);
-      if (result.status === 'error') throw new Error(result.error);
-      saveStatus = `Saved · .novelist/chats/${filename}`;
+      const resolvedPath = await saveAiChat(projectDir, filename, body);
+      saveStatus = `Saved · .novelist/chats/${aiChatBasename(resolvedPath)}`;
     } catch (e) {
       saveStatus = `Save failed: ${e instanceof Error ? e.message : String(e)}`;
     }

@@ -1,14 +1,13 @@
-import { check, type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
+import { type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { t } from '$lib/i18n';
 import { updaterState } from '$lib/stores/updater-state.svelte';
-
-const SKIPPED_VERSION_KEY = 'novelist-skipped-update-version';
-
-function getSkippedVersion(): string | null {
-  return localStorage.getItem(SKIPPED_VERSION_KEY);
-}
+import {
+  runUpdateCheck,
+  SKIPPED_VERSION_KEY,
+  takeLastAvailableHandle,
+} from '$lib/services/update-checker';
 
 function setSkippedVersion(version: string) {
   localStorage.setItem(SKIPPED_VERSION_KEY, version);
@@ -20,55 +19,41 @@ export function clearSkippedVersion() {
 
 let _cachedUpdate: Update | null = null;
 
-/**
- * Check for updates.
- *
- * - `silent=true` (startup): if a non-skipped update is found, surface it via
- *   the in-app "Update Available" banner. Errors swallowed.
- * - `silent=false` (manual command): always show a result — either the
- *   confirm dialog, an "already latest" message, or the failure message.
- */
 export async function checkForUpdates(silent = true): Promise<void> {
-  try {
-    const update = await check({ timeout: 10000 });
-    if (update) {
-      _cachedUpdate = update;
+  const outcome = await runUpdateCheck({ startup: silent });
 
-      const skipped = getSkippedVersion();
-      if (silent && skipped === update.version) {
-        // User chose "Skip This Version" for this exact version — stay quiet
-        return;
-      }
-
-      updaterState.setAvailable(update.version, update.body ?? null);
-
-      if (!silent) {
+  switch (outcome.kind) {
+    case 'available': {
+      const handle = (outcome.handle ?? takeLastAvailableHandle()) as Update | null;
+      if (handle) _cachedUpdate = handle;
+      if (!silent && _cachedUpdate) {
         await promptAndInstall();
       }
-    } else {
+      return;
+    }
+    case 'no-update':
+      updaterState.reset();
       if (!silent) {
         await message(t('updater.alreadyLatest'), {
           title: t('updater.noUpdates'),
           kind: 'info',
         });
       }
-      updaterState.reset();
-    }
-  } catch (e) {
-    console.warn('[updater] Check failed:', e);
-    if (!silent) {
-      await message(t('updater.checkFailedMessage'), {
-        title: t('updater.checkFailed'),
-        kind: 'error',
-      });
-    }
+      return;
+    case 'skipped':
+    case 'unsupported':
+      return;
+    case 'failed':
+      if (!silent) {
+        await message(t('updater.checkFailedMessage'), {
+          title: t('updater.checkFailed'),
+          kind: 'error',
+        });
+      }
+      return;
   }
 }
 
-/**
- * Entry point used by the in-app banner / "Update available" affordance.
- * Also used by the command palette `installUpdate` after a manual check.
- */
 export async function startUpdateFlow(): Promise<void> {
   if (!_cachedUpdate) {
     await checkForUpdates(false);
@@ -77,12 +62,8 @@ export async function startUpdateFlow(): Promise<void> {
   await promptAndInstall();
 }
 
-/** Legacy alias kept for `app-commands.ts` callers. */
 export const installUpdate = startUpdateFlow;
 
-/**
- * Skip the currently-pending version. Called from the banner.
- */
 export function skipPendingVersion(): void {
   const v = updaterState.version;
   if (v) setSkippedVersion(v);
@@ -90,14 +71,10 @@ export function skipPendingVersion(): void {
   _cachedUpdate = null;
 }
 
-/** Dismiss the banner without skipping (next startup will re-prompt). */
 export function dismissPendingVersion(): void {
   updaterState.reset();
 }
 
-/**
- * Native two-step prompt → progress modal → restart prompt.
- */
 async function promptAndInstall(): Promise<void> {
   const update = _cachedUpdate;
   if (!update) return;
@@ -145,18 +122,9 @@ async function downloadAndInstall(update: Update): Promise<void> {
     return;
   }
 
-  // Install succeeded; ask the user whether to relaunch now.
   updaterState.setReady();
 }
 
-/**
- * Called from the modal's "Restart now" button.
- *
- * `relaunch()` exits the current process and starts the freshly installed
- * binary. We try to flush via the lifecycle handler first so unsaved state
- * isn't lost, but the user has already been asked to restart so we don't
- * second-guess them.
- */
 export async function restartForUpdate(): Promise<void> {
   try {
     await relaunch();
@@ -170,7 +138,6 @@ export async function restartForUpdate(): Promise<void> {
   }
 }
 
-/** Called from the modal "Later" button — keeps the new version pending. */
 export function deferRestart(): void {
   updaterState.reset();
   _cachedUpdate = null;

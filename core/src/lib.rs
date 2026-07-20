@@ -5,13 +5,20 @@ mod models;
 mod services;
 
 pub use error::AppError;
+pub use services::publish::cover_assets as publish_cover_assets;
+pub use services::publish::sidecar as publish_sidecar;
+pub use services::publish::types::{
+    build_error_from_body, redact_reqwest_error, redact_secrets, ProviderRevision, PublishError,
+    PublishOperation, PublishResult, UnsupportedUpdateReason, UpdateConflictContext, UpdateTarget,
+};
+pub use services::sidecar;
 
 use std::sync::Mutex;
 
 use commands::ai_bridge::{ai_fetch_stream_cancel, ai_fetch_stream_start, AiBridgeState};
 use commands::ai_files::{
-    delete_ai_session, list_ai_prompt_assets, list_ai_sessions, read_ai_session, write_ai_memory,
-    write_ai_session,
+    delete_ai_session, list_ai_prompt_assets, list_ai_sessions, read_ai_session, save_ai_chat,
+    write_ai_memory, write_ai_session,
 };
 use commands::bench::log_startup_phase;
 use commands::claude_bridge::{
@@ -20,19 +27,30 @@ use commands::claude_bridge::{
 use commands::cli_shim::{cli_shim_status, install_cli_shim};
 use commands::codex_bridge::{codex_cli_detect, codex_cli_kill, codex_cli_turn, CodexBridgeState};
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
-use commands::export::{check_pandoc, export_project, set_pandoc_path};
+#[cfg(all(target_os = "macos", feature = "e2e-testing"))]
+use commands::e2e::{
+    capture_e2e_webview_snapshot, perform_e2e_native_command_v, perform_e2e_native_paste,
+};
+use commands::export::{
+    cancel_export_project, check_pandoc, export_project, set_pandoc_path, stage_export_css,
+    ExportState,
+};
 use commands::file::{
     broadcast_file_renamed, create_directory, create_file, create_scratch_file, delete_item,
-    duplicate_file, get_file_encoding, list_directory, move_item, read_file, read_image_data_uri,
-    rename_item, reveal_in_file_manager, search_in_project, write_binary_file, write_file,
-    EncodingState,
+    duplicate_file, get_file_encoding, list_directory, move_item, read_file, rename_item,
+    reveal_in_file_manager, search_in_project, write_binary_file, write_file,
+    write_file_if_unchanged, EncodingState,
 };
 use commands::image_host::{
     get_image_host_settings, read_image_bytes, set_image_host_settings, upload_image_aliyun_oss,
     upload_image_custom, upload_image_imgur, upload_image_qiniu, upload_image_s3,
-    upload_image_smms,
+    upload_image_smms, WindowImageCapabilities,
 };
 use commands::menu::refresh_menu;
+use commands::naming::{
+    compute_document_key, delete_managed_name_state, read_managed_name_state,
+    write_managed_name_state,
+};
 use commands::plugin::{
     get_plugin_commands, get_plugins_dir, invoke_plugin_command, list_plugins, load_plugin,
     reload_plugin, scaffold_plugin, set_plugin_document_state, set_plugin_enabled, unload_plugin,
@@ -40,11 +58,14 @@ use commands::plugin::{
 use commands::portable::is_portable_mode;
 use commands::project::{detect_project, read_project_config};
 use commands::publish::{
-    convert_markdown_to_html, get_publish_settings, list_publish_tags, publish_to_ghost,
+    bind_legacy_publication, clear_publish_cover, convert_markdown_to_html, get_publish_settings,
+    list_publish_tags, load_publish_cover, persist_publish_result, publish_to_ghost,
     publish_to_medium, publish_to_wordpress_com, publish_to_wordpress_self_hosted,
-    read_clipboard_image, set_publish_settings, upload_post_image_ghost, upload_post_image_medium,
+    read_clipboard_image, read_publish_form_drafts, read_publish_remote_state,
+    set_publish_settings, store_publish_cover, upload_post_image_ghost, upload_post_image_medium,
     upload_post_image_wordpress_com, upload_post_image_wordpress_self_hosted,
-    verify_publish_channel,
+    verify_publish_channel, verify_wordpress_com_update, verify_wordpress_self_hosted_update,
+    write_publish_form_draft,
 };
 use commands::recent::{
     add_recent_project, get_recent_projects, remove_recent_project, reorder_recent_projects,
@@ -86,7 +107,39 @@ use specta::Type;
 use tauri::{Emitter, Manager};
 use tauri_specta::{collect_commands, Builder};
 
+#[cfg(feature = "codegen")]
+fn normalize_generated_typescript(path: &std::path::Path) -> std::io::Result<()> {
+    let source = std::fs::read_to_string(path)?;
+    let mut normalized = source
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    normalized.push('\n');
+    if normalized != source {
+        std::fs::write(path, normalized)?;
+    }
+    Ok(())
+}
+
 use services::cli::{help_text, parse_argv, CliRequest, FileTarget};
+
+#[cfg(feature = "e2e-testing")]
+fn log_native_e2e_startup(message: &str) {
+    use std::io::Write;
+
+    let Ok(path) = std::env::var("NOVELIST_NATIVE_TAURI_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "native_e2e_startup={message}");
+        let _ = file.sync_all();
+    }
+}
 
 /// Files queued for opening before the frontend listener is ready.
 /// Populated by CLI args and macOS `RunEvent::Opened`; drained by the
@@ -108,6 +161,7 @@ impl PendingFile {
             col: t.col,
         }
     }
+    #[allow(dead_code)]
     fn from_path(path: String) -> Self {
         Self {
             path,
@@ -274,6 +328,11 @@ fn handle_early_exit_flags() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(feature = "e2e-testing")]
+    log_native_e2e_startup(&format!(
+        "run.begin socket={:?}",
+        std::env::var("TAURI_PLAYWRIGHT_SOCKET")
+    ));
     // Early-exit flags (--version, --help) must work even if the portable
     // data directory is unwritable. Run them before portable::init() so a
     // read-only USB stick doesn't crash CLI introspection.
@@ -306,20 +365,37 @@ pub fn run() {
         // payload type must be registered explicitly or it vanishes from the
         // generated bindings — app-events.svelte.ts imports it.
         .typ::<CliOpenPayload>()
+        // PublishError + UnsupportedUpdateReason: no command currently
+        // returns these directly (commands funnel through AppError string
+        // per repo convention), so specta cannot infer they should be
+        // exported. Register explicitly so Task 21's structured-error UI
+        // has a stable typed contract to import when it lands.
+        .typ::<crate::services::publish::types::PublishError>()
+        .typ::<crate::services::publish::types::UnsupportedUpdateReason>()
+        .typ::<crate::services::publish::sidecar::RemoteIdentity>()
+        .typ::<crate::services::publish::sidecar::ChannelState>()
+        .typ::<crate::services::publish::sidecar::PublishSidecar>()
         .commands(collect_commands![
             read_file,
             write_file,
+            write_file_if_unchanged,
             get_file_encoding,
             list_directory,
             create_file,
             create_scratch_file,
             create_directory,
             rename_item,
+            compute_document_key,
+            read_managed_name_state,
+            write_managed_name_state,
+            delete_managed_name_state,
             broadcast_file_renamed,
             move_item,
             delete_item,
             check_pandoc,
             set_pandoc_path,
+            stage_export_css,
+            cancel_export_project,
             export_project,
             detect_project,
             read_project_config,
@@ -385,7 +461,6 @@ pub fn run() {
             submit_file_open_bid,
             cli_shim_status,
             install_cli_shim,
-            read_image_data_uri,
             read_image_bytes,
             upload_image_qiniu,
             upload_image_aliyun_oss,
@@ -399,6 +474,8 @@ pub fn run() {
             publish_to_wordpress_self_hosted,
             publish_to_wordpress_com,
             publish_to_medium,
+            verify_wordpress_self_hosted_update,
+            verify_wordpress_com_update,
             upload_post_image_ghost,
             upload_post_image_wordpress_self_hosted,
             upload_post_image_wordpress_com,
@@ -412,6 +489,14 @@ pub fn run() {
             read_clipboard_image,
             get_publish_settings,
             set_publish_settings,
+            read_publish_form_drafts,
+            read_publish_remote_state,
+            write_publish_form_draft,
+            persist_publish_result,
+            store_publish_cover,
+            load_publish_cover,
+            clear_publish_cover,
+            bind_legacy_publication,
             write_binary_file,
             reveal_in_file_manager,
             duplicate_file,
@@ -424,6 +509,7 @@ pub fn run() {
             delete_ai_session,
             list_ai_prompt_assets,
             write_ai_memory,
+            save_ai_chat,
             claude_cli_detect,
             claude_cli_spawn,
             claude_cli_send,
@@ -450,20 +536,33 @@ pub fn run() {
         // payload type must be registered explicitly or it vanishes from the
         // generated bindings — app-events.svelte.ts imports it.
         .typ::<CliOpenPayload>()
+        // See sync-feature builder branch above for rationale.
+        .typ::<crate::services::publish::types::PublishError>()
+        .typ::<crate::services::publish::types::UnsupportedUpdateReason>()
+        .typ::<crate::services::publish::sidecar::RemoteIdentity>()
+        .typ::<crate::services::publish::sidecar::ChannelState>()
+        .typ::<crate::services::publish::sidecar::PublishSidecar>()
         .commands(collect_commands![
             read_file,
             write_file,
+            write_file_if_unchanged,
             get_file_encoding,
             list_directory,
             create_file,
             create_scratch_file,
             create_directory,
             rename_item,
+            compute_document_key,
+            read_managed_name_state,
+            write_managed_name_state,
+            delete_managed_name_state,
             broadcast_file_renamed,
             move_item,
             delete_item,
             check_pandoc,
             set_pandoc_path,
+            stage_export_css,
+            cancel_export_project,
             export_project,
             detect_project,
             read_project_config,
@@ -529,7 +628,6 @@ pub fn run() {
             submit_file_open_bid,
             cli_shim_status,
             install_cli_shim,
-            read_image_data_uri,
             read_image_bytes,
             upload_image_qiniu,
             upload_image_aliyun_oss,
@@ -543,6 +641,8 @@ pub fn run() {
             publish_to_wordpress_self_hosted,
             publish_to_wordpress_com,
             publish_to_medium,
+            verify_wordpress_self_hosted_update,
+            verify_wordpress_com_update,
             upload_post_image_ghost,
             upload_post_image_wordpress_self_hosted,
             upload_post_image_wordpress_com,
@@ -556,6 +656,14 @@ pub fn run() {
             read_clipboard_image,
             get_publish_settings,
             set_publish_settings,
+            read_publish_form_drafts,
+            read_publish_remote_state,
+            write_publish_form_draft,
+            persist_publish_result,
+            store_publish_cover,
+            load_publish_cover,
+            clear_publish_cover,
+            bind_legacy_publication,
             write_binary_file,
             reveal_in_file_manager,
             duplicate_file,
@@ -568,6 +676,7 @@ pub fn run() {
             delete_ai_session,
             list_ai_prompt_assets,
             write_ai_memory,
+            save_ai_chat,
             claude_cli_detect,
             claude_cli_spawn,
             claude_cli_send,
@@ -581,13 +690,44 @@ pub fn run() {
         ]);
 
     #[cfg(feature = "codegen")]
-    builder
-        .export(
-            specta_typescript::Typescript::new()
-                .header("// @ts-nocheck\n// Auto-generated by tauri-specta\n"),
-            "../app/lib/ipc/commands.ts",
-        )
-        .expect("Failed to export typescript bindings");
+    {
+        let bindings_path = std::path::Path::new("../app/lib/ipc/commands.ts");
+        builder
+            .export(
+                specta_typescript::Typescript::new()
+                    .header("// @ts-nocheck\n// Auto-generated by tauri-specta\n"),
+                bindings_path,
+            )
+            .expect("Failed to export typescript bindings");
+        normalize_generated_typescript(bindings_path)
+            .expect("Failed to normalize generated typescript bindings");
+    }
+
+    #[cfg(all(target_os = "macos", feature = "e2e-testing"))]
+    let invoke_handler = {
+        let e2e_handler: Box<tauri::ipc::InvokeHandler<tauri::Wry>> =
+            Box::new(tauri::generate_handler![
+                capture_e2e_webview_snapshot,
+                perform_e2e_native_command_v,
+                perform_e2e_native_paste,
+            ]);
+        let core_handler = builder.invoke_handler();
+        move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            let is_e2e = matches!(
+                invoke.message.command(),
+                "capture_e2e_webview_snapshot"
+                    | "perform_e2e_native_command_v"
+                    | "perform_e2e_native_paste"
+            );
+            if is_e2e {
+                e2e_handler(invoke)
+            } else {
+                core_handler(invoke)
+            }
+        }
+    };
+    #[cfg(not(all(target_os = "macos", feature = "e2e-testing")))]
+    let invoke_handler = builder.invoke_handler();
 
     #[allow(unused_mut)]
     let mut app_builder = tauri::Builder::default()
@@ -638,6 +778,36 @@ pub fn run() {
             // commandRegistry.execute so there is a single handler map.
             let _ = app.emit("menu-command", event.id().0.clone());
         })
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+
+            let owner_label = window.label().to_string();
+            let app = window.app_handle().clone();
+            if let Some(state) = app.try_state::<ClaudeBridgeState>() {
+                state.tombstone_owner(&owner_label);
+            }
+            if let Some(state) = app.try_state::<CodexBridgeState>() {
+                state.tombstone_owner(&owner_label);
+            }
+            if let Some(state) = app.try_state::<WindowImageCapabilities>() {
+                state.clear_owner(&owner_label);
+            }
+
+            let claude_app = app.clone();
+            let claude_owner = owner_label.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = claude_app.try_state::<ClaudeBridgeState>() {
+                    state.drain_owner(&claude_owner).await;
+                }
+            });
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app.try_state::<CodexBridgeState>() {
+                    state.drain_owner(&owner_label).await;
+                }
+            });
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init());
@@ -648,7 +818,17 @@ pub fn run() {
 
     #[cfg(feature = "e2e-testing")]
     {
-        app_builder = app_builder.plugin(tauri_plugin_playwright::init());
+        log_native_e2e_startup(&format!(
+            "plugin.configure socket={:?}",
+            std::env::var("TAURI_PLAYWRIGHT_SOCKET")
+        ));
+        let plugin = match std::env::var("TAURI_PLAYWRIGHT_SOCKET") {
+            Ok(path) if !path.trim().is_empty() => tauri_plugin_playwright::init_with_config(
+                tauri_plugin_playwright::PluginConfig::new().socket_path(path),
+            ),
+            _ => tauri_plugin_playwright::init(),
+        };
+        app_builder = app_builder.plugin(plugin);
     }
 
     tracing::info!(
@@ -659,17 +839,21 @@ pub fn run() {
     );
     app_builder
         .manage(FileWatcherState::new())
+        .manage(WindowImageCapabilities::new())
         .manage(PluginHostState::new())
         .manage(RopeDocumentState::new())
         .manage(EncodingState::new())
+        .manage(ExportState::new())
         .manage(PendingOpenFiles::new())
         .manage(PendingOpenProjects::new())
         .manage(FileRoutingState::new())
         .manage(AiBridgeState::new())
         .manage(ClaudeBridgeState::new())
         .manage(CodexBridgeState::new())
-        .invoke_handler(builder.invoke_handler())
+        .invoke_handler(invoke_handler)
         .setup(move |app| {
+            #[cfg(feature = "e2e-testing")]
+            log_native_e2e_startup("setup.begin");
             tracing::info!(
                 target: "novelist::startup",
                 phase = "backend.setup.begin",
@@ -741,11 +925,21 @@ pub fn run() {
                 since_start_ms = t0.elapsed().as_secs_f64() * 1000.0,
                 "backend phase"
             );
+            #[cfg(feature = "e2e-testing")]
+            log_native_e2e_startup("setup.end");
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(feature = "e2e-testing")]
+            if matches!(event, tauri::RunEvent::Ready) {
+                log_native_e2e_startup("event.ready");
+            }
+            #[cfg(all(target_os = "macos", feature = "e2e-testing"))]
+            if matches!(event, tauri::RunEvent::Ready) {
+                commands::e2e::request_visual_native_activation_once(app);
+            }
             // macOS: handle file-open Apple Events (Finder "Open With", double-click)
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {

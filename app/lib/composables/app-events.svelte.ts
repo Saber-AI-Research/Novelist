@@ -1,13 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { commands, type CliOpenPayload, type PendingFile, type RecentProject } from '$lib/ipc/commands';
+import {
+  commands,
+  type CliOpenPayload,
+  type ExternalFileChangePayload,
+  type PendingFile,
+  type RecentProject,
+} from '$lib/ipc/commands';
 import { projectStore } from '$lib/stores/project.svelte';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 import { uiStore } from '$lib/stores/ui.svelte';
 import { handleCliOpen, openProjectInThisWindow } from '$lib/services/cli-open';
 import { routeSingleFileOpen, wireFileRoutingBids } from '$lib/services/file-route';
-import { pathDirname } from '$lib/utils/path';
+import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
 
 export type AppEventContext = {
   /** Called when file-changed arrives for a dirty open tab. */
@@ -21,6 +27,18 @@ export type AppEventContext = {
 };
 
 const TEXT_EXTENSIONS = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
+const EXTERNAL_CHANGE_DEBOUNCE_MS = 1_050;
+
+type ExternalChangePayload =
+  | ExternalFileChangePayload
+  | { path: string };
+
+type QueuedExternalChange = {
+  identity: string;
+  paths: string[];
+  refreshSidebar: boolean;
+  generation: number;
+};
 
 function reportEventError(label: string, error: unknown): void {
   console.error(`[app-events] ${label} failed:`, error);
@@ -56,7 +74,7 @@ async function openFileByPath(filePath: string, line: number | null = null): Pro
   if (result.status !== 'ok') return false;
 
   if (!projectStore.isOpen) {
-    projectStore.enterSingleFileMode();
+    await projectStore.enterSingleFileMode();
     uiStore.sidebarVisible = false;
   }
   tabsStore.openTab(filePath, result.data);
@@ -87,6 +105,13 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   let unlistenRecentProjectsUpdated: (() => void) | null = null;
 
   let unlistenCliOpen: (() => void) | null = null;
+  let disposed = false;
+  const pendingExternalChanges = new Map<string, QueuedExternalChange>();
+  const imeDeferredChanges = new Map<string, QueuedExternalChange>();
+  const externalChangeTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
+  // Per canonical identity, the highest generation owns store mutation.
+  // Scheduling a newer change invalidates every older alias read immediately.
+  const externalChangeGenerations = new Map<string, number>();
 
   // Drain any files + folders queued before the frontend was ready
   // (CLI args, macOS "Open With" on cold start). Folders take precedence:
@@ -97,7 +122,9 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
       const pendingProjects = await invoke<string[]>('get_pending_open_projects');
       const pendingFiles = await invoke<PendingFile[]>('get_pending_open_files');
       if (pendingProjects.length > 0) {
+        recordNativeE2eEvent('pending-project', pendingProjects[0]);
         await ctx.onOpenProjectInThisWindow(pendingProjects[0]);
+        recordNativeE2eEvent('project-opened', pendingProjects[0]);
         // Extra folders go to fresh windows.
         for (const extra of pendingProjects.slice(1)) {
           await openProjectInThisWindow(extra, /*spawnNew*/ true);
@@ -106,7 +133,8 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
       for (const f of pendingFiles) {
         await routeSingleFileOpen(f.path, f.line ?? null, f.col ?? null);
       }
-    } catch (_) {
+    } catch (error) {
+      recordNativeE2eEvent('pending-open-error', String(error));
       // ignore — command may not exist on older builds
     }
   })();
@@ -117,9 +145,17 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     assign: (fn: () => void) => void,
   ) {
     try {
-      listen<T>(name, safeAsync(`event:${name}`, handler)).then(assign).catch((e) => {
-        reportEventError(`listen:${name}`, e);
-      });
+      listen<T>(name, safeAsync(`event:${name}`, handler))
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            assign(unlisten);
+          }
+        })
+        .catch((e) => {
+          reportEventError(`listen:${name}`, e);
+        });
     } catch (e) {
       reportEventError(`listen:${name}`, e);
     }
@@ -151,7 +187,10 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
 
   // Respond to bid requests from the router (in any window).
   wireFileRoutingBids()
-    .then(fn => { unlistenFileRoutingBids = fn; })
+    .then((fn) => {
+      if (disposed) fn();
+      else unlistenFileRoutingBids = fn;
+    })
     .catch((e) => reportEventError('listen:file-open-bid-request', e));
 
   // Hot-path CLI invocations: a second `novelist ...` process forwarded its
@@ -165,32 +204,220 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   // Reload an open tab when its file changed on disk (or surface a conflict if
   // the tab has unsaved edits). Shared by the notify `file-changed` event and
   // the polling fallback below.
-  async function handleExternalChange(path: string, refreshSidebar: boolean) {
-    const tab = tabsStore.findByPath(path);
-    if (tab) {
-      if (!tab.isDirty) {
-        const result = await commands.readFile(path);
-        if (result.status === 'ok') {
-          tabsStore.reloadContent(tab.id, result.data);
-        }
-      } else {
-        ctx.onConflict(path);
+  function normalizeExternalChange(payload: ExternalChangePayload | string): { identity: string; paths: string[] } | null {
+    if (typeof payload === 'string') {
+      return payload.length > 0 ? { identity: payload, paths: [payload] } : null;
+    }
+    if ('identity' in payload) {
+      if (payload.identity.length === 0) return null;
+      const paths = Array.from(new Set(payload.paths.filter(path => path.length > 0))).sort();
+      return paths.length > 0 ? { identity: payload.identity, paths } : null;
+    }
+    return payload.path.length > 0 ? { identity: payload.path, paths: [payload.path] } : null;
+  }
+
+  function advanceExternalChangeGeneration(identity: string): number {
+    const generation = (externalChangeGenerations.get(identity) ?? 0) + 1;
+    externalChangeGenerations.set(identity, generation);
+    return generation;
+  }
+
+  function isCurrentExternalChange(identity: string, generation: number): boolean {
+    return !disposed && externalChangeGenerations.get(identity) === generation;
+  }
+
+  function recordNativeE2eEvent(kind: string, path: string) {
+    const testWindow = window as typeof window & {
+      __PW_ACTIVE__?: boolean;
+      __NOVELIST_NATIVE_E2E_EVENTS__?: Array<{ kind: string; path: string }>;
+    };
+    if (!testWindow.__PW_ACTIVE__) return;
+    (testWindow.__NOVELIST_NATIVE_E2E_EVENTS__ ??= []).push({ kind, path });
+  }
+
+  async function isConfirmedExternalDeletion(path: string): Promise<boolean> {
+    const parent = pathDirname(path);
+    const name = pathBasename(path);
+    if (!parent || !name) return false;
+    const listed = await commands.listDirectory(parent, true);
+    if (listed.status !== 'ok') return false;
+    return !listed.data.some(entry => entry.name === name && !entry.is_dir);
+  }
+
+  function ownerTabs(paths: string[]) {
+    const owners = new Map<string, { path: string; tab: ReturnType<typeof tabsStore.findByPath> }>();
+    for (const path of paths) {
+      for (const tab of tabsStore.findAllByPath(path)) {
+        owners.set(tab.id, { path, tab });
       }
     }
+    return Array.from(owners.values()).filter(
+      (owner): owner is { path: string; tab: NonNullable<typeof owner.tab> } => owner.tab !== undefined,
+    );
+  }
 
-    // Refresh the sidebar folder containing the changed path, IF it's
-    // been loaded (expanded at least once). refreshFolder is a no-op for
-    // folders whose children are still undefined.
-    if (refreshSidebar) {
-      const parent = pathDirname(path);
-      if (parent) {
-        await projectStore.refreshFolder(parent);
-      }
+  function hasComposingOwner(paths: string[]): boolean {
+    return ownerTabs(paths).some(({ tab }) => tabsStore.isTabImeComposing(tab.id));
+  }
+
+  function deferExternalChange(change: QueuedExternalChange) {
+    for (const path of change.paths) recordNativeE2eEvent('ime-deferred', path);
+    imeDeferredChanges.set(change.identity, change);
+  }
+
+  async function readExternalContent(paths: string[]) {
+    let lastError: Awaited<ReturnType<typeof commands.readFile>> | null = null;
+    for (const path of paths) {
+      const result = await commands.readFile(path);
+      if (result.status === 'ok') return result;
+      lastError = result;
+    }
+    return lastError;
+  }
+
+  async function refreshExternalChangeParents(paths: string[]) {
+    const parents = new Set(paths.map(pathDirname).filter((parent): parent is string => parent.length > 0));
+    for (const parent of parents) {
+      await projectStore.refreshFolder(parent);
     }
   }
 
-  bindEvent<{ path: string }>('file-changed', async (event) => {
-    await handleExternalChange(event.payload.path, true);
+  async function deliverExternalChange(change: QueuedExternalChange) {
+    const { identity, paths, refreshSidebar, generation } = change;
+    if (!isCurrentExternalChange(identity, generation)) return;
+    let owners = ownerTabs(paths);
+    if (owners.some(({ tab }) => tabsStore.isTabImeComposing(tab.id))) {
+      deferExternalChange(change);
+      return;
+    }
+
+    if (owners.length > 0) {
+      const result = await readExternalContent(owners.map(({ path }) => path));
+      if (!isCurrentExternalChange(identity, generation)) return;
+      owners = ownerTabs(paths);
+      if (owners.some(({ tab }) => tabsStore.isTabImeComposing(tab.id))) {
+        deferExternalChange(change);
+        return;
+      }
+
+      if (result?.status === 'ok') {
+        const conflictPaths = new Set<string>();
+        for (const { path, tab } of owners) {
+          if (tab.isDirty) {
+            conflictPaths.add(path);
+          } else {
+            recordNativeE2eEvent('reload', path);
+            tabsStore.reloadContent(tab.id, result.data);
+          }
+        }
+        for (const path of conflictPaths) {
+          recordNativeE2eEvent('conflict', path);
+          ctx.onConflict(path);
+        }
+      } else {
+        const conflictPaths = new Set<string>();
+        for (const path of Array.from(new Set(owners.map(owner => owner.path)))) {
+          const confirmedDeleted = await isConfirmedExternalDeletion(path);
+          if (!isCurrentExternalChange(identity, generation)) return;
+          const pathOwners = tabsStore.findAllByPath(path);
+          if (pathOwners.some(tab => tabsStore.isTabImeComposing(tab.id))) {
+            deferExternalChange(change);
+            return;
+          }
+          for (const tab of pathOwners) {
+            if (confirmedDeleted) tabsStore.markExternalDeleted(tab.id);
+            if (tab.isDirty) conflictPaths.add(path);
+          }
+        }
+        for (const path of conflictPaths) {
+          recordNativeE2eEvent('conflict', path);
+          ctx.onConflict(path);
+        }
+      }
+    }
+
+    if (refreshSidebar) {
+      await refreshExternalChangeParents(paths);
+    }
+  }
+
+  function armExternalChangeTimer(identity: string) {
+    const existingTimer = externalChangeTimers.get(identity);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    externalChangeTimers.set(identity, window.setTimeout(() => {
+      externalChangeTimers.delete(identity);
+      const change = pendingExternalChanges.get(identity);
+      if (!change) return;
+      pendingExternalChanges.delete(identity);
+      void deliverExternalChange(change).catch((error) => {
+        reportEventError(`external-change:${identity}`, error);
+      });
+    }, EXTERNAL_CHANGE_DEBOUNCE_MS));
+  }
+
+  function retargetQueuedPath(path: string, oldRoot: string, newRoot: string): string {
+    if (path === oldRoot) return newRoot;
+    return pathStartsWithChild(path, oldRoot)
+      ? `${newRoot}${path.slice(oldRoot.length)}`
+      : path;
+  }
+
+  function retargetQueuedExternalChanges(oldRoot: string, newRoot: string): string[] {
+    const pendingIdentities: string[] = [];
+    for (const queue of [pendingExternalChanges, imeDeferredChanges]) {
+      for (const [identity, change] of queue) {
+        const paths = Array.from(new Set(
+          change.paths.map(path => retargetQueuedPath(path, oldRoot, newRoot)),
+        )).sort();
+        if (paths.every((path, index) => path === change.paths[index])) continue;
+        queue.set(identity, { ...change, paths });
+        if (queue === pendingExternalChanges) pendingIdentities.push(identity);
+      }
+    }
+    return pendingIdentities;
+  }
+
+  function scheduleExternalChange(payload: ExternalChangePayload | string, refreshSidebar: boolean) {
+    if (disposed) return;
+    const normalized = normalizeExternalChange(payload);
+    if (!normalized) return;
+    const generation = advanceExternalChangeGeneration(normalized.identity);
+    const existing = pendingExternalChanges.get(normalized.identity)
+      ?? imeDeferredChanges.get(normalized.identity);
+    const change: QueuedExternalChange = {
+      ...normalized,
+      refreshSidebar: refreshSidebar || existing?.refreshSidebar === true,
+      generation,
+    };
+    pendingExternalChanges.delete(normalized.identity);
+    imeDeferredChanges.delete(normalized.identity);
+    if (hasComposingOwner(normalized.paths)) {
+      deferExternalChange(change);
+      return;
+    }
+    pendingExternalChanges.set(normalized.identity, change);
+    armExternalChangeTimer(normalized.identity);
+  }
+
+  function drainImeDeferredChanges() {
+    for (const [identity, change] of Array.from(imeDeferredChanges.entries())) {
+      if (!isCurrentExternalChange(identity, change.generation)) {
+        imeDeferredChanges.delete(identity);
+        continue;
+      }
+      if (hasComposingOwner(change.paths)) continue;
+      imeDeferredChanges.delete(identity);
+      scheduleExternalChange(change, change.refreshSidebar);
+    }
+  }
+
+  window.addEventListener('novelist-composition-end', drainImeDeferredChanges);
+
+  bindEvent<ExternalChangePayload>('file-changed', async (event) => {
+    const normalized = normalizeExternalChange(event.payload);
+    if (!normalized) return;
+    for (const path of normalized.paths) recordNativeE2eEvent('notify', path);
+    scheduleExternalChange(normalized, true);
   }, fn => { unlistenFileChanged = fn; });
 
   bindEvent<{ path: string }>('directory-changed', async (event) => {
@@ -214,12 +441,16 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   let polling = false;
   const externalPollInterval = window.setInterval(async () => {
     if (polling) return; // don't overlap if a tick runs long
+    drainImeDeferredChanges();
     polling = true;
     try {
       const result = await commands.pollExternalChanges();
       if (result.status === 'ok') {
-        for (const path of result.data) {
-          await handleExternalChange(path, true);
+        for (const change of result.data) {
+          const normalized = normalizeExternalChange(change);
+          if (!normalized) continue;
+          for (const path of normalized.paths) recordNativeE2eEvent('poll', path);
+          scheduleExternalChange(normalized, true);
         }
       }
     } catch (e) {
@@ -233,7 +464,16 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   // may have open. Update our tab paths and refresh the affected sidebar folder.
   bindEvent<{ old_path: string; new_path: string }>('file-renamed', async (event) => {
     const { old_path, new_path } = event.payload;
+    const pendingIdentities = retargetQueuedExternalChanges(old_path, new_path);
+    for (const identity of pendingIdentities) {
+      const timer = externalChangeTimers.get(identity);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        externalChangeTimers.delete(identity);
+      }
+    }
     await tabsStore.retargetOpenPathTree(old_path, new_path);
+    for (const identity of pendingIdentities) armExternalChangeTimer(identity);
     const oldParent = pathDirname(old_path);
     const newParent = pathDirname(new_path);
     if (oldParent) {
@@ -258,7 +498,10 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
           await routeSingleFileOpen(filePath);
         }
       }
-    })).then(fn => { unlistenDragDrop = fn; }).catch((e) => {
+    })).then((fn) => {
+      if (disposed) fn();
+      else unlistenDragDrop = fn;
+    }).catch((e) => {
       reportEventError('drag-drop-listener', e);
     });
   } catch (e) {
@@ -273,6 +516,7 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   window.addEventListener('novelist-goto-line', handleGotoLine);
 
   return () => {
+    disposed = true;
     unlistenFileChanged?.();
     unlistenDirectoryChanged?.();
     unlistenDragDrop?.();
@@ -284,6 +528,12 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     unlistenCliOpen?.();
     window.clearInterval(refreshInterval);
     window.clearInterval(externalPollInterval);
+    window.removeEventListener('novelist-composition-end', drainImeDeferredChanges);
+    pendingExternalChanges.clear();
+    imeDeferredChanges.clear();
+    externalChangeGenerations.clear();
+    for (const timer of externalChangeTimers.values()) window.clearTimeout(timer);
+    externalChangeTimers.clear();
     window.removeEventListener('novelist-goto-line', handleGotoLine);
   };
 }

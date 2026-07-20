@@ -10,11 +10,13 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,
+    "types": [],
     "baseUrl": ".",
     "paths": {
       "$lib/*": ["./app/lib/*"]
     }
   },
   "include": ["app/**/*.ts", "app/**/*.svelte", "tests/**/*.ts"],
+  "exclude": ["tests/e2e/native/**/*.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

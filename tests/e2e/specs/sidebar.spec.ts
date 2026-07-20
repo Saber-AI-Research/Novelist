@@ -185,7 +185,7 @@ test.describe('Sidebar', () => {
     expect(another?.pinned).toBe(true);
   });
 
-  test('folder tree: drag a root file into a subfolder', async ({ app }) => {
+  test('folder tree: drag a root file into a subfolder', async ({ app, mockState }) => {
     const folder = app.getByTestId('sidebar-folder-Notes');
     const chevron = folder.getByRole('button', { name: /Expand|Collapse/i });
 
@@ -202,5 +202,8 @@ test.describe('Sidebar', () => {
     await expect(app.getByTestId('sidebar-file-Chapter 3.md')).toBeVisible();
     // And the Notes subfolder still shows outline.md.
     await expect(app.getByTestId('sidebar-file-outline.md')).toBeVisible();
+    const calls = await mockState.getInvokeCalls();
+    expect(calls.filter(call => call.command === 'move_item')).toHaveLength(1);
+    expect(calls.filter(call => call.command === 'broadcast_file_renamed')).toHaveLength(0);
   });
 });

@@ -14,13 +14,13 @@ type RegisterCall = {
   handler: (...args: unknown[]) => unknown;
 };
 
-const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, fmt, translatedKeys } = vi.hoisted(() => {
+const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, fmt, translatedKeys } = vi.hoisted(() => {
   const register = vi.fn();
   const shortcuts = new Map<string, string>();
   const uiCalls: string[] = [];
   const projectState = { dirPath: null as null | string };
   const tabsState = {
-    activeTab: null as null | { id: string; fileName: string },
+    activeTab: null as null | { id: string; fileName: string; filePath?: string },
     toggleSplit: vi.fn(),
   };
   const extensionState = {
@@ -30,13 +30,15 @@ const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, a
   };
   const aiTalkCreate = vi.fn();
   const aiAgentCreate = vi.fn();
+  const requestAiAgentNewSession = vi.fn();
+  const applyBlockTransform = vi.fn();
   const fmt = {
     toggleWrap: vi.fn(),
     wrapSelection: vi.fn(),
     toggleLinePrefix: vi.fn(),
   };
   const translatedKeys: string[] = [];
-  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, fmt, translatedKeys };
+  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, fmt, translatedKeys };
 });
 
 vi.mock('$lib/stores/commands.svelte', () => ({
@@ -82,7 +84,12 @@ vi.mock('$lib/components/ai-agent/sessions.svelte', () => ({
   aiAgentSessions: { create: aiAgentCreate },
 }));
 
+vi.mock('$lib/components/ai-agent/new-session-requests', () => ({
+  requestAiAgentNewSession,
+}));
+
 vi.mock('$lib/editor/formatting', () => fmt);
+vi.mock('$lib/editor/block-transform', () => ({ applyBlockTransform }));
 
 // Dynamic-import targets — vi.mock intercepts both static and dynamic imports.
 const simplifiedToTraditional = vi.fn(async (s: string) => `T:${s}`);
@@ -94,12 +101,14 @@ const runBenchmark = vi.fn(async (_n: number) => 'bench-ok');
 const runReleaseBenchmark = vi.fn(async () => 'release-ok');
 const runScrollEditTest = vi.fn(async () => 'scroll-ok');
 const checkForUpdates = vi.fn(async (_silent: boolean) => {});
+const uploadAllInDocument = vi.fn(async () => ({ successes: [], failures: [] }));
 
 vi.mock('$lib/utils/chinese', () => ({ simplifiedToTraditional, traditionalToSimplified, toPinyin }));
 vi.mock('$lib/utils/markdown-copy', () => ({ markdownToHtml, markdownToPlainText }));
 vi.mock('$lib/utils/benchmark', () => ({ runBenchmark, runReleaseBenchmark }));
 vi.mock('$lib/utils/scroll-edit-test', () => ({ runScrollEditTest }));
 vi.mock('$lib/updater', () => ({ checkForUpdates }));
+vi.mock('$lib/services/image-host', () => ({ uploadAllInDocument }));
 vi.mock('$lib/services/portable', () => ({
   getPortableInfo: async () => ({ enabled: false, dataRoot: '/home/test/.novelist' }),
   portableInfoSync: () => null,
@@ -156,6 +165,8 @@ beforeEach(() => {
   extensionState.openPanel.mockClear();
   aiTalkCreate.mockClear();
   aiAgentCreate.mockClear();
+  requestAiAgentNewSession.mockClear();
+  applyBlockTransform.mockClear();
   fmt.toggleWrap.mockClear();
   fmt.wrapSelection.mockClear();
   fmt.toggleLinePrefix.mockClear();
@@ -168,6 +179,39 @@ beforeEach(() => {
   runReleaseBenchmark.mockClear();
   runScrollEditTest.mockClear();
   checkForUpdates.mockClear();
+  uploadAllInDocument.mockClear();
+});
+
+describe('[regression] image-host upload-all scope', () => {
+  it.each([
+    {
+      name: 'nested Windows project document',
+      projectDir: 'C:\\project',
+      filePath: 'C:\\project\\章节\\第一章.md',
+      expectedBase: 'C:\\project\\章节',
+    },
+    {
+      name: 'Windows single-file document',
+      projectDir: null,
+      filePath: 'C:\\Users\\writer\\小说\\第一章.md',
+      expectedBase: 'C:\\Users\\writer\\小说',
+    },
+  ])('uses the document directory for $name', async ({ projectDir, filePath, expectedBase }) => {
+    projectState.dirPath = projectDir;
+    tabsState.activeTab = { id: 'chapter', fileName: '第一章.md', filePath };
+    const view = {
+      state: { doc: { toString: () => '![](插图/人物甲.png)' } },
+      dispatch: vi.fn(),
+    };
+    registerAppCommands(ctx({ getActiveEditorView: () => view as never }));
+
+    handlerFor('image-host.upload-all')();
+
+    await vi.waitFor(() => expect(uploadAllInDocument).toHaveBeenCalledTimes(1));
+    expect(uploadAllInDocument).toHaveBeenCalledWith('![](插图/人物甲.png)', {
+      baseDir: expectedBase,
+    });
+  });
 });
 
 describe('[contract] registerAppCommands — registration shape', () => {
@@ -277,7 +321,18 @@ describe('[contract] AI panel commands', () => {
     registerAppCommands(ctx());
     handlerFor('ai-agent-new-session')();
     expect(extensionState.openPanel).not.toHaveBeenCalled();
-    expect(aiAgentCreate).toHaveBeenCalled();
+    expect(requestAiAgentNewSession).toHaveBeenCalledWith(null);
+  });
+
+  it('ai-agent-new-session never mutates the session store directly', () => {
+    projectState.dirPath = '/destination';
+    registerAppCommands(ctx());
+
+    handlerFor('ai-agent-new-session')();
+
+    expect(extensionState.openPanel).toHaveBeenCalledWith('ai-agent');
+    expect(aiAgentCreate).not.toHaveBeenCalled();
+    expect(requestAiAgentNewSession).toHaveBeenCalledWith('/destination');
   });
 
   it('ai-talk-save-chat fires the DOM event for the active panel to catch', () => {
@@ -320,6 +375,49 @@ describe('[contract] editor formatting commands', () => {
     registerAppCommands(ctx({ getActiveEditorView: () => view }));
     handlerFor('editor-heading')();
     expect(fmt.toggleLinePrefix).toHaveBeenCalledWith(view, '#');
+  });
+});
+
+describe('[contract] editor block transform commands', () => {
+  const expectedCommands = [
+    ['editor-block-paragraph', 'paragraph'],
+    ['editor-block-heading-1', 'heading-1'],
+    ['editor-block-heading-2', 'heading-2'],
+    ['editor-block-heading-3', 'heading-3'],
+    ['editor-block-heading-4', 'heading-4'],
+    ['editor-block-heading-5', 'heading-5'],
+    ['editor-block-heading-6', 'heading-6'],
+    ['editor-block-quote', 'quote'],
+    ['editor-block-unordered-list', 'unordered-list'],
+    ['editor-block-ordered-list', 'ordered-list'],
+    ['editor-block-task-list', 'task-list'],
+    ['editor-block-code-fence', 'code-fence'],
+  ] as const;
+
+  it('registers every BlockTransformTarget under one stable command id exactly once', () => {
+    registerAppCommands(ctx());
+
+    for (const [id] of expectedCommands) {
+      expect(registered().filter((command) => command.id === id)).toHaveLength(1);
+    }
+  });
+
+  it.each(expectedCommands)('%s passes the active EditorView to target %s', (id, target) => {
+    const view = { id: 'active-editor' } as any;
+    registerAppCommands(ctx({ getActiveEditorView: () => view }));
+
+    handlerFor(id)();
+
+    expect(applyBlockTransform).toHaveBeenCalledTimes(1);
+    expect(applyBlockTransform).toHaveBeenCalledWith(view, target);
+  });
+
+  it('does not transform when there is no active EditorView', () => {
+    registerAppCommands(ctx({ getActiveEditorView: () => null }));
+
+    for (const [id] of expectedCommands) handlerFor(id)();
+
+    expect(applyBlockTransform).not.toHaveBeenCalled();
   });
 });
 
@@ -472,6 +570,39 @@ describe('[contract] diagnostics', () => {
     registerAppCommands(ctx());
     await (handlerFor('check-for-updates')() as unknown as Promise<void>);
     expect(checkForUpdates).toHaveBeenCalledWith(false);
+  });
+
+  it('check-for-updates handler awaits checkForUpdates before resolving', async () => {
+    let resolveCheck: (() => void) | null = null;
+    const checkPromise = new Promise<void>((res) => { resolveCheck = () => res(); });
+    checkForUpdates.mockImplementationOnce(() => checkPromise);
+    registerAppCommands(ctx());
+
+    const handler = handlerFor('check-for-updates');
+    const handlerResult = handler() as unknown as Promise<void>;
+
+    let resolved = false;
+    handlerResult.then(() => { resolved = true; });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(checkForUpdates).toHaveBeenCalledWith(false);
+    expect(resolved).toBe(false);
+    expect(resolveCheck).not.toBeNull();
+
+    resolveCheck!();
+    await handlerResult;
+    expect(resolved).toBe(true);
+  });
+
+  it('check-for-updates handler swallows rejection from checkForUpdates so nothing leaks after registry execute returns', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    checkForUpdates.mockImplementationOnce(() => Promise.reject(new Error('dispatch failure')));
+    registerAppCommands(ctx());
+
+    const handler = handlerFor('check-for-updates');
+    await expect(handler() as unknown as Promise<void>).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

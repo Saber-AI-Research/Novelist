@@ -1,3 +1,5 @@
+import { isolateHistory } from '@codemirror/commands';
+import { Transaction } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { commandRegistry } from '$lib/stores/commands.svelte';
 
@@ -26,12 +28,18 @@ export function createEditorContextMenu(getView: () => EditorView | null) {
     const { from, to } = state;
     if (from === to) return;
     const text = view.state.sliceDoc(from, to);
-    try { await navigator.clipboard.writeText(text); } catch {}
+    // Make the captured range the deletion event's start selection for undo.
+    view.dispatch({
+      selection: { anchor: from, head: to },
+      annotations: Transaction.addToHistory.of(false),
+    });
     view.dispatch({
       changes: { from, to, insert: '' },
       selection: { anchor: from },
+      annotations: isolateHistory.of('full'),
     });
     view.focus();
+    try { await navigator.clipboard.writeText(text); } catch {}
   }
 
   async function copy() {
@@ -74,6 +82,7 @@ export function createEditorContextMenu(getView: () => EditorView | null) {
       view.dispatch({ selection: { anchor: from, head: to } });
     }
     commandRegistry.execute(id);
+    view?.focus();
   }
 
   return {

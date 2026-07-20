@@ -4,6 +4,7 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { commands } from '$lib/ipc/commands';
 
 export type DetectedCli = { path: string; version: string | null };
@@ -13,6 +14,26 @@ export type ClaudeStreamEvent =
   | { kind: 'stderr-line'; data: string }
   | { kind: 'exit'; code: number | null }
   | { kind: 'error'; message: string };
+
+type RoutedStreamEvent =
+  | { kind: 'stdout-line'; data: string; target_label?: unknown }
+  | { kind: 'stderr-line'; data: string; target_label?: unknown }
+  | { kind: 'exit'; code: number | null; target_label?: unknown }
+  | { kind: 'error'; message: string; target_label?: unknown };
+
+function eventForWindow(payload: RoutedStreamEvent, ownerLabel: string): ClaudeStreamEvent | null {
+  if (typeof payload.target_label !== 'string' || payload.target_label !== ownerLabel) return null;
+  switch (payload.kind) {
+    case 'stdout-line':
+      return { kind: payload.kind, data: payload.data };
+    case 'stderr-line':
+      return { kind: payload.kind, data: payload.data };
+    case 'exit':
+      return { kind: payload.kind, code: payload.code };
+    case 'error':
+      return { kind: payload.kind, message: payload.message };
+  }
+}
 
 export async function detectClaudeCli(): Promise<DetectedCli | null> {
   const result = await commands.claudeCliDetect();
@@ -65,8 +86,10 @@ export function listenClaudeStream(
   sessionId: string,
   handler: (event: ClaudeStreamEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<ClaudeStreamEvent>(`claude-stream://${sessionId}`, (event) => {
-    handler(event.payload);
+  const ownerLabel = getCurrentWindow().label;
+  return listen<RoutedStreamEvent>(`claude-stream://${sessionId}`, (event) => {
+    const addressed = eventForWindow(event.payload, ownerLabel);
+    if (addressed) handler(addressed);
   });
 }
 
@@ -91,7 +114,8 @@ export type ParsedStreamEvent =
   | { kind: 'text-delta'; text: string }
   | { kind: 'assistant-block'; blocks: Array<TextBlock | ToolUseBlock> }
   | { kind: 'tool-use'; name: string; input: unknown }
-  | { kind: 'tool-result'; content: string }
+  | { kind: 'tool-result'; content: string; isError: boolean }
+  | { kind: 'failure'; stage: 'stream'; message: string }
   | { kind: 'result'; text: string; cost?: number; usage?: TokenUsage }
   | { kind: 'system'; data: unknown }
   // Codex emits its conversation/thread id mid-turn; the caller persists it
@@ -139,16 +163,21 @@ export function parseClaudeLine(line: string): ParsedStreamEvent | null {
       if (b.type === 'tool_result') {
         const c = b.content;
         const text = typeof c === 'string' ? c : JSON.stringify(c);
-        return { kind: 'tool-result', content: text };
+        return { kind: 'tool-result', content: text, isError: b.is_error === true };
       }
     }
     return null;
   }
 
   if (msg.type === 'result') {
+    const text = typeof msg.result === 'string' ? msg.result : '';
+    const subtype = typeof msg.subtype === 'string' ? msg.subtype : '';
+    if (msg.is_error === true || subtype.includes('error')) {
+      return { kind: 'failure', stage: 'stream', message: text || 'Agent execution failed' };
+    }
     return {
       kind: 'result',
-      text: typeof msg.result === 'string' ? msg.result : '',
+      text,
       cost: typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : undefined,
     };
   }
@@ -224,8 +253,10 @@ export function listenCodexStream(
   sessionId: string,
   handler: (event: AgentStreamEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<AgentStreamEvent>(`codex-stream://${sessionId}`, (event) => {
-    handler(event.payload);
+  const ownerLabel = getCurrentWindow().label;
+  return listen<RoutedStreamEvent>(`codex-stream://${sessionId}`, (event) => {
+    const addressed = eventForWindow(event.payload, ownerLabel);
+    if (addressed) handler(addressed);
   });
 }
 
@@ -273,7 +304,7 @@ export function parseCodexLine(line: string): ParsedStreamEvent | null {
     }
     case 'error': {
       const message = typeof msg.message === 'string' ? msg.message : 'Codex error';
-      return { kind: 'result', text: `⚠️ ${message}` };
+      return { kind: 'failure', stage: 'stream', message };
     }
     // turn.started, item.started, and unknown types are ignored.
     default:

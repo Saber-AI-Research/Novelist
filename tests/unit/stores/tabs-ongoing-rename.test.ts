@@ -15,6 +15,9 @@ vi.mock('$lib/ipc/commands', () => ({
     broadcastFileRenamed: vi.fn(),
     registerOpenFile: vi.fn(),
     unregisterOpenFile: vi.fn(),
+    readManagedNameState: vi.fn(),
+    writeManagedNameState: vi.fn(),
+    computeDocumentKey: vi.fn(),
   },
 }));
 
@@ -30,22 +33,38 @@ vi.mock('$lib/i18n', () => ({
 }));
 
 import { tabsStore } from '$lib/stores/tabs.svelte';
+import { projectStore } from '$lib/stores/project.svelte';
 import { commands } from '$lib/ipc/commands';
+import { clearManagedNameCache } from '$lib/services/managed-name-persistence';
 
 const PROJECT = '/proj';
 
 describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
   beforeEach(() => {
     localStorage.clear();
+    clearManagedNameCache();
     tabsStore.closeAll();
+    projectStore.dirPath = PROJECT;
     vi.clearAllMocks();
     (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
-    (commands.renameItem as any).mockImplementation((_old: string, name: string) =>
-      Promise.resolve({ status: 'ok', data: `${PROJECT}/${name}` }),
+    (commands.renameItem as any).mockImplementation((_project: string, _old: string, name: string) =>
+      Promise.resolve({ status: 'ok', data: { new_path: `${PROJECT}/${name}`, migration: { status: 'full_success', migrated: 0, conflicts: 0, errors: [] } } }),
     );
     (commands.broadcastFileRenamed as any).mockResolvedValue({ status: 'ok', data: null });
     (commands.registerOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
     (commands.unregisterOpenFile as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.computeDocumentKey as any).mockImplementation((_project: string, path: string) => Promise.resolve({ status: 'ok', data: path.slice(PROJECT.length + 1) }));
+    (commands.writeManagedNameState as any).mockResolvedValue({ status: 'ok', data: null });
+    (commands.readManagedNameState as any).mockImplementation((_project: string, path: string) => Promise.resolve({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '第{N}章-{title}',
+        currentH1: path.includes('终结') ? '终结' : '开篇',
+        documentKey: path.slice(PROJECT.length + 1),
+      },
+    }));
   });
 
   it('renames when H1 changes on a non-placeholder file whose name still contains the old H1', async () => {
@@ -59,6 +78,7 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
 
     expect(newPath).toBe(`${PROJECT}/第1章-序幕.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/第1章-开篇.md`,
       '第1章-序幕.md',
       true,
@@ -78,13 +98,14 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
     );
     expect(finalPath).toBe(`${PROJECT}/第1章-终章.md`);
     expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
       `${PROJECT}/第1章-序幕.md`,
       '第1章-终章.md',
       true,
     );
   });
 
-  it('detaches sync when the user manually renamed the file (old H1 no longer in filename)', async () => {
+  it('falls back to the sanitized H1 basename when manual rename removed the old anchor', async () => {
     // Open a file whose name does NOT contain the H1 — simulates a manual rename
     // performed earlier (or a file opened from disk with mismatched H1).
     tabsStore.openTab(`${PROJECT}/chapter1.md`, '# 开篇\n\nbody');
@@ -94,8 +115,8 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
       '# 序幕',
     );
 
-    expect(newPath).toBe(`${PROJECT}/chapter1.md`);
-    expect(commands.renameItem).not.toHaveBeenCalled();
+    expect(newPath).toBe(`${PROJECT}/序幕.md`);
+    expect(commands.renameItem).toHaveBeenCalledWith(PROJECT, `${PROJECT}/chapter1.md`, '序幕.md', true);
   });
 
   it('keeps the filename when the H1 is emptied (does not revert to Untitled)', async () => {
@@ -108,6 +129,26 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
 
     expect(newPath).toBe(`${PROJECT}/第1章-开篇.md`);
     expect(commands.renameItem).not.toHaveBeenCalled();
+  });
+
+  it('does not persist punctuation-only H1 as an anchor', async () => {
+    (commands.readManagedNameState as any).mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '第{N}章-{title}',
+        currentH1: '',
+        documentKey: 'chapter.md',
+      },
+    });
+    tabsStore.openTab(`${PROJECT}/chapter.md`, '# 开篇\n\nbody');
+
+    const newPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/chapter.md`, '# !!!');
+
+    expect(newPath).toBe(`${PROJECT}/chapter.md`);
+    expect(commands.renameItem).not.toHaveBeenCalled();
+    expect(commands.writeManagedNameState).not.toHaveBeenCalled();
   });
 
   it('after clearing the H1 then retyping the SAME H1, no rename fires', async () => {
@@ -135,6 +176,71 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
     expect(commands.renameItem).not.toHaveBeenCalled();
   });
 
+  it('preserves the .markdown extension during ongoing H1 sync', async () => {
+    const filePath = `${PROJECT}/chapter-开篇.markdown`;
+    (commands.readManagedNameState as any).mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '{title}',
+        currentH1: '开篇',
+        documentKey: 'chapter-开篇.markdown',
+      },
+    });
+    tabsStore.openTab(filePath, '# 开篇\n\nbody');
+
+    const newPath = await tabsStore.tryRenameAfterSave(filePath, '# 序幕\n\nbody');
+
+    expect(newPath).toBe(`${PROJECT}/chapter-序幕.markdown`);
+    expect(commands.renameItem).toHaveBeenCalledWith(PROJECT, filePath, 'chapter-序幕.markdown', true);
+  });
+
+  it('keeps the collision suffix before the .markdown extension', async () => {
+    const filePath = `${PROJECT}/chapter-开篇.markdown`;
+    (commands.readManagedNameState as any).mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        version: 1,
+        status: 'managed',
+        templateRaw: '{title}',
+        currentH1: '开篇',
+        documentKey: 'chapter-开篇.markdown',
+      },
+    });
+    (commands.listDirectory as any).mockResolvedValue({
+      status: 'ok',
+      data: [
+        { name: 'chapter-开篇.markdown' },
+        { name: 'chapter-序幕.markdown' },
+      ],
+    });
+    tabsStore.openTab(filePath, '# 开篇');
+
+    const newPath = await tabsStore.tryRenameAfterSave(filePath, '# 序幕');
+
+    expect(newPath).toBe(`${PROJECT}/chapter-序幕 2.markdown`);
+    expect(commands.renameItem).toHaveBeenCalledWith(
+      PROJECT,
+      filePath,
+      'chapter-序幕 2.markdown',
+      true,
+    );
+  });
+
+  it('reconciles the current inferred name after explicit re-enable even when H1 is unchanged', async () => {
+    tabsStore.openTab(`${PROJECT}/chapter.md`, '# 开篇\n\nbody');
+
+    const newPath = await tabsStore.tryRenameAfterSave(
+      `${PROJECT}/chapter.md`,
+      '# 开篇\n\nbody',
+      { reconcileCurrentH1: true },
+    );
+
+    expect(newPath).toBe(`${PROJECT}/开篇.md`);
+    expect(commands.renameItem).toHaveBeenCalledWith(PROJECT, `${PROJECT}/chapter.md`, '开篇.md', true);
+  });
+
   it('does not rename when the template has no {title} (gate honored)', async () => {
     // The gate is the template placeholder, not the legacy autoRenameFromH1
     // checkbox (no UI since 1e0ab6e). Strip {title} for this case.
@@ -142,6 +248,7 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
     const original = settingsMod.newFileSettings.template;
     (settingsMod.newFileSettings as { template: string }).template = '第{N}章';
     try {
+      (commands.readManagedNameState as any).mockResolvedValueOnce({ status: 'ok', data: null });
       tabsStore.openTab(`${PROJECT}/第1章-开篇.md`, '# 开篇');
       const newPath = await tabsStore.tryRenameAfterSave(
         `${PROJECT}/第1章-开篇.md`,
@@ -188,13 +295,13 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
     expect(commands.renameItem).not.toHaveBeenCalled();
 
     // But if the user now changes the H1 again, sync wakes up using "终结"
-    // as the anchor — which is NOT in `第1章-开篇.md`, so it stays detached.
+    // as the anchor. It is absent from the filename, so managed naming falls
+    // back to the new sanitized H1 basename.
     const next = await tabsStore.tryRenameAfterSave(
       `${PROJECT}/第1章-开篇.md`,
       '# 别的标题',
     );
-    expect(next).toBe(`${PROJECT}/第1章-开篇.md`);
-    expect(commands.renameItem).not.toHaveBeenCalled();
+    expect(next).toBe(`${PROJECT}/别的标题.md`);
   });
 
   it('keeps the old anchor when renameItem fails so the next save can retry', async () => {
@@ -218,5 +325,26 @@ describe('tabsStore.tryRenameAfterSave — Path B (ongoing H1 sync)', () => {
       '# 序幕',
     );
     expect(retryPath).toBe(`${PROJECT}/第1章-序幕.md`);
+  });
+
+  it('retries anchor persistence after a successful rename when the first anchor write fails', async () => {
+    tabsStore.openTab(`${PROJECT}/chapter.md`, '# 开篇\n\nbody');
+    (commands.writeManagedNameState as any)
+      .mockResolvedValueOnce({ status: 'error', error: 'sidecar write failed' })
+      .mockResolvedValueOnce({ status: 'ok', data: null });
+
+    const renamedPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/chapter.md`, '# 序幕');
+    expect(renamedPath).toBe(`${PROJECT}/序幕.md`);
+    expect(commands.renameItem).toHaveBeenCalledTimes(1);
+
+    const healedPath = await tabsStore.tryRenameAfterSave(`${PROJECT}/序幕.md`, '# 序幕');
+    expect(healedPath).toBe(`${PROJECT}/序幕.md`);
+    expect(commands.renameItem).toHaveBeenCalledTimes(1);
+    expect(commands.writeManagedNameState).toHaveBeenCalledTimes(2);
+    expect(commands.writeManagedNameState).toHaveBeenLastCalledWith(
+      PROJECT,
+      `${PROJECT}/序幕.md`,
+      expect.objectContaining({ currentH1: '序幕', documentKey: '序幕.md' }),
+    );
   });
 });

@@ -3,7 +3,7 @@ import { collectExportFiles, type ExportFileSource } from '$lib/utils/export-fil
 
 const md = (name: string, path: string): ExportFileSource => ({ is_dir: false, name, path });
 
-describe('collectExportFiles', () => {
+describe('[precision] collectExportFiles', () => {
   const projectFiles: ExportFileSource[] = [
     md('ch1.md', '/proj/ch1.md'),
     md('ch2.markdown', '/proj/ch2.markdown'),
@@ -14,6 +14,29 @@ describe('collectExportFiles', () => {
   it('project mode: collects all markdown files, skipping dirs and non-markdown', () => {
     const files = collectExportFiles('/proj', projectFiles, { filePath: '/proj/ch1.md' });
     expect(files).toEqual(['/proj/ch1.md', '/proj/ch2.markdown']);
+  });
+
+  it('project mode: recursively collects nested chapters in numeric order', () => {
+    const tree: ExportFileSource[] = [
+      md('第十章.md', '/proj/第十章.md'),
+      {
+        is_dir: true,
+        name: '卷一',
+        path: '/proj/卷一',
+        children: [
+          md('第二章.md', '/proj/卷一/第二章.md'),
+          md('第一章.md', '/proj/卷一/第一章.md'),
+        ],
+      },
+      md('第二章.md', '/proj/第二章.md'),
+    ];
+
+    expect(collectExportFiles('/proj', tree, null)).toEqual([
+      '/proj/卷一/第一章.md',
+      '/proj/卷一/第二章.md',
+      '/proj/第二章.md',
+      '/proj/第十章.md',
+    ]);
   });
 
   it('standalone mode: exports the active tab file (this is the bug fix)', () => {

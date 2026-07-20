@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/app-fixture';
+import { OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 const FULL_SOURCE = '# 冻结全文\n\n前文 未保存选择文本 后文';
@@ -401,11 +402,11 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
         originalRevoke(url);
       };
     });
-    const imageTransfer = await app.evaluateHandle(() => {
+    const imageTransfer = await app.evaluateHandle((bytes) => {
       const transfer = new DataTransfer();
-      transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'cover.png', { type: 'image/png' }));
+      transfer.items.add(new File([new Uint8Array(bytes)], 'cover.png', { type: 'image/png' }));
       return transfer;
-    });
+    }, Array.from(OPAQUE_RED_PNG_BYTES));
     await app.locator('.cover-drop').dispatchEvent('drop', { dataTransfer: imageTransfer });
     await expect(app.locator('.cover-drop img')).toHaveAttribute('src', /^blob:/);
 

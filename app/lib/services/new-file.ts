@@ -8,8 +8,20 @@ import { newFileSettings } from '$lib/stores/new-file-settings.svelte';
 import { templatesStore } from '$lib/stores/templates.svelte';
 import { parseTemplate, inferNextName } from '$lib/utils/placeholder';
 import { makeTemplateContext, resolveBody, extractCursorAnchor, resolveFilename } from '$lib/utils/template-tokens';
+import {
+  confirmManagedNameEnrollment,
+  enableManagedNameForCreatedFile,
+} from '$lib/services/managed-name-persistence';
+import { hasCanonicalTitleToken } from '$lib/utils/managed-name';
+import { extractFirstH1 } from '$lib/utils/h1';
 
 type T = (key: string, params?: Record<string, string | number>) => string;
+export type ManagedNameEnrollmentOutcome = 'enrolled' | 'not-applicable' | 'failed';
+
+function isMarkdownDocumentPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
 
 /**
  * Create a scratch file (single-file mode, no project). Opens it as the sole tab.
@@ -20,7 +32,7 @@ export async function createScratchFile() {
     const filePath = result.data;
     const readResult = await commands.readFile(filePath);
     if (readResult.status === 'ok') {
-      projectStore.enterSingleFileMode();
+      await projectStore.enterSingleFileMode();
       uiStore.sidebarVisible = false;
       tabsStore.openTab(filePath, readResult.data, { justCreated: true });
       await commands.registerOpenFile(filePath);
@@ -60,6 +72,57 @@ export async function proposeNewFileName(targetDir: string, ext?: string): Promi
 }
 
 /**
+ * Resolve the user's current filename template (macros expanded) so callers
+ * can gate managed-name enrollment on the exact source template string.
+ *
+ * Exported so Sidebar's inline header `+` and context-menu `New File` sites
+ * can pass the same template that Cmd+N uses to `persistManagedNameEnrollment`,
+ * preserving the canonical `{title}` token — never derived from the final
+ * filename.
+ */
+export function currentFilenameTemplateRaw(): string {
+  const macroCtx = makeTemplateContext({
+    activeFilePath: tabsStore.activeTab?.filePath ?? null,
+    projectDir: projectStore.dirPath,
+  });
+  return resolveBody(newFileSettings.template, macroCtx);
+}
+
+/**
+ * Safe enrollment helper: enrolls managed naming for a freshly-created file
+ * IFF `templateRaw` contains the exact canonical `{title}` token. On any
+ * persistence failure the created file is NEVER deleted; instead a static
+ * safe warning label is logged so on-disk paths never leak through log
+ * telemetry.
+ *
+ * Exported so every new-file entry point (Cmd+N, template panel, Sidebar
+ * header `+`, Sidebar context-menu `New File`) shares one enrollment gate
+ * and one failure-handling contract.
+ */
+export async function persistManagedNameEnrollment(
+  projectDir: string,
+  filePath: string,
+  templateRaw: string,
+  currentH1: string,
+  warningLabel: string,
+): Promise<ManagedNameEnrollmentOutcome> {
+  if (!hasCanonicalTitleToken(templateRaw) || !isMarkdownDocumentPath(filePath)) {
+    return 'not-applicable';
+  }
+  let persisted = null;
+  try {
+    persisted = await enableManagedNameForCreatedFile(projectDir, filePath, templateRaw, currentH1);
+  } catch {
+    persisted = null;
+  }
+  if (persisted && await confirmManagedNameEnrollment(projectDir, filePath, persisted)) {
+    return 'enrolled';
+  }
+  console.warn(warningLabel);
+  return 'failed';
+}
+
+/**
  * Smart new-file creation inside the active project.
  *
  * Target folder resolves: pinned default > last-used > project root. If the
@@ -83,6 +146,7 @@ export async function createNewFileInProject() {
     targetDir = projectStore.dirPath;
   }
 
+  const templateRaw = currentFilenameTemplateRaw();
   const proposedName = await proposeNewFileName(targetDir);
   const result = await commands.createFile(targetDir, proposedName);
   if (result.status !== 'ok') return;
@@ -99,6 +163,13 @@ export async function createNewFileInProject() {
 
   const readResult = await commands.readFile(result.data);
   if (readResult.status === 'ok') {
+    await persistManagedNameEnrollment(
+      projectStore.dirPath,
+      result.data,
+      templateRaw,
+      '',
+      'Managed-name enrollment failed during new-file creation',
+    );
     tabsStore.openTab(result.data, readResult.data, { justCreated: true });
     await commands.registerOpenFile(result.data);
   }
@@ -150,6 +221,13 @@ export async function executeTemplate(
     if (after.status === 'ok') projectStore.updateFiles(after.data);
     const readResult = await commands.readFile(res.data);
     if (readResult.status === 'ok') {
+      await persistManagedNameEnrollment(
+        projectStore.dirPath,
+        res.data,
+        filenameTemplate,
+        extractFirstH1(readResult.data) ?? '',
+        'Managed-name enrollment failed during template file creation',
+      );
       tabsStore.openTab(res.data, readResult.data);
       await commands.registerOpenFile(res.data);
     }

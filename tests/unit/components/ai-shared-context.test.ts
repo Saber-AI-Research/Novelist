@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildContextPack,
   commandInstruction,
@@ -6,11 +6,14 @@ import {
   parseMentions,
   parseSkillTokens,
   parseSlashCommand,
+  resolveMentionContexts,
   skillAssetsForTokens,
   stripMentionTokens,
   stripSkillTokens,
   type AiContextItem,
 } from '$lib/components/ai-shared/context';
+import { commands } from '$lib/ipc/commands';
+import { projectStore } from '$lib/stores/project.svelte';
 import {
   attachmentToContextItem,
   buildPromptFromAttachments,
@@ -60,6 +63,53 @@ describe('[contract] AI shared context parsing', () => {
     expect(commandInstruction(parseSlashCommand('/plan next'))).toBeNull();
   });
 
+  it('parses a CJK project command and resolves its loaded instruction', () => {
+    const projectCommand = {
+      id: 'commands/甲项目命令.md',
+      kind: 'command',
+      path: '/项目甲/.novelist/ai/commands/甲项目命令.md',
+      name: '甲项目命令',
+      content: '只使用项目甲的命令指令。',
+    };
+
+    const parsed = parseSlashCommand('/甲项目命令 收紧第二章节奏', [projectCommand]);
+
+    expect(parsed).toEqual({
+      id: '甲项目命令',
+      raw: '/甲项目命令',
+      rest: '收紧第二章节奏',
+      asset: projectCommand,
+    });
+    expect(commandInstruction(parsed)).toBe('只使用项目甲的命令指令。');
+  });
+
+  it('keeps built-in control commands ahead of colliding project commands', () => {
+    const collidingCommand = {
+      id: 'commands/Plan.md',
+      kind: 'command',
+      path: '/项目甲/.novelist/ai/commands/Plan.md',
+      name: 'Plan',
+      content: 'This project command must not replace the built-in control.',
+    };
+
+    const parsed = parseSlashCommand('/Plan outline the next scene', [collidingCommand]);
+
+    expect(parsed).toEqual({ id: 'plan', raw: '/plan', rest: 'outline the next scene' });
+    expect(commandInstruction(parsed)).toBeNull();
+  });
+
+  it('rejects project command names containing invisible format characters', () => {
+    const deceptiveCommand = {
+      id: 'commands/plan-hidden.md',
+      kind: 'command',
+      path: '/项目甲/.novelist/ai/commands/plan-hidden.md',
+      name: 'plan\u200d',
+      content: 'This deceptive command must not execute.',
+    };
+
+    expect(parseSlashCommand('/plan\u200d outline the next scene', [deceptiveCommand])).toBeNull();
+  });
+
   it('resolves skill tokens against available prompt assets', () => {
     const assets = [
       { id: 'skills/plot-doctor/SKILL.md', kind: 'skill', path: '/p/SKILL.md', name: 'plot-doctor', content: 'plot' },
@@ -69,6 +119,36 @@ describe('[contract] AI shared context parsing', () => {
       { raw: '$missing', name: 'missing' },
     ]);
     expect(skillAssetsForTokens(parseSkillTokens('$plot-doctor $missing'), assets)).toEqual([assets[0]]);
+  });
+
+  it('keeps shared resolution tolerant while strict Agent resolution rejects a typed read failure', async () => {
+    const previousFiles = projectStore.files;
+    projectStore.files = [{
+      name: '第一章.md',
+      path: '/project/第一章.md',
+      is_dir: false,
+      size: 120,
+      expanded: false,
+      loading: false,
+      mtime: 1,
+      ctime: 1,
+    }];
+    const read = vi.spyOn(commands, 'readFile').mockResolvedValue({
+      status: 'error',
+      error: '读取失败 Authorization: Bearer CONTEXT_SECRET',
+    });
+
+    try {
+      await expect(resolveMentionContexts('@file:第一章 请继续')).resolves.toEqual([]);
+      await expect(resolveMentionContexts(
+        '@file:第一章 请继续',
+        { rejectFileReadError: true },
+      )).rejects.toThrow('读取失败');
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      read.mockRestore();
+      projectStore.files = previousFiles;
+    }
   });
 });
 
@@ -155,6 +235,19 @@ describe('[contract] AI context attachments', () => {
       label: 'Selection',
       content: 'selected text',
     });
+  });
+
+  it('preserves project commands as command attachments', () => {
+    const attachment = createAttachmentFromContext({
+      id: 'command:commands/甲项目命令.md',
+      kind: 'manual-note',
+      label: 'Command: 甲项目命令',
+      path: '/项目甲/.novelist/ai/commands/甲项目命令.md',
+      content: '只使用项目甲的命令指令。',
+    });
+
+    expect(attachment.kind).toBe('command');
+    expect(attachment.source).toBe('ai-assets');
   });
 
   it('ranks label prefix matches before path-only matches', () => {

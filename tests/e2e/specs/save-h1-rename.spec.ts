@@ -14,10 +14,20 @@ import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 async function seedAndOpen(app: import('@playwright/test').Page, files: MockFileEntry[], contents: Record<string, string> = {}) {
   await app.evaluate(
-    ([d, f, c]) => {
+    async ([d, f, c]) => {
       const w = window as any;
       w.__TAURI_MOCK_STATE__.openProject(d, f);
       w.__TAURI_MOCK_STATE__.seedFileContents(c);
+      for (const file of f) {
+        if (!file.is_dir && /^Untitled \d+\.md$/.test(file.name)) {
+          const documentKey = await w.__TAURI_INTERNALS__.invoke('compute_document_key', { projectDir: d, filePath: file.path });
+          await w.__TAURI_INTERNALS__.invoke('write_managed_name_state', {
+            projectDir: d,
+            filePath: file.path,
+            state: { version: 1, status: 'managed', templateRaw: '{title}', currentH1: '', documentKey },
+          });
+        }
+      }
     },
     [MOCK_PROJECT_DIR, files, contents] as const,
   );

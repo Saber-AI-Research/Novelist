@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { commands } from '$lib/ipc/commands';
+  import { moveItemAfterSidecarFlush } from '$lib/services/rename-coordinator';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { pathDirname } from '$lib/utils/path';
@@ -73,10 +74,14 @@
   async function confirm(targetDir: string) {
     if (!activeTab?.filePath) { onClose(); return; }
     const srcPath = activeTab.filePath;
-    const result = await commands.moveItem(srcPath, targetDir);
+    const result = await moveItemAfterSidecarFlush(
+      projectStore.dirPath,
+      srcPath,
+      targetDir,
+    );
     if (result.status === 'ok') {
-      const newPath = result.data;
-      await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: true });
+      const newPath = result.data.new_path;
+      await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: false });
       // Refresh both affected folders so the tree catches up immediately.
       const oldParent = pathDirname(srcPath);
       await projectStore.refreshFolder(oldParent).catch(() => {});

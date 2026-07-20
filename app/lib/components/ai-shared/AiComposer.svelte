@@ -3,8 +3,8 @@
   import AiContextBar from './AiContextBar.svelte';
   import AiMentionMenu from './AiMentionMenu.svelte';
   import AiCommandMenu from './AiCommandMenu.svelte';
-  import type { SlashCommandId } from './context';
   import type { AiContextAttachment } from './attachments';
+  import type { AiPromptAsset } from './persistence';
   import { attachmentToContextItem } from './attachments';
   import { filterMentionItems, filterSlashCommands } from './menu-items';
   import { getCaretCoordinates } from './caret-coordinates';
@@ -24,6 +24,7 @@
     mentionQuery: string;
     commandVisible: boolean;
     commandQuery: string;
+    commandAssets?: readonly AiPromptAsset[];
     suggestedSelection?: SuggestedSelection;
     busy?: boolean;
     canSend: boolean;
@@ -35,7 +36,7 @@
     onStop?: () => void;
     mentionCandidates?: readonly AiContextAttachment[];
     onPickMention: (token: string, attachment?: AiContextAttachment) => void | Promise<void>;
-    onPickCommand: (id: SlashCommandId) => void;
+    onPickCommand: (id: string) => void;
     onRemoveAttachment: (id: string) => void;
     onClearAttachments: () => void;
     onAttachSelection?: () => void;
@@ -53,6 +54,7 @@
     mentionQuery,
     commandVisible,
     commandQuery,
+    commandAssets = [],
     suggestedSelection = null,
     busy = false,
     canSend,
@@ -78,7 +80,7 @@
   // ---- Menu keyboard selection (ArrowUp/Down to move, Tab/Enter to pick) ----
   // The composer owns the filtered lists and the active index; the menu
   // components are pure renderers, so mouse and keyboard stay in sync.
-  let commandItems = $derived(commandVisible ? filterSlashCommands(commandQuery) : []);
+  let commandItems = $derived(commandVisible ? filterSlashCommands(commandQuery, commandAssets) : []);
   let mentionItems = $derived(mentionVisible ? filterMentionItems(mentionQuery, mentionCandidates) : []);
   let menuLength = $derived(commandItems.length || mentionItems.length);
   let menuIndex = $state(0);

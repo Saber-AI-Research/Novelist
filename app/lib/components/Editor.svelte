@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { EditorView } from '@codemirror/view';
   import type { Extension, ChangeSet } from '@codemirror/state';
-  import { createEditorExtensions, createEditorState, highlightMatchCompartment } from '$lib/editor/setup';
+  import { createEditorExtensions, createEditorState, highlightMatchCompartment, reconfigureEditorState } from '$lib/editor/setup';
   import { highlightSelectionMatches } from '@codemirror/search';
   import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState, getEditorView } from '$lib/stores/tabs.svelte';
   import { Transaction } from '@codemirror/state';
@@ -16,9 +16,16 @@
   import { t } from '$lib/i18n';
   import { countWords } from '$lib/utils/wordcount';
   import { extractHeadings, type HeadingItem } from '$lib/editor/outline';
-  import { setWysiwygProjectDir, setWysiwygRenderImages } from '$lib/editor/wysiwyg';
+import {
+  setWysiwygImageDocumentDir,
+  setWysiwygProjectDir,
+  setWysiwygRenderImages,
+} from '$lib/editor/wysiwyg';
   import { setSlashCommandI18n } from '$lib/editor/slash-commands';
-  import { pathBasename, pathDirname, pathJoin } from '$lib/utils/path';
+  import { isImeComposing } from '$lib/editor/ime-guard';
+  import { pathBasename, pathDirname, pathJoin, pathStartsWithChild } from '$lib/utils/path';
+  import { registerRenameFlushProvider } from '$lib/services/rename-coordinator';
+  import { writeDraftNoteStrict } from '$lib/services/draft-notes';
 
   interface Props {
     paneId?: string;
@@ -50,6 +57,7 @@
   let isReadOnly = $state(false);
   let readOnlyFileSize = $state(0);
   let statsTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingLoadAfterComposition = false;
   // Re-entrancy guard for saveCurrentFile. Prevents two racing writers from
   // both using the `{path}.novelist-tmp` atomic-write name (the first rename
   // would consume the temp and the second would fail with ENOENT).
@@ -81,13 +89,23 @@
 
   // Crash recovery: use a `.~recovery` suffix to separate from sidebar draft notes
   const RECOVERY_SUFFIX = '.~recovery';
+  let pendingRecoveryWrite: Promise<void> | null = null;
 
   /** Write a crash-recovery draft for the current file content. */
   async function writeRecoveryDraft(filePath: string, content: string) {
     if (!projectStore.dirPath) return;
-    await commands.writeDraftNote(projectStore.dirPath, filePath + RECOVERY_SUFFIX, content).catch(
-      e => console.warn('[Recovery] Failed to write draft:', e)
-    );
+    pendingRecoveryWrite = writeDraftNoteStrict(projectStore.dirPath, filePath + RECOVERY_SUFFIX, content)
+      .then(() => {})
+      .finally(() => { pendingRecoveryWrite = null; });
+    await pendingRecoveryWrite;
+  }
+
+  async function flushRecoveryForRename(oldPath: string) {
+    const tab = getActiveTab();
+    if (!tab || !view || !projectStore.dirPath) return;
+    if (tab.filePath !== oldPath && !pathStartsWithChild(tab.filePath, oldPath)) return;
+    if (tab.isDirty) await writeRecoveryDraft(tab.filePath, view.state.doc.toString());
+    if (pendingRecoveryWrite) await pendingRecoveryWrite;
   }
 
   /** Delete the crash-recovery draft after a successful save. */
@@ -277,6 +295,10 @@
 
   function buildUpdateListener(): Extension {
     return EditorView.updateListener.of((update) => {
+      if (pendingLoadAfterComposition && !isImeComposing(update.view)) {
+        pendingLoadAfterComposition = false;
+        queueMicrotask(loadTab);
+      }
       if (update.docChanged) {
         const t = getActiveTab();
         if (t) {
@@ -494,11 +516,11 @@
 
   // --- Tab lifecycle ---
 
-  function cleanupCurrentView() {
+  function cleanupCurrentView(discardState = false) {
     flushWritingStats();
     if (view && currentTabId) {
-      saveEditorState(currentTabId, view.state);
-      if (!isReadOnly) {
+      if (!discardState) saveEditorState(currentTabId, view.state);
+      if (!discardState && !isReadOnly) {
         // syncFromView now compares content before marking dirty,
         // so scroll-only sessions won't trigger false dirty flags.
         tabsStore.syncFromView(currentTabId);
@@ -527,13 +549,18 @@
 
     if (tab.id === currentTabId && tab.version === currentTabVersion && currentZenMode === uiStore.zenMode && view) return;
 
-    // Set project dir for image resolution in WYSIWYG
-    if (projectStore.dirPath) setWysiwygProjectDir(projectStore.dirPath);
+    if (view && isImeComposing(view)) {
+      pendingLoadAfterComposition = true;
+      return;
+    }
+
+    setWysiwygProjectDir(projectStore.dirPath ?? '');
     // Image rendering: off for novel template projects, on otherwise (respects user setting)
     const isNovelTemplate = projectStore.config?.project?.type === 'novel';
     setWysiwygRenderImages(isNovelTemplate ? false : uiStore.editorSettings.renderImages);
 
-    cleanupCurrentView();
+    const discardStaleView = tab.id === currentTabId && tab.version !== currentTabVersion;
+    cleanupCurrentView(discardStaleView);
     currentTabId = tab.id;
     currentTabVersion = tab.version;
     currentZenMode = uiStore.zenMode;
@@ -565,11 +592,15 @@
     const savedState = getSavedEditorState(tab.id);
     if (savedState) {
       // Restore saved state (preserves undo history) with current extensions
-      view = new EditorView({ state: savedState, parent: editorContainer });
+      view = new EditorView({
+        state: reconfigureEditorState(savedState, extensions),
+        parent: editorContainer,
+      });
     } else {
       const state = createEditorState(tab.content, extensions);
       view = new EditorView({ state, parent: editorContainer });
     }
+    setWysiwygImageDocumentDir(view, pathDirname(tab.filePath));
     registerEditorView(tab.id, view);
     // Auto-focus the editor so the user can type immediately
     requestAnimationFrame(() => view?.focus());
@@ -607,6 +638,7 @@
   $effect(() => {
     const enabled = uiStore.editorSettings.highlightMatches;
     if (view) {
+      if (isImeComposing(view)) return;
       view.dispatch({
         effects: highlightMatchCompartment.reconfigure(
           enabled ? highlightSelectionMatches() : []
@@ -616,6 +648,7 @@
   });
 
   onMount(() => {
+    const unregisterRenameFlush = registerRenameFlushProvider(flushRecoveryForRename);
     // Initialize slash command i18n labels
     const slashLabels = new Map([
       ['heading1', { label: t('slash.heading1'), description: t('slash.heading1.desc') }],
@@ -673,10 +706,13 @@
       const tab = getActiveTab();
       if (!tab || !tab.isDirty || !view || !projectStore.dirPath) return;
       const content = view.state.doc.toString();
-      writeRecoveryDraft(tab.filePath, content);
+      writeRecoveryDraft(tab.filePath, content).catch(
+        e => console.warn('[Recovery] Failed to write draft:', e),
+      );
     }, 90_000);
 
     return () => {
+      unregisterRenameFlush();
       clearInterval(recoveryDraftIntervalId);
       if (autoSaveIntervalId) clearInterval(autoSaveIntervalId);
       if (statsTimer) clearTimeout(statsTimer);

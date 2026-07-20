@@ -25,6 +25,22 @@ A path is **waived** if:
 
 Anything else must be tested (or waived with an explicit entry here).
 
+### Platform code and native evidence
+
+A Platform waiver removes a path only from the Vitest/v8 denominator; it does
+not waive observable behavior at every layer. When a contract can be exercised
+through the real macOS Tauri/WKWebView harness, record native behavioral and
+cleanup evidence even if direct unit instrumentation remains infeasible. A
+browser test with mocked Tauri IPC is not native evidence for clipboard,
+watcher, provider, updater, process, or WebView behavior.
+
+Native smoke results supplement this coverage policy. They never reduce the
+four enforced thresholds, create an implicit waiver, or satisfy a required
+native screenshot unless the captured image is visibly composited and passes
+the acceptance pixel checks. See
+[`docs/design-docs/testing.md`](../docs/design-docs/testing.md) for the current
+mock/native boundary and Task 24 status.
+
 ## How to Add a Waiver
 
 1. Open a PR that edits both:

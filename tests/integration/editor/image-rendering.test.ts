@@ -1,5 +1,27 @@
 import { describe, it, expect } from 'vitest';
+import { EditorState } from '@codemirror/state';
 import { detectDesktopPlatform, fileManagerLabel } from '$lib/utils/platform-labels';
+import { imageDocumentDirEffect, imageDocumentDirField } from '$lib/editor/wysiwyg';
+
+describe('[regression] image document scope ownership', () => {
+  it('keeps different nested document directories isolated per editor state', () => {
+    const first = EditorState.create({
+      extensions: [imageDocumentDirField],
+    });
+    const second = EditorState.create({
+      extensions: [imageDocumentDirField],
+    });
+    const firstUpdated = first.update({
+      effects: imageDocumentDirEffect.of('/project/第一卷'),
+    }).state;
+    const secondUpdated = second.update({
+      effects: imageDocumentDirEffect.of('/project/第二卷'),
+    }).state;
+
+    expect(firstUpdated.field(imageDocumentDirField)).toBe('/project/第一卷');
+    expect(secondUpdated.field(imageDocumentDirField)).toBe('/project/第二卷');
+  });
+});
 
 /**
  * Image rendering feature tests.

@@ -57,7 +57,7 @@ function modeForKind(kind: AiContextAttachmentKind): AiContextAttachment['mode']
 
 export function createAttachmentFromContext(item: AiContextItem): AiContextAttachment {
   const kind: AiContextAttachmentKind = item.kind === 'manual-note'
-    ? item.id === 'memory' ? 'memory' : 'skill'
+    ? item.id === 'memory' ? 'memory' : item.id.startsWith('command:') ? 'command' : 'skill'
     : item.kind;
   return {
     id: item.id,

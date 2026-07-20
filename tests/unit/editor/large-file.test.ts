@@ -9,18 +9,18 @@ describe("classifyFileSize", () => {
     expect(classifyFileSize(1024 * 1024 - 1)).toBe(FileSize.Normal);
   });
 
-  it("classifies 1MB boundary as Normal", () => {
-    expect(classifyFileSize(1024 * 1024)).toBe(FileSize.Normal);
+  it("classifies the 1MB boundary as Large", () => {
+    expect(classifyFileSize(1024 * 1024)).toBe(FileSize.Large);
   });
 
-  it("classifies 1-10MB as Large", () => {
+  it("classifies 1-3.5MB as Large", () => {
     expect(classifyFileSize(1024 * 1024 + 1)).toBe(FileSize.Large);
-    expect(classifyFileSize(5 * 1024 * 1024)).toBe(FileSize.Large);
-    expect(classifyFileSize(10 * 1024 * 1024)).toBe(FileSize.Large);
+    expect(classifyFileSize(3.5 * 1024 * 1024 - 1)).toBe(FileSize.Large);
   });
 
-  it("classifies >10MB as Huge", () => {
-    expect(classifyFileSize(10 * 1024 * 1024 + 1)).toBe(FileSize.Huge);
+  it("classifies the 3.5MB read-only boundary as Huge", () => {
+    expect(classifyFileSize(3.5 * 1024 * 1024)).toBe(FileSize.Huge);
+    expect(classifyFileSize(10 * 1024 * 1024)).toBe(FileSize.Huge);
     expect(classifyFileSize(100 * 1024 * 1024)).toBe(FileSize.Huge);
   });
 });

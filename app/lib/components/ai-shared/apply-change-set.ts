@@ -20,6 +20,7 @@ export type AiFileChange = {
 export type AiChangeSet = {
   id: string;
   sourceSessionId: string;
+  sourceProjectDir?: string | null;
   createdAt: string;
   summary: string;
   files: AiFileChange[];
@@ -27,6 +28,7 @@ export type AiChangeSet = {
 
 type ParseOptions = {
   sourceSessionId: string;
+  sourceProjectDir?: string | null;
 };
 
 type ValidationResult = { ok: true } | { ok: false; reason: string };
@@ -66,6 +68,7 @@ export function parseChangeSetsFromText(text: string, options: ParseOptions): Ai
       out.push({
         id: uuid(),
         sourceSessionId: options.sourceSessionId,
+        sourceProjectDir: options.sourceProjectDir ?? null,
         createdAt: new Date().toISOString(),
         summary: typeof raw.summary === 'string' && raw.summary.trim()
           ? raw.summary

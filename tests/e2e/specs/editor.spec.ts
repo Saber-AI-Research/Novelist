@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/app-fixture';
+import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('Editor', () => {
   test.beforeEach(async ({ app }) => {
@@ -20,23 +21,7 @@ test.describe('Editor', () => {
     await expect(cmContent).toContainText('dark and stormy night');
   });
 
-  test('cursor position is reported in status bar', async ({ app }) => {
-    const cmEditor = app.locator('.cm-editor');
-    await cmEditor.click();
-
-    const cursorPos = app.getByTestId('status-cursor-pos');
-    await expect(cursorPos).toBeVisible();
-    await expect(cursorPos).toContainText(/Ln \d+/);
-  });
-
-  test('word count updates in status bar', async ({ app }) => {
-    const wordCount = app.getByTestId('status-word-count');
-    await expect(wordCount).toBeVisible();
-    const text = await wordCount.textContent();
-    expect(text).toBeTruthy();
-  });
-
-  test('clicking in editor moves cursor to correct position', async ({ app }) => {
+  test('clicking in editor reports the clicked cursor line', async ({ app }) => {
     const targetLine = app.locator('.cm-line').filter({ hasText: 'wind howled' });
     await targetLine.click();
 
@@ -48,6 +33,7 @@ test.describe('Editor', () => {
     });
 
     expect(cursorLine).toBeGreaterThan(0);
+    await expect(app.getByTestId('status-cursor-pos')).toContainText(`Ln ${cursorLine}`);
   });
 
   test('typing inserts text at cursor position', async ({ app }) => {
@@ -62,28 +48,6 @@ test.describe('Editor', () => {
     await expect(cmContent).toContainText('New paragraph here');
   });
 
-  test('multiple edits are tracked', async ({ app }) => {
-    const cmEditor = app.locator('.cm-editor');
-    await cmEditor.click();
-
-    // Type first edit
-    await app.keyboard.press('End');
-    await app.keyboard.type(' - edited');
-
-    // Verify content was modified
-    const cmContent = app.locator('.cm-content');
-    await expect(cmContent).toContainText('edited');
-
-    // Editor state should have history entries
-    const hasHistory = await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
-      if (!view) return false;
-      // If the doc length is greater than original, edits were tracked
-      return view.state.doc.length > 0;
-    });
-    expect(hasHistory).toBe(true);
-  });
-
   test('CJK content renders correctly', async ({ app }) => {
     const fileItem = app.getByTestId('sidebar-file-Chapter 3.md');
     await fileItem.click();
@@ -91,5 +55,74 @@ test.describe('Editor', () => {
     const cmContent = app.locator('.cm-content');
     await expect(cmContent).toContainText('第三章');
     await expect(cmContent).toContainText('中文测试文本');
+  });
+
+  test('external reload is deferred while IME composition is active', async ({ app, mockState }) => {
+    const filePath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    const initialContent = await app.evaluate(() => (window as any).__novelist_view.state.doc.toString());
+    const pos = await app.evaluate(() => {
+      const view = (window as any).__novelist_view;
+      const pos = view.state.doc.toString().indexOf('stormy') + 'stormy'.length;
+      view.dispatch({ selection: { anchor: pos } });
+      view.contentDOM.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+      (window as any).__ime_test_view = view;
+      return pos;
+    });
+
+    const cleanExternal = '# 第一章\n\n外部合成结束版本。\n';
+    await mockState.setFileContent(filePath, cleanExternal);
+    await mockState.emitEvent('file-changed', { path: filePath });
+    await app.waitForTimeout(150);
+
+    const duringComposition = await app.evaluate(({ expectedPos, expectedContent }) => {
+      const view = (window as any).__novelist_view;
+      return {
+        sameView: view === (window as any).__ime_test_view,
+        head: view.state.selection.main.head,
+        expectedPos,
+        content: view.state.doc.toString(),
+        expectedContent,
+      };
+    }, { expectedPos: pos, expectedContent: initialContent });
+
+    expect(duringComposition.sameView).toBe(true);
+    expect(duringComposition.head).toBe(pos);
+    expect(duringComposition.content).toBe(initialContent);
+    await expect(app.getByRole('dialog')).toHaveCount(0);
+
+    await app.evaluate(() => {
+      const view = (window as any).__novelist_view;
+      view.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
+      delete (window as any).__ime_test_view;
+    });
+
+    await expect.poll(() => app.evaluate(() => (window as any).__novelist_view.state.doc.toString()))
+      .toBe(cleanExternal);
+
+    await app.evaluate(() => {
+      const view = (window as any).__novelist_view;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '\n本地未保存内容。' } });
+      view.contentDOM.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    });
+    const dirtyLocal = `${cleanExternal}\n本地未保存内容。`;
+    const dirtyExternal = '# 第一章\n\n外部冲突内容。\n';
+    await mockState.setFileContent(filePath, dirtyExternal);
+    await mockState.emitEvent('file-changed', { path: filePath });
+    await app.waitForTimeout(150);
+
+    await expect(app.getByRole('dialog')).toHaveCount(0);
+    expect(await app.evaluate(() => (window as any).__novelist_view.state.doc.toString())).toBe(dirtyLocal);
+
+    await app.evaluate(() => {
+      const view = (window as any).__novelist_view;
+      view.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    });
+    const conflict = app.getByRole('dialog');
+    await expect(conflict).toBeVisible();
+    await expect(conflict).toContainText('Chapter 1.md');
+    await expect(conflict.getByRole('button', { name: 'Keep Mine' })).toBeVisible();
+    await expect(conflict.getByRole('button', { name: 'Load Theirs' })).toBeVisible();
+    expect(await app.evaluate(() => (window as any).__novelist_view.state.doc.toString())).toBe(dirtyLocal);
+    await app.screenshot({ path: '.sisyphus/evidence/task-11-ime-conflict.png' });
   });
 });

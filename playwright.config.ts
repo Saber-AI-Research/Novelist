@@ -13,6 +13,8 @@ export default defineConfig({
     ['list'],
     ['html', { open: 'never' }],
   ],
+  outputDir: 'test-results/playwright',
+  preserveOutput: 'always',
   use: {
     baseURL: 'http://localhost:1420',
     trace: 'on-first-retry',

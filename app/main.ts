@@ -6,6 +6,14 @@ import { i18n } from "$lib/i18n";
 import { startupMark } from "$lib/utils/startup-timing";
 import "./app.css";
 
+const scheduleFirstFrame = (callback: FrameRequestCallback) => {
+  if ((window as typeof window & { __PW_ACTIVE__?: boolean }).__PW_ACTIVE__) {
+    window.setTimeout(() => callback(performance.now()), 0);
+  } else {
+    requestAnimationFrame(callback);
+  }
+};
+
 // DEBUG: Mirror every startup phase to Rust tracing (`log_startup_phase`)
 // so we can see progress in terminal logs even when devtools is unreachable.
 // Remove once the startup path is confirmed healthy.
@@ -72,7 +80,7 @@ void (async () => {
       sinceStartMs: performance.now(),
     }).catch(() => {});
   } finally {
-    requestAnimationFrame(() => {
+    scheduleFirstFrame(() => {
       clearTimeout(forceShowTimer);
       const win = getCurrentWindow();
       win.show().catch((err) => console.error("[startup] window.show failed", err));

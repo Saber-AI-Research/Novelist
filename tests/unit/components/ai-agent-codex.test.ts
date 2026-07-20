@@ -16,8 +16,9 @@ vi.mock('$lib/ipc/commands', () => ({
   commands: { codexCliDetect, codexCliTurn, codexCliKill, claudeCliDetect, claudeCliSpawn, claudeCliSend, claudeCliKill },
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }));
 
-import { parseCodexLine, runCodexTurn } from '$lib/components/ai-agent/host';
+import { listenCodexStream, parseCodexLine, runCodexTurn } from '$lib/components/ai-agent/host';
 import { runtimeFor, ClaudeRuntime, CodexRuntime } from '$lib/components/ai-agent/runtime';
 
 beforeEach(() => {
@@ -77,9 +78,9 @@ describe('parseCodexLine', () => {
     expect(ev).toEqual({ kind: 'result', text: '', usage: { input: 0, output: 0 } });
   });
 
-  it('surfaces an error event as a result with a warning prefix', () => {
+  it('surfaces an error event as a turn-scoped stream failure', () => {
     const ev = parseCodexLine('{"type":"error","message":"boom"}');
-    expect(ev).toEqual({ kind: 'result', text: '⚠️ boom' });
+    expect(ev).toEqual({ kind: 'failure', stage: 'stream', message: 'boom' });
   });
 });
 
@@ -126,6 +127,25 @@ describe('runCodexTurn arg mapping', () => {
   it('throws on an error result', async () => {
     codexCliTurn.mockResolvedValue({ status: 'error', error: 'nope' });
     await expect(runCodexTurn({ sessionUuid: 's1', prompt: 'hi' })).rejects.toThrow('nope');
+  });
+});
+
+describe('listenCodexStream routing', () => {
+  it('delivers only events addressed to the current window and strips target_label', async () => {
+    let captured: any = null;
+    listen.mockImplementation(async (_channel: string, cb: any) => {
+      captured = cb;
+      return vi.fn();
+    });
+    const handler = vi.fn();
+    await listenCodexStream('s1', handler);
+
+    captured({ payload: { kind: 'stdout-line', data: 'foreign', target_label: 'novelist-2' } });
+    captured({ payload: { kind: 'stdout-line', data: 'missing' } });
+    captured({ payload: { kind: 'stdout-line', data: 'mine', target_label: 'main' } });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({ kind: 'stdout-line', data: 'mine' });
   });
 });
 

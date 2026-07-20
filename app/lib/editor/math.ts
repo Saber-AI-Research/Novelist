@@ -209,8 +209,8 @@ function buildDisplayMathBlockState(state: EditorState): DisplayMathBlockState {
 const mathBlockDecoField = StateField.define<DisplayMathBlockState>({
   create(state) { return buildDisplayMathBlockState(state); },
   update(value, tr) {
-    if (tr.state.field(imeComposingField, false)) return value;
     if (tr.docChanged) return buildDisplayMathBlockState(tr.state);
+    if (tr.state.field(imeComposingField, false)) return value;
     if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
       return buildDisplayMathBlockState(tr.state);
     }

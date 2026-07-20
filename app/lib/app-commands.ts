@@ -6,10 +6,30 @@ import { tabsStore } from '$lib/stores/tabs.svelte';
 import { projectStore } from '$lib/stores/project.svelte';
 import { extensionStore } from '$lib/stores/extensions.svelte';
 import { aiTalkSessions } from '$lib/components/ai-talk/sessions.svelte';
-import { aiAgentSessions } from '$lib/components/ai-agent/sessions.svelte';
+import { requestAiAgentNewSession } from '$lib/components/ai-agent/new-session-requests';
 import * as fmt from '$lib/editor/formatting';
+import { applyBlockTransform, type BlockTransformTarget } from '$lib/editor/block-transform';
 import { i18n, t as tFn, tIn } from '$lib/i18n';
-import { getPortableInfo } from '$lib/services/portable';
+import { pathDirname } from '$lib/utils/path';
+
+export const BLOCK_TRANSFORM_COMMANDS = [
+  { id: 'editor-block-paragraph', target: 'paragraph', labelKey: 'command.blockParagraph' },
+  { id: 'editor-block-heading-1', target: 'heading-1', labelKey: 'command.blockHeading1' },
+  { id: 'editor-block-heading-2', target: 'heading-2', labelKey: 'command.blockHeading2' },
+  { id: 'editor-block-heading-3', target: 'heading-3', labelKey: 'command.blockHeading3' },
+  { id: 'editor-block-heading-4', target: 'heading-4', labelKey: 'command.blockHeading4' },
+  { id: 'editor-block-heading-5', target: 'heading-5', labelKey: 'command.blockHeading5' },
+  { id: 'editor-block-heading-6', target: 'heading-6', labelKey: 'command.blockHeading6' },
+  { id: 'editor-block-quote', target: 'quote', labelKey: 'command.blockQuote' },
+  { id: 'editor-block-unordered-list', target: 'unordered-list', labelKey: 'command.blockUnorderedList' },
+  { id: 'editor-block-ordered-list', target: 'ordered-list', labelKey: 'command.blockOrderedList' },
+  { id: 'editor-block-task-list', target: 'task-list', labelKey: 'command.blockTaskList' },
+  { id: 'editor-block-code-fence', target: 'code-fence', labelKey: 'command.blockCodeFence' },
+] as const satisfies ReadonlyArray<{
+  id: string;
+  target: BlockTransformTarget;
+  labelKey: string;
+}>;
 
 /**
  * Bundle of App.svelte-local references the command handlers need.
@@ -156,7 +176,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
     shortcut: shortcutsStore.get('ai-agent-new-session'),
     handler: () => {
       if (extensionStore.activePanelId !== 'ai-agent') extensionStore.openPanel('ai-agent');
-      aiAgentSessions.create();
+      requestAiAgentNewSession(projectStore.dirPath);
     },
   });
   reg({
@@ -188,6 +208,16 @@ export function registerAppCommands(ctx: AppCommandContext) {
   reg({ id: 'editor-strikethrough', labelKey: 'command.strikethrough', shortcut: shortcutsStore.get('editor-strikethrough'), handler: () => {
     const view = getActiveEditorView(); if (view) fmt.toggleWrap(view, '~~');
   }});
+  for (const command of BLOCK_TRANSFORM_COMMANDS) {
+    reg({
+      id: command.id,
+      labelKey: command.labelKey,
+      handler: () => {
+        const view = getActiveEditorView();
+        if (view) applyBlockTransform(view, command.target);
+      },
+    });
+  }
 
   // Chinese text tools
   reg({ id: 'chinese-s2t', labelKey: 'command.simplifiedToTraditional', handler: async () => {
@@ -282,22 +312,13 @@ export function registerAppCommands(ctx: AppCommandContext) {
     const { commands } = await import('$lib/ipc/commands');
     await commands.openDevtools();
   }});
-  // Portable builds skip the updater plugin on the Rust side (Task 2),
-  // so the manual "Check for updates" affordance is gated at click-time:
-  // the command is always registered (avoids palette/menu race), and the
-  // handler bails with a user-visible dialog when running in portable mode.
   reg({ id: 'check-for-updates', labelKey: 'command.checkForUpdates', handler: async () => {
-    const info = await getPortableInfo();
-    if (info.enabled) {
-      const { message } = await import('@tauri-apps/plugin-dialog');
-      await message('Updates disabled in portable mode', {
-        title: 'Check for Updates',
-        kind: 'info',
-      });
-      return;
-    }
     const { checkForUpdates } = await import('$lib/updater');
-    checkForUpdates(false);
+    try {
+      await checkForUpdates(false);
+    } catch (e) {
+      console.warn('[updater] manual check dispatch failed:', e);
+    }
   }});
   reg({ id: 'install-cli-shim', labelKey: 'command.installCliShim', handler: async () => {
     const { runInstallCliShim } = await import('$lib/services/cli-shim');
@@ -315,7 +336,7 @@ async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<voi
   if (!view) return;
   const docText = view.state.doc.toString();
   const docPath = tabsStore.activeTab?.filePath ?? null;
-  const docDir = docPath ? docPath.split('/').slice(0, -1).join('/') : (projectStore.dirPath ?? '');
+  const docDir = docPath ? pathDirname(docPath) : (projectStore.dirPath ?? '');
   if (!docDir) {
     window.dispatchEvent(new CustomEvent('image-host-toast', {
       detail: { kind: 'error', message: 'Open a saved file before running upload-all.' },
@@ -324,7 +345,9 @@ async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<voi
   }
   try {
     const { uploadAllInDocument } = await import('$lib/services/image-host');
-    const report = await uploadAllInDocument(docText, docDir);
+    const report = await uploadAllInDocument(docText, {
+      baseDir: docDir,
+    });
     if (report.successes.length === 0 && report.failures.length === 0) {
       window.dispatchEvent(new CustomEvent('image-host-toast', {
         detail: { kind: 'info', message: 'No local images to upload.' },

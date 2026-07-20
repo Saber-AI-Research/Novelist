@@ -29,7 +29,7 @@ async function openFileInEditor(app: Page, fileName: string) {
 }
 
 test.describe('Cmd+M move-file palette', () => {
-  test('palette lists folders and moves the active file into the chosen one', async ({ app }) => {
+  test('palette lists folders and moves the active file into the chosen one', async ({ app, mockState }) => {
     await seedAndOpen(app, [
       { name: 'Chapter 1.md', path: `${MOCK_PROJECT_DIR}/Chapter 1.md`, is_dir: false, size: 100 },
       { name: 'Drafts', path: `${MOCK_PROJECT_DIR}/Drafts`, is_dir: true, size: 0 },
@@ -73,6 +73,9 @@ test.describe('Cmd+M move-file palette', () => {
       paths.includes(`${MOCK_PROJECT_DIR}/Drafts/Chapter 1.md`),
       'file must be at /Drafts/Chapter 1.md; got: ' + JSON.stringify(paths),
     ).toBe(true);
+    const calls = await mockState.getInvokeCalls();
+    expect(calls.filter(call => call.command === 'move_item')).toHaveLength(1);
+    expect(calls.filter(call => call.command === 'broadcast_file_renamed')).toHaveLength(0);
   });
 
   test('palette hides the file\'s current parent folder from the list', async ({ app }) => {

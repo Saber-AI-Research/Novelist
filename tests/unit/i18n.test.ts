@@ -52,6 +52,29 @@ describe('[contract] i18n basic translation', () => {
     expect(i18n.t('welcome.moreProjectsHint', { count: 2, shortcut: 'Ctrl+Shift+P' })).toContain('Ctrl+Shift+P');
     expect(i18n.t('settings.editor.newFile.defaultDirHint', { shortcut: 'Ctrl+N' })).toContain('Ctrl+N');
   });
+
+  it('provides complete English and Chinese block command and submenu labels', () => {
+    const labels = {
+      'editor.menu.blockType': ['Block Type', '块类型'],
+      'command.blockParagraph': ['Convert to Paragraph', '转换为正文'],
+      'command.blockHeading1': ['Convert to Heading 1', '转换为一级标题'],
+      'command.blockHeading2': ['Convert to Heading 2', '转换为二级标题'],
+      'command.blockHeading3': ['Convert to Heading 3', '转换为三级标题'],
+      'command.blockHeading4': ['Convert to Heading 4', '转换为四级标题'],
+      'command.blockHeading5': ['Convert to Heading 5', '转换为五级标题'],
+      'command.blockHeading6': ['Convert to Heading 6', '转换为六级标题'],
+      'command.blockQuote': ['Convert to Quote', '转换为引用'],
+      'command.blockUnorderedList': ['Convert to Unordered List', '转换为无序列表'],
+      'command.blockOrderedList': ['Convert to Ordered List', '转换为有序列表'],
+      'command.blockTaskList': ['Convert to Task List', '转换为任务列表'],
+      'command.blockCodeFence': ['Convert to Code Block', '转换为代码块'],
+    } as const;
+
+    for (const [key, [english, chinese]] of Object.entries(labels)) {
+      expect(en[key]).toBe(english);
+      expect(zhCN[key]).toBe(chinese);
+    }
+  });
 });
 
 describe('[contract] i18n locale switching', () => {

@@ -2,12 +2,9 @@ use crate::error::AppError;
 use crate::services::pandoc;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
-use tokio::sync::{oneshot, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell};
 
 pub const MAX_MARKDOWN_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_HTML_BYTES: usize = 20 * 1024 * 1024;
@@ -24,24 +21,13 @@ const REQUIRED_EXTENSIONS: [&str; 7] = [
     "tex_math_dollars",
 ];
 
-type CapabilityResult = Result<Arc<HashSet<String>>, String>;
-static CAPABILITY_CACHE: Lazy<Mutex<HashMap<String, Arc<OnceCell<CapabilityResult>>>>> =
+type CapabilitySet = Arc<HashSet<String>>;
+type CapabilityResult = Result<CapabilitySet, String>;
+type CapabilityCell = Arc<OnceCell<CapabilitySet>>;
+static CAPABILITY_CACHE: Lazy<Mutex<HashMap<String, CapabilityCell>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-struct ProcessOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-enum ProcessFailure {
-    NotFound,
-    Spawn,
-    Wait,
-    Write,
-    Timeout,
-    OutputOverflow,
-}
+use pandoc::{PipedPandocFailure as ProcessFailure, PipedPandocOutput as ProcessOutput};
 
 pub async fn styled_markdown_to_html(markdown: &str) -> Result<String, AppError> {
     validate_markdown_size(markdown)?;
@@ -57,7 +43,7 @@ pub(crate) async fn styled_markdown_to_html_with_binary_and_timeout(
     timeout: Duration,
 ) -> Result<String, AppError> {
     validate_markdown_size(markdown)?;
-    let supported = capabilities_for(binary, PANDOC_TIMEOUT).await?;
+    let supported = capabilities_for(binary, timeout).await?;
     let missing: Vec<&str> = REQUIRED_EXTENSIONS
         .iter()
         .copied()
@@ -124,10 +110,10 @@ async fn capabilities_for(
     };
 
     let binary = binary.to_string();
-    let result = cell
-        .get_or_init(|| async move { probe_capabilities(&binary, timeout).await })
-        .await;
-    result.clone().map_err(AppError::Custom)
+    cell.get_or_try_init(|| async move { probe_capabilities(&binary, timeout).await })
+        .await
+        .cloned()
+        .map_err(AppError::Custom)
 }
 
 async fn probe_capabilities(binary: &str, timeout: Duration) -> CapabilityResult {
@@ -172,6 +158,7 @@ fn map_conversion_process_failure(failure: ProcessFailure) -> AppError {
         ProcessFailure::Write => "pandoc_input_write_failed",
         ProcessFailure::Timeout => "pandoc_timeout",
         ProcessFailure::OutputOverflow => "pandoc_output_too_large",
+        ProcessFailure::RetainedPipes => "pandoc_cleanup_failed",
     };
     AppError::Custom(code.to_string())
 }
@@ -183,156 +170,19 @@ async fn run_bounded_process(
     stdout_limit: usize,
     timeout: Duration,
 ) -> Result<ProcessOutput, ProcessFailure> {
-    let mut command = Command::new(binary);
-    command
-        .args(args)
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ProcessFailure::NotFound
-        } else {
-            ProcessFailure::Spawn
-        }
-    })?;
-
-    let stdin_task = match (input, child.stdin.take()) {
-        (Some(bytes), Some(mut stdin)) => {
-            let bytes = bytes.to_vec();
-            Some(tokio::spawn(async move {
-                stdin
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| ProcessFailure::Write)?;
-                stdin.shutdown().await.map_err(|_| ProcessFailure::Write)
-            }))
-        }
-        _ => None,
-    };
-
-    let stdout = child.stdout.take().ok_or(ProcessFailure::Spawn)?;
-    let stderr = child.stderr.take().ok_or(ProcessFailure::Spawn)?;
-    let (overflow_tx, mut overflow_rx) = oneshot::channel();
-    let stdout_task = tokio::spawn(drain_bounded(stdout, stdout_limit, Some(overflow_tx)));
-    let stderr_task = tokio::spawn(drain_bounded(stderr, MAX_DIAGNOSTIC_BYTES, None));
-
-    let (deadline_tx, deadline_cancel_rx) = std::sync::mpsc::channel();
-    let (deadline_signal_tx, mut deadline_signal_rx) = oneshot::channel();
-    let deadline_thread = std::thread::spawn(move || {
-        if deadline_cancel_rx.recv_timeout(timeout)
-            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        {
-            let _ = deadline_signal_tx.send(());
-        }
-    });
-    let mut overflow_channel_open = true;
-    let mut deadline_channel_open = true;
-    let wait_result = loop {
-        tokio::select! {
-            status = child.wait() => break status.map(Some).map_err(|_| ProcessFailure::Wait),
-            overflow = &mut overflow_rx, if overflow_channel_open => {
-                match overflow {
-                    Ok(()) => break Err(ProcessFailure::OutputOverflow),
-                    Err(_) => overflow_channel_open = false,
-                }
-            }
-            deadline = &mut deadline_signal_rx, if deadline_channel_open => {
-                match deadline {
-                    Ok(()) => break Ok(None),
-                    Err(_) => deadline_channel_open = false,
-                }
-            }
-        }
-    };
-    let _ = deadline_tx.send(());
-    let _ = deadline_thread.join();
-
-    let status = match wait_result {
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            kill_and_reap(&mut child).await;
-            await_input_task(stdin_task).await.ok();
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(ProcessFailure::Timeout);
-        }
-        Err(failure) => {
-            kill_and_reap(&mut child).await;
-            await_input_task(stdin_task).await.ok();
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(failure);
-        }
-    };
-
-    let input_result = await_input_task(stdin_task).await;
-    let stdout = stdout_task.await.map_err(|_| ProcessFailure::Wait)?;
-    let stderr = stderr_task.await.map_err(|_| ProcessFailure::Wait)?;
-    if stdout.len() > stdout_limit {
-        return Err(ProcessFailure::OutputOverflow);
+    let output = pandoc::run_piped_pandoc(
+        binary,
+        args,
+        input,
+        stdout_limit,
+        MAX_DIAGNOSTIC_BYTES,
+        timeout,
+    )
+    .await?;
+    if let Some(warning) = output.cleanup_warning.as_ref() {
+        tracing::warn!(target: "novelist::styled_copy", stage = warning.stage.tag(), message = %warning.message, "Pandoc cleanup warning");
     }
-    if status.success() {
-        input_result?;
-    }
-    Ok(ProcessOutput {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-async fn await_input_task(
-    task: Option<tokio::task::JoinHandle<Result<(), ProcessFailure>>>,
-) -> Result<(), ProcessFailure> {
-    match task {
-        Some(task) => task.await.map_err(|_| ProcessFailure::Write)?,
-        None => Ok(()),
-    }
-}
-
-async fn kill_and_reap(child: &mut tokio::process::Child) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-}
-
-async fn drain_bounded<R>(
-    mut reader: R,
-    limit: usize,
-    overflow: Option<oneshot::Sender<()>>,
-) -> Vec<u8>
-where
-    R: AsyncRead + Unpin,
-{
-    let retain_limit = if overflow.is_some() {
-        limit.saturating_add(1)
-    } else {
-        limit
-    };
-    let mut retained = Vec::with_capacity(retain_limit.min(64 * 1024));
-    let mut overflow = overflow;
-    let mut total = 0usize;
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => read,
-        };
-        total = total.saturating_add(read);
-        let remaining = retain_limit.saturating_sub(retained.len());
-        retained.extend_from_slice(&chunk[..read.min(remaining)]);
-        if total > limit {
-            if let Some(sender) = overflow.take() {
-                let _ = sender.send(());
-            }
-        }
-    }
-    retained
+    Ok(output)
 }
 
 fn bounded_diagnostic(bytes: &[u8]) -> String {
@@ -446,7 +296,7 @@ fn redact_key_value(input: &str, key: &str) -> String {
             .find(|character: char| !character.is_whitespace())
             .unwrap_or(after_key.len());
         let after_whitespace = &after_key[whitespace_len..];
-        if !after_whitespace.starts_with('=') {
+        if !after_whitespace.starts_with('=') && !after_whitespace.starts_with(':') {
             redacted.push_str(&rest[..index + key.len()]);
             rest = &rest[index + key.len()..];
             continue;
@@ -562,12 +412,19 @@ fn redact_json_string(input: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::process::Stdio;
     use std::time::Duration;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
+    #[allow(dead_code)]
     const REQUIRED_EXTENSIONS: &str = "+pipe_tables\n-footnotes\n+fenced_code_blocks\n-fenced_code_attributes\n+backtick_code_blocks\n-mark\n+tex_math_dollars\n+raw_attribute\n";
+    const TEST_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
     #[cfg(unix)]
     fn make_fake_pandoc(
@@ -627,7 +484,7 @@ mod tests {
             let converted = styled_markdown_to_html_with_binary_and_timeout(
                 "==重点== $E=mc^2$",
                 binary.to_str().unwrap(),
-                Duration::from_secs(2),
+                TEST_PROCESS_TIMEOUT,
             )
             .await
             .unwrap();
@@ -648,6 +505,52 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn transient_capability_failure_is_retried_for_the_same_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("first-probe-failed");
+        let extensions = dir.path().join("extensions.txt");
+        let script = dir.path().join("retryable-pandoc.sh");
+        std::fs::write(&extensions, REQUIRED_EXTENSIONS).unwrap();
+        let mut file = std::fs::File::create(&script).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(file, "if [ \"$1\" = '--list-extensions=markdown' ]; then").unwrap();
+        writeln!(file, "  if [ ! -e '{}' ]; then", marker.display()).unwrap();
+        writeln!(file, "    /usr/bin/touch '{}'; exit 47", marker.display()).unwrap();
+        writeln!(file, "  fi").unwrap();
+        writeln!(file, "  /bin/cat '{}'; exit 0", extensions.display()).unwrap();
+        writeln!(file, "fi").unwrap();
+        writeln!(file, "/bin/cat >/dev/null").unwrap();
+        writeln!(file, "printf '<p>retry succeeded</p>'").unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let first = styled_markdown_to_html_with_binary_and_timeout(
+            "first",
+            script.to_str().unwrap(),
+            TEST_PROCESS_TIMEOUT,
+        )
+        .await;
+        assert_eq!(
+            first.unwrap_err().to_string(),
+            "pandoc_capability_probe_failed"
+        );
+
+        let second = styled_markdown_to_html_with_binary_and_timeout(
+            "second",
+            script.to_str().unwrap(),
+            TEST_PROCESS_TIMEOUT,
+        )
+        .await
+        .expect("transient capability errors must not remain cached");
+        assert_eq!(second, "<p>retry succeeded</p>");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn raw_attribute_is_disabled_only_when_supported() {
         let dir = TempDir::new().unwrap();
         let extensions = REQUIRED_EXTENSIONS.replace("+raw_attribute\n", "");
@@ -656,7 +559,7 @@ mod tests {
         styled_markdown_to_html_with_binary_and_timeout(
             "x",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap();
@@ -676,7 +579,7 @@ mod tests {
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "==blocked==",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -716,7 +619,7 @@ mod tests {
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "# bounded",
             binary.to_str().unwrap(),
-            Duration::from_secs(5),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -741,7 +644,7 @@ mod tests {
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "x",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -811,7 +714,7 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "x",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -822,6 +725,15 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         for secret in secrets {
             assert!(!error.contains(secret), "leaked {secret}: {error}");
         }
+    }
+
+    #[test]
+    fn diagnostics_redact_colon_delimited_secret_values() {
+        let diagnostic =
+            bounded_diagnostic(b"token: COLON_TOKEN_SECRET\npassword : quoted-secret\n");
+        assert!(!diagnostic.contains("COLON_TOKEN_SECRET"));
+        assert!(!diagnostic.contains("quoted-secret"));
+        assert!(diagnostic.contains("token: <redacted>"));
     }
 
     #[cfg(unix)]
@@ -849,7 +761,7 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "x",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -873,6 +785,9 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         let dir = TempDir::new().unwrap();
         let (binary, _, pid_path) =
             make_fake_pandoc(&dir, REQUIRED_EXTENSIONS, b"", b"", 0, Some(30));
+        capabilities_for(binary.to_str().unwrap(), TEST_PROCESS_TIMEOUT)
+            .await
+            .expect("capability setup should complete before testing conversion timeout");
 
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "x",
@@ -887,9 +802,75 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         let pid = std::fs::read_to_string(pid_path).unwrap();
         let status = std::process::Command::new("/bin/kill")
             .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .unwrap();
         assert!(!status.success(), "timed-out child {pid} is still alive");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn descendant_retaining_pipes_is_terminated_and_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let extensions = dir.path().join("extensions.txt");
+        let pid_file = dir.path().join("descendant.pid");
+        let script = dir.path().join("fake-pandoc-descendant.sh");
+        std::fs::write(&extensions, REQUIRED_EXTENSIONS).unwrap();
+        let mut file = std::fs::File::create(&script).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(file, "if [ \"$1\" = '--list-extensions=markdown' ]; then").unwrap();
+        writeln!(file, "  /bin/cat '{}'", extensions.display()).unwrap();
+        writeln!(file, "  exit 0").unwrap();
+        writeln!(file, "fi").unwrap();
+        writeln!(file, "/bin/cat >/dev/null").unwrap();
+        writeln!(file, "/bin/sleep 30 &").unwrap();
+        writeln!(file, "printf '%s' \"$!\" > '{}'", pid_file.display()).unwrap();
+        writeln!(file, "exit 0").unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        capabilities_for(script.to_str().unwrap(), TEST_PROCESS_TIMEOUT)
+            .await
+            .expect("capability setup should complete before testing descendant cleanup");
+
+        let bounded = tokio::time::timeout(
+            Duration::from_secs(5),
+            styled_markdown_to_html_with_binary_and_timeout(
+                "# hi",
+                script.to_str().unwrap(),
+                Duration::from_secs(1),
+            ),
+        )
+        .await;
+        let descendant = std::fs::read_to_string(&pid_file)
+            .expect("fake Pandoc should record its descendant")
+            .parse::<u32>()
+            .unwrap();
+        if bounded.is_err() {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-9", &descendant.to_string()])
+                .status();
+        }
+
+        assert!(
+            bounded.is_ok(),
+            "styled-copy conversion escaped its lifecycle bound"
+        );
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-0", &descendant.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "styled-copy descendant {descendant} survived"
+        );
     }
 
     #[cfg(unix)]
@@ -901,7 +882,7 @@ access_token={}&password={}&client_secret={}&secret={}\n\
         let error = styled_markdown_to_html_with_binary_and_timeout(
             "x",
             binary.to_str().unwrap(),
-            Duration::from_secs(2),
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap_err()
@@ -911,26 +892,15 @@ access_token={}&password={}&client_secret={}&secret={}\n\
 
     #[tokio::test]
     async fn real_pandoc_preserves_semantic_math_mermaid_and_blocks_raw_content() {
-        if !Path::new("/opt/homebrew/bin/pandoc").exists()
-            && std::process::Command::new("pandoc")
-                .arg("--version")
-                .output()
-                .map(|output| !output.status.success())
-                .unwrap_or(true)
-        {
+        let Some((binary, _)) = pandoc::resolve_pandoc(None).await else {
             eprintln!("skipping: pandoc unavailable");
             return;
-        }
-        let binary = if Path::new("/opt/homebrew/bin/pandoc").exists() {
-            "/opt/homebrew/bin/pandoc"
-        } else {
-            "pandoc"
         };
         let markdown = "==重点== and $E=mc^2$\n\n```mermaid\ngraph TD; A-->B\n```\n\n<script>alert(1)</script>\n\n\\rawtex";
         let html = styled_markdown_to_html_with_binary_and_timeout(
             markdown,
-            binary,
-            Duration::from_secs(5),
+            &binary,
+            TEST_PROCESS_TIMEOUT,
         )
         .await
         .unwrap();

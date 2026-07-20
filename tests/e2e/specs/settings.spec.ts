@@ -76,8 +76,8 @@ test.describe('Settings Dialog', () => {
     await expect(app.getByText('hello-world')).toBeVisible();
   });
 
-  test('plugins: help tooltip copies prompt to clipboard', async ({ app, context }) => {
-    await context.grantPermissions(['clipboard-read']);
+  test('plugins: help tooltip copies prompt to clipboard', async ({ app, clipboardCapture }) => {
+    await clipboardCapture.start();
 
     await app.evaluate(() => (window as any).__test_api__.toggleSettings());
     await app.getByTestId('settings-dialog').waitFor({ state: 'visible' });
@@ -90,8 +90,8 @@ test.describe('Settings Dialog', () => {
     // Copy.
     await app.getByTestId('help-copy-btn').click();
 
-    const clip = await app.evaluate(() => navigator.clipboard.readText());
-    expect(clip).toContain('counts sentences');
+    await expect.poll(() => clipboardCapture.getWrites()).toHaveLength(1);
+    expect((await clipboardCapture.getWrites())[0]).toContain('counts sentences');
   });
 
   test('language picker is only visible in the Editor tab', async ({ app }) => {

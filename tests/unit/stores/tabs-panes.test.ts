@@ -235,8 +235,9 @@ describe('[contract] tabsStore mutators', () => {
 
   it('retargetOpenPath re-registers the watcher for a renamed open file', async () => {
     tabsStore.openTab('/proj/old.md', '');
-    await tabsStore.retargetOpenPath('/proj/old.md', '/proj/new.md', { broadcast: true });
+    const result = await tabsStore.retargetOpenPath('/proj/old.md', '/proj/new.md', { broadcast: true });
 
+    expect(result).toEqual({ changed: 1, status: 'ok', failedOperations: [] });
     expect(tabsStore.findByPath('/proj/new.md')).toBeTruthy();
     expect(commands.unregisterOpenFile).toHaveBeenCalledWith('/proj/old.md');
     expect(commands.registerOpenFile).toHaveBeenCalledWith('/proj/new.md');
@@ -257,6 +258,42 @@ describe('[contract] tabsStore mutators', () => {
     expect(commands.registerOpenFile).toHaveBeenCalledWith('/proj/new/nested/b.md');
   });
 
+  it('retargetOpenPath reports watcher and broadcast failures without losing the new path', async () => {
+    tabsStore.openTab('/proj/old.md', '');
+    (commands.unregisterOpenFile as any).mockResolvedValueOnce({
+      status: 'error',
+      error: 'old watcher unavailable',
+    });
+    (commands.registerOpenFile as any).mockRejectedValueOnce(new Error('new watcher unavailable'));
+    (commands.broadcastFileRenamed as any).mockResolvedValueOnce({
+      status: 'error',
+      error: 'window registry unavailable',
+    });
+    const operationError = vi.fn();
+    window.addEventListener('novelist-operation-error', operationError);
+
+    const result = await tabsStore.retargetOpenPath(
+      '/proj/old.md',
+      '/proj/new.md',
+      { broadcast: true },
+    );
+
+    expect(result).toEqual({
+      changed: 1,
+      status: 'warning',
+      failedOperations: [
+        'unregister-open-file',
+        'register-open-file',
+        'broadcast-file-renamed',
+      ],
+    });
+    expect(tabsStore.findByPath('/proj/new.md')).toBeTruthy();
+    expect(operationError).toHaveBeenCalledTimes(1);
+    const event = operationError.mock.calls[0][0] as CustomEvent;
+    expect(event.detail).toEqual({ message: 'file.pathSyncFailed' });
+    window.removeEventListener('novelist-operation-error', operationError);
+  });
+
   it('closeTab keeps watcher registration while the same path remains open in another pane', async () => {
     tabsStore.openTab('/proj/shared.md', '');
     const pane1Tab = tabsStore.activeTabId!;
@@ -275,11 +312,32 @@ describe('[contract] tabsStore mutators', () => {
     tabsStore.openTab('/a.md', 'v1');
     const id = tabsStore.activeTabId!;
     tabsStore.markDirty(id);
+    tabsStore.markExternalDeleted(id);
     const before = tabsStore.tabs[0].version;
     tabsStore.reloadContent(id, 'v2');
     expect(tabsStore.tabs[0].content).toBe('v2');
     expect(tabsStore.tabs[0].isDirty).toBe(false);
+    expect(tabsStore.tabs[0].externalState).toBe('present');
     expect(tabsStore.tabs[0].version).toBe(before + 1);
+  });
+
+  it('markExternalDeleted preserves clean and dirty buffers until an explicit reload or save', () => {
+    tabsStore.openTab('/gone.md', 'local buffer');
+    const id = tabsStore.activeTabId!;
+
+    tabsStore.markExternalDeleted(id);
+    expect(tabsStore.tabs[0].content).toBe('local buffer');
+    expect(tabsStore.tabs[0].isDirty).toBe(false);
+    expect(tabsStore.tabs[0].externalState).toBe('deleted');
+
+    tabsStore.markDirty(id);
+    tabsStore.markExternalDeleted(id);
+    expect(tabsStore.tabs[0].content).toBe('local buffer');
+    expect(tabsStore.tabs[0].isDirty).toBe(true);
+    expect(tabsStore.tabs[0].externalState).toBe('deleted');
+
+    tabsStore.markSaved(id);
+    expect(tabsStore.tabs[0].externalState).toBe('present');
   });
 });
 

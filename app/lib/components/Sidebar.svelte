@@ -1,6 +1,11 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { commands } from '$lib/ipc/commands';
+  import {
+    moveItemAfterSidecarFlush,
+    renameItemAfterSidecarFlush,
+  } from '$lib/services/rename-coordinator';
   import type { RecentProject } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
@@ -12,7 +17,21 @@
   import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
   import FileTreeNode from '$lib/components/FileTreeNode.svelte';
   import { compareByMode, type SortMode } from '$lib/utils/file-sort';
-  import { proposeNewFileName } from '$lib/services/new-file';
+  import {
+    currentFilenameTemplateRaw,
+    persistManagedNameEnrollment,
+    proposeNewFileName,
+  } from '$lib/services/new-file';
+  import {
+    detachManagedName,
+    loadManagedName,
+    reEnableManagedName,
+    type ManagedNameLoadResult,
+  } from '$lib/services/managed-name-persistence';
+  import {
+    persistReEnableAutoNamingMenuAction,
+    persistStopAutoNamingMenuAction,
+  } from '$lib/services/managed-name-menu-actions';
   import { SIDEBAR_PATH_MIME } from '$lib/services/pane-drop';
   import { fileManagerLabelKey } from '$lib/utils/platform-labels';
   import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
@@ -55,7 +74,7 @@
   });
 
   interface Props {
-    onOpenProjectFromPath?: (path: string) => void;
+    onOpenProjectFromPath: (path: string) => Promise<void>;
     recentProjects?: RecentProject[];
     onRemoveRecentProject?: (path: string) => void;
     onRefreshRecentProjects?: () => void;
@@ -93,7 +112,6 @@
 
   async function switchToProject(path: string) {
     switcherOpen = false;
-    if (path === projectStore.dirPath) return;
     await openProjectFromPath(path);
   }
 
@@ -110,39 +128,7 @@
   }
 
   async function openProjectFromPath(dirPath: string) {
-    if (onOpenProjectFromPath) {
-      onOpenProjectFromPath(dirPath);
-      return;
-    }
-    if (projectStore.isOpen) {
-      const dirty = tabsStore.dirtyTabs;
-      if (dirty.length > 0) {
-        const names = dirty.map(t => t.fileName).join(', ');
-        const choice = await confirmUnsavedChanges({
-          fileNames: names,
-          saveLabel: t('dialog.save'),
-        });
-        if (choice === 'cancel') return;
-        if (choice === 'save') {
-          const saved = await tabsStore.saveAllDirty();
-          if (!saved) return;
-        }
-      }
-    }
-    projectStore.isLoading = true;
-    await commands.stopFileWatcher();
-    const configResult = await commands.detectProject(dirPath);
-    const config = configResult.status === 'ok' ? configResult.data : null;
-    // Load per-project settings before listDirectory so show_hidden_files is respected on first render.
-    await settingsStore.load(dirPath);
-    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
-    const files = filesResult.status === 'ok' ? filesResult.data : [];
-    projectStore.setProject(dirPath, config, files);
-    tabsStore.closeAll();
-    const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
-    await commands.addRecentProject(dirPath, name);
-    const watchResult = await commands.startFileWatcher(dirPath);
-    if (watchResult.status !== 'ok') console.error('Failed to start file watcher:', watchResult.error);
+    await onOpenProjectFromPath(dirPath);
   }
 
   const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
@@ -182,27 +168,7 @@
   async function openDirectory() {
     const selected = await open({ directory: true, multiple: false });
     if (!selected) return;
-    const dirPath = selected as string;
-    if (onOpenProjectFromPath) {
-      onOpenProjectFromPath(dirPath);
-      return;
-    }
-    projectStore.isLoading = true;
-    await commands.stopFileWatcher();
-    const configResult = await commands.detectProject(dirPath);
-    const config = configResult.status === 'ok' ? configResult.data : null;
-    // Load per-project settings before listDirectory so show_hidden_files is respected on first render.
-    await settingsStore.load(dirPath);
-    const filesResult = await commands.listDirectory(dirPath, settingsStore.effective.view.show_hidden_files);
-    const files = filesResult.status === 'ok' ? filesResult.data : [];
-    projectStore.setProject(dirPath, config, files);
-    tabsStore.closeAll();
-    const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
-    await commands.addRecentProject(dirPath, name);
-    const watchResult = await commands.startFileWatcher(dirPath);
-    if (watchResult.status !== 'ok') {
-      console.error('Failed to start file watcher:', watchResult.error);
-    }
+    await onOpenProjectFromPath(selected as string);
   }
 
   // --- Open file ---
@@ -254,27 +220,24 @@
     newItemName = projectStore.dirPath
       ? await proposeNewFileName(projectStore.dirPath)
       : 'untitled.md';
-    // Focus after DOM update
-    requestAnimationFrame(() => {
-      if (newItemInput) {
-        newItemInput.focus();
-        // Select name without extension
-        const dotIdx = newItemName.lastIndexOf('.');
-        newItemInput.setSelectionRange(0, dotIdx > 0 ? dotIdx : newItemName.length);
-      }
-    });
+    await tick();
+    if (newItemInput) {
+      newItemInput.focus();
+      // Select name without extension
+      const dotIdx = newItemName.lastIndexOf('.');
+      newItemInput.setSelectionRange(0, dotIdx > 0 ? dotIdx : newItemName.length);
+    }
   }
 
-  function startCreateFolder() {
+  async function startCreateFolder() {
     creatingFolder = true;
     creatingFile = false;
     newItemName = 'new-folder';
-    requestAnimationFrame(() => {
-      if (newItemInput) {
-        newItemInput.focus();
-        newItemInput.select();
-      }
-    });
+    await tick();
+    if (newItemInput) {
+      newItemInput.focus();
+      newItemInput.select();
+    }
   }
 
   async function confirmCreate() {
@@ -283,9 +246,17 @@
       return;
     }
     if (creatingFile) {
+      const templateRaw = currentFilenameTemplateRaw();
       const result = await commands.createFile(projectStore.dirPath, newItemName.trim());
       if (result.status === 'ok') {
         void settingsStore.recordLastUsedDir(projectStore.dirPath);
+        await persistManagedNameEnrollment(
+          projectStore.dirPath,
+          result.data,
+          templateRaw,
+          '',
+          'Managed-name enrollment failed during sidebar header new-file creation',
+        );
         await refreshFiles();
         // Open the new file
         const readResult = await commands.readFile(result.data);
@@ -321,6 +292,7 @@
   async function createFileAt(targetDir: string, ext: string = '.md') {
     closeContextMenu();
     closeViewMenu();
+    const templateRaw = currentFilenameTemplateRaw();
     const proposedName = await proposeNewFileName(targetDir, ext === '.md' ? undefined : ext);
     const result = await commands.createFile(targetDir, proposedName);
     if (result.status !== 'ok') {
@@ -328,12 +300,21 @@
       return;
     }
     void settingsStore.recordLastUsedDir(targetDir);
+    const enrollment = projectStore.dirPath
+      ? await persistManagedNameEnrollment(
+        projectStore.dirPath,
+        result.data,
+        templateRaw,
+        '',
+        'Managed-name enrollment failed during sidebar context-menu new-file creation',
+      )
+      : 'not-applicable';
     if (targetDir !== projectStore.dirPath) {
       await projectStore.expandFolder(targetDir);
     }
     await projectStore.refreshFolder(targetDir);
     const newNode = findTreeNodeByPath(result.data);
-    if (newNode) startRename(newNode);
+    if (newNode && enrollment !== 'failed') startRename(newNode);
   }
 
   /**
@@ -445,6 +426,7 @@
 
   // --- Context menu ---
   let contextMenu = $state<{ x: number; y: number; entry: FileNode } | null>(null);
+  let contextManagedName = $state<ManagedNameLoadResult | null>(null);
   let renaming = $state<FileNode | null>(null);
   let renameValue = $state('');
 
@@ -452,10 +434,48 @@
     e.preventDefault();
     const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
     contextMenu = { x: e.clientX / zoom, y: e.clientY / zoom, entry };
+    contextManagedName = null;
+    if (!entry.is_dir && projectStore.dirPath && isTextFile(entry.name)) {
+      void loadManagedName(projectStore.dirPath, entry.path).then((state) => {
+        if (contextMenu?.entry.path === entry.path) contextManagedName = state;
+      });
+    }
   }
 
   function closeContextMenu() {
     contextMenu = null;
+    contextManagedName = null;
+  }
+
+  async function stopAutoNaming(entry: FileNode) {
+    if (!projectStore.dirPath || contextManagedName?.kind !== 'ready') return;
+    const result = await persistStopAutoNamingMenuAction(
+      projectStore.dirPath,
+      entry.path,
+      contextManagedName.state,
+      detachManagedName,
+    );
+    if (result.kind !== 'persisted') return;
+    contextManagedName = { kind: 'ready', state: result.state };
+    closeContextMenu();
+  }
+
+  async function reEnableAutoNaming(entry: FileNode) {
+    if (!projectStore.dirPath || contextManagedName?.kind !== 'ready') return;
+    const result = await persistReEnableAutoNamingMenuAction(
+      projectStore.dirPath,
+      entry.path,
+      contextManagedName.state,
+      reEnableManagedName,
+    );
+    if (result.kind !== 'persisted') return;
+    contextManagedName = { kind: 'ready', state: result.state };
+    closeContextMenu();
+    const openTab = tabsStore.findByPath(entry.path);
+    const content = openTab?.content ?? (await commands.readFile(entry.path).then(r => r.status === 'ok' ? r.data : null));
+    if (typeof content === 'string') {
+      await tabsStore.tryRenameAfterSave(entry.path, content, { reconcileCurrentH1: true });
+    }
   }
 
   function startRename(entry: FileNode) {
@@ -471,10 +491,10 @@
     }
     const oldPath = renaming.path;
     const oldParent = pathDirname(oldPath);
-    const result = await commands.renameItem(renaming.path, renameValue.trim(), null);
+    const result = await renameItemAfterSidecarFlush(projectStore.dirPath, renaming.path, renameValue.trim(), null);
     if (result.status === 'ok') {
-      const newPath = result.data;
-      await tabsStore.retargetOpenPathTree(oldPath, newPath, { broadcast: true });
+      const newPath = result.data.new_path;
+      await tabsStore.retargetOpenPathTree(oldPath, newPath, { broadcast: false });
       const newParent = pathDirname(newPath);
       if (oldParent) await projectStore.refreshFolder(oldParent);
       if (newParent && newParent !== oldParent) await projectStore.refreshFolder(newParent);
@@ -625,14 +645,18 @@
     const parentPath = pathDirname(source.path);
     if (!parentPath || parentPath === target.path) return; // no-op: already in that folder
 
-    const result = await commands.moveItem(source.path, target.path);
+    const result = await moveItemAfterSidecarFlush(
+      projectStore.dirPath,
+      source.path,
+      target.path,
+    );
     if (result.status !== 'ok') {
       console.error('Move failed:', result.error);
       return;
     }
-    const newPath = result.data;
+    const newPath = result.data.new_path;
 
-    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: true });
+    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: false });
 
     await projectStore.refreshFolder(parentPath);
     await projectStore.refreshFolder(target.path);
@@ -669,13 +693,17 @@
     const parentPath = pathDirname(source.path);
     if (!parentPath || parentPath === projectStore.dirPath) return;
 
-    const result = await commands.moveItem(source.path, projectStore.dirPath);
+    const result = await moveItemAfterSidecarFlush(
+      projectStore.dirPath,
+      source.path,
+      projectStore.dirPath,
+    );
     if (result.status !== 'ok') {
       console.error('Move failed:', result.error);
       return;
     }
-    const newPath = result.data;
-    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: true });
+    const newPath = result.data.new_path;
+    await tabsStore.retargetOpenPathTree(source.path, newPath, { broadcast: false });
     await projectStore.refreshFolder(parentPath);
     await projectStore.refreshFolder(projectStore.dirPath);
   }
@@ -956,8 +984,21 @@
     {#if !contextMenu.entry.is_dir}
       <button role="menuitem" class="context-menu-item" onclick={() => handleDuplicate(contextMenu!.entry)}>{t('sidebar.duplicate')}</button>
     {/if}
+    {#if !contextMenu.entry.is_dir && contextManagedName?.kind === 'ready'}
+      {#if contextManagedName.state.status === 'managed'}
+        <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-stop-auto-naming" onclick={() => stopAutoNaming(contextMenu!.entry)}>
+          <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h4"/><path d="M15 7h2a5 5 0 0 1 4 8"/><path d="M8 12h4"/><path d="M2 2l20 20"/></svg>
+          <span>{t('sidebar.stopAutoNaming')}</span>
+        </button>
+      {:else}
+        <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-reenable-auto-naming" onclick={() => reEnableAutoNaming(contextMenu!.entry)}>
+          <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M18 2v4h-4"/><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M6 22v-4h4"/></svg>
+          <span>{t('sidebar.reenableAutoNaming')}</span>
+        </button>
+      {/if}
+    {/if}
     <div class="context-menu-separator"></div>
-    <button role="menuitem" class="context-menu-item" onclick={() => startRename(contextMenu!.entry)}>{t('sidebar.rename')}</button>
+    <button role="menuitem" class="context-menu-item" data-testid="context-menu-rename" onclick={() => startRename(contextMenu!.entry)}>{t('sidebar.rename')}</button>
     <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>{t('sidebar.delete')}</button>
   </div>
 {/if}

@@ -115,7 +115,6 @@ The IPC overhead in Tauri is **microsecond-level** — effectively the same as a
 ~/my-novel/                       # User project directory
 +-- .novelist/                    # Project metadata
 |   +-- project.toml              # Name, type, sort order
-|   +-- export.toml               # Export config: pandoc options, format preferences
 |   +-- plugins.toml              # Plugin config & permissions
 |   +-- workspace.json            # UI state: open tabs, sidebar width (not committed)
 +-- chapters/
@@ -133,7 +132,7 @@ The IPC overhead in Tauri is **microsecond-level** — effectively the same as a
 - **"Open directory" model**: Like VSCode — open any directory, auto-detect `.novelist/` as a project. No `.novelist/` means it still works as a plain editor.
 - **Plain .md files**: No proprietary syntax, no wikilinks, no custom frontmatter requirements. External tools (vim, AI, git) can freely edit files.
 - **Config is separate from content**: `.novelist/` only contains metadata and settings. Content lives in user-organized directories.
-- **workspace.json is ephemeral**: UI state (open tabs, scroll positions) is not version-controlled. Project config (project.toml, export.toml) can be committed to git.
+- **workspace.json is ephemeral**: UI state (open tabs, scroll positions) is not version-controlled. Project config (`project.toml`) can be committed to git.
 
 ### 4.2 Project Config Schema
 
@@ -156,24 +155,9 @@ daily_goal = 2000                 # Word count goal per session
 auto_save_minutes = 5             # Auto-save interval (0 = disabled)
 ```
 
-```toml
-# .novelist/export.toml
-[general]
-order = "outline"              # "outline" (from project.toml) or "alphabetical"
-
-[html]
-css = "default"                # "default" | path to custom CSS
-
-[pdf]
-engine = "auto"                # "auto" (detect) | "typst" | "xelatex" | "weasyprint"
-font_body = "Noto Serif SC"
-font_size = 12
-margin = "2.5cm"
-page_size = "A4"
-
-[pandoc]
-extra_args = []                # Advanced: extra CLI args passed to pandoc
-```
+Export does not have a project configuration file. The dialog exposes a fixed
+format set and optional current-theme styling for HTML; Rust rejects arbitrary
+Pandoc arguments at the IPC boundary.
 
 ## 5. Editor Design
 
@@ -286,7 +270,9 @@ External edit (vim/AI)                                          |
 
 ### 5.4 Large File Strategy
 
-> **Design goal**: Keep frontend memory proportional to the viewport, not the file size. Use Rust as the single source of truth for large files.
+> **Current production contract**: Files remain full CodeMirror documents. The
+> editor progressively strips extensions, then becomes read-only at 3.5MB.
+> Rust-backed viewport editing remains a future direction, not a wired path.
 
 #### Tiered approach
 
@@ -294,14 +280,16 @@ External edit (vim/AI)                                          |
 |------|-----------|----------|----------------|
 | **Normal** | < 1 MB | Rust reads entire file → send to CM6 via IPC. CM6 owns full document. Standard WYSIWYG. | ~2-4× file size |
 | **Tall doc** | < 1 MB, > 5000 lines | Same as Normal but **disable WYSIWYG decorations** and use flat heading sizes. Prevents CM6 height-map drift that causes click-after-scroll jump bugs. | ~2-4× file size |
-| **Large** | 1-10 MB | Rust reads entire file → send to CM6, but **disable WYSIWYG decorations** (plain Markdown highlighting only). CM6 virtual scrolling handles rendering. | ~2-4× file size, but much lower CPU/GC pressure |
-| **Huge** | > 10 MB | **Rust-backed viewport mode** (see below). CM6 only holds a window of content. | ~5-10 MB constant |
+| **Large** | 1-3.5 MB | Rust reads the entire file into CM6 with parser, WYSIWYG, syntax highlighting, and line wrapping disabled. Editing remains enabled. | ~2-4× file size, with lower update/measurement cost |
+| **Huge** | ≥ 3.5 MB | Rust reads the entire file into a stripped read-only CM6 state. Editing handlers are omitted. | ~2-4× file size |
 
 **Why tall doc mode exists**: CM6 estimates heights for off-screen lines. WYSIWYG decorations (heading font-size changes, blockquote styling, etc.) only apply within the viewport. The difference between estimated and actual heights accumulates as the user scrolls, causing `posAtCoords` (click → document position) to land on the wrong line. For documents > 5000 lines, this drift becomes user-visible. The fix: disable all height-changing decorations and use uniform heading font sizes via `flatNovelistHighlightStyle` in `app/lib/editor/setup.ts`.
 
-#### Huge file: Rust-backed viewport mode
+#### Future huge-file direction: Rust-backed viewport mode
 
-This is the key differentiator from editors like VSCode that load entire files into the JS heap.
+The following viewport architecture is a proposal and is not wired into
+`Editor.svelte`. Current production behavior is the read-only full-document tier
+described above.
 
 ```
 Rust Backend (source of truth)              Frontend (viewport only)
@@ -333,10 +321,11 @@ Rust Backend (source of truth)              Frontend (viewport only)
 |----------|-------------|-------------------|-------|
 | Idle, no file open | ~20 MB | ~30 MB | ~50 MB |
 | 3 normal files (50KB each) | ~21 MB | ~32 MB | ~53 MB |
-| 1 large file (5 MB) | ~26 MB | ~50 MB | ~76 MB |
-| 1 huge file (50 MB) | ~70 MB | ~35 MB | ~105 MB |
+| 1 large file (3 MB) | ~24 MB | ~44 MB | ~68 MB |
+| Future viewport target (50 MB) | ~70 MB | ~35 MB | ~105 MB |
 
-Key: for huge files, the JS heap stays constant (~35 MB) regardless of file size, because only the viewport window is loaded.
+Future target: if viewport mode is wired, the JS heap should stay constant
+(~35 MB) regardless of file size because only a window is loaded.
 
 #### Rust dependency for large files
 
@@ -366,7 +355,7 @@ ropey = "1"  # Rope data structure for large text, O(log n) access/edit
 |  | Plugin Registry  |    | Host Functions             |   |
 |  | (plugins.toml)   |    | - read/write file (gated)  |   |
 |  |                  |    | - register command          |   |
-|  +------------------+    | - register export preset    |   |
+|  +------------------+    | - scoped document actions   |   |
 |                          +---------------------------+   |
 +----------------------------------------------------------+
 ```
@@ -377,7 +366,7 @@ ropey = "1"  # Rope data structure for large text, O(log n) access/edit
 |------|-------------|----------|
 | **Tier 1: Read-only** | Read document content, register themes (CSS variable overrides only) | Themes, word frequency analyzer, reading stats |
 | **Tier 2: Read-write** | Modify document content, register commands in command palette | Auto-formatter, template inserter, text transform |
-| **Tier 3: System** | File system access (scoped), network access, register export presets | Cloud sync, AI integration, custom pandoc presets |
+| **Tier 3: System** | Explicitly scoped infrastructure capabilities | Bundled core integrations only; plugins cannot extend Pandoc arguments |
 
 Plugins must declare required permissions in a manifest. User approves on install.
 
@@ -447,10 +436,11 @@ User clicks "Export"
      |
      +-- Not found --> prompt user to install pandoc
      |
-     +-- Found --> assemble file list (outline order)
+     +-- Found --> save dirty tabs, then scan Markdown files in stable path order
                    -> concatenate .md files to temp file
-                   -> invoke: pandoc temp.md -o output.pdf/html [options]
-                   -> report success / stream stderr on failure
+                   -> invoke Pandoc inside a private destination-side directory
+                    -> sync + atomically rename on success
+                    -> report bounded structured diagnostics on failure
 ```
 
 ### 7.2 Supported Formats
@@ -459,40 +449,24 @@ Pandoc supports a wide range of output formats. Novelist exposes a curated subse
 
 | Format | pandoc command | Notes |
 |--------|---------------|-------|
-| **HTML** | `pandoc -t html5 --standalone --css=theme.css` | Novelist provides a default CSS; users can customize |
-| **PDF** | `pandoc -t pdf` (via LaTeX or `--pdf-engine=typst`) | Requires LaTeX or typst installed; Novelist detects available engines |
+| **HTML** | `pandoc -t html5 --standalone --embed-resources --include-in-header theme.html` | The current theme is wrapped in a backend-staged `<style>` header and embedded into a self-contained file |
+| **PDF** | Pandoc default PDF output | May require an external PDF engine supported by the installed Pandoc environment |
 | **DOCX** | `pandoc -t docx` | Built-in to pandoc, no extra deps |
 | **EPUB** | `pandoc -t epub` | Built-in to pandoc, no extra deps |
 
-### 7.3 Export Config
+### 7.3 Export Configuration
 
-Export is project-level (defined in `.novelist/export.toml`):
-
-```toml
-# .novelist/export.toml
-[general]
-order = "outline"              # "outline" (from project.toml) or "alphabetical"
-
-[html]
-css = "default"                # "default" | path to custom CSS
-
-[pdf]
-engine = "auto"                # "auto" (detect) | "typst" | "xelatex" | "weasyprint"
-font_body = "Noto Serif SC"
-font_size = 12
-margin = "2.5cm"
-page_size = "A4"
-
-[pandoc]
-extra_args = []                # Advanced: extra CLI args passed to pandoc
-```
+Export settings are request-local dialog choices. There is no
+`.novelist/export.toml`, custom engine field, or arbitrary argument escape
+hatch. HTML theme CSS is created by the backend as a bounded, owner-only,
+request-correlated `:root` custom-property header and embedded before cleanup.
 
 ### 7.4 Implementation Details
 
-1. **Pandoc detection**: On app start, run `which pandoc` and cache the result. Show a non-intrusive banner if not found.
-2. **Async execution**: Invoke pandoc via `tokio::process::Command`. Stream stdout/stderr back to frontend via Tauri events for progress feedback.
-3. **Temp file cleanup**: Concatenated temp files are cleaned up after export completes or fails.
-4. **Extensibility**: Plugins (Tier 3) can register custom export presets (pre-configured pandoc argument sets), but cannot replace the pandoc-based pipeline itself.
+1. **Pandoc detection**: Probe the saved override, `PATH`, and deterministic platform locations with a three-second deadline. Report the absolute executable used.
+2. **Source ownership**: Save dirty editor tabs first. Project exports bound every entry before buffering, enumerate Markdown in numeric order, and read files and referenced raster images through retained no-follow capabilities. Images are signature-checked, bounded, and converted to data URIs; standalone exports apply the same media rule from the selected file's parent capability.
+3. **Async execution**: Invoke Pandoc with discrete argv through the shared bounded process-tree runner. Never use a shell or expose arbitrary IPC-supplied options.
+4. **Atomic publication and cleanup**: Write Pandoc output inside an owner-only destination-side directory, monitor the 1 GiB cap, sync and rename it only after success, and clean assembled input/CSS/output temporaries after success, failure, timeout, or cancellation.
 
 ## 8. Theme System
 
@@ -875,10 +849,10 @@ tracing = "0.1"                      # Structured logging
 | **App binary size** | < 15MB (macOS .dmg) |
 | **Cold start** | < 1s to editor ready |
 | **File open (< 1MB .md)** | < 200ms (full load to CM6) |
-| **File open (1-10MB .md)** | < 500ms (full load, WYSIWYG disabled) |
-| **File open (> 10MB .md)** | < 300ms (viewport mode, only load visible window) |
+| **File open (1-3.5MB .md)** | < 500ms (full load, stripped editable mode) |
+| **File open (≥ 3.5MB .md)** | Read-only full-document mode; no viewport target is claimed |
 | **Typing latency** | < 16ms (60fps) |
 | **Memory (idle)** | < 50MB |
 | **Memory (normal files)** | < 80MB (3-5 files under 1MB each) |
-| **Memory (huge file 50MB)** | < 120MB (Rust rope ~70MB + JS viewport ~35MB) |
+| **Memory (future 50MB viewport)** | < 120MB target after viewport mode is wired |
 | **Auto-save** | < 50ms per file write; 5-min default interval |

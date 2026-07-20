@@ -1,11 +1,10 @@
 <script lang="ts">
-  import type { SlashCommandId } from './context';
   import type { SlashMenuItem } from './menu-items';
 
   type Props = {
     items: readonly SlashMenuItem[];
     activeIndex: number;
-    onPick: (id: SlashCommandId) => void;
+    onPick: (id: string) => void;
   };
 
   let { items, activeIndex, onPick }: Props = $props();

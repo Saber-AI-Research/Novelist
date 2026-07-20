@@ -49,6 +49,10 @@
   --novelist-scrollbar-thumb: color-mix(in srgb, var(--novelist-accent) 24%, var(--novelist-bg-tertiary));
   --novelist-scrollbar-thumb-hover: color-mix(in srgb, var(--novelist-accent) 42%, var(--novelist-bg-tertiary));
   --novelist-scrollbar-thumb-active: color-mix(in srgb, var(--novelist-accent) 56%, var(--novelist-bg-tertiary));
+  --novelist-context-menu-gap: 4px;
+  --novelist-context-menu-viewport-inset: 16px;
+  --novelist-context-menu-item-height: 28px;
+  --novelist-context-submenu-width: 208px;
 }
 
 /* Dark mode variables are now handled by the theme system (src/lib/themes.ts).
@@ -189,6 +193,45 @@ html, body, #app {
 }
 .context-menu-item:hover {
   background: var(--novelist-sidebar-hover);
+}
+.context-menu-item:focus-visible {
+  outline: 1px solid var(--novelist-accent);
+  outline-offset: -1px;
+  background: var(--novelist-sidebar-hover);
+}
+.context-menu-submenu-trigger {
+  min-height: var(--novelist-context-menu-item-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--novelist-context-menu-gap);
+}
+.context-menu-submenu-chevron {
+  flex: 0 0 auto;
+  color: var(--novelist-text-secondary);
+}
+.context-submenu {
+  width: min(var(--novelist-context-submenu-width), calc(100vw - var(--novelist-context-menu-viewport-inset)));
+  max-height: calc(100vh - var(--novelist-context-menu-viewport-inset));
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.context-submenu[data-positioned='false'] {
+  visibility: hidden;
+}
+.context-submenu-item {
+  min-height: var(--novelist-context-menu-item-height);
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+.context-menu-item-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.context-menu-icon {
+  flex: 0 0 auto;
+  opacity: 0.78;
 }
 .context-menu-item-danger:hover {
   background: #e5484d18;

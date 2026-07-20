@@ -17,8 +17,9 @@ Commands:
   unit         Vitest unit and integration suites only.
   coverage     Vitest coverage gate.
   e2e          Browser Playwright suite with mocked Tauri IPC.
-  rust         Rust fmt check + clippy + cargo test.
-  ci           Local mirror of the CI quality gate.
+  native-smoke Real macOS Tauri/WKWebView smoke with the Rust backend.
+  rust         Rust fmt, clippy, tests, and pinned Pandoc 3.10 contracts.
+  ci           Local CI mirror, including pinned Pandoc 3.10 contracts.
   build        Frontend production build.
   tauri-build  Full Tauri production build.
 
@@ -26,6 +27,7 @@ Common flows:
   pnpm verify:quick     Before small frontend/doc changes.
   pnpm verify:ci        Before opening or merging a PR.
   pnpm test:e2e:ui      Interactive Playwright debugging.
+  pnpm verify:native-smoke  Native macOS Tauri smoke.
 EOF
 }
 
@@ -65,6 +67,8 @@ doctor() {
   rustc --version
   need cargo
   cargo --version
+  need pandoc
+  pandoc --version
 
   if command -v tauri >/dev/null 2>&1; then
     tauri --version
@@ -97,10 +101,15 @@ e2e() {
   run_root_ci pnpm test:e2e:browser
 }
 
+native_smoke() {
+  run_root pnpm test:e2e:tauri
+}
+
 rust_gate() {
   run_core cargo fmt --all -- --check
-  run_core cargo clippy --all-targets -- -D warnings
-  run_core cargo test
+  run_core cargo clippy --locked --all-targets --all-features -- -D warnings
+  run_core cargo test --locked
+  run_root pnpm test:rust:pandoc
 }
 
 ci() {
@@ -116,10 +125,11 @@ case "${1:-}" in
   unit) unit ;;
   coverage) coverage ;;
   e2e) e2e ;;
+  native-smoke) native_smoke ;;
   rust) rust_gate ;;
   ci) ci ;;
   build) run_root pnpm build ;;
-  tauri-build) run_root pnpm tauri build ;;
+  tauri-build) run_root pnpm tauri build -- --locked ;;
   ""|-h|--help|help) usage ;;
   *)
     printf 'Unknown harness command: %s\n\n' "$1" >&2

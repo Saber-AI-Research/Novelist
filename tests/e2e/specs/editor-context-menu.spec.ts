@@ -1,4 +1,14 @@
 import { test, expect } from '../fixtures/app-fixture';
+import type { Page } from '@playwright/test';
+import { MOCK_FILE_CONTENTS, MOCK_PROJECT_DIR } from '../fixtures/mock-data';
+
+async function waitForActiveEditor(app: Page, filePath: string) {
+  await expect.poll(() => app.evaluate((expectedPath) => {
+    const editor = (window as any).__test_api__?.getActiveEditor?.();
+    if (!editor || !editor.view.dom.isConnected) return null;
+    return editor.filePath === expectedPath ? editor.view.state.doc.toString() : null;
+  }, filePath)).toBe(MOCK_FILE_CONTENTS[filePath]);
+}
 
 /**
  * Right-clicking inside the editor (.cm-content) should open a styled
@@ -12,18 +22,41 @@ import { test, expect } from '../fixtures/app-fixture';
 test.describe('Editor context menu', () => {
   test.beforeEach(async ({ app }) => {
     const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await expect(recentItem).toBeVisible();
+    await recentItem.click();
+    await expect(app.getByTestId('sidebar')).toBeVisible();
     await app.getByTestId('sidebar-file-Chapter 1.md').click();
-    await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
+    await waitForActiveEditor(app, `${MOCK_PROJECT_DIR}/Chapter 1.md`);
+  });
+
+  test('active editor readiness follows a blocked selected-file lifecycle @task23', async ({ app, mockState }) => {
+    const chapter1 = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    const chapter2 = `${MOCK_PROJECT_DIR}/Chapter 2.md`;
+    await mockState.setReadFileBlocked(chapter2, true);
+
+    try {
+      await app.getByTestId('sidebar-file-Chapter 2.md').click();
+      await expect.poll(async () => (await mockState.getInvokeCalls()).some(
+        call => call.command === 'read_file' && call.args.path === chapter2,
+      )).toBe(true);
+
+      await expect(app.locator('.cm-editor')).toBeVisible();
+      expect(await app.evaluate(() => {
+        const editor = (window as any).__test_api__?.getActiveEditor?.();
+        return editor?.filePath ?? null;
+      })).toBe(chapter1);
+
+      await mockState.releaseNextBlockedRead();
+      await waitForActiveEditor(app, chapter2);
+    } finally {
+      await mockState.setReadFileBlocked(chapter2, false);
+    }
   });
 
   test('right-click with no selection shows paste + select-all only', async ({ app }) => {
     // Make sure there is no selection.
     await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
+      const view = (window as any).__test_api__.getActiveEditor().view;
       view.dispatch({ selection: { anchor: 0, head: 0 } });
     });
 
@@ -43,7 +76,7 @@ test.describe('Editor context menu', () => {
 
   test('right-click with a selection adds cut + copy items', async ({ app }) => {
     await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
+      const view = (window as any).__test_api__.getActiveEditor().view;
       // Select "Chapter" on the first line.
       view.dispatch({ selection: { anchor: 2, head: 9 } });
     });
@@ -85,7 +118,7 @@ test.describe('Editor context menu', () => {
     await app.getByTestId('editor-ctx-select-all').click();
 
     const { anchor, head, len } = await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
+      const view = (window as any).__test_api__.getActiveEditor().view;
       const sel = view.state.selection.main;
       return { anchor: sel.anchor, head: sel.head, len: view.state.doc.length };
     });
@@ -94,26 +127,301 @@ test.describe('Editor context menu', () => {
     expect(len).toBeGreaterThan(0);
   });
 
-  test('cut via menu removes selected text from the document', async ({ app }) => {
-    // Select "Chapter 1" on line 1.
-    const before = await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
-      view.dispatch({ selection: { anchor: 2, head: 11 } });
-      return view.state.doc.toString();
+  test('cut via menu removes selected text from the document', async ({ app, appKeys, browserErrors, clipboardCapture }) => {
+    await clipboardCapture.startDeferred();
+    const initial = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const doc = '序章\n你好，world\n尾声';
+      const selection = { anchor: 3, head: 11 };
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: doc },
+        selection,
+      });
+      return { doc, selection };
     });
-    expect(before).toContain('# Chapter 1');
 
     await app.locator('.cm-content').click({ button: 'right' });
     await app.getByTestId('editor-ctx-cut').click();
 
-    const after = await app.evaluate(() => {
-      const view = (window as any).__novelist_view;
-      return view.state.doc.toString();
+    expect(await clipboardCapture.getWrites()).toEqual(['你好，world']);
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({
+      doc: '序章\n\n尾声',
+      selection: { anchor: 3, head: 3 },
+      focused: true,
     });
-    // Cut removes the selected range regardless of whether the clipboard
-    // write succeeds in the test environment.
-    expect(after).not.toContain('Chapter 1');
-    expect(after.startsWith('# \n')).toBe(true);
+    await expect(app.locator('.cm-content')).not.toContainText('你好，world');
+    await expect(app.getByTestId('editor-context-menu')).toHaveCount(0);
+
+    await clipboardCapture.releaseNext();
+    await appKeys.pressMod('z');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+      };
+    })).toEqual(initial);
+    await expect(app.locator('.cm-content')).toContainText('你好，world');
+    expect(browserErrors).toEqual([]);
+  });
+
+  test('cut keeps deletion and undo state when clipboard rejects', async ({ app, appKeys, browserErrors, clipboardCapture }) => {
+    await clipboardCapture.startRejected('denied: token=secret');
+    const initial = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const doc = 'plain 文本 tail';
+      const selection = { anchor: 6, head: 8 };
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: doc },
+        selection,
+      });
+      return { doc, selection };
+    });
+
+    await app.locator('.cm-content').click({ button: 'right' });
+    await app.getByTestId('editor-ctx-cut').click();
+    await app.evaluate(() => Promise.resolve());
+
+    expect(await clipboardCapture.getWrites()).toEqual(['文本']);
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({
+      doc: 'plain  tail',
+      selection: { anchor: 6, head: 6 },
+      focused: true,
+    });
+    await expect(app.locator('.cm-content')).not.toContainText('文本');
+    await expect(app.getByTestId('editor-context-menu')).toHaveCount(0);
+    expect(browserErrors).toEqual([]);
+
+    await appKeys.pressMod('z');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+      };
+    })).toEqual(initial);
+    await expect(app.locator('.cm-content')).toContainText('文本');
+  });
+
+  test('Block Type > Quote restores a three-line CJK selection and remains one-step undoable @task23', async ({ app, appKeys }) => {
+    const initial = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const doc = '第一章\n第二幕\n终章';
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: doc },
+        selection: { anchor: 0, head: doc.length },
+      });
+      return {
+        doc,
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+      };
+    });
+
+    await app.locator('.cm-content').click({ button: 'right' });
+    const blockType = app.getByTestId('editor-ctx-block-type');
+    await expect(blockType).toBeVisible();
+    await blockType.click();
+
+    const submenu = app.getByTestId('editor-ctx-block-submenu');
+    await expect(submenu).toBeVisible();
+    const submenuBox = await submenu.boundingBox();
+    const viewport = app.viewportSize();
+    expect(submenuBox).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    expect(submenuBox!.x).toBeGreaterThanOrEqual(0);
+    expect(submenuBox!.y).toBeGreaterThanOrEqual(0);
+    expect(submenuBox!.x + submenuBox!.width).toBeLessThanOrEqual(viewport!.width);
+    expect(submenuBox!.y + submenuBox!.height).toBeLessThanOrEqual(viewport!.height);
+    await app.screenshot({ path: '.sisyphus/evidence/task-15-context-block.png' });
+
+    // Model WKWebView collapsing the live range after right-click. The menu
+    // command must restore the captured range before registry execution.
+    await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      view.dispatch({ selection: { anchor: 0, head: 0 } });
+    });
+    await app.getByTestId('editor-ctx-block-quote').click();
+
+    const transformed = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      return {
+        doc: view.state.doc.toString(),
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+      };
+    });
+    expect(transformed.doc).toBe('> 第一章\n> 第二幕\n> 终章');
+    expect(transformed.selection).toEqual({ anchor: 2, head: initial.doc.length + 6 });
+
+    await app.locator('.cm-content').focus();
+    await appKeys.pressMod('z');
+    const restored = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      return {
+        doc: view.state.doc.toString(),
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+      };
+    });
+    expect(restored).toEqual(initial);
+  });
+
+  test('typing > over selected CJK text converts whole lines and preserves focus @task23', async ({ app, appKeys }) => {
+    const doc = '你好\n世界\n终章';
+    const initial = await app.evaluate(async (content) => {
+      const api = (window as any).__test_api__;
+      await api.setActiveEditorDocument(content, { anchor: 0, head: content.length });
+      const view = api.getActiveEditor().view;
+      return {
+        doc: view.state.doc.toString(),
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+      };
+    }, doc);
+    await expect(app.locator('.cm-content')).toBeFocused();
+
+    await app.keyboard.type('>');
+
+    const transformed = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      return {
+        doc: view.state.doc.toString(),
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+        focused: view.hasFocus,
+      };
+    });
+    expect(transformed).toEqual({
+      doc: '> 你好\n> 世界\n> 终章',
+      selection: { anchor: 2, head: initial.doc.length + 6 },
+      focused: true,
+    });
+
+    await appKeys.pressMod('z');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+      };
+    })).toEqual(initial);
+
+    await expect(app.locator('.cm-content')).toBeFocused();
+    await app.keyboard.type('>');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({
+      doc: '> 你好\n> 世界\n> 终章',
+      selection: { anchor: 2, head: initial.doc.length + 6 },
+      focused: true,
+    });
+    await app.screenshot({ path: '.sisyphus/evidence/task-16-selected-quote.png' });
+  });
+
+  test('Tab and Shift+Tab preserve list and task hierarchy selection and focus @task23', async ({ app }) => {
+    const initial = await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const doc = '* 星号项目\n- [x] 已完成\n> 引文';
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: doc },
+        selection: { anchor: 0, head: doc.length },
+      });
+      view.focus();
+      return { doc, selection: { anchor: 0, head: doc.length } };
+    });
+
+    await app.keyboard.press('Tab');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({
+      doc: '  * 星号项目\n  - [x] 已完成\n> > 引文',
+      selection: { anchor: 2, head: initial.doc.length + 6 },
+      focused: true,
+    });
+    await app.keyboard.press('Shift+Tab');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({ ...initial, focused: true });
+
+    await app.keyboard.press('Tab');
+    expect(await app.evaluate(() => {
+      const view = (window as any).__test_api__.getActiveEditor().view;
+      const selection = view.state.selection.main;
+      return {
+        doc: view.state.doc.toString(),
+        selection: { anchor: selection.anchor, head: selection.head },
+        focused: view.hasFocus,
+      };
+    })).toEqual({
+      doc: '  * 星号项目\n  - [x] 已完成\n> > 引文',
+      selection: { anchor: 2, head: initial.doc.length + 6 },
+      focused: true,
+    });
+    await app.screenshot({ path: '.sisyphus/evidence/task-16-tab-hierarchy.png' });
+  });
+
+  test('Block Type submenu keyboard navigation returns focus without reopening', async ({ app }) => {
+    await app.locator('.cm-content').click({ button: 'right' });
+    const trigger = app.getByTestId('editor-ctx-block-type');
+    await trigger.focus();
+    await app.keyboard.press('ArrowRight');
+
+    const firstItem = app.getByTestId('editor-ctx-block-paragraph');
+    await expect(firstItem).toBeFocused();
+    await app.keyboard.press('End');
+    await expect(app.getByTestId('editor-ctx-block-code-fence')).toBeFocused();
+
+    await app.keyboard.press('ArrowLeft');
+    await expect(app.getByTestId('editor-ctx-block-submenu')).toHaveCount(0);
+    await expect(trigger).toBeFocused();
   });
 
   test('native context menu is suppressed on non-editable chrome', async ({ app }) => {

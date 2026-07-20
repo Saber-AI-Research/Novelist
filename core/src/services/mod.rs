@@ -6,8 +6,10 @@ pub mod pandoc;
 pub mod plugin_host;
 pub mod portable;
 pub mod publish;
+pub mod rename_migration;
 pub mod rope_benchmark;
 pub mod rope_document;
+pub mod sidecar;
 pub mod snapshots;
 #[cfg(feature = "sync")]
 pub mod sync;
