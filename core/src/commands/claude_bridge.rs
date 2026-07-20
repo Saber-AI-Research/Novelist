@@ -729,6 +729,29 @@ mod tests {
 
     const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+    struct PathEnvGuard(Option<std::ffi::OsString>);
+
+    impl PathEnvGuard {
+        fn replace(value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os("PATH");
+            unsafe {
+                std::env::set_var("PATH", value);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(previous) => std::env::set_var("PATH", previous),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+    }
+
     struct DropSignal(Option<oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -856,9 +879,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn candidate_paths_includes_path_entries() {
         let sep = if cfg!(windows) { ";" } else { ":" };
-        std::env::set_var("PATH", format!("/tmp/one{sep}/tmp/two"));
+        let _path = PathEnvGuard::replace(format!("/tmp/one{sep}/tmp/two"));
         let c = candidate_paths();
         let strs: Vec<String> = c.iter().map(|p| p.to_string_lossy().to_string()).collect();
         assert!(strs.iter().any(|s| s.contains("/tmp/one")));

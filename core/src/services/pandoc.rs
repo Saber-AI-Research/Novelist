@@ -3139,6 +3139,7 @@ fn main() {
 
     #[cfg(windows)]
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn windows_probe_timeout_terminates_job_descendant() {
         let dir = TempDir::new().unwrap();
         let (fake, pid_file) = make_hanging_version_pandoc_windows(&dir);

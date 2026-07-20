@@ -126,9 +126,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
-      - name: Verify Windows Pandoc security and lifecycle
+      - name: Verify full Windows Rust suite
         working-directory: core
-        run: cargo test --locked --lib windows_
+        run: cargo test --locked
 
       - name: Windows strict Clippy
         working-directory: core

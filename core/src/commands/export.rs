@@ -3577,7 +3577,7 @@ mod tests {
                     .strip_prefix(&canonical_project)
                     .unwrap()
                     .to_string_lossy()
-                    .to_string()
+                    .replace('\\', "/")
             })
             .collect::<Vec<_>>();
         assert_eq!(

@@ -287,12 +287,18 @@ mod tests {
 
     #[test]
     fn test_draft_path_outside_project() {
-        // Files outside the project fall back to file name only
-        let p = draft_path("/project", "/other/path/scratch.md").unwrap();
-        assert_eq!(
-            p,
-            Path::new("/project/.novelist/drafts/scratch.md.draft.md")
-        );
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let scratch = root.path().join("outside").join("scratch.md");
+        fs::create_dir_all(&project).unwrap();
+
+        // Absolute scratch files outside the project fall back to file name only.
+        let p = draft_path(
+            project.to_string_lossy().as_ref(),
+            scratch.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(p, project.join(".novelist/drafts/scratch.md.draft.md"));
     }
 
     #[tokio::test]
