@@ -62,6 +62,7 @@ png = "0.17"
 specta-typescript = { version = "0.0.12", optional = true }
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
+quick-xml = "0.38"
 
 # macOS-only: needed to poke the NSWindow at setup time to disable the
 # titlebar separator hairline (macOS 11+ draws a 1px line under the overlay

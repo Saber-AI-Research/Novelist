@@ -9,6 +9,10 @@ export interface UIExtension {
   entryUrl: string;
   width?: number;
   fileExtensions?: string[];
+  /** False for formats that can only be created through a dedicated importer. */
+  creatable?: boolean;
+  /** Enable/disable changes become active after an app relaunch. */
+  requiresAppReload?: boolean;
   /** True for first-party panels rendered as native Svelte components. */
   builtin?: boolean;
 }
@@ -39,6 +43,11 @@ class ExtensionStore {
   panels = $state<UIExtension[]>([...BUILTIN_PANELS]);
   fileHandlers = $state<UIExtension[]>([]);
   activePanelId = $state<string | null>(null);
+  pendingReloadPluginIds = $state<string[]>([]);
+
+  get appReloadRequired(): boolean {
+    return this.pendingReloadPluginIds.length > 0;
+  }
 
   async loadFromPlugins() {
     try {
@@ -53,7 +62,7 @@ class ExtensionStore {
       const fileHandlers: UIExtension[] = [];
 
       for (const plugin of result.data) {
-        if (!plugin.ui) continue;
+        if (!plugin.enabled || !plugin.ui) continue;
         // Skip if a built-in already owns this id (avoid double-listing).
         if (BUILTIN_PANELS.some((p) => p.pluginId === plugin.id)) continue;
 
@@ -67,6 +76,8 @@ class ExtensionStore {
           entryUrl,
           width: plugin.ui.width ?? undefined,
           fileExtensions: plugin.ui.file_extensions ?? undefined,
+          creatable: plugin.ui.creatable ?? true,
+          requiresAppReload: plugin.ui.requires_app_reload,
         };
 
         if (ext.type === 'panel') {
@@ -101,6 +112,18 @@ class ExtensionStore {
   /** Set the active panel to a specific id (vs. the toggle behavior). */
   openPanel(pluginId: string) {
     this.activePanelId = pluginId;
+  }
+
+  recordPluginEnabledChange(pluginId: string, enabled: boolean) {
+    const runtimeEnabled = [...this.panels, ...this.fileHandlers]
+      .some((extension) => extension.pluginId === pluginId);
+    const pending = new Set(this.pendingReloadPluginIds);
+    if (enabled === runtimeEnabled) {
+      pending.delete(pluginId);
+    } else {
+      pending.add(pluginId);
+    }
+    this.pendingReloadPluginIds = [...pending];
   }
 
   getFileHandler(fileName: string): UIExtension | null {

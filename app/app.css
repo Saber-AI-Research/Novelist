@@ -25,6 +25,7 @@
   --novelist-text: #2c2c2c;
   --novelist-text-secondary: #8a8a8a;
   --novelist-text-tertiary: #b0b0b0;
+  --novelist-error: #c4474d;
   --novelist-accent: #5b7e9a;
   --novelist-accent-soft: color-mix(in srgb, var(--novelist-accent) 10%, transparent);
   --novelist-border: #e8e6e1;

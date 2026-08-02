@@ -7,6 +7,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { relaunch } from '@tauri-apps/plugin-process';
   import { convertTyporaTheme } from '$lib/utils/typora-theme';
   import { t, i18n } from '$lib/i18n';
   import type { Locale } from '$lib/i18n';
@@ -354,6 +355,9 @@
     if (projectStore.dirPath) {
       await settingsStore.writePluginEnabled(plugin.id, newEnabled);
     }
+    if (plugin.ui?.requires_app_reload) {
+      extensionStore.recordPluginEnabledChange(plugin.id, newEnabled);
+    }
     await loadPlugins();
   }
 
@@ -590,7 +594,7 @@
           title={t('settings.plugins.reload')}
           aria-label={t('settings.plugins.reload')}
           data-testid="plugin-reload-{plugin.id}"
-          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.id === 'ai-agent'}
+          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.id === 'ai-agent' || plugin.ui?.requires_app_reload}
           onclick={() => reloadPlugin(plugin)}
         >
           <span class="inline-block" style="transform: {reloadingPluginId === plugin.id ? 'rotate(360deg)' : 'none'}; transition: transform 0.6s;">↻</span>
@@ -1209,6 +1213,22 @@
             ? t('settings.plugins.scopeProject', { name: projectStore.name })
             : t('settings.plugins.scopeGlobal')}
         </div>
+
+        {#if extensionStore.appReloadRequired}
+          <div
+            class="rounded text-xs mb-3 px-3 py-2 flex items-center justify-between gap-3"
+            style="background: color-mix(in srgb, var(--novelist-accent) 10%, var(--novelist-bg)); color: var(--novelist-text); border: 1px solid color-mix(in srgb, var(--novelist-accent) 40%, var(--novelist-border));"
+            data-testid="plugin-app-reload-required"
+          >
+            <span>{t('settings.plugins.appReloadRequired')}</span>
+            <button
+              type="button"
+              class="shrink-0 rounded px-2.5 py-1 text-xs font-medium cursor-pointer"
+              style="background: var(--novelist-accent); color: white; border: none;"
+              onclick={() => relaunch()}
+            >{t('settings.plugins.reloadApp')}</button>
+          </div>
+        {/if}
 
         {#if !pluginsLoaded}
           <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>

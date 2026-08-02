@@ -237,6 +237,8 @@ export const commands = {
 	getWritingStats: (projectDir: string) => typedError<WritingStatsOverview, string>(__TAURI_INVOKE("get_writing_stats", { projectDir })),
 	listTemplates: () => typedError<TemplateInfo[], string>(__TAURI_INVOKE("list_templates")),
 	createProjectFromTemplate: (templateId: string, projectName: string, parentDir: string, locale: string) => typedError<string, string>(__TAURI_INVOKE("create_project_from_template", { templateId, projectName, parentDir, locale })),
+	inspectLiterarySource: (path: string) => typedError<LiterarySourceInspection, string>(__TAURI_INVOKE("inspect_literary_source", { path })),
+	createLiteraryStudyProject: (request: CreateLiteraryStudyProjectRequest) => typedError<CreateLiteraryStudyProjectResult, string>(__TAURI_INVOKE("create_literary_study_project", { request })),
 	saveProjectAsTemplate: (projectDir: string, templateName: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("save_project_as_template", { projectDir, templateName })),
 	deleteTemplate: (templateId: string) => typedError<null, string>(__TAURI_INVOKE("delete_template", { templateId })),
 	importTemplateZip: (zipPath: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("import_template_zip", { zipPath })),
@@ -680,6 +682,22 @@ export type CoverRef = {
 	bytes: number,
 };
 
+export type CreateLiteraryStudyProjectRequest = {
+	projectName: string,
+	parentDir: string,
+	sourcePath: string,
+	title: string,
+	author: string | null,
+	language: string | null,
+	chapters: LiteraryChapterDraft[],
+};
+
+export type CreateLiteraryStudyProjectResult = {
+	projectPath: string,
+	firstChapterPath: string,
+	chapterCount: number,
+};
+
 export type DailyStats = {
 	date: string,
 	words_written: number,
@@ -846,6 +864,21 @@ export type ImageHostSettings_Serialize = {
 	hosts: HostConfig_Serialize[],
 	active_host_id?: string | null,
 	auto_on_paste: boolean,
+};
+
+export type LiteraryChapterDraft = {
+	id: string,
+	volume: string | null,
+	title: string,
+	text: string,
+};
+
+export type LiterarySourceInspection = {
+	title: string,
+	author: string | null,
+	language: string | null,
+	sourcePath: string,
+	chapters: LiteraryChapterDraft[],
 };
 
 export type ManagedNameStateV1 = {
@@ -1210,6 +1243,16 @@ export type PluginUiConfig = {
 	width?: number | null,
 	label?: string | null,
 	file_extensions?: string[] | null,
+	/**
+	 *  Whether the file handler should appear in generic "new file" menus.
+	 *  Import-driven formats such as `.litstudy` set this to false.
+	 */
+	creatable?: boolean | null,
+	/**
+	 *  UI plugins loaded in isolated webviews need an app relaunch after
+	 *  enable/disable so every window rebuilds the extension registry.
+	 */
+	requires_app_reload?: boolean,
 };
 
 /**

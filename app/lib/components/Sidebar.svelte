@@ -134,7 +134,8 @@
   const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
 
   function isTextFile(name: string): boolean {
-    return textExtensions.some(ext => name.toLowerCase().endsWith(ext));
+    return textExtensions.some(ext => name.toLowerCase().endsWith(ext))
+      || extensionStore.getFileHandler(name) !== null;
   }
 
   function isCanvasFile(name: string): boolean {

@@ -212,6 +212,7 @@ export function applyTheme(theme: Theme) {
   const bgSecondary = theme.vars['--novelist-bg-secondary'] ?? bg;
   const bgTertiary = theme.vars['--novelist-bg-tertiary'] ?? bgSecondary;
   const accent = theme.vars['--novelist-accent'] ?? '#5b7e9a';
+  const error = theme.vars['--novelist-error'] ?? (theme.dark ? '#ff7b82' : '#c4474d');
   const scrollbarMix = theme.dark
     ? { thumb: 34, hover: 52, active: 64 }
     : { thumb: 24, hover: 42, active: 56 };
@@ -223,6 +224,7 @@ export function applyTheme(theme: Theme) {
   root.style.setProperty('--novelist-sidebar-hover', `color-mix(in srgb, ${accent} 8%, ${bgSecondary})`);
   root.style.setProperty('--novelist-sidebar-active', `color-mix(in srgb, ${accent} 14%, ${bgSecondary})`);
   root.style.setProperty('--novelist-editor-bg', bg);
+  root.style.setProperty('--novelist-error', error);
   root.style.setProperty('--novelist-scrollbar-track', theme.vars['--novelist-scrollbar-track'] ?? `color-mix(in srgb, ${bgSecondary} 92%, ${bg})`);
   root.style.setProperty('--novelist-scrollbar-thumb', theme.vars['--novelist-scrollbar-thumb'] ?? `color-mix(in srgb, ${accent} ${scrollbarMix.thumb}%, ${bgTertiary})`);
   root.style.setProperty('--novelist-scrollbar-thumb-hover', theme.vars['--novelist-scrollbar-thumb-hover'] ?? `color-mix(in srgb, ${accent} ${scrollbarMix.hover}%, ${bgTertiary})`);

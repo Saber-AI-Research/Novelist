@@ -18,6 +18,14 @@ pub struct PluginUiConfig {
     pub label: Option<String>,
     #[serde(default)]
     pub file_extensions: Option<Vec<String>>,
+    /// Whether the file handler should appear in generic "new file" menus.
+    /// Import-driven formats such as `.litstudy` set this to false.
+    #[serde(default)]
+    pub creatable: Option<bool>,
+    /// UI plugins loaded in isolated webviews need an app relaunch after
+    /// enable/disable so every window rebuilds the extension registry.
+    #[serde(default)]
+    pub requires_app_reload: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
@@ -119,6 +127,27 @@ version = "0.1.0"
 "#;
         let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
         assert!(manifest.plugin.permissions.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_ui_lifecycle_defaults() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+[plugin]
+id = "reader"
+name = "Reader"
+version = "0.1.0"
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+file_extensions = [".reader"]
+"#,
+        )
+        .unwrap();
+        let ui = manifest.ui.unwrap();
+        assert_eq!(ui.creatable, None);
+        assert!(!ui.requires_app_reload);
     }
 
     #[test]

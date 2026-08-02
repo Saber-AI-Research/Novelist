@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
 
 /// Known built-in plugin IDs that ship with Novelist.
-const BUILTIN_PLUGIN_IDS: &[&str] = &["canvas", "mindmap", "kanban"];
+const BUILTIN_PLUGIN_IDS: &[&str] = &["canvas", "mindmap", "kanban", "literary-commentary"];
 
 fn novelist_dir() -> PathBuf {
     // `NOVELIST_PLUGIN_DATA_DIR` is a test seam (used by unit tests that need

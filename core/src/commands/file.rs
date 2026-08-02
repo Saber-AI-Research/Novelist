@@ -97,7 +97,7 @@ pub fn migrate_encoding_state_tree(
 
 /// Detect encoding from raw bytes. Returns the `encoding_rs::Encoding` label
 /// and the decoded UTF-8 string.
-fn decode_bytes(bytes: &[u8]) -> (Option<&'static str>, String) {
+pub(crate) fn decode_bytes(bytes: &[u8]) -> (Option<&'static str>, String) {
     // 1. Check for BOM
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
         // UTF-8 BOM -- strip it and decode as UTF-8

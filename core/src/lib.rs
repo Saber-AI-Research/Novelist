@@ -46,6 +46,7 @@ use commands::image_host::{
     upload_image_custom, upload_image_imgur, upload_image_qiniu, upload_image_s3,
     upload_image_smms, WindowImageCapabilities,
 };
+use commands::literary_study::{create_literary_study_project, inspect_literary_source};
 use commands::menu::refresh_menu;
 use commands::naming::{
     compute_document_key, delete_managed_name_state, read_managed_name_state,
@@ -445,6 +446,8 @@ pub fn run() {
             get_writing_stats,
             list_templates,
             create_project_from_template,
+            inspect_literary_source,
+            create_literary_study_project,
             save_project_as_template,
             delete_template,
             import_template_zip,
@@ -612,6 +615,8 @@ pub fn run() {
             get_writing_stats,
             list_templates,
             create_project_from_template,
+            inspect_literary_source,
+            create_literary_study_project,
             save_project_as_template,
             delete_template,
             import_template_zip,

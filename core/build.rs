@@ -20,7 +20,12 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 fn prepare_bundled_plugins() {
-    let plugins = [("canvas", true), ("mindmap", true), ("kanban", true)];
+    let plugins = [
+        ("canvas", true),
+        ("mindmap", true),
+        ("kanban", true),
+        ("literary-commentary", true),
+    ];
     let bundled_dir = Path::new("bundled-plugins");
     std::fs::create_dir_all(bundled_dir).ok();
 
@@ -58,6 +63,8 @@ fn prepare_bundled_plugins() {
     println!("cargo:rerun-if-changed=../plugins/mindmap/dist/");
     println!("cargo:rerun-if-changed=../plugins/kanban/manifest.toml");
     println!("cargo:rerun-if-changed=../plugins/kanban/dist/");
+    println!("cargo:rerun-if-changed=../plugins/literary-commentary/manifest.toml");
+    println!("cargo:rerun-if-changed=../plugins/literary-commentary/dist/");
 }
 
 fn prepare_bundled_templates() {

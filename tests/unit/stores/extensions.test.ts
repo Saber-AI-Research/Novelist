@@ -33,6 +33,7 @@ function resetStore() {
     { pluginId: 'ai-agent', type: 'panel', label: 'AI Agent', entryUrl: '', builtin: true },
   ];
   extensionStore.fileHandlers = [];
+  extensionStore.pendingReloadPluginIds = [];
   extensionStore.activePanelId = null;
 }
 
@@ -326,5 +327,28 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     const mindmap = extensionStore.panels.find(p => p.pluginId === 'mindmap')!;
     expect(mindmap.label).toBe('Mindmap Plugin');
+  });
+
+  it('keeps app-reload state until runtime registration matches again', () => {
+    expect(extensionStore.appReloadRequired).toBe(false);
+
+    extensionStore.recordPluginEnabledChange('literary-commentary', true);
+    expect(extensionStore.appReloadRequired).toBe(true);
+
+    extensionStore.recordPluginEnabledChange('literary-commentary', false);
+    expect(extensionStore.appReloadRequired).toBe(false);
+
+    extensionStore.fileHandlers = [{
+      pluginId: 'literary-commentary',
+      type: 'file-handler',
+      label: '文学评注',
+      entryUrl: 'asset:///literary/index.html',
+      fileExtensions: ['.litstudy'],
+    }];
+    extensionStore.recordPluginEnabledChange('literary-commentary', false);
+    expect(extensionStore.pendingReloadPluginIds).toEqual(['literary-commentary']);
+
+    extensionStore.recordPluginEnabledChange('literary-commentary', true);
+    expect(extensionStore.appReloadRequired).toBe(false);
   });
 });

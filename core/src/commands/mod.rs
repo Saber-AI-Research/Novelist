@@ -10,6 +10,7 @@ pub mod e2e;
 pub mod export;
 pub mod file;
 pub mod image_host;
+pub mod literary_study;
 pub mod menu;
 pub mod naming;
 pub mod plugin;

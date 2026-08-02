@@ -1,0 +1,15 @@
+[plugin]
+id = "literary-commentary"
+name = "文学评注"
+version = "0.1.0"
+description = "逐字抄写长文本，并在原文中插入行内评注与误字标记"
+author = "Novelist Team"
+permissions = ["read", "write", "ui"]
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+file_extensions = [".litstudy"]
+label = "文学评注"
+creatable = false
+requires_app_reload = true

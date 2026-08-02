@@ -2987,6 +2987,7 @@ dependencies = [
  "once_cell",
  "png 0.17.16",
  "pulldown-cmark",
+ "quick-xml",
  "reqwest 0.12.28",
  "ropey",
  "rquickjs",

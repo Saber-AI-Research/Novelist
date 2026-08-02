@@ -23,6 +23,7 @@
   const loadSettings = () => import('$lib/components/Settings.svelte');
   const loadProjectSearch = () => import('$lib/components/ProjectSearch.svelte');
   const loadNewProjectDialog = () => import('$lib/components/NewProjectDialog.svelte');
+  const loadLiteraryImportDialog = () => import('$lib/components/LiteraryImportDialog.svelte');
   const loadMindmapOverlay = () => import('$lib/components/MindmapOverlay.svelte');
   const loadOutline = () => import('$lib/components/Outline.svelte');
   const loadDraftNote = () => import('$lib/components/DraftNote.svelte');
@@ -113,6 +114,7 @@ let paletteOpen = $state(false);
   let mindmapOverlayOpen = $state(false);
   let projectSearchOpen = $state(false);
   let newProjectDialogOpen = $state(false);
+  let literaryImportDialogOpen = $state(false);
   let operationError = $state<string | null>(null);
   // Opening the template dialog from outside TemplatePanel (e.g. from the
   // command palette) — the panel consumes this object then calls back to clear.
@@ -366,6 +368,15 @@ let paletteOpen = $state(false);
         }
       }
     });
+  }
+
+  async function handleLiteraryProjectCreated(projectPath: string, firstChapterPath: string) {
+    await openProjectFromPath(projectPath);
+    if (projectStore.dirPath !== projectPath) return;
+    const result = await commands.readFile(firstChapterPath);
+    if (result.status !== 'ok') return;
+    tabsStore.openTab(firstChapterPath, result.data);
+    await commands.registerOpenFile(firstChapterPath);
   }
 
   async function openNewWindow() {
@@ -1174,6 +1185,16 @@ let paletteOpen = $state(false);
     <NewProjectDialog
       onClose={() => { newProjectDialogOpen = false; }}
       onProjectCreated={(path) => openProjectFromPath(path)}
+      onLiteraryImport={() => { literaryImportDialogOpen = true; }}
+    />
+  {/await}
+{/if}
+
+{#if literaryImportDialogOpen}
+  {#await loadLiteraryImportDialog() then { default: LiteraryImportDialog }}
+    <LiteraryImportDialog
+      onClose={() => { literaryImportDialogOpen = false; }}
+      onProjectCreated={handleLiteraryProjectCreated}
     />
   {/await}
 {/if}

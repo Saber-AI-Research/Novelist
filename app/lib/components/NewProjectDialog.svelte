@@ -5,12 +5,16 @@
   import type { TemplateInfo } from '$lib/ipc/commands';
   import { i18n, t } from '$lib/i18n';
   import { categoryLabel, templateName, templateDescription } from '$lib/utils/templateI18n';
+  import { extensionStore } from '$lib/stores/extensions.svelte';
+
+  const LITERARY_TEMPLATE_ID = 'literary-commentary';
 
   interface Props {
     onClose: () => void;
     onProjectCreated: (path: string) => void;
+    onLiteraryImport: () => void;
   }
-  let { onClose, onProjectCreated }: Props = $props();
+  let { onClose, onProjectCreated, onLiteraryImport }: Props = $props();
 
   let templates = $state<TemplateInfo[]>([]);
   let selectedTemplate = $state<TemplateInfo | null>(null);
@@ -59,7 +63,16 @@
 
     const result = await commands.listTemplates();
     if (result.status === 'ok') {
-      templates = result.data;
+      const literaryTemplate: TemplateInfo = {
+        id: LITERARY_TEMPLATE_ID,
+        name: 'Literary Commentary',
+        description: 'Import a book and create a close-reading transcription project',
+        category: 'study',
+        builtin: true,
+      };
+      templates = extensionStore.getFileHandler('chapter.litstudy')
+        ? [...result.data, literaryTemplate]
+        : result.data;
       if (templates.length > 0) {
         selectedTemplate = templates[0];
       }
@@ -112,7 +125,13 @@
   }
 
   async function handleCreate() {
-    if (!selectedTemplate || !projectName.trim() || !parentDir.trim()) return;
+    if (!selectedTemplate) return;
+    if (selectedTemplate.id === LITERARY_TEMPLATE_ID) {
+      onClose();
+      onLiteraryImport();
+      return;
+    }
+    if (!projectName.trim() || !parentDir.trim()) return;
     creating = true;
     error = '';
 
@@ -210,7 +229,8 @@
 
     <!-- Bottom: Project config -->
     <div class="dialog-footer">
-      <div class="footer-fields">
+      {#if selectedTemplate?.id !== LITERARY_TEMPLATE_ID}
+        <div class="footer-fields">
         <div class="field-row">
           <label class="field-label" for="np-name">{t('newProject.name')}</label>
           <input
@@ -233,7 +253,8 @@
             <button class="field-browse-btn" onclick={chooseDirectory}>{t('newProject.browse')}</button>
           </div>
         </div>
-      </div>
+        </div>
+      {/if}
 
       {#if error}
         <div class="footer-error">{error}</div>
@@ -244,9 +265,13 @@
         <button
           class="btn-create"
           onclick={handleCreate}
-          disabled={creating || !projectName.trim() || !parentDir.trim() || !selectedTemplate}
+          disabled={creating || !selectedTemplate || (selectedTemplate.id !== LITERARY_TEMPLATE_ID && (!projectName.trim() || !parentDir.trim()))}
         >
-          {creating ? t('newProject.creating') : t('newProject.create')}
+          {creating
+            ? t('newProject.creating')
+            : selectedTemplate?.id === LITERARY_TEMPLATE_ID
+              ? t('literaryImport.continue')
+              : t('newProject.create')}
         </button>
       </div>
     </div>
