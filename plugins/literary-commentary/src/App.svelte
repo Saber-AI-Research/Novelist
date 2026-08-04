@@ -23,14 +23,70 @@
   let error = $state('');
   let capture = $state<HTMLTextAreaElement | null>(null);
   let caret = $state<HTMLSpanElement | null>(null);
+  let locale = $state<'en' | 'zh-CN'>('zh-CN');
   const saveTimers = new Map<string, number>();
   let pastePending = false;
-  let saveState = $state<'idle' | 'dirty' | 'saved' | 'error'>('idle');
+  let saveState = $state<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle');
+
+  const messages = {
+    en: {
+      copyMode: 'Transcribe',
+      commentMode: 'Comment',
+      commentShortcut: 'Comment mode (Cmd/Ctrl + Shift + Enter)',
+      previousChapter: 'Previous chapter',
+      nextChapter: 'Next chapter',
+      inputComment: 'Type commentary',
+      inputSource: 'Type source text',
+      copied: 'copied',
+      mistakes: 'mistakes',
+      comments: 'comments',
+      unsaved: 'Unsaved',
+      saving: 'Saving',
+      saved: 'Saved',
+      saveFailed: 'Save failed',
+      opening: 'Opening literary commentary chapter...',
+    },
+    'zh-CN': {
+      copyMode: '抄写',
+      commentMode: '评注',
+      commentShortcut: '评注模式（Cmd/Ctrl + Shift + Enter）',
+      previousChapter: '上一章',
+      nextChapter: '下一章',
+      inputComment: '输入评注',
+      inputSource: '输入原文',
+      copied: '已抄',
+      mistakes: '错字',
+      comments: '评注',
+      unsaved: '未保存',
+      saving: '保存中',
+      saved: '已保存',
+      saveFailed: '保存失败',
+      opening: '正在打开文学评注章节...',
+    },
+  } as const;
 
   let pieces = $derived(file ? buildRenderPieces(file) : []);
-  let progress = $derived(file && file.source.length > 0
-    ? Math.min(100, (file.sourceCursor / file.source.length) * 100)
+  let copiedCharacters = $derived(file
+    ? Array.from(file.source.slice(0, file.sourceCursor)).length
     : 0);
+  let totalCharacters = $derived(file ? Array.from(file.source).length : 0);
+  let commentCharacters = $derived(file
+    ? file.insertions
+        .filter((insertion) => insertion.kind === 'comment')
+        .reduce((total, insertion) => total + Array.from(insertion.text).length, 0)
+    : 0);
+  let progress = $derived(file && totalCharacters > 0
+    ? Math.min(100, (copiedCharacters / totalCharacters) * 100)
+    : 0);
+
+  function text(key: keyof typeof messages.en): string {
+    return messages[locale][key];
+  }
+
+  function setLocale(value: unknown) {
+    locale = value === 'en' ? 'en' : 'zh-CN';
+    document.documentElement.lang = locale;
+  }
 
   function focusCapture() {
     capture?.focus({ preventScroll: true });
@@ -60,6 +116,7 @@
     const pendingTimer = saveTimers.get(targetDocumentId);
     if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
     if (saveImmediately) {
+      saveState = 'saving';
       window.parent.postMessage({
         type: 'file-save',
         documentId: targetDocumentId,
@@ -69,6 +126,7 @@
       saveTimers.delete(targetDocumentId);
     } else {
       const timer = window.setTimeout(() => {
+        saveState = 'saving';
         window.parent.postMessage({
           type: 'file-save',
           documentId: targetDocumentId,
@@ -145,12 +203,18 @@
       applyTheme(data.theme);
       return;
     }
+    if (data?.type === 'locale-update') {
+      setLocale(data.locale);
+      return;
+    }
     if (data?.type === 'file-save-result') {
       if (data.documentId !== documentId || data.revision !== revision) return;
       if (!data.ok) {
         saveState = 'error';
       } else if (data.saved) {
         saveState = 'saved';
+      } else {
+        saveState = 'dirty';
       }
       return;
     }
@@ -160,6 +224,7 @@
       filePath = data.filePath ?? '';
       documentId = data.documentId ?? data.filePath ?? '';
       revision = Number.isInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
+      setLocale(data.locale);
       mode = 'copy';
       error = '';
       saveState = 'idle';
@@ -191,40 +256,40 @@
       </div>
 
       <div class="toolbar">
-        <div class="mode-switch" aria-label="输入模式">
+        <div class="mode-switch" aria-label={text('copyMode')}>
           <button
             class:active={mode === 'copy'}
-            title="抄写模式"
+            title={text('copyMode')}
             aria-pressed={mode === 'copy'}
             onclick={() => setMode('copy')}
           >
             <Keyboard size={14} />
-            <span>抄写</span>
+            <span>{text('copyMode')}</span>
           </button>
           <button
             class:active={mode === 'comment'}
-            title="评注模式（Cmd/Ctrl + Shift + Enter）"
+            title={text('commentShortcut')}
             aria-pressed={mode === 'comment'}
             onclick={() => setMode('comment')}
           >
             <MessageSquareText size={14} />
-            <span>评注</span>
+            <span>{text('commentMode')}</span>
           </button>
         </div>
 
         <div class="chapter-nav">
           <button
             class="icon-button"
-            title="上一章"
-            aria-label="上一章"
+            title={text('previousChapter')}
+            aria-label={text('previousChapter')}
             disabled={!file.chapter.previousPath}
             onclick={() => openRelative(file?.chapter.previousPath ?? null)}
           ><ChevronLeft size={17} /></button>
           <span>{file.chapter.index} / {file.chapter.total}</span>
           <button
             class="icon-button"
-            title="下一章"
-            aria-label="下一章"
+            title={text('nextChapter')}
+            aria-label={text('nextChapter')}
             disabled={!file.chapter.nextPath}
             onclick={() => openRelative(file?.chapter.nextPath ?? null)}
           ><ChevronRight size={17} /></button>
@@ -241,7 +306,7 @@
     <textarea
       class="input-capture"
       bind:this={capture}
-      aria-label={mode === 'comment' ? '输入评注' : '输入原文'}
+      aria-label={mode === 'comment' ? text('inputComment') : text('inputSource')}
       autocomplete="off"
       autocapitalize="off"
       spellcheck="false"
@@ -272,16 +337,25 @@
 
     <footer>
       <span>{Math.round(progress)}%</span>
+      <span class="chapter-stats">
+        {copiedCharacters} {text('copied')} ·
+        {file.stats.mistakes} {text('mistakes')} ·
+        {commentCharacters} {text('comments')}
+      </span>
       {#if saveState === 'saved'}
-        <span class="save-state"><Check size={13} />已保存</span>
+        <span class="save-state"><Check size={13} />{text('saved')}</span>
+      {:else if saveState === 'saving'}
+        <span class="save-state">{text('saving')}</span>
+      {:else if saveState === 'dirty'}
+        <span class="save-state">{text('unsaved')}</span>
       {:else if saveState === 'error'}
-        <span class="save-error">保存失败</span>
+        <span class="save-error">{text('saveFailed')}</span>
       {:else}
         <span>{filePath.split(/[\\/]/).pop()}</span>
       {/if}
     </footer>
   {:else}
-    <div class="error-state">{error || '正在打开文学评注章节...'}</div>
+    <div class="error-state">{error || text('opening')}</div>
   {/if}
 </div>
 
@@ -495,6 +569,13 @@
     align-items: center;
     gap: 4px;
   }
+  .chapter-stats {
+    min-width: 0;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .save-error {
     color: var(--novelist-error, #c53d43);
   }
@@ -521,5 +602,6 @@
       padding-top: 32px;
       font-size: 16px;
     }
+    .chapter-stats { display: none; }
   }
 </style>

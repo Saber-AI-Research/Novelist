@@ -47,7 +47,7 @@ function saveSettings(s: EditorSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 }
 
-export type RightPanel = 'draft' | 'snapshot' | 'stats' | 'template' | null;
+export type RightPanel = 'draft' | 'snapshot' | 'stats' | 'template' | 'literary' | null;
 
 function readNumber(key: string, fallback: number, min: number, max: number): number {
   try {
@@ -97,6 +97,7 @@ class UiStore {
   get snapshotVisible(): boolean { return this.activeRightPanel === 'snapshot'; }
   get statsVisible(): boolean { return this.activeRightPanel === 'stats'; }
   get templateVisible(): boolean { return this.activeRightPanel === 'template'; }
+  get literaryVisible(): boolean { return this.activeRightPanel === 'literary'; }
   toggleSidebar() { this.sidebarVisible = !this.sidebarVisible; }
   toggleOutline() { this.outlineVisible = !this.outlineVisible; }
 
@@ -109,6 +110,7 @@ class UiStore {
   toggleSnapshot() { this.toggleRightPanel('snapshot'); }
   toggleStats() { this.toggleRightPanel('stats'); }
   toggleTemplate() { this.toggleRightPanel('template'); }
+  toggleLiterary() { this.toggleRightPanel('literary'); }
   toggleZen() { this.zenMode = !this.zenMode; }
   toggleSettings() { this.settingsOpen = !this.settingsOpen; }
   setDeveloperMode(on: boolean) {

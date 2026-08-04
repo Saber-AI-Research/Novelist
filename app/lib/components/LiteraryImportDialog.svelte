@@ -8,7 +8,10 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { homeDir } from '@tauri-apps/api/path';
-  import { commands } from '$lib/ipc/commands';
+  import {
+    commands,
+    type ReplaceLiteraryStudyBookResult,
+  } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
 
   type SourceChapterDraft = {
@@ -30,10 +33,24 @@
 
   interface Props {
     onClose: () => void;
-    onProjectCreated: (projectPath: string, firstChapterPath: string) => void;
+    mode?: 'create' | 'replace';
+    projectPath?: string | null;
+    beforeReplace?: () => Promise<boolean>;
+    onProjectCreated?: (
+      projectPath: string,
+      firstChapterPath: string,
+    ) => void | Promise<void>;
+    onBookReplaced?: (result: ReplaceLiteraryStudyBookResult) => void | Promise<void>;
   }
 
-  let { onClose, onProjectCreated }: Props = $props();
+  let {
+    onClose,
+    mode = 'create',
+    projectPath = null,
+    beforeReplace,
+    onProjectCreated,
+    onBookReplaced,
+  }: Props = $props();
 
   let inspection = $state<Inspection | null>(null);
   let chapters = $state<ChapterDraft[]>([]);
@@ -46,21 +63,31 @@
   let parentDir = $state('');
   let inspecting = $state(false);
   let creating = $state(false);
+  let confirmingReplace = $state(false);
   let error = $state('');
   let preview = $state<HTMLTextAreaElement | null>(null);
 
   let selectedChapter = $derived(chapters[selectedIndex] ?? null);
-  let canCreate = $derived(
+  let canSubmit = $derived(
     inspection !== null
       && chapters.length > 0
       && chapters.every((chapter) => chapter.title.trim() && chapter.text.trim())
-      && projectName.trim().length > 0
-      && parentDir.trim().length > 0,
+      && (
+        mode === 'replace'
+          ? !!projectPath
+          : projectName.trim().length > 0 && parentDir.trim().length > 0
+      ),
   );
 
   onMount(async () => {
-    const home = await homeDir();
-    parentDir = `${home.replace(/[\\/]$/, '')}/Documents`;
+    if (mode === 'create') {
+      try {
+        const home = await homeDir();
+        parentDir = `${home.replace(/[\\/]$/, '')}/Documents`;
+      } catch {
+        parentDir = '';
+      }
+    }
   });
 
   async function chooseSource() {
@@ -88,7 +115,8 @@
       title = result.data.title;
       author = result.data.author ?? '';
       language = result.data.language ?? '';
-      projectName = result.data.title;
+      if (mode === 'create') projectName = result.data.title;
+      confirmingReplace = false;
     } else {
       inspection = null;
       chapters = [];
@@ -141,30 +169,79 @@
     selectedIndex = Math.min(selectedIndex, chapters.length - 1);
   }
 
-  async function createProject() {
-    if (!inspection || !canCreate) return;
+  async function submitImport() {
+    if (!inspection || !canSubmit) return;
+    if (mode === 'replace' && !confirmingReplace) {
+      confirmingReplace = true;
+      return;
+    }
     creating = true;
     error = '';
-    const result = await commands.createLiteraryStudyProject({
-      projectName: projectName.trim(),
-      parentDir: parentDir.trim(),
-      sourcePath: inspection.sourcePath,
-      title: title.trim(),
-      author: author.trim() || null,
-      language: language.trim() || null,
-      chapters: chapters.map((chapter, index) => ({
-        ...chapter,
-        id: chapter.id || `chapter-${String(index + 1).padStart(4, '0')}`,
-        volume: chapter.volume.trim() || null,
-        title: chapter.title.trim(),
-        text: chapter.text.trim(),
-      })),
-    });
-    if (result.status === 'ok') {
-      onProjectCreated(result.data.projectPath, result.data.firstChapterPath);
-      onClose();
+    const normalizedChapters = chapters.map((chapter, index) => ({
+      ...chapter,
+      id: chapter.id || `chapter-${String(index + 1).padStart(4, '0')}`,
+      volume: chapter.volume.trim() || null,
+      title: chapter.title.trim(),
+      text: chapter.text.trim(),
+    }));
+
+    if (mode === 'replace') {
+      let prepared: boolean | undefined;
+      try {
+        prepared = await beforeReplace?.();
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : String(cause);
+        creating = false;
+        return;
+      }
+      if (prepared === false) {
+        creating = false;
+        confirmingReplace = false;
+        return;
+      }
+      if (!projectPath) {
+        error = t('literaryImport.noProject');
+        creating = false;
+        return;
+      }
+      const result = await commands.replaceLiteraryStudyBook({
+        projectDir: projectPath,
+        sourcePath: inspection.sourcePath,
+        title: title.trim(),
+        author: author.trim() || null,
+        language: language.trim() || null,
+        chapters: normalizedChapters,
+      });
+      if (result.status === 'ok') {
+        try {
+          await onBookReplaced?.(result.data);
+          onClose();
+        } catch (cause) {
+          error = cause instanceof Error ? cause.message : String(cause);
+        }
+      } else {
+        error = result.error;
+      }
     } else {
-      error = result.error;
+      const result = await commands.createLiteraryStudyProject({
+        projectName: projectName.trim(),
+        parentDir: parentDir.trim(),
+        sourcePath: inspection.sourcePath,
+        title: title.trim(),
+        author: author.trim() || null,
+        language: language.trim() || null,
+        chapters: normalizedChapters,
+      });
+      if (result.status === 'ok') {
+        try {
+          await onProjectCreated?.(result.data.projectPath, result.data.firstChapterPath);
+          onClose();
+        } catch (cause) {
+          error = cause instanceof Error ? cause.message : String(cause);
+        }
+      } else {
+        error = result.error;
+      }
     }
     creating = false;
   }
@@ -172,10 +249,11 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       event.preventDefault();
-      onClose();
-    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && canCreate) {
+      if (confirmingReplace) confirmingReplace = false;
+      else onClose();
+    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && canSubmit) {
       event.preventDefault();
-      void createProject();
+      void submitImport();
     }
   }
 </script>
@@ -187,9 +265,9 @@
 <div class="backdrop" onclick={onClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog" onclick={(event) => event.stopPropagation()}>
+  <div class="dialog" data-testid="literary-import-dialog" onclick={(event) => event.stopPropagation()}>
     <header>
-      <h2>{t('literaryImport.title')}</h2>
+      <h2>{t(mode === 'replace' ? 'literaryImport.replaceTitle' : 'literaryImport.title')}</h2>
       <button class="icon-button" title={t('newProject.cancel')} aria-label={t('newProject.cancel')} onclick={onClose}>
         <X size={16} />
       </button>
@@ -204,7 +282,7 @@
     </div>
 
     {#if inspection}
-      <div class="metadata">
+      <div class:replace={mode === 'replace'} class="metadata">
         <label>
           <span>{t('literaryImport.bookTitle')}</span>
           <input bind:value={title} />
@@ -213,19 +291,21 @@
           <span>{t('literaryImport.author')}</span>
           <input bind:value={author} />
         </label>
-        <label>
-          <span>{t('literaryImport.projectName')}</span>
-          <input bind:value={projectName} />
-        </label>
-        <label class="destination">
-          <span>{t('newProject.location')}</span>
-          <div>
-            <input bind:value={parentDir} />
-            <button class="icon-button bordered" title={t('newProject.browse')} aria-label={t('newProject.browse')} onclick={chooseDestination}>
-              <FolderOpen size={15} />
-            </button>
-          </div>
-        </label>
+        {#if mode === 'create'}
+          <label>
+            <span>{t('literaryImport.projectName')}</span>
+            <input bind:value={projectName} />
+          </label>
+          <label class="destination">
+            <span>{t('newProject.location')}</span>
+            <div>
+              <input bind:value={parentDir} />
+              <button class="icon-button bordered" title={t('newProject.browse')} aria-label={t('newProject.browse')} onclick={chooseDestination}>
+                <FolderOpen size={15} />
+              </button>
+            </div>
+          </label>
+        {/if}
       </div>
 
       <main>
@@ -278,11 +358,20 @@
     {/if}
 
     <footer>
-      <div class="error" role="alert">{error}</div>
+      <div class:error={!!error} class:confirmation={confirmingReplace} role="alert">
+        {error || (confirmingReplace ? t('literaryImport.replaceConfirm') : '')}
+      </div>
       <div class="actions">
-        <button class="secondary-button" onclick={onClose}>{t('newProject.cancel')}</button>
-        <button class="primary-button" disabled={!canCreate || creating} onclick={createProject}>
-          {creating ? t('newProject.creating') : t('newProject.create')}
+        <button
+          class="secondary-button"
+          onclick={() => confirmingReplace ? confirmingReplace = false : onClose()}
+        >{confirmingReplace ? t('literaryImport.back') : t('newProject.cancel')}</button>
+        <button class="primary-button" disabled={!canSubmit || creating} onclick={submitImport}>
+          {creating
+            ? t(mode === 'replace' ? 'literaryImport.replacing' : 'newProject.creating')
+            : mode === 'replace'
+              ? t(confirmingReplace ? 'literaryImport.confirmReplace' : 'literaryImport.replace')
+              : t('newProject.create')}
         </button>
       </div>
     </footer>
@@ -394,6 +483,9 @@
     gap: 12px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--novelist-border);
+  }
+  .metadata.replace {
+    grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr);
   }
   .metadata label {
     min-width: 0;
@@ -527,6 +619,11 @@
   .error {
     min-width: 0;
     color: var(--novelist-error, #c24146);
+    font-size: 0.76rem;
+  }
+  .confirmation {
+    min-width: 0;
+    color: var(--novelist-text);
     font-size: 0.76rem;
   }
   .actions {

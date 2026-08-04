@@ -1,13 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { homeDir } from '@tauri-apps/api/path';
+  import BookOpen from '@lucide/svelte/icons/book-open';
   import { commands } from '$lib/ipc/commands';
   import type { TemplateInfo } from '$lib/ipc/commands';
   import { i18n, t } from '$lib/i18n';
   import { categoryLabel, templateName, templateDescription } from '$lib/utils/templateI18n';
-  import { extensionStore } from '$lib/stores/extensions.svelte';
 
   const LITERARY_TEMPLATE_ID = 'literary-commentary';
+  const LITERARY_TEMPLATE: TemplateInfo = {
+    id: LITERARY_TEMPLATE_ID,
+    name: 'Literary Commentary',
+    description: 'Import a book and create a close-reading transcription project',
+    category: 'study',
+    builtin: true,
+  };
 
   interface Props {
     onClose: () => void;
@@ -16,8 +24,8 @@
   }
   let { onClose, onProjectCreated, onLiteraryImport }: Props = $props();
 
-  let templates = $state<TemplateInfo[]>([]);
-  let selectedTemplate = $state<TemplateInfo | null>(null);
+  let templates = $state<TemplateInfo[]>([LITERARY_TEMPLATE]);
+  let selectedTemplate = $state<TemplateInfo | null>(LITERARY_TEMPLATE);
   let projectName = $state('My Project');
   let parentDir = $state('');
   let creating = $state(false);
@@ -57,26 +65,23 @@
   }
 
   onMount(async () => {
-    // Set default parent directory to ~/Documents
-    const home = await getHomeDir();
-    parentDir = home ? `${home}/Documents` : '';
-
-    const result = await commands.listTemplates();
-    if (result.status === 'ok') {
-      const literaryTemplate: TemplateInfo = {
-        id: LITERARY_TEMPLATE_ID,
-        name: 'Literary Commentary',
-        description: 'Import a book and create a close-reading transcription project',
-        category: 'study',
-        builtin: true,
-      };
-      templates = extensionStore.getFileHandler('chapter.litstudy')
-        ? [...result.data, literaryTemplate]
-        : result.data;
-      if (templates.length > 0) {
-        selectedTemplate = templates[0];
-      }
+    const [homeResult, templatesResult] = await Promise.allSettled([
+      homeDir(),
+      commands.listTemplates(),
+    ]);
+    if (homeResult.status === 'fulfilled') {
+      parentDir = `${homeResult.value.replace(/[\\/]$/, '')}/Documents`;
     }
+
+    const available = templatesResult.status === 'fulfilled'
+      && templatesResult.value.status === 'ok'
+      ? templatesResult.value.data.filter((template) => template.id !== LITERARY_TEMPLATE_ID)
+      : [];
+    const selectedId = selectedTemplate?.id;
+    templates = [...available, LITERARY_TEMPLATE];
+    selectedTemplate = templates.find((template) => template.id === selectedId)
+      ?? templates[0]
+      ?? null;
 
     requestAnimationFrame(() => {
       if (nameInput) {
@@ -85,37 +90,6 @@
       }
     });
   });
-
-  async function getHomeDir(): Promise<string | null> {
-    // Derive from a known path pattern
-    if (typeof window !== 'undefined') {
-      // On macOS, home is typically /Users/<username>
-      // We can use the Tauri path API or just default
-      return `/Users/${await getUsername()}`;
-    }
-    return null;
-  }
-
-  async function getUsername(): Promise<string> {
-    // Simple fallback — read from environment via a trick
-    try {
-      const result = await commands.listDirectory('/Users', null);
-      if (result.status === 'ok') {
-        // Find a likely home dir (not Shared, not hidden)
-        const dirs = result.data.filter(f =>
-          f.is_dir && !f.name.startsWith('.') && f.name !== 'Shared' && f.name !== 'Guest'
-        );
-        if (dirs.length === 1) return dirs[0].name;
-        // Multiple users — try to find one that has Documents
-        for (const d of dirs) {
-          const docsResult = await commands.listDirectory(`/Users/${d.name}/Documents`, null);
-          if (docsResult.status === 'ok') return d.name;
-        }
-        if (dirs.length > 0) return dirs[0].name;
-      }
-    } catch {}
-    return 'user';
-  }
 
   async function chooseDirectory() {
     const selected = await openDialog({ directory: true, multiple: false });
@@ -127,7 +101,6 @@
   async function handleCreate() {
     if (!selectedTemplate) return;
     if (selectedTemplate.id === LITERARY_TEMPLATE_ID) {
-      onClose();
       onLiteraryImport();
       return;
     }
@@ -203,13 +176,18 @@
             <button
               class="template-card"
               class:template-selected={selectedTemplate?.id === tpl.id}
+              data-testid="new-project-template-{tpl.id}"
               onclick={() => selectedTemplate = tpl}
               ondblclick={handleCreate}
             >
               <div class="template-icon">
-                <svg width="32" height="32" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
-                  <path d={templateIcon(tpl.id)} />
-                </svg>
+                {#if tpl.id === LITERARY_TEMPLATE_ID}
+                  <BookOpen size={32} strokeWidth={1.2} />
+                {:else}
+                  <svg width="32" height="32" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <path d={templateIcon(tpl.id)} />
+                  </svg>
+                {/if}
               </div>
               <div class="template-name">{templateName(tpl)}</div>
               {#if !tpl.builtin}

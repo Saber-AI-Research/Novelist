@@ -11,7 +11,7 @@
     parsePluginFileRevision,
     shouldMarkPluginFileSaved,
   } from '$lib/services/plugin-file-protocol';
-  import { t } from '$lib/i18n';
+  import { i18n, t } from '$lib/i18n';
 
   let { extension, paneId = 'pane-1' }: { extension: UIExtension; paneId?: string } = $props();
 
@@ -69,6 +69,7 @@
       filePath: activeTab.filePath,
       content: untrack(() => activeTab.content ?? ''),
       projectPath,
+      locale: i18n.locale,
     }, '*');
   });
 
@@ -92,6 +93,14 @@
       vars[prop] = styles.getPropertyValue(prop);
     }
     iframeEl.contentWindow.postMessage({ type: 'theme-update', theme: vars }, '*');
+  });
+
+  // Keep plugin chrome in sync when the host locale changes without
+  // reopening the current document and resetting its editor mode.
+  $effect(() => {
+    const locale = i18n.locale;
+    if (!iframeEl?.contentWindow || !loaded) return;
+    iframeEl.contentWindow.postMessage({ type: 'locale-update', locale }, '*');
   });
 
   function resolveMessageTab(data: Record<string, unknown>) {
@@ -185,7 +194,14 @@
               )
             : liveTab.content === data.content
         );
-        if (saved) tabsStore.markSaved(tabId);
+        if (saved) {
+          tabsStore.markSaved(tabId);
+          if (extension.pluginId === 'literary-commentary') {
+            window.dispatchEvent(new CustomEvent('novelist:literary-study-saved', {
+              detail: { filePath: liveTab.filePath },
+            }));
+          }
+        }
         postSaveResult(
           documentId,
           revision,

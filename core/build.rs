@@ -37,6 +37,9 @@ fn prepare_bundled_plugins() {
             continue;
         }
 
+        if dest_dir.exists() {
+            std::fs::remove_dir_all(&dest_dir).ok();
+        }
         std::fs::create_dir_all(&dest_dir).ok();
 
         let manifest_src = src_dir.join("manifest.toml");

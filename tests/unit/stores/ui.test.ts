@@ -85,16 +85,21 @@ describe('[contract] uiStore.toggleRightPanel (mutual exclusion)', () => {
     expect(uiStore.snapshotVisible).toBe(true);
   });
 
-  it('all four *Visible getters reflect the active panel (mutually exclusive)', () => {
+  it('all right-panel visibility getters reflect the active panel (mutually exclusive)', () => {
     uiStore.toggleStats();
     expect(uiStore.statsVisible).toBe(true);
     expect(uiStore.templateVisible).toBe(false);
     expect(uiStore.snapshotVisible).toBe(false);
     expect(uiStore.draftVisible).toBe(false);
+    expect(uiStore.literaryVisible).toBe(false);
 
     uiStore.toggleTemplate();
     expect(uiStore.templateVisible).toBe(true);
     expect(uiStore.statsVisible).toBe(false);
+
+    uiStore.toggleLiterary();
+    expect(uiStore.literaryVisible).toBe(true);
+    expect(uiStore.templateVisible).toBe(false);
   });
 });
 

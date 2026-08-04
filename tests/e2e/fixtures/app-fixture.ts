@@ -11,6 +11,8 @@ import {
 import type {
   ChannelConfig,
   FormDraft,
+  LiteraryStudyOverview,
+  ProjectConfig,
   PublishResult,
   RemoteIdentity,
 } from '../../../app/lib/ipc/commands';
@@ -127,6 +129,8 @@ export const test = base.extend<{
     seedRecentProjects: (list: Array<{ path: string; name: string; last_opened: string; pinned?: boolean; sort_order?: number | null }>) => Promise<void>;
     emitEvent: (event: string, payload: unknown, targetLabel?: string) => Promise<void>;
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
+    setProjectConfig: (config: ProjectConfig) => Promise<void>;
+    setLiteraryOverview: (overview: LiteraryStudyOverview) => Promise<void>;
     renameFile: (oldPath: string, newPath: string) => Promise<void>;
     setClaudeCliSendError: (message: string | null) => Promise<void>;
     setClaudeCliKillBlocked: (blocked: boolean) => Promise<void>;
@@ -337,6 +341,18 @@ export const test = base.extend<{
         await app.evaluate(
           ([d, f]) => (window as any).__TAURI_MOCK_STATE__.openProject(d, f),
           [dirPath, files] as const,
+        );
+      },
+      async setProjectConfig(config: ProjectConfig) {
+        await app.evaluate(
+          (value) => (window as any).__TAURI_MOCK_STATE__.setProjectConfig(value),
+          config,
+        );
+      },
+      async setLiteraryOverview(overview: LiteraryStudyOverview) {
+        await app.evaluate(
+          (value) => (window as any).__TAURI_MOCK_STATE__.setLiteraryOverview(value),
+          overview,
         );
       },
       async renameFile(oldPath: string, newPath: string) {

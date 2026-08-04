@@ -239,6 +239,8 @@ export const commands = {
 	createProjectFromTemplate: (templateId: string, projectName: string, parentDir: string, locale: string) => typedError<string, string>(__TAURI_INVOKE("create_project_from_template", { templateId, projectName, parentDir, locale })),
 	inspectLiterarySource: (path: string) => typedError<LiterarySourceInspection, string>(__TAURI_INVOKE("inspect_literary_source", { path })),
 	createLiteraryStudyProject: (request: CreateLiteraryStudyProjectRequest) => typedError<CreateLiteraryStudyProjectResult, string>(__TAURI_INVOKE("create_literary_study_project", { request })),
+	readLiteraryStudyOverview: (projectDir: string) => typedError<LiteraryStudyOverview, string>(__TAURI_INVOKE("read_literary_study_overview", { projectDir })),
+	replaceLiteraryStudyBook: (request: ReplaceLiteraryStudyBookRequest) => typedError<ReplaceLiteraryStudyBookResult, string>(__TAURI_INVOKE("replace_literary_study_book", { request })),
 	saveProjectAsTemplate: (projectDir: string, templateName: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("save_project_as_template", { projectDir, templateName })),
 	deleteTemplate: (templateId: string) => typedError<null, string>(__TAURI_INVOKE("delete_template", { templateId })),
 	importTemplateZip: (zipPath: string) => typedError<TemplateInfo, string>(__TAURI_INVOKE("import_template_zip", { zipPath })),
@@ -873,12 +875,42 @@ export type LiteraryChapterDraft = {
 	text: string,
 };
 
+export type LiteraryChapterSummary = {
+	id: string,
+	title: string,
+	volume: string | null,
+	index: number,
+	total: number,
+	relativePath: string,
+	sourceCharacters: number,
+	copiedCharacters: number,
+	mistakes: number,
+	pasted: number,
+	completed: boolean,
+};
+
 export type LiterarySourceInspection = {
 	title: string,
 	author: string | null,
 	language: string | null,
 	sourcePath: string,
 	chapters: LiteraryChapterDraft[],
+};
+
+export type LiteraryStudyOverview = {
+	schemaVersion: number,
+	sourcePath: string,
+	title: string,
+	author: string | null,
+	language: string | null,
+	chapterCount: number,
+	completedChapters: number,
+	copiedCharacters: number,
+	totalCharacters: number,
+	mistakes: number,
+	pasted: number,
+	resumeChapterPath: string | null,
+	chapters: LiteraryChapterSummary[],
 };
 
 export type ManagedNameStateV1 = {
@@ -1896,6 +1928,22 @@ export type RenameMigrationResult = {
 };
 
 export type RenameMigrationStatus = "full_success" | "user_file_renamed_with_metadata_errors" | "idempotent_retry";
+
+export type ReplaceLiteraryStudyBookRequest = {
+	projectDir: string,
+	sourcePath: string,
+	title: string,
+	author: string | null,
+	language: string | null,
+	chapters: LiteraryChapterDraft[],
+};
+
+export type ReplaceLiteraryStudyBookResult = {
+	firstChapterPath: string,
+	resumeChapterPath: string,
+	chapterCount: number,
+	preservedChapterCount: number,
+};
 
 export type ResolvedNewFile = {
 	template: string,

@@ -30,6 +30,7 @@
   const loadSnapshotPanel = () => import('$lib/components/SnapshotPanel.svelte');
   const loadStatsPanel = () => import('$lib/components/StatsPanel.svelte');
   const loadTemplatePanel = () => import('$lib/components/TemplatePanel.svelte');
+  const loadLiteraryStudyPanel = () => import('$lib/components/LiteraryStudyPanel.svelte');
   const loadPluginPanel = () => import('$lib/components/PluginPanel.svelte');
   const loadAiTalkPanel = () => import('$lib/components/AiTalkPanel.svelte');
   const loadAiAgentPanel = () => import('$lib/components/AiAgentPanel.svelte');
@@ -37,6 +38,10 @@
   const loadUpdateAvailableBanner = () => import('$lib/components/UpdateAvailableBanner.svelte');
   import { updaterState } from '$lib/stores/updater-state.svelte';
   import { consumeWindowSeed } from '$lib/services/cli-open';
+  import {
+    ensureLiteraryPluginReady,
+    isLiteraryStudyProject,
+  } from '$lib/services/literary-study';
   import { ProjectOpenOwner } from '$lib/services/project-open-owner';
   import { ProjectWatcherOwner } from '$lib/services/project-watcher-owner';
   import type { TemplateFileSummary } from '$lib/ipc/commands';
@@ -54,7 +59,8 @@
   import { handleTitlebarDrag } from '$lib/utils/window-drag';
   import { useWindowTitle } from '$lib/composables/window-title.svelte';
   import { promptGoToLine } from '$lib/utils/go-to-line';
-  import { pathBasename, pathDirname } from '$lib/utils/path';
+  import { pathBasename, pathDirname, pathJoin, pathStartsWithChild } from '$lib/utils/path';
+  import { normalizeSafeProjectRelativePath } from '$lib/services/plugin-file-protocol';
   import { isScratchFile } from '$lib/utils/scratch';
   import { BLOCK_TRANSFORM_COMMANDS, registerAppCommands } from '$lib/app-commands';
   import { wireAppEvents } from '$lib/composables/app-events.svelte';
@@ -115,6 +121,7 @@ let paletteOpen = $state(false);
   let projectSearchOpen = $state(false);
   let newProjectDialogOpen = $state(false);
   let literaryImportDialogOpen = $state(false);
+  let literaryImportMode = $state<'create' | 'replace'>('create');
   let operationError = $state<string | null>(null);
   // Opening the template dialog from outside TemplatePanel (e.g. from the
   // command palette) — the panel consumes this object then calls back to clear.
@@ -197,8 +204,16 @@ let paletteOpen = $state(false);
     uiStore.snapshotVisible ||
     uiStore.statsVisible ||
     uiStore.templateVisible ||
+    uiStore.literaryVisible ||
     !!extensionStore.activePanelId
   );
+  let literaryProjectOpen = $derived(isLiteraryStudyProject(projectStore.config));
+
+  $effect(() => {
+    if (!literaryProjectOpen && uiStore.literaryVisible) {
+      uiStore.activeRightPanel = null;
+    }
+  });
 
   // Recent projects cache for Cmd+Number switching (Notion-style)
   import type { RecentProject } from '$lib/ipc/commands';
@@ -280,6 +295,14 @@ let paletteOpen = $state(false);
         const configResult = await commands.detectProject(dirPath);
         if (!isCurrent() || configResult.status !== 'ok') return;
         const config = configResult.data;
+        if (isLiteraryStudyProject(config)) {
+          const pluginError = await ensureLiteraryPluginReady();
+          if (!isCurrent()) return;
+          if (pluginError) {
+            showOperationError(pluginError);
+            return;
+          }
+        }
 
         // Load the per-project settings overlay BEFORE the initial listDirectory
         // so the user's saved `show_hidden_files` preference applies to the first
@@ -374,9 +397,69 @@ let paletteOpen = $state(false);
     await openProjectFromPath(projectPath);
     if (projectStore.dirPath !== projectPath) return;
     const result = await commands.readFile(firstChapterPath);
-    if (result.status !== 'ok') return;
+    if (result.status !== 'ok') {
+      showOperationError(result.error);
+      return;
+    }
     tabsStore.openTab(firstChapterPath, result.data);
-    await commands.registerOpenFile(firstChapterPath);
+    const registered = await commands.registerOpenFile(firstChapterPath);
+    if (registered.status === 'error') {
+      showOperationError(registered.error);
+      return;
+    }
+    uiStore.activeRightPanel = 'literary';
+  }
+
+  async function openLiteraryChapter(relativePath: string) {
+    const projectPath = projectStore.dirPath;
+    const normalized = normalizeSafeProjectRelativePath(relativePath);
+    if (!projectPath || !normalized) return;
+    const targetPath = pathJoin(projectPath, normalized);
+    if (targetPath !== projectPath && !pathStartsWithChild(targetPath, projectPath)) return;
+    const result = await commands.readFile(targetPath);
+    if (result.status !== 'ok') {
+      showOperationError(result.error);
+      return;
+    }
+    tabsStore.openTab(targetPath, result.data);
+    await commands.registerOpenFile(targetPath);
+  }
+
+  async function prepareLiteraryBookReplacement(): Promise<boolean> {
+    const saved = await tabsStore.saveAllDirty();
+    if (!saved) {
+      showOperationError(t('literaryImport.saveBeforeReplaceFailed'));
+      return false;
+    }
+    const literaryTabs = tabsStore.allTabs.filter((tab) =>
+      tab.fileName.toLowerCase().endsWith('.litstudy'),
+    );
+    for (const tab of literaryTabs) {
+      await tabsStore.closeTab(tab.id);
+    }
+    return tabsStore.allTabs.every((tab) => !tab.fileName.toLowerCase().endsWith('.litstudy'));
+  }
+
+  async function handleLiteraryBookReplaced(result: {
+    resumeChapterPath: string;
+    preservedChapterCount: number;
+  }) {
+    const projectPath = projectStore.dirPath;
+    if (!projectPath) return;
+    await projectStore.refreshFolder(projectPath);
+    const config = await commands.detectProject(projectPath);
+    if (config.status === 'error') {
+      showOperationError(config.error);
+      return;
+    }
+    projectStore.config = config.data;
+    const opened = await openSingleFile(result.resumeChapterPath);
+    if (!opened) {
+      showOperationError(t('literaryPanel.openChapterFailed'));
+      return;
+    }
+    uiStore.activeRightPanel = 'literary';
+    window.dispatchEvent(new CustomEvent('novelist:literary-study-saved'));
   }
 
   async function openNewWindow() {
@@ -425,7 +508,7 @@ let paletteOpen = $state(false);
   async function handleOpenFile() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban'] }],
+      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban', 'litstudy'] }],
     });
     if (!selected) return;
     await openSingleFile(selected as string);
@@ -1026,6 +1109,18 @@ let paletteOpen = $state(false);
             />
           {/await}
         </div>
+      {:else if uiStore.literaryVisible && literaryProjectOpen}
+        <div style="width: {uiStore.rightPanelWidth}px;">
+          {#await loadLiteraryStudyPanel() then { default: LiteraryStudyPanel }}
+            <LiteraryStudyPanel
+              onOpenChapter={(relativePath) => { void openLiteraryChapter(relativePath); }}
+              onReplaceBook={() => {
+                literaryImportMode = 'replace';
+                literaryImportDialogOpen = true;
+              }}
+            />
+          {/await}
+        </div>
       {:else if extensionStore.activePanelId}
         {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
         {#if activePanel?.pluginId === 'ai-talk'}
@@ -1095,13 +1190,31 @@ let paletteOpen = $state(false);
         >
           {t('template.title')}
         </button>
+        {#if literaryProjectOpen}
+          <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
+          <button
+            class="flex items-center justify-center cursor-pointer"
+            data-testid="toggle-literary-study"
+            style="width: 20px; flex: 1; background: {uiStore.literaryVisible ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {uiStore.literaryVisible ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
+            onclick={() => {
+              extensionStore.activePanelId = null;
+              uiStore.toggleLiterary();
+            }}
+            title={t('literaryPanel.title')}
+          >
+            {t('literaryPanel.shortTitle')}
+          </button>
+        {/if}
         {#each extensionStore.panels.filter(p => p.pluginId !== 'mindmap') as panel}
           <div style="height: 1px; background: var(--novelist-border-subtle, var(--novelist-border));"></div>
           <button
             class="flex items-center justify-center cursor-pointer"
             data-testid="panel-toggle-{panel.pluginId}"
             style="width: 20px; flex: 1; background: {extensionStore.activePanelId === panel.pluginId ? 'color-mix(in srgb, var(--novelist-accent) 10%, transparent)' : 'transparent'}; color: {extensionStore.activePanelId === panel.pluginId ? 'var(--novelist-accent)' : 'var(--novelist-text-tertiary, var(--novelist-text-secondary))'}; border: none; writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.08em; user-select: none; transition: color 100ms, background 100ms;"
-            onclick={() => extensionStore.togglePanel(panel.pluginId)}
+            onclick={() => {
+              uiStore.activeRightPanel = null;
+              extensionStore.togglePanel(panel.pluginId);
+            }}
             title="Toggle {panel.label}"
           >
             {panel.label}
@@ -1185,7 +1298,11 @@ let paletteOpen = $state(false);
     <NewProjectDialog
       onClose={() => { newProjectDialogOpen = false; }}
       onProjectCreated={(path) => openProjectFromPath(path)}
-      onLiteraryImport={() => { literaryImportDialogOpen = true; }}
+      onLiteraryImport={() => {
+        newProjectDialogOpen = false;
+        literaryImportMode = 'create';
+        literaryImportDialogOpen = true;
+      }}
     />
   {/await}
 {/if}
@@ -1194,7 +1311,11 @@ let paletteOpen = $state(false);
   {#await loadLiteraryImportDialog() then { default: LiteraryImportDialog }}
     <LiteraryImportDialog
       onClose={() => { literaryImportDialogOpen = false; }}
+      mode={literaryImportMode}
+      projectPath={projectStore.dirPath}
+      beforeReplace={prepareLiteraryBookReplacement}
       onProjectCreated={handleLiteraryProjectCreated}
+      onBookReplaced={handleLiteraryBookReplaced}
     />
   {/await}
 {/if}

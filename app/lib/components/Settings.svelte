@@ -357,6 +357,8 @@
     }
     if (plugin.ui?.requires_app_reload) {
       extensionStore.recordPluginEnabledChange(plugin.id, newEnabled);
+    } else if (plugin.ui) {
+      await extensionStore.loadFromPlugins();
     }
     await loadPlugins();
   }

@@ -34,7 +34,50 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         if (override) recentProjects = JSON.parse(override);
       } catch {}
       let projectDir = ${JSON.stringify(config.projectDir)};
-      const projectConfig = ${JSON.stringify(config.projectConfig)};
+      let projectConfig = ${JSON.stringify(config.projectConfig)};
+      const defaultLiteraryOverview = {
+        schemaVersion: 2,
+        sourcePath: '/mock/books/demo.txt',
+        title: 'Demo Book',
+        author: 'Demo Author',
+        language: 'zh-CN',
+        chapterCount: 2,
+        completedChapters: 0,
+        copiedCharacters: 4,
+        totalCharacters: 12,
+        mistakes: 1,
+        pasted: 0,
+        resumeChapterPath: '学习内容/第一章.litstudy',
+        chapters: [
+          {
+            id: 'chapter-0001',
+            title: '第一章',
+            volume: null,
+            index: 1,
+            total: 2,
+            relativePath: '学习内容/第一章.litstudy',
+            sourceCharacters: 6,
+            copiedCharacters: 4,
+            mistakes: 1,
+            pasted: 0,
+            completed: false,
+          },
+          {
+            id: 'chapter-0002',
+            title: '第二章',
+            volume: null,
+            index: 2,
+            total: 2,
+            relativePath: '学习内容/第二章.litstudy',
+            sourceCharacters: 6,
+            copiedCharacters: 0,
+            mistakes: 0,
+            pasted: 0,
+            completed: false,
+          },
+        ],
+      };
+      let literaryOverview = JSON.parse(JSON.stringify(defaultLiteraryOverview));
       const writtenFiles = {};
       const createdFiles = [];
       const deletedFiles = [];
@@ -240,6 +283,21 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           path: '/mock/home/.novelist/plugins/kanban',
           permissions: ['read', 'write', 'ui'],
           ui: { type: 'file-handler', entry: 'index.html', label: 'Kanban', file_extensions: ['.kanban'] },
+        },
+        {
+          id: 'literary-commentary', name: 'Literary Commentary', version: '0.2.0',
+          description: 'Transcription and inline literary commentary',
+          author: 'Novelist Team', enabled: false, builtin: true,
+          path: '/mock/home/.novelist/plugins/literary-commentary',
+          permissions: ['read', 'write', 'ui'],
+          ui: {
+            type: 'file-handler',
+            entry: 'index.html',
+            label: 'Literary Commentary',
+            file_extensions: ['.litstudy'],
+            creatable: false,
+            requires_app_reload: false,
+          },
         },
       ];
       const builtinScaffoldedPluginCount = scaffoldedPlugins.length;
@@ -931,6 +989,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'publish_to_wordpress_com': return nextPublishResult('wordpress_com', args.input);
           case 'publish_to_medium': return nextPublishResult('medium', args.input);
           case 'list_plugins': return scaffoldedPlugins.slice();
+          case 'set_plugin_enabled': {
+            const plugin = scaffoldedPlugins.find(candidate => candidate.id === args.pluginId);
+            if (!plugin) throw new Error('Plugin not found: ' + args.pluginId);
+            plugin.enabled = !!args.enabled;
+            return null;
+          }
           case 'get_plugin_commands': return [];
           case 'scaffold_plugin': {
             const id = args.id;
@@ -944,6 +1008,39 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           case 'get_plugins_dir': return '/mock/home/.novelist/plugins';
           case 'load_plugin': case 'unload_plugin': case 'reload_plugin': case 'set_plugin_document_state': return null;
+          case 'inspect_literary_source': return {
+            title: literaryOverview.title,
+            author: literaryOverview.author,
+            language: literaryOverview.language,
+            sourcePath: args.path,
+            chapters: literaryOverview.chapters.map((chapter, index) => ({
+              id: chapter.id,
+              volume: chapter.volume,
+              title: chapter.title,
+              text: index === 0 ? '天地玄黄宇宙' : '洪荒日月盈昃',
+            })),
+          };
+          case 'create_literary_study_project': {
+            const target = args.request.parentDir.replace(/[\\\\/]$/, '')
+              + '/' + args.request.projectName;
+            return {
+              projectPath: target,
+              firstChapterPath: target + '/学习内容/第一章.litstudy',
+              chapterCount: args.request.chapters.length,
+            };
+          }
+          case 'read_literary_study_overview':
+            return JSON.parse(JSON.stringify(literaryOverview));
+          case 'replace_literary_study_book': {
+            const chapters = args.request.chapters || [];
+            const first = chapters[0]?.title || '第一章';
+            return {
+              firstChapterPath: args.request.projectDir + '/学习内容/' + first + '.litstudy',
+              resumeChapterPath: args.request.projectDir + '/学习内容/' + first + '.litstudy',
+              chapterCount: chapters.length,
+              preservedChapterCount: 0,
+            };
+          }
           case 'rope_open': return { file_id: 'mock-rope-id', total_lines: 100, total_bytes: 5000 };
           case 'rope_get_lines': return {
             text: 'Mock content\\n',
@@ -1176,10 +1273,15 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           case 'read_project_config': {
             const p = readMockProject(args.dirPath);
+            const base = projectConfig && typeof projectConfig === 'object'
+              ? JSON.parse(JSON.stringify(projectConfig))
+              : {
+                  project: { name: 'Mock', type: 'novel', version: '0.1.0' },
+                  outline: { order: [] },
+                  writing: { daily_goal: 2000, auto_save_minutes: 5 },
+                };
             return {
-              project: { name: 'Mock', type: 'novel', version: '0.1.0' },
-              outline: { order: [] },
-              writing: { daily_goal: 2000, auto_save_minutes: 5 },
+              ...base,
               view: p?.view ?? {},
               new_file: p?.new_file ?? {},
               plugins: p?.plugins ?? { enabled: {} },
@@ -1397,6 +1499,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           persistMockFiles();
         },
+        setProjectConfig(value) {
+          projectConfig = JSON.parse(JSON.stringify(value));
+        },
+        setLiteraryOverview(value) {
+          literaryOverview = JSON.parse(JSON.stringify(value));
+        },
         seedFileContents(map) {
           for (const k of Object.keys(map || {})) fileContents[k] = map[k];
           persistMockContents();
@@ -1443,6 +1551,8 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            recentProjects.length = 0;
            for (const recent of ${JSON.stringify(config.recentProjects)}) recentProjects.push({ ...recent });
            projectDir = ${JSON.stringify(config.projectDir)};
+           projectConfig = ${JSON.stringify(config.projectConfig)};
+           literaryOverview = JSON.parse(JSON.stringify(defaultLiteraryOverview));
 
            aiStreamCounter = 0;
            claudeCliDetectResult = null;
@@ -1481,6 +1591,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             nextEventListenerId = 1;
             for (const key of Object.keys(mockTemplates)) delete mockTemplates[key];
             scaffoldedPlugins.length = builtinScaffoldedPluginCount;
+            const literaryPlugin = scaffoldedPlugins.find(plugin => plugin.id === 'literary-commentary');
+            if (literaryPlugin) literaryPlugin.enabled = false;
+            const kanbanPlugin = scaffoldedPlugins.find(plugin => plugin.id === 'kanban');
+            if (kanbanPlugin) kanbanPlugin.enabled = true;
 
              publishChannels = [];
              deferredPublishSettingsReadCount = 0;

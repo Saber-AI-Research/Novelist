@@ -40,6 +40,28 @@ propagate naturally). Fold logic lives in `app/lib/utils/mindmap.ts`
 retained as a reference implementation but is filtered out of the
 side-panel list in `App.svelte`.
 
+## Literary commentary projects
+
+Literary commentary is a dedicated `literary-study` project type backed by
+the bundled `literary-commentary` file-handler plugin. The New Project
+dialog always exposes this type, independently of the deferred plugin scan.
+Opening a literary project ensures the bundled `.litstudy` handler is enabled
+before the file tree is committed.
+
+EPUB/TXT inspection and project mutations live in
+`core/src/commands/literary_study.rs`. Imported chapters are stored below
+`学习内容/`; `.novelist/literary-study.json` records source metadata and the
+ordered chapter paths. The native right panel reads a bounded overview through
+`read_literary_study_overview`, while the iframe editor owns transcription,
+inline comments, mistake markers, and revision-safe saves.
+
+Replacing a book is a staged transaction. Existing `.litstudy` files move to a
+temporary backup, replacement files move in from a staging directory, and the
+project config plus metadata are written atomically. Compatible chapter
+progress is preserved by volume/title and source-prefix matching. Any collision
+or write failure rolls the chapter files and metadata back before returning an
+error.
+
 ## Plugin scaffolding
 
 `scaffold_plugin(id, display_name?)` Rust command creates

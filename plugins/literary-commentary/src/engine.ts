@@ -84,7 +84,7 @@ export function normalizeStudyFile(value: unknown): LiteraryStudyFile {
     sourceCursor: cursor,
     insertions,
     stats: {
-      correct: cursor,
+      correct: countSourceCharacters(raw.source, cursor),
       mistakes: Number(raw.stats?.mistakes) || 0,
       pasted: Number(raw.stats?.pasted) || 0,
       startedAt: raw.stats?.startedAt ?? null,
@@ -229,7 +229,7 @@ function findLatestInsertion(
 
 function finishMutation(file: LiteraryStudyFile, now: string): LiteraryStudyFile {
   file.sourceCursor = clampOffset(file.source, file.sourceCursor);
-  file.stats.correct = file.sourceCursor;
+  file.stats.correct = countSourceCharacters(file.source, file.sourceCursor);
   file.stats.completedAt = file.sourceCursor >= file.source.length ? now : null;
   return file;
 }
@@ -245,11 +245,32 @@ function cloneFile(file: LiteraryStudyFile): LiteraryStudyFile {
 }
 
 function clampOffset(source: string, value: number): number {
-  return Math.max(0, Math.min(source.length, Math.trunc(value)));
+  const bounded = Math.max(0, Math.min(source.length, Math.trunc(value)));
+  if (
+    bounded > 0
+    && bounded < source.length
+    && isHighSurrogate(source.charCodeAt(bounded - 1))
+    && isLowSurrogate(source.charCodeAt(bounded))
+  ) {
+    return bounded - 1;
+  }
+  return bounded;
 }
 
 function removeLastCodePoint(value: string): string {
   const characters = Array.from(value);
   characters.pop();
   return characters.join('');
+}
+
+function countSourceCharacters(source: string, cursor: number): number {
+  return Array.from(source.slice(0, clampOffset(source, cursor))).length;
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xD800 && value <= 0xDBFF;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xDC00 && value <= 0xDFFF;
 }

@@ -1,19 +1,28 @@
 use crate::commands::file::decode_bytes;
 use crate::error::AppError;
 use crate::models::project::{OutlineConfig, ProjectConfig, ProjectMeta, WritingConfig};
+use crate::models::settings::PluginsConfig;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use walkdir::WalkDir;
 use zip::ZipArchive;
 
 const MAX_EPUB_ENTRIES: usize = 4096;
 const MAX_EPUB_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+const LITERARY_PLUGIN_ID: &str = "literary-commentary";
+const LITERARY_CONTENT_ROOT: &str = "学习内容";
+const LITERARY_METADATA_FILE: &str = "literary-study.json";
+const LITERARY_SCHEMA_VERSION: u32 = 2;
+const MAX_LITERARY_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_LITERARY_CHAPTER_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_LITERARY_CHAPTERS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +63,60 @@ pub struct CreateLiteraryStudyProjectResult {
     pub chapter_count: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceLiteraryStudyBookRequest {
+    pub project_dir: String,
+    pub source_path: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub language: Option<String>,
+    pub chapters: Vec<LiteraryChapterDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceLiteraryStudyBookResult {
+    pub first_chapter_path: String,
+    pub resume_chapter_path: String,
+    pub chapter_count: usize,
+    pub preserved_chapter_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteraryChapterSummary {
+    pub id: String,
+    pub title: String,
+    pub volume: Option<String>,
+    pub index: usize,
+    pub total: usize,
+    pub relative_path: String,
+    pub source_characters: usize,
+    pub copied_characters: usize,
+    pub mistakes: usize,
+    pub pasted: usize,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteraryStudyOverview {
+    pub schema_version: u32,
+    pub source_path: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub language: Option<String>,
+    pub chapter_count: usize,
+    pub completed_chapters: usize,
+    pub copied_characters: usize,
+    pub total_characters: usize,
+    pub mistakes: usize,
+    pub pasted: usize,
+    pub resume_chapter_path: Option<String>,
+    pub chapters: Vec<LiteraryChapterSummary>,
+}
+
 #[derive(Debug, Clone)]
 struct OpfItem {
     href: String,
@@ -83,7 +146,7 @@ struct NavPoint {
     src: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiteraryProjectMetadata {
     schema_version: u32,
@@ -92,41 +155,45 @@ struct LiteraryProjectMetadata {
     author: Option<String>,
     language: Option<String>,
     chapter_count: usize,
+    #[serde(default)]
+    content_root: Option<String>,
+    #[serde(default)]
+    chapter_paths: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LiteraryStudyFile<'a> {
+struct LiteraryStudyFile {
     schema_version: u32,
-    book: LiteraryBook<'a>,
-    chapter: LiteraryChapter<'a>,
-    source: &'a str,
+    book: LiteraryBook,
+    chapter: LiteraryChapter,
+    source: String,
     source_cursor: usize,
     insertions: Vec<LiteraryInsertion>,
     stats: LiteraryStats,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LiteraryBook<'a> {
-    title: &'a str,
-    author: Option<&'a str>,
-    language: Option<&'a str>,
+struct LiteraryBook {
+    title: String,
+    author: Option<String>,
+    language: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LiteraryChapter<'a> {
-    id: &'a str,
-    title: &'a str,
-    volume: Option<&'a str>,
+struct LiteraryChapter {
+    id: String,
+    title: String,
+    volume: Option<String>,
     index: usize,
     total: usize,
-    previous_path: Option<&'a str>,
-    next_path: Option<&'a str>,
+    previous_path: Option<String>,
+    next_path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiteraryInsertion {
     id: String,
@@ -136,7 +203,7 @@ struct LiteraryInsertion {
     text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiteraryStats {
     correct: usize,
@@ -162,6 +229,26 @@ pub async fn create_literary_study_project(
     tokio::task::spawn_blocking(move || create_literary_study_project_inner(request))
         .await
         .map_err(|error| AppError::Custom(format!("Literary project task failed: {error}")))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn read_literary_study_overview(
+    project_dir: String,
+) -> Result<LiteraryStudyOverview, AppError> {
+    tokio::task::spawn_blocking(move || read_literary_study_overview_inner(&project_dir))
+        .await
+        .map_err(|error| AppError::Custom(format!("Literary overview task failed: {error}")))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn replace_literary_study_book(
+    request: ReplaceLiteraryStudyBookRequest,
+) -> Result<ReplaceLiteraryStudyBookResult, AppError> {
+    tokio::task::spawn_blocking(move || replace_literary_study_book_inner(request))
+        .await
+        .map_err(|error| AppError::Custom(format!("Literary replacement task failed: {error}")))?
 }
 
 fn inspect_literary_source_inner(path: &str) -> Result<LiterarySourceInspection, AppError> {
@@ -960,6 +1047,188 @@ fn create_literary_study_project_inner(
     })
 }
 
+#[derive(Debug)]
+struct LiteraryProjectSnapshot {
+    root: PathBuf,
+    config: ProjectConfig,
+    metadata: LiteraryProjectMetadata,
+    chapters: Vec<(String, LiteraryStudyFile)>,
+}
+
+fn read_literary_study_overview_inner(
+    project_dir: &str,
+) -> Result<LiteraryStudyOverview, AppError> {
+    let snapshot = load_literary_project(project_dir)?;
+    Ok(build_literary_overview(&snapshot))
+}
+
+fn replace_literary_study_book_inner(
+    request: ReplaceLiteraryStudyBookRequest,
+) -> Result<ReplaceLiteraryStudyBookResult, AppError> {
+    validate_book_request(
+        &request.title,
+        &request.chapters,
+        "Select at least one replacement chapter",
+    )?;
+    let snapshot = load_literary_project(&request.project_dir)?;
+    let (study_files, preserved_chapter_count) = build_study_files(
+        &request.title,
+        request.author.as_deref(),
+        request.language.as_deref(),
+        &request.chapters,
+        Some(&snapshot.chapters),
+    );
+    let relative_paths = study_files
+        .iter()
+        .map(|(relative, _)| relative.clone())
+        .collect::<Vec<_>>();
+    let first_relative = relative_paths.first().ok_or_else(|| {
+        AppError::InvalidInput("Literary project requires at least one chapter".to_string())
+    })?;
+    let resume_relative = study_files
+        .iter()
+        .find(|(_, study)| !study_is_complete(study))
+        .map(|(relative, _)| relative)
+        .unwrap_or(first_relative);
+
+    let novelist_dir = snapshot.root.join(".novelist");
+    let unique = unique_suffix();
+    let stage_dir = novelist_dir.join(format!(".literary-stage-{unique}"));
+    let backup_dir = novelist_dir.join(format!(".literary-backup-{unique}"));
+    std::fs::create_dir(&stage_dir)?;
+    std::fs::create_dir(&backup_dir)?;
+
+    let config_path = novelist_dir.join("project.toml");
+    let metadata_path = novelist_dir.join(LITERARY_METADATA_FILE);
+    let original_config = std::fs::read(&config_path)?;
+    let original_metadata = std::fs::read(&metadata_path)?;
+    let mut moved_old = Vec::<String>::new();
+    let mut moved_new = Vec::<String>::new();
+
+    let transaction = (|| -> Result<(), AppError> {
+        write_study_files(&stage_dir, &study_files)?;
+
+        for (relative, _) in &snapshot.chapters {
+            let source = checked_project_path(&snapshot.root, relative)?;
+            if !source.exists() {
+                continue;
+            }
+            let destination = checked_project_path(&backup_dir, relative)?;
+            ensure_safe_parent(&backup_dir, relative)?;
+            std::fs::rename(&source, &destination)?;
+            moved_old.push(relative.clone());
+        }
+
+        for (relative, _) in &study_files {
+            let source = checked_project_path(&stage_dir, relative)?;
+            let destination = checked_project_path(&snapshot.root, relative)?;
+            ensure_safe_parent(&snapshot.root, relative)?;
+            if destination.exists() {
+                return Err(AppError::InvalidInput(format!(
+                    "Replacement chapter collides with an unmanaged file: {}",
+                    destination.display()
+                )));
+            }
+            std::fs::rename(&source, &destination)?;
+            moved_new.push(relative.clone());
+        }
+
+        let mut next_config = snapshot.config.clone();
+        next_config.outline.order = relative_paths.clone();
+        next_config
+            .plugins
+            .enabled
+            .insert(LITERARY_PLUGIN_ID.to_string(), true);
+        let next_metadata = LiteraryProjectMetadata {
+            schema_version: LITERARY_SCHEMA_VERSION,
+            source_path: request.source_path.clone(),
+            title: request.title.trim().to_string(),
+            author: normalize_optional_text(request.author.clone()),
+            language: normalize_optional_text(request.language.clone()),
+            chapter_count: study_files.len(),
+            content_root: Some(LITERARY_CONTENT_ROOT.to_string()),
+            chapter_paths: relative_paths.clone(),
+        };
+
+        atomic_write_sync(&config_path, toml::to_string(&next_config)?.as_bytes())?;
+        atomic_write_sync(
+            &metadata_path,
+            serde_json::to_string_pretty(&next_metadata)?.as_bytes(),
+        )?;
+        Ok(())
+    })();
+
+    if let Err(error) = transaction {
+        let mut rollback_errors = Vec::new();
+        if let Err(rollback_error) = atomic_write_sync(&config_path, &original_config) {
+            rollback_errors.push(format!("project config: {rollback_error}"));
+        }
+        if let Err(rollback_error) = atomic_write_sync(&metadata_path, &original_metadata) {
+            rollback_errors.push(format!("metadata: {rollback_error}"));
+        }
+        for relative in moved_new.iter().rev() {
+            match checked_project_path(&snapshot.root, relative) {
+                Ok(path) if path.exists() => {
+                    if let Err(rollback_error) = std::fs::remove_file(&path) {
+                        rollback_errors
+                            .push(format!("remove {}: {rollback_error}", path.display()));
+                    }
+                }
+                Ok(_) => {}
+                Err(rollback_error) => rollback_errors.push(rollback_error.to_string()),
+            }
+        }
+        for relative in moved_old.iter().rev() {
+            let source = checked_project_path(&backup_dir, relative);
+            let destination = checked_project_path(&snapshot.root, relative);
+            match (source, destination) {
+                (Ok(source), Ok(destination)) if source.exists() => {
+                    if let Err(rollback_error) = ensure_safe_parent(&snapshot.root, relative)
+                        .and_then(|_| std::fs::rename(&source, &destination).map_err(AppError::Io))
+                    {
+                        rollback_errors.push(format!(
+                            "restore {}: {rollback_error}",
+                            destination.display()
+                        ));
+                    }
+                }
+                (Err(rollback_error), _) | (_, Err(rollback_error)) => {
+                    rollback_errors.push(rollback_error.to_string())
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        let _ = std::fs::remove_dir_all(&backup_dir);
+        if rollback_errors.is_empty() {
+            return Err(error);
+        }
+        return Err(AppError::Custom(format!(
+            "{error}; rollback also reported: {}",
+            rollback_errors.join("; ")
+        )));
+    }
+
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    prune_empty_chapter_directories(&snapshot.root, &snapshot.chapters);
+
+    Ok(ReplaceLiteraryStudyBookResult {
+        first_chapter_path: snapshot
+            .root
+            .join(first_relative)
+            .to_string_lossy()
+            .to_string(),
+        resume_chapter_path: snapshot
+            .root
+            .join(resume_relative)
+            .to_string_lossy()
+            .to_string(),
+        chapter_count: study_files.len(),
+        preserved_chapter_count,
+    })
+}
+
 fn validate_project_request(request: &CreateLiteraryStudyProjectRequest) -> Result<(), AppError> {
     if request.project_name.trim().is_empty()
         || request.project_name.contains('/')
@@ -972,18 +1241,32 @@ fn validate_project_request(request: &CreateLiteraryStudyProjectRequest) -> Resu
             "Project name cannot be empty or contain path separators".to_string(),
         ));
     }
-    if request.title.trim().is_empty() {
+    validate_book_request(
+        &request.title,
+        &request.chapters,
+        "Select at least one chapter",
+    )
+}
+
+fn validate_book_request(
+    title: &str,
+    chapters: &[LiteraryChapterDraft],
+    empty_message: &str,
+) -> Result<(), AppError> {
+    if title.trim().is_empty() {
         return Err(AppError::InvalidInput(
             "Book title cannot be empty".to_string(),
         ));
     }
-    if request.chapters.is_empty() {
-        return Err(AppError::InvalidInput(
-            "Select at least one chapter".to_string(),
-        ));
+    if chapters.is_empty() {
+        return Err(AppError::InvalidInput(empty_message.to_string()));
     }
-    if request
-        .chapters
+    if chapters.len() > MAX_LITERARY_CHAPTERS {
+        return Err(AppError::InvalidInput(format!(
+            "Literary projects support at most {MAX_LITERARY_CHAPTERS} chapters"
+        )));
+    }
+    if chapters
         .iter()
         .any(|chapter| chapter.title.trim().is_empty() || chapter.text.trim().is_empty())
     {
@@ -1001,7 +1284,19 @@ fn build_literary_project(
     let novelist_dir = root.join(".novelist");
     std::fs::create_dir_all(&novelist_dir)?;
 
-    let relative_paths = chapter_relative_paths(&request.chapters);
+    let (study_files, _) = build_study_files(
+        &request.title,
+        request.author.as_deref(),
+        request.language.as_deref(),
+        &request.chapters,
+        None,
+    );
+    let relative_paths = study_files
+        .iter()
+        .map(|(relative, _)| relative.clone())
+        .collect::<Vec<_>>();
+    let mut plugins = PluginsConfig::default();
+    plugins.enabled.insert(LITERARY_PLUGIN_ID.to_string(), true);
     let project_config = ProjectConfig {
         project: ProjectMeta {
             name: request.project_name.trim().to_string(),
@@ -1014,64 +1309,163 @@ fn build_literary_project(
         writing: WritingConfig::default(),
         view: Default::default(),
         new_file: Default::default(),
-        plugins: Default::default(),
+        plugins,
         active_image_host_id: None,
     };
-    std::fs::write(
-        novelist_dir.join("project.toml"),
-        toml::to_string(&project_config)?,
+    atomic_write_sync(
+        &novelist_dir.join("project.toml"),
+        toml::to_string(&project_config)?.as_bytes(),
     )?;
-    std::fs::write(
-        novelist_dir.join("literary-study.json"),
+    atomic_write_sync(
+        &novelist_dir.join(LITERARY_METADATA_FILE),
         serde_json::to_string_pretty(&LiteraryProjectMetadata {
-            schema_version: 1,
+            schema_version: LITERARY_SCHEMA_VERSION,
             source_path: request.source_path.clone(),
             title: request.title.trim().to_string(),
-            author: request.author.clone(),
-            language: request.language.clone(),
+            author: normalize_optional_text(request.author.clone()),
+            language: normalize_optional_text(request.language.clone()),
             chapter_count: request.chapters.len(),
-        })?,
+            content_root: Some(LITERARY_CONTENT_ROOT.to_string()),
+            chapter_paths: relative_paths.clone(),
+        })?
+        .as_bytes(),
     )?;
-
-    for (index, chapter) in request.chapters.iter().enumerate() {
-        let relative = &relative_paths[index];
-        let path = root.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let study = LiteraryStudyFile {
-            schema_version: 1,
-            book: LiteraryBook {
-                title: request.title.trim(),
-                author: request.author.as_deref(),
-                language: request.language.as_deref(),
-            },
-            chapter: LiteraryChapter {
-                id: &chapter.id,
-                title: chapter.title.trim(),
-                volume: chapter.volume.as_deref(),
-                index: index + 1,
-                total: request.chapters.len(),
-                previous_path: index
-                    .checked_sub(1)
-                    .and_then(|previous| relative_paths.get(previous))
-                    .map(String::as_str),
-                next_path: relative_paths.get(index + 1).map(String::as_str),
-            },
-            source: chapter.text.trim(),
-            source_cursor: 0,
-            insertions: Vec::new(),
-            stats: LiteraryStats {
-                correct: 0,
-                mistakes: 0,
-                pasted: 0,
-                started_at: None,
-                completed_at: None,
-            },
-        };
-        std::fs::write(path, serde_json::to_string_pretty(&study)?)?;
-    }
+    write_study_files(root, &study_files)?;
     Ok(relative_paths)
+}
+
+fn build_study_files(
+    title: &str,
+    author: Option<&str>,
+    language: Option<&str>,
+    chapters: &[LiteraryChapterDraft],
+    existing: Option<&[(String, LiteraryStudyFile)]>,
+) -> (Vec<(String, LiteraryStudyFile)>, usize) {
+    let relative_paths = chapter_relative_paths(chapters);
+    let mut existing_by_label = HashMap::<(String, String), Vec<LiteraryStudyFile>>::new();
+    if let Some(existing) = existing {
+        for (_, study) in existing.iter().rev() {
+            existing_by_label
+                .entry(chapter_match_key(
+                    study.chapter.volume.as_deref(),
+                    &study.chapter.title,
+                ))
+                .or_default()
+                .push(study.clone());
+        }
+    }
+
+    let mut preserved = 0;
+    let studies = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| {
+            let mut study = LiteraryStudyFile {
+                schema_version: 1,
+                book: LiteraryBook {
+                    title: title.trim().to_string(),
+                    author: author
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    language: language
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                },
+                chapter: LiteraryChapter {
+                    id: if chapter.id.trim().is_empty() {
+                        format!("chapter-{:04}", index + 1)
+                    } else {
+                        chapter.id.clone()
+                    },
+                    title: chapter.title.trim().to_string(),
+                    volume: chapter
+                        .volume
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    index: index + 1,
+                    total: chapters.len(),
+                    previous_path: index
+                        .checked_sub(1)
+                        .and_then(|previous| relative_paths.get(previous))
+                        .cloned(),
+                    next_path: relative_paths.get(index + 1).cloned(),
+                },
+                source: chapter.text.trim().to_string(),
+                source_cursor: 0,
+                insertions: Vec::new(),
+                stats: LiteraryStats {
+                    correct: 0,
+                    mistakes: 0,
+                    pasted: 0,
+                    started_at: None,
+                    completed_at: None,
+                },
+            };
+
+            let key = chapter_match_key(chapter.volume.as_deref(), chapter.title.trim());
+            if let Some(candidates) = existing_by_label.get_mut(&key) {
+                if let Some(previous) = candidates.pop() {
+                    if preserve_compatible_progress(&mut study, &previous) {
+                        preserved += 1;
+                    }
+                }
+            }
+            (relative_paths[index].clone(), study)
+        })
+        .collect();
+    (studies, preserved)
+}
+
+fn chapter_match_key(volume: Option<&str>, title: &str) -> (String, String) {
+    (
+        volume
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<String>(),
+        title.split_whitespace().collect::<String>(),
+    )
+}
+
+fn preserve_compatible_progress(
+    replacement: &mut LiteraryStudyFile,
+    previous: &LiteraryStudyFile,
+) -> bool {
+    let previous_cursor = clamp_utf16_offset(&previous.source, previous.source_cursor);
+    let replacement_units = utf16_len(&replacement.source);
+    let compatible = previous.source == replacement.source
+        || (previous_cursor <= replacement_units
+            && utf16_prefix_matches(&previous.source, &replacement.source, previous_cursor));
+    if !compatible {
+        return false;
+    }
+
+    replacement.source_cursor = previous_cursor;
+    replacement.insertions = previous
+        .insertions
+        .iter()
+        .filter(|insertion| insertion.source_offset <= previous_cursor)
+        .cloned()
+        .collect();
+    replacement.stats = previous.stats.clone();
+    replacement.stats.correct = copied_character_count(&replacement.source, previous_cursor);
+    replacement.stats.mistakes = replacement
+        .insertions
+        .iter()
+        .filter(|insertion| insertion.kind == "mistake")
+        .map(|insertion| insertion.text.chars().count())
+        .sum();
+    replacement.stats.completed_at = if previous_cursor >= replacement_units {
+        previous.stats.completed_at.clone()
+    } else {
+        None
+    };
+    previous_cursor > 0
+        || !replacement.insertions.is_empty()
+        || replacement.stats.started_at.is_some()
 }
 
 fn chapter_relative_paths(chapters: &[LiteraryChapterDraft]) -> Vec<String> {
@@ -1087,7 +1481,7 @@ fn chapter_relative_paths(chapters: &[LiteraryChapterDraft]) -> Vec<String> {
                 index + 1,
                 sanitize_path_component(chapter.title.trim())
             );
-            if let Some(volume) = chapter
+            let inner = if let Some(volume) = chapter
                 .volume
                 .as_deref()
                 .map(str::trim)
@@ -1106,9 +1500,444 @@ fn chapter_relative_paths(chapters: &[LiteraryChapterDraft]) -> Vec<String> {
                 )
             } else {
                 format!("章节/{filename}")
-            }
+            };
+            format!("{LITERARY_CONTENT_ROOT}/{inner}")
         })
         .collect()
+}
+
+fn load_literary_project(project_dir: &str) -> Result<LiteraryProjectSnapshot, AppError> {
+    let requested = PathBuf::from(project_dir);
+    if !requested.is_dir() {
+        return Err(AppError::NotADirectory(project_dir.to_string()));
+    }
+    let root = std::fs::canonicalize(&requested)?;
+    let novelist_dir = root.join(".novelist");
+    let novelist_metadata = std::fs::symlink_metadata(&novelist_dir)?;
+    if novelist_metadata.file_type().is_symlink() || !novelist_metadata.is_dir() {
+        return Err(AppError::PathNotAllowed(format!(
+            "Invalid literary metadata directory: {}",
+            novelist_dir.display()
+        )));
+    }
+    let config: ProjectConfig =
+        read_json_or_toml_bounded(&novelist_dir.join("project.toml"), false)?;
+    if config.project.project_type != "literary-study" {
+        return Err(AppError::InvalidInput(
+            "The selected directory is not a literary study project".to_string(),
+        ));
+    }
+    let metadata: LiteraryProjectMetadata =
+        read_json_or_toml_bounded(&novelist_dir.join(LITERARY_METADATA_FILE), true)?;
+    let chapter_paths = discover_literary_chapter_paths(&root, &config, &metadata)?;
+    let mut chapters = Vec::with_capacity(chapter_paths.len());
+    for relative in chapter_paths {
+        let path = checked_project_path(&root, &relative)?;
+        let study: LiteraryStudyFile = read_json_bounded(&path, MAX_LITERARY_CHAPTER_BYTES)?;
+        chapters.push((relative, study));
+    }
+    chapters.sort_by(|(left_path, left), (right_path, right)| {
+        left.chapter
+            .index
+            .cmp(&right.chapter.index)
+            .then(left_path.cmp(right_path))
+    });
+    Ok(LiteraryProjectSnapshot {
+        root,
+        config,
+        metadata,
+        chapters,
+    })
+}
+
+fn discover_literary_chapter_paths(
+    root: &Path,
+    config: &ProjectConfig,
+    metadata: &LiteraryProjectMetadata,
+) -> Result<Vec<String>, AppError> {
+    let declared = if !metadata.chapter_paths.is_empty() {
+        metadata.chapter_paths.clone()
+    } else {
+        config
+            .outline
+            .order
+            .iter()
+            .filter(|path| path.to_ascii_lowercase().ends_with(".litstudy"))
+            .cloned()
+            .collect()
+    };
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for path in declared {
+        let normalized = normalize_project_relative_path(&path)?;
+        if seen.insert(normalized.clone()) {
+            paths.push(normalized);
+        }
+    }
+    if !paths.is_empty() {
+        return Ok(paths);
+    }
+
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".novelist")
+    {
+        let entry = entry.map_err(|error| AppError::Custom(error.to_string()))?;
+        if entry.file_type().is_symlink() {
+            continue;
+        }
+        if entry.file_type().is_dir() && entry.file_name() == ".novelist" {
+            continue;
+        }
+        if !entry.file_type().is_file()
+            || entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|value| !value.eq_ignore_ascii_case("litstudy"))
+        {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| AppError::Custom(error.to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if seen.insert(relative.clone()) {
+            paths.push(relative);
+        }
+    }
+    if paths.is_empty() {
+        return Err(AppError::InvalidInput(
+            "This literary study project contains no readable chapters".to_string(),
+        ));
+    }
+    Ok(paths)
+}
+
+fn build_literary_overview(snapshot: &LiteraryProjectSnapshot) -> LiteraryStudyOverview {
+    let mut completed_chapters = 0;
+    let mut copied_characters = 0;
+    let mut total_characters = 0;
+    let mut mistakes = 0;
+    let mut pasted = 0;
+    let mut resume_chapter_path = None;
+    let total = snapshot.chapters.len();
+    let chapters: Vec<LiteraryChapterSummary> = snapshot
+        .chapters
+        .iter()
+        .enumerate()
+        .map(|(position, (relative_path, study))| {
+            let source_characters = study.source.chars().count();
+            let copied = copied_character_count(&study.source, study.source_cursor);
+            let completed = study_is_complete(study);
+            if completed {
+                completed_chapters += 1;
+            } else if resume_chapter_path.is_none() {
+                resume_chapter_path = Some(relative_path.clone());
+            }
+            copied_characters += copied;
+            total_characters += source_characters;
+            mistakes += study.stats.mistakes;
+            pasted += study.stats.pasted;
+            LiteraryChapterSummary {
+                id: study.chapter.id.clone(),
+                title: study.chapter.title.clone(),
+                volume: study.chapter.volume.clone(),
+                index: position + 1,
+                total,
+                relative_path: relative_path.clone(),
+                source_characters,
+                copied_characters: copied,
+                mistakes: study.stats.mistakes,
+                pasted: study.stats.pasted,
+                completed,
+            }
+        })
+        .collect();
+    LiteraryStudyOverview {
+        schema_version: snapshot.metadata.schema_version,
+        source_path: snapshot.metadata.source_path.clone(),
+        title: snapshot.metadata.title.clone(),
+        author: snapshot.metadata.author.clone(),
+        language: snapshot.metadata.language.clone(),
+        chapter_count: chapters.len(),
+        completed_chapters,
+        copied_characters,
+        total_characters,
+        mistakes,
+        pasted,
+        resume_chapter_path,
+        chapters,
+    }
+}
+
+fn study_is_complete(study: &LiteraryStudyFile) -> bool {
+    clamp_utf16_offset(&study.source, study.source_cursor) >= utf16_len(&study.source)
+}
+
+fn copied_character_count(source: &str, cursor: usize) -> usize {
+    let cursor = clamp_utf16_offset(source, cursor);
+    let mut units = 0;
+    let mut characters = 0;
+    for character in source.chars() {
+        let next = units + character.len_utf16();
+        if next > cursor {
+            break;
+        }
+        units = next;
+        characters += 1;
+    }
+    characters
+}
+
+fn utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+fn clamp_utf16_offset(value: &str, requested: usize) -> usize {
+    let mut offset = 0;
+    for character in value.chars() {
+        let next = offset + character.len_utf16();
+        if next > requested {
+            break;
+        }
+        offset = next;
+    }
+    offset
+}
+
+fn utf16_prefix_matches(left: &str, right: &str, units: usize) -> bool {
+    let Some(left_index) = byte_index_for_utf16_offset(left, units) else {
+        return false;
+    };
+    let Some(right_index) = byte_index_for_utf16_offset(right, units) else {
+        return false;
+    };
+    left[..left_index] == right[..right_index]
+}
+
+fn byte_index_for_utf16_offset(value: &str, target: usize) -> Option<usize> {
+    if target == 0 {
+        return Some(0);
+    }
+    let mut units = 0;
+    for (index, character) in value.char_indices() {
+        units += character.len_utf16();
+        if units == target {
+            return Some(index + character.len_utf8());
+        }
+        if units > target {
+            return None;
+        }
+    }
+    (units == target).then_some(value.len())
+}
+
+fn write_study_files(
+    root: &Path,
+    study_files: &[(String, LiteraryStudyFile)],
+) -> Result<(), AppError> {
+    for (relative, study) in study_files {
+        ensure_safe_parent(root, relative)?;
+        let path = checked_project_path(root, relative)?;
+        let bytes = serde_json::to_vec_pretty(study)?;
+        if bytes.len() as u64 > MAX_LITERARY_CHAPTER_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "Literary chapter is too large to store safely: {}",
+                study.chapter.title
+            )));
+        }
+        atomic_write_sync(&path, &bytes)?;
+    }
+    Ok(())
+}
+
+fn read_json_or_toml_bounded<T>(path: &Path, json: bool) -> Result<T, AppError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let bytes = read_bounded(path, MAX_LITERARY_METADATA_BYTES)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| AppError::InvalidInput(format!("Invalid UTF-8 metadata: {error}")))?;
+    if json {
+        serde_json::from_str(&text).map_err(AppError::from)
+    } else {
+        toml::from_str(&text).map_err(AppError::from)
+    }
+}
+
+fn read_json_bounded<T>(path: &Path, max_bytes: u64) -> Result<T, AppError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let bytes = read_bounded(path, max_bytes)?;
+    serde_json::from_slice(&bytes).map_err(AppError::from)
+}
+
+fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, AppError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::PathNotAllowed(format!(
+            "Literary data must be a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(AppError::InvalidInput(format!(
+            "Literary data is too large: {}",
+            path.display()
+        )));
+    }
+    Ok(std::fs::read(path)?)
+}
+
+fn normalize_project_relative_path(value: &str) -> Result<String, AppError> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(AppError::PathNotAllowed(value.to_string()));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            _ => return Err(AppError::PathNotAllowed(value.to_string())),
+        }
+    }
+    if normalized.as_os_str().is_empty()
+        || normalized
+            .components()
+            .next()
+            .is_some_and(|component| component.as_os_str() == ".novelist")
+        || normalized
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("litstudy"))
+    {
+        return Err(AppError::PathNotAllowed(value.to_string()));
+    }
+    Ok(normalized.to_string_lossy().replace('\\', "/"))
+}
+
+fn checked_project_path(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
+    let normalized = normalize_project_relative_path(relative)?;
+    Ok(root.join(normalized))
+}
+
+fn ensure_safe_parent(root: &Path, relative_file: &str) -> Result<(), AppError> {
+    let normalized = normalize_project_relative_path(relative_file)?;
+    let relative_parent = Path::new(&normalized)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let mut current = root.to_path_buf();
+    for component in relative_parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(AppError::PathNotAllowed(relative_file.to_string()));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(AppError::PathNotAllowed(format!(
+                        "Literary chapter parent is not a regular directory: {}",
+                        current.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)?;
+            }
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn atomic_write_sync(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput("Literary data path has no parent".to_string()))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::InvalidInput("Literary data path has no file name".to_string()))?
+        .to_string_lossy();
+    let mut last_collision = None;
+    for attempt in 0..32_u64 {
+        let temporary = parent.join(format!(
+            ".{file_name}.novelist-tmp-{}-{}-{}",
+            std::process::id(),
+            unique_suffix(),
+            attempt
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(mut file) => {
+                let write_result = (|| -> Result<(), AppError> {
+                    file.write_all(bytes)?;
+                    file.flush()?;
+                    file.sync_all()?;
+                    Ok(())
+                })();
+                drop(file);
+                if let Err(error) = write_result {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error);
+                }
+                if let Err(error) = std::fs::rename(&temporary, path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(AppError::Io(error));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_collision = Some(error);
+            }
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    Err(AppError::Io(last_collision.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "Unable to allocate a literary data temporary file",
+        )
+    })))
+}
+
+fn prune_empty_chapter_directories(root: &Path, previous: &[(String, LiteraryStudyFile)]) {
+    let mut directories = previous
+        .iter()
+        .filter_map(|(relative, _)| Path::new(relative).parent())
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    directories.dedup();
+    for relative in directories {
+        let path = root.join(&relative);
+        if path == root || relative.starts_with(".novelist") {
+            continue;
+        }
+        let _ = std::fs::remove_dir(&path);
+    }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn sanitize_path_component(value: &str) -> String {
@@ -1195,7 +2024,214 @@ mod tests {
         let result = create_literary_study_project_inner(request).unwrap();
         assert_eq!(result.chapter_count, 2);
         let first = std::fs::read_to_string(result.first_chapter_path).unwrap();
-        assert!(first.contains("\"nextPath\": \"01 白马出凉州/0002 第二章.litstudy\""));
+        assert!(first.contains("\"nextPath\": \"学习内容/01 白马出凉州/0002 第二章.litstudy\""));
+        let overview = read_literary_study_overview_inner(&result.project_path).unwrap();
+        assert_eq!(overview.chapter_count, 2);
+        assert_eq!(overview.completed_chapters, 0);
+        assert_eq!(
+            overview.resume_chapter_path.as_deref(),
+            Some("学习内容/01 白马出凉州/0001 第一章.litstudy")
+        );
+    }
+
+    #[test]
+    fn replacing_book_preserves_compatible_chapter_progress() {
+        let parent = tempfile::tempdir().unwrap();
+        let created = create_literary_study_project_inner(CreateLiteraryStudyProjectRequest {
+            project_name: "学习项目".to_string(),
+            parent_dir: parent.path().to_string_lossy().to_string(),
+            source_path: "/tmp/original.epub".to_string(),
+            title: "原书".to_string(),
+            author: Some("作者".to_string()),
+            language: Some("zh-CN".to_string()),
+            chapters: vec![LiteraryChapterDraft {
+                id: "c1".to_string(),
+                volume: None,
+                title: "第一章".to_string(),
+                text: "甲乙丙丁".to_string(),
+            }],
+        })
+        .unwrap();
+        let mut study: LiteraryStudyFile =
+            serde_json::from_str(&std::fs::read_to_string(&created.first_chapter_path).unwrap())
+                .unwrap();
+        study.source_cursor = 2;
+        study.stats.correct = 2;
+        study.stats.started_at = Some("2026-08-04T00:00:00Z".to_string());
+        study.insertions.push(LiteraryInsertion {
+            id: "comment-1".to_string(),
+            source_offset: 2,
+            order: 0,
+            kind: "comment".to_string(),
+            text: "批注".to_string(),
+        });
+        atomic_write_sync(
+            Path::new(&created.first_chapter_path),
+            serde_json::to_string_pretty(&study).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let replaced = replace_literary_study_book_inner(ReplaceLiteraryStudyBookRequest {
+            project_dir: created.project_path.clone(),
+            source_path: "/tmp/revised.epub".to_string(),
+            title: "修订版".to_string(),
+            author: Some("作者".to_string()),
+            language: Some("zh-CN".to_string()),
+            chapters: vec![
+                LiteraryChapterDraft {
+                    id: "new-c1".to_string(),
+                    volume: None,
+                    title: "第一章".to_string(),
+                    text: "甲乙丙丁戊".to_string(),
+                },
+                LiteraryChapterDraft {
+                    id: "new-c2".to_string(),
+                    volume: None,
+                    title: "第二章".to_string(),
+                    text: "新章".to_string(),
+                },
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(replaced.preserved_chapter_count, 1);
+        assert_eq!(replaced.chapter_count, 2);
+        let preserved: LiteraryStudyFile =
+            serde_json::from_str(&std::fs::read_to_string(&replaced.first_chapter_path).unwrap())
+                .unwrap();
+        assert_eq!(preserved.book.title, "修订版");
+        assert_eq!(preserved.source_cursor, 2);
+        assert_eq!(preserved.insertions.len(), 1);
+        let overview = read_literary_study_overview_inner(&created.project_path).unwrap();
+        assert_eq!(overview.copied_characters, 2);
+        assert_eq!(overview.chapter_count, 2);
+    }
+
+    #[test]
+    fn replacement_collision_restores_original_project() {
+        let parent = tempfile::tempdir().unwrap();
+        let created = create_literary_study_project_inner(CreateLiteraryStudyProjectRequest {
+            project_name: "回滚测试".to_string(),
+            parent_dir: parent.path().to_string_lossy().to_string(),
+            source_path: "/tmp/original.txt".to_string(),
+            title: "原书".to_string(),
+            author: None,
+            language: Some("zh-CN".to_string()),
+            chapters: vec![LiteraryChapterDraft {
+                id: "c1".to_string(),
+                volume: None,
+                title: "第一章".to_string(),
+                text: "原始正文".to_string(),
+            }],
+        })
+        .unwrap();
+        let original_chapter = std::fs::read(&created.first_chapter_path).unwrap();
+        let metadata_path = Path::new(&created.project_path)
+            .join(".novelist")
+            .join(LITERARY_METADATA_FILE);
+        let original_metadata = std::fs::read(&metadata_path).unwrap();
+        let collision = Path::new(&created.project_path)
+            .join(LITERARY_CONTENT_ROOT)
+            .join("章节")
+            .join("0002 第二章.litstudy");
+        std::fs::write(&collision, b"unmanaged").unwrap();
+
+        let error = replace_literary_study_book_inner(ReplaceLiteraryStudyBookRequest {
+            project_dir: created.project_path.clone(),
+            source_path: "/tmp/replacement.txt".to_string(),
+            title: "新书".to_string(),
+            author: None,
+            language: Some("zh-CN".to_string()),
+            chapters: vec![
+                LiteraryChapterDraft {
+                    id: "new-c1".to_string(),
+                    volume: None,
+                    title: "第一章".to_string(),
+                    text: "替换正文".to_string(),
+                },
+                LiteraryChapterDraft {
+                    id: "new-c2".to_string(),
+                    volume: None,
+                    title: "第二章".to_string(),
+                    text: "会发生冲突".to_string(),
+                },
+            ],
+        })
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("collides with an unmanaged file"));
+        assert_eq!(
+            std::fs::read(&created.first_chapter_path).unwrap(),
+            original_chapter
+        );
+        assert_eq!(std::fs::read(&metadata_path).unwrap(), original_metadata);
+        assert_eq!(std::fs::read(&collision).unwrap(), b"unmanaged");
+        let novelist_dir = Path::new(&created.project_path).join(".novelist");
+        let leftovers = std::fs::read_dir(novelist_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| {
+                name.starts_with(".literary-stage-") || name.starts_with(".literary-backup-")
+            })
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn rejects_excessive_chapter_counts_before_writing() {
+        let chapters = (0..=MAX_LITERARY_CHAPTERS)
+            .map(|index| LiteraryChapterDraft {
+                id: format!("c{index}"),
+                volume: None,
+                title: format!("第{index}章"),
+                text: "正文".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let error = validate_book_request("书", &chapters, "empty").unwrap_err();
+        assert!(error.to_string().contains("support at most 4096 chapters"));
+    }
+
+    #[test]
+    fn replacing_changed_prefix_resets_incompatible_progress() {
+        let mut replacement = LiteraryStudyFile {
+            schema_version: 1,
+            book: LiteraryBook {
+                title: "书".to_string(),
+                author: None,
+                language: None,
+            },
+            chapter: LiteraryChapter {
+                id: "new".to_string(),
+                title: "第一章".to_string(),
+                volume: None,
+                index: 1,
+                total: 1,
+                previous_path: None,
+                next_path: None,
+            },
+            source: "甲新丙".to_string(),
+            source_cursor: 0,
+            insertions: Vec::new(),
+            stats: LiteraryStats {
+                correct: 0,
+                mistakes: 0,
+                pasted: 0,
+                started_at: None,
+                completed_at: None,
+            },
+        };
+        let mut previous = replacement.clone();
+        previous.source = "甲乙丙".to_string();
+        previous.source_cursor = 2;
+        previous.stats.correct = 2;
+        previous.stats.started_at = Some("2026-08-04T00:00:00Z".to_string());
+
+        assert!(!preserve_compatible_progress(&mut replacement, &previous));
+        assert_eq!(replacement.source_cursor, 0);
+        assert!(replacement.stats.started_at.is_none());
     }
 
     #[test]

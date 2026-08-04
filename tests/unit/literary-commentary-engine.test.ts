@@ -76,4 +76,23 @@ describe('literary commentary engine', () => {
     const copied = applyInput(study(), '最终，', 'copy');
     expect(applyBackspace(copied, 'copy').sourceCursor).toBe(2);
   });
+
+  it('counts Unicode code points while retaining UTF-16 source offsets', () => {
+    const copied = applyInput(study('甲😀乙'), '甲😀', 'copy');
+    expect(copied.sourceCursor).toBe(3);
+    expect(copied.stats.correct).toBe(2);
+
+    const backedUp = applyBackspace(copied, 'copy');
+    expect(backedUp.sourceCursor).toBe(1);
+    expect(backedUp.stats.correct).toBe(1);
+  });
+
+  it('normalizes a corrupt cursor away from the middle of a surrogate pair', () => {
+    const normalized = normalizeStudyFile({
+      ...study('甲😀乙'),
+      sourceCursor: 2,
+    });
+    expect(normalized.sourceCursor).toBe(1);
+    expect(normalized.stats.correct).toBe(1);
+  });
 });
