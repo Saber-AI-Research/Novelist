@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { projectStore, type FileNode } from '$lib/stores/project.svelte';
+import { loadProjectWorkspaceState } from '$lib/services/project-workspace-state';
 
 vi.mock('$lib/ipc/commands', () => ({
   commands: {
@@ -125,5 +126,36 @@ describe('projectStore tree extensions', () => {
     const sub = projectStore.files.find(f => f.path === '/proj/sub')!;
     expect(sub.children).toHaveLength(2);
     expect(sub.expanded).toBe(true);
+  });
+
+  it('restores expanded folders when the same project is opened again', async () => {
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
+    (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
+    await projectStore.expandFolder('/proj/sub');
+    expect(loadProjectWorkspaceState('/proj').expandedPaths).toEqual(['sub']);
+
+    await projectStore.close();
+    vi.clearAllMocks();
+    (commands.listDirectory as any).mockResolvedValue({ status: 'ok', data: [] });
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
+
+    expect(projectStore.findFolder('/proj/sub')?.expanded).toBe(true);
+    expect(commands.listDirectory).toHaveBeenCalledWith('/proj/sub', false);
+  });
+
+  it('collapsing a branch removes its persisted descendant expansion state', async () => {
+    await projectStore.setProject('/proj', null, [node('sub', true)]);
+    (commands.listDirectory as any).mockImplementation((path: string) => Promise.resolve({
+      status: 'ok',
+      data: path === '/proj/sub'
+        ? [{ name: 'nested', path: '/proj/sub/nested', is_dir: true, size: 0 }]
+        : [],
+    }));
+    await projectStore.expandFolder('/proj/sub');
+    await projectStore.expandFolder('/proj/sub/nested');
+
+    projectStore.collapseFolder('/proj/sub');
+
+    expect(loadProjectWorkspaceState('/proj').expandedPaths).toEqual([]);
   });
 });

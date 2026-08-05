@@ -4,16 +4,22 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
-  import Keyboard from '@lucide/svelte/icons/keyboard';
   import MessageSquareText from '@lucide/svelte/icons/message-square-text';
   import {
-    applyBackspace,
+    applyDeleteBackward,
+    applyDelimitedInput,
     applyInput,
     buildRenderPieces,
     normalizeStudyFile,
+    type DeleteUnit,
     type LiteraryMode,
     type LiteraryStudyFile,
   } from './engine';
+
+  interface EditorSnapshot {
+    file: LiteraryStudyFile;
+    mode: LiteraryMode;
+  }
 
   let file = $state<LiteraryStudyFile | null>(null);
   let filePath = $state('');
@@ -23,16 +29,28 @@
   let error = $state('');
   let capture = $state<HTMLTextAreaElement | null>(null);
   let caret = $state<HTMLSpanElement | null>(null);
+  let compositionText = $state('');
+  let captureLeft = $state(0);
+  let captureTop = $state(0);
+  let captureHeight = $state(24);
   let locale = $state<'en' | 'zh-CN'>('zh-CN');
   const saveTimers = new Map<string, number>();
+  const undoStack: EditorSnapshot[] = [];
+  const redoStack: EditorSnapshot[] = [];
   let pastePending = false;
+  let composing = $state(false);
+  let suppressedCompositionValue: string | null = null;
+  let suppressionTimer: number | null = null;
   let saveState = $state<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle');
 
   const messages = {
     en: {
-      copyMode: 'Transcribe',
-      commentMode: 'Comment',
       commentShortcut: 'Comment mode (Cmd/Ctrl + Shift + Enter)',
+      commentHint: 'Type 【 to add a comment',
+      commentActive: 'Writing comment',
+      commentEndHint: 'Type 】 to finish',
+      autoTypeShortcut: 'F6 types the next source character',
+      autoTypeHint: 'F6 next character',
       previousChapter: 'Previous chapter',
       nextChapter: 'Next chapter',
       inputComment: 'Type commentary',
@@ -47,9 +65,12 @@
       opening: 'Opening literary commentary chapter...',
     },
     'zh-CN': {
-      copyMode: '抄写',
-      commentMode: '评注',
       commentShortcut: '评注模式（Cmd/Ctrl + Shift + Enter）',
+      commentHint: '输入【开始评注',
+      commentActive: '正在评注',
+      commentEndHint: '输入】结束',
+      autoTypeShortcut: 'F6 自动录入范文下一字',
+      autoTypeHint: 'F6 跟打下一字',
       previousChapter: '上一章',
       nextChapter: '下一章',
       inputComment: '输入评注',
@@ -88,13 +109,23 @@
     document.documentElement.lang = locale;
   }
 
+  function syncCapturePosition() {
+    if (!capture || !caret) return;
+    const rect = caret.getBoundingClientRect();
+    captureLeft = Math.max(0, Math.min(window.innerWidth - 2, rect.left));
+    captureTop = Math.max(0, Math.min(window.innerHeight - rect.height, rect.top));
+    captureHeight = Math.max(20, rect.height);
+  }
+
   function focusCapture() {
+    syncCapturePosition();
     capture?.focus({ preventScroll: true });
   }
 
   async function revealCaret() {
     await tick();
-    caret?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    caret?.scrollIntoView({ block: 'center', inline: 'nearest' });
+    syncCapturePosition();
   }
 
   function serialize(): string {
@@ -145,37 +176,213 @@
     focusCapture();
   }
 
-  function mutate(next: LiteraryStudyFile) {
+  function cloneFile(value: LiteraryStudyFile): LiteraryStudyFile {
+    return JSON.parse(JSON.stringify(value)) as LiteraryStudyFile;
+  }
+
+  function snapshot(): EditorSnapshot | null {
+    return file ? { file: cloneFile(file), mode } : null;
+  }
+
+  function filesEqual(left: LiteraryStudyFile, right: LiteraryStudyFile): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function resetComposition() {
+    composing = false;
+    compositionText = '';
+    suppressedCompositionValue = null;
+    if (suppressionTimer !== null) window.clearTimeout(suppressionTimer);
+    suppressionTimer = null;
+    if (capture) capture.value = '';
+  }
+
+  function mutate(next: LiteraryStudyFile, nextMode = mode, recordHistory = true) {
+    if (!file) return;
+    const changed = !filesEqual(file, next);
+    if (!changed) {
+      mode = nextMode;
+      focusCapture();
+      return;
+    }
+    if (recordHistory) {
+      const current = snapshot();
+      if (current) undoStack.push(current);
+      if (undoStack.length > 100) undoStack.shift();
+      redoStack.length = 0;
+    }
     file = next;
+    mode = nextMode;
     revision += 1;
     publishState();
   }
 
-  function handleInput(event: Event) {
+  function restoreHistory(from: EditorSnapshot[], to: EditorSnapshot[]) {
     if (!file) return;
-    const element = event.currentTarget as HTMLTextAreaElement;
-    const text = element.value;
+    const target = from.pop();
+    if (!target) return;
+    const current = snapshot();
+    if (current) to.push(current);
+    resetComposition();
+    file = cloneFile(target.file);
+    mode = target.mode;
+    revision += 1;
+    publishState();
+  }
+
+  function commitText(input: string, pasted = false) {
+    if (!file) return;
+    if (!input) return;
+    const result = applyDelimitedInput(file, input, mode, pasted);
+    mutate(result.file, result.mode);
+  }
+
+  function commitCapture(element: HTMLTextAreaElement) {
+    const input = element.value;
     element.value = '';
-    if (!text) return;
-    mutate(applyInput(file, text, mode, pastePending));
+    const pasted = pastePending;
     pastePending = false;
+    commitText(input, pasted);
+  }
+
+  function handleInput(event: InputEvent) {
+    const element = event.currentTarget as HTMLTextAreaElement;
+    if (event.isComposing || composing) {
+      compositionText = event.data ?? element.value;
+      syncCapturePosition();
+      return;
+    }
+    if (suppressedCompositionValue !== null) {
+      const value = element.value || event.data || '';
+      const duplicate = value === suppressedCompositionValue
+        || event.data === suppressedCompositionValue
+        || event.inputType === 'insertFromComposition';
+      suppressedCompositionValue = null;
+      if (suppressionTimer !== null) window.clearTimeout(suppressionTimer);
+      suppressionTimer = null;
+      if (duplicate) {
+        element.value = '';
+        return;
+      }
+    }
+    commitCapture(element);
+  }
+
+  function handleCompositionStart(event: CompositionEvent) {
+    composing = true;
+    compositionText = event.data ?? '';
+    suppressedCompositionValue = null;
+    syncCapturePosition();
+  }
+
+  function handleCompositionUpdate(event: CompositionEvent) {
+    compositionText = event.data ?? '';
+    syncCapturePosition();
+  }
+
+  function handleCompositionEnd(event: CompositionEvent) {
+    const element = event.currentTarget as HTMLTextAreaElement;
+    const committed = event.data ?? '';
+    composing = false;
+    compositionText = '';
+    element.value = '';
+    if (!committed) {
+      void revealCaret();
+      return;
+    }
+
+    // WebKit may emit a final non-composing input either immediately before or
+    // after compositionend. The composition event is the authoritative commit;
+    // suppress only a matching duplicate input from the same event turn.
+    suppressedCompositionValue = committed;
+    if (suppressionTimer !== null) window.clearTimeout(suppressionTimer);
+    suppressionTimer = window.setTimeout(() => {
+      suppressedCompositionValue = null;
+      suppressionTimer = null;
+    }, 0);
+    commitText(committed);
+  }
+
+  function deleteBackward(unit: DeleteUnit) {
+    if (!file) return;
+    mutate(applyDeleteBackward(file, mode, unit));
+  }
+
+  function typeNextSourceCharacter() {
+    if (!file || file.sourceCursor >= file.source.length) return;
+    const character = Array.from(file.source.slice(file.sourceCursor))[0];
+    if (!character) return;
+    mutate(applyInput(file, character, 'copy'), 'copy');
+  }
+
+  function handleBeforeInput(event: InputEvent) {
+    if (!file || composing || event.isComposing) return;
+    const units: Partial<Record<string, DeleteUnit>> = {
+      deleteContentBackward: 'character',
+      deleteWordBackward: 'word',
+      deleteSoftLineBackward: 'line',
+      deleteHardLineBackward: 'line',
+    };
+    const unit = units[event.inputType];
+    if (unit) {
+      event.preventDefault();
+      deleteBackward(unit);
+      return;
+    }
+    if (event.inputType === 'historyUndo') {
+      event.preventDefault();
+      restoreHistory(undoStack, redoStack);
+    } else if (event.inputType === 'historyRedo') {
+      event.preventDefault();
+      restoreHistory(redoStack, undoStack);
+    }
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!file || event.isComposing) return;
-    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === 'Enter') {
+    if (!file || composing || event.isComposing || event.keyCode === 229) return;
+    const primary = event.metaKey || event.ctrlKey;
+    const key = event.key.toLowerCase();
+    if (event.key === 'F6') {
+      event.preventDefault();
+      typeNextSourceCharacter();
+      return;
+    }
+    if (primary && event.shiftKey && event.key === 'Enter') {
       event.preventDefault();
       setMode(mode === 'copy' ? 'comment' : 'copy');
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+    if (primary && key === 's') {
       event.preventDefault();
       publishState(true);
       return;
     }
-    if (event.key === 'Backspace') {
+    if (primary && key === 'z') {
       event.preventDefault();
-      mutate(applyBackspace(file, mode));
+      restoreHistory(event.shiftKey ? redoStack : undoStack, event.shiftKey ? undoStack : redoStack);
+      return;
+    }
+    if (event.ctrlKey && !event.metaKey && key === 'y') {
+      event.preventDefault();
+      restoreHistory(redoStack, undoStack);
+      return;
+    }
+    const backwardDelete = event.key === 'Backspace'
+      || event.code === 'Backspace'
+      || (event.metaKey && event.key === 'Delete');
+    if (backwardDelete) {
+      event.preventDefault();
+      deleteBackward(event.metaKey ? 'line' : (event.altKey || event.ctrlKey ? 'word' : 'character'));
+      return;
+    }
+    if (event.ctrlKey && !event.metaKey && !event.altKey && ['h', 'w', 'u'].includes(key)) {
+      event.preventDefault();
+      deleteBackward(key === 'h' ? 'character' : (key === 'w' ? 'word' : 'line'));
+      return;
+    }
+    if (event.key === 'Escape' && mode === 'comment') {
+      event.preventDefault();
+      setMode('copy');
       return;
     }
     if (event.key === 'Enter') {
@@ -226,6 +433,9 @@
       revision = Number.isInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
       setLocale(data.locale);
       mode = 'copy';
+      resetComposition();
+      undoStack.length = 0;
+      redoStack.length = 0;
       error = '';
       saveState = 'idle';
       void tick().then(() => {
@@ -239,7 +449,7 @@
   }
 </script>
 
-<svelte:window onmessage={handleMessage} />
+<svelte:window onmessage={handleMessage} onresize={syncCapturePosition} />
 
 <div class="app-shell">
   {#if file}
@@ -256,25 +466,19 @@
       </div>
 
       <div class="toolbar">
-        <div class="mode-switch" aria-label={text('copyMode')}>
-          <button
-            class:active={mode === 'copy'}
-            title={text('copyMode')}
-            aria-pressed={mode === 'copy'}
-            onclick={() => setMode('copy')}
-          >
-            <Keyboard size={14} />
-            <span>{text('copyMode')}</span>
-          </button>
-          <button
-            class:active={mode === 'comment'}
-            title={text('commentShortcut')}
-            aria-pressed={mode === 'comment'}
-            onclick={() => setMode('comment')}
-          >
-            <MessageSquareText size={14} />
-            <span>{text('commentMode')}</span>
-          </button>
+        <div
+          class="comment-status"
+          class:active={mode === 'comment'}
+          title={`${text('commentShortcut')} · ${text('autoTypeShortcut')}`}
+          aria-live="polite"
+        >
+          <MessageSquareText size={14} />
+          {#if mode === 'comment'}
+            <strong>{text('commentActive')}</strong>
+            <span>{text('commentEndHint')}</span>
+          {:else}
+            <span>{text('commentHint')}</span>
+          {/if}
         </div>
 
         <div class="chapter-nav">
@@ -301,16 +505,24 @@
       <div style:width={`${progress}%`}></div>
     </div>
 
-    <!-- The hidden textarea owns IME and paste input; the document below is
-         immutable source plus inline decorations, so offsets never drift. -->
+    <!-- The transparent textarea owns native keyboard and IME events. It stays
+         on top of the rendered caret so the system candidate window opens at
+         the writing position instead of at the corner of the app. -->
     <textarea
       class="input-capture"
       bind:this={capture}
+      style:left={`${captureLeft}px`}
+      style:top={`${captureTop}px`}
+      style:height={`${captureHeight}px`}
       aria-label={mode === 'comment' ? text('inputComment') : text('inputSource')}
       autocomplete="off"
       autocapitalize="off"
       spellcheck="false"
+      onbeforeinput={handleBeforeInput}
       oninput={handleInput}
+      oncompositionstart={handleCompositionStart}
+      oncompositionupdate={handleCompositionUpdate}
+      oncompositionend={handleCompositionEnd}
       onkeydown={handleKeydown}
       onpaste={() => { pastePending = true; }}
     ></textarea>
@@ -318,25 +530,19 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <main onclick={focusCapture}>
+    <main onclick={focusCapture} onscroll={syncCapturePosition}>
       <article class:comment-mode={mode === 'comment'}>
-        {#each pieces as piece}
-          {#if piece.type === 'source'}
-            <span class:copied={piece.copied} class:pending={!piece.copied}>{piece.text}</span>
-          {:else if piece.type === 'insertion'}
-            <span
-              class:comment={piece.insertion.kind === 'comment'}
-              class:mistake={piece.insertion.kind === 'mistake'}
-            >{piece.insertion.text}</span>
-          {:else}
-            <span bind:this={caret} class="typing-caret" class:comment-caret={mode === 'comment'}></span>
-          {/if}
-        {/each}
+        <!-- Keep the inline pieces adjacent. Literal formatting whitespace
+             here becomes a visible gap at the insertion point under
+             `white-space: pre-wrap`, including around IME pre-edit text. -->
+        {#each pieces as piece}{#if piece.type === 'source'}<span class:copied={piece.copied} class:pending={!piece.copied}>{piece.text}</span>{:else if piece.type === 'insertion'}<span class:comment={piece.insertion.kind === 'comment'} class:mistake={piece.insertion.kind === 'mistake'}>{piece.insertion.text}</span>{:else}<span bind:this={caret} class="typing-caret" class:comment-caret={mode === 'comment'} class:composing></span>{#if compositionText}<span class="composition-preedit" class:comment-preedit={mode === 'comment'}>{compositionText}</span>{/if}{/if}{/each}
       </article>
     </main>
 
     <footer>
-      <span>{Math.round(progress)}%</span>
+      <span class="progress-status" title={text('autoTypeShortcut')}>
+        {Math.round(progress)}% · {text('autoTypeHint')}
+      </span>
       <span class="chapter-stats">
         {copiedCharacters} {text('copied')} ·
         {file.stats.mistakes} {text('mistakes')} ·
@@ -420,7 +626,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .toolbar, .chapter-nav, .mode-switch {
+  .toolbar, .chapter-nav, .comment-status {
     display: flex;
     align-items: center;
   }
@@ -428,30 +634,23 @@
     flex: 0 0 auto;
     gap: 13px;
   }
-  .mode-switch {
+  .comment-status {
     height: 30px;
-    padding: 2px;
+    gap: 6px;
+    padding: 0 9px;
+    color: var(--novelist-text-secondary, #666);
     background: var(--novelist-bg-secondary, #f5f5f5);
     border: 1px solid var(--novelist-border, #e2e2e2);
     border-radius: 6px;
-  }
-  .mode-switch button {
-    height: 24px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 0 9px;
-    color: var(--novelist-text-secondary, #666);
-    background: transparent;
-    border: 0;
-    border-radius: 4px;
     font-size: 0.72rem;
-    cursor: pointer;
   }
-  .mode-switch button.active {
-    color: var(--novelist-accent, #2f6fce);
-    background: var(--novelist-bg, #fff);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.07);
+  .comment-status.active {
+    color: #2d6f9f;
+    background: color-mix(in srgb, #d8efff 62%, var(--novelist-bg, #fff));
+    border-color: color-mix(in srgb, #87bee3 52%, var(--novelist-border, #e2e2e2));
+  }
+  .comment-status strong {
+    font-weight: 650;
   }
   .chapter-nav {
     gap: 4px;
@@ -496,11 +695,22 @@
   }
   .input-capture {
     position: fixed;
-    left: -10000px;
-    top: 0;
-    width: 1px;
-    height: 1px;
+    z-index: 0;
+    width: 2px;
+    min-height: 20px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    color: transparent;
+    caret-color: transparent;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
     opacity: 0;
+    pointer-events: none;
+    resize: none;
+    font: inherit;
+    line-height: 1;
   }
   main {
     min-height: 0;
@@ -527,11 +737,13 @@
     color: var(--novelist-text-tertiary, #b2b2b2);
   }
   .comment {
-    color: var(--novelist-accent, #2f6fce);
-    background: color-mix(in srgb, var(--novelist-accent, #2f6fce) 10%, transparent);
+    color: color-mix(in srgb, #2773a5 88%, var(--novelist-text, #252525));
+    background: color-mix(in srgb, #cceaff 58%, var(--novelist-bg, #fff));
+    border-bottom: 1px solid color-mix(in srgb, #83bee5 55%, transparent);
+    border-radius: 3px;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
-    padding: 0 2px;
+    padding: 1px 3px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
   .mistake {
@@ -550,7 +762,21 @@
   }
   .typing-caret.comment-caret {
     width: 2px;
-    background: var(--novelist-accent, #2f6fce);
+    background: #3c88b9;
+  }
+  .typing-caret.composing {
+    animation: none;
+  }
+  .composition-preedit {
+    color: var(--novelist-text, #252525);
+    background: color-mix(in srgb, #cceaff 30%, transparent);
+    text-decoration: underline solid #6faed6;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+  .composition-preedit.comment-preedit {
+    color: #2d6f9f;
+    background: color-mix(in srgb, #cceaff 58%, var(--novelist-bg, #fff));
   }
   footer {
     min-height: 27px;
@@ -568,6 +794,9 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+  .progress-status {
+    white-space: nowrap;
   }
   .chapter-stats {
     min-width: 0;
@@ -594,8 +823,7 @@
   @media (max-width: 680px) {
     header { padding: 8px 10px; }
     .chapter-heading p { display: none; }
-    .mode-switch button span { display: none; }
-    .mode-switch button { width: 28px; justify-content: center; padding: 0; }
+    .comment-status > span:last-child { display: none; }
     .toolbar { gap: 6px; }
     article {
       width: calc(100% - 30px);

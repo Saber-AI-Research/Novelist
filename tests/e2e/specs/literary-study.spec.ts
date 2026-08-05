@@ -16,7 +16,7 @@ const PROJECT_CONFIG: ProjectConfig = {
 };
 
 const OVERVIEW: LiteraryStudyOverview = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   sourcePath: '/mock/books/analects.txt',
   title: 'The Analects',
   author: 'Confucius',
@@ -28,6 +28,11 @@ const OVERVIEW: LiteraryStudyOverview = {
   mistakes: 2,
   pasted: 0,
   resumeChapterPath: '学习内容/Chapter Two.litstudy',
+  importOptions: {
+    directoryMode: 'by-volume',
+    numberingMode: 'global',
+    cleanChapterTitles: true,
+  },
   chapters: [
     {
       id: 'chapter-0001',
@@ -71,6 +76,10 @@ test.describe('Literary commentary projects', () => {
     await app.waitForTimeout(250);
     expect(browserErrors).toEqual([]);
 
+    const literaryCategory = app.getByTestId('new-project-category-literary-study');
+    await expect(literaryCategory).toBeVisible();
+    await literaryCategory.click();
+
     const literaryTemplate = app.getByTestId('new-project-template-literary-commentary');
     await expect(literaryTemplate).toBeVisible();
     await literaryTemplate.click();
@@ -80,6 +89,46 @@ test.describe('Literary commentary projects', () => {
     await expect(app.getByRole('heading', {
       name: 'Create Literary Commentary Project',
     })).toBeVisible();
+  });
+
+  test('keeps the import actions reachable below a bounded preview', async ({
+    app,
+    browserErrors,
+  }) => {
+    await app.setViewportSize({ width: 900, height: 600 });
+    await app.getByRole('button', { name: 'New Project', exact: true }).click();
+    await app.getByTestId('new-project-category-literary-study').click();
+    await app.getByTestId('new-project-template-literary-commentary').click();
+    await app.getByRole('button', { name: 'Choose Book', exact: true }).click();
+
+    await app.evaluate(() => {
+      const tauri = (window as any).__TAURI_INTERNALS__;
+      const invoke = tauri.invoke.bind(tauri);
+      tauri.invoke = (command: string, args: unknown) => command === 'plugin:dialog|open'
+        ? Promise.resolve('/mock/books/demo.txt')
+        : invoke(command, args);
+    });
+    await app.getByRole('button', { name: 'Choose EPUB / TXT', exact: true }).click();
+
+    const dialog = app.getByTestId('literary-import-dialog');
+    const footer = app.getByTestId('literary-import-footer');
+    const submit = app.getByTestId('literary-import-submit');
+    await expect(app.getByRole('textbox', { name: 'Chapter preview' })).toBeVisible();
+    const directoryMode = app.getByTestId('literary-directory-mode');
+    const numberingMode = app.getByTestId('literary-numbering-mode');
+    await expect(directoryMode).toHaveValue('by-volume');
+    await expect(numberingMode).toHaveValue('global');
+    await numberingMode.selectOption('per-volume');
+    await directoryMode.selectOption('flat');
+    await expect(numberingMode).toBeDisabled();
+    await expect(numberingMode).toHaveValue('global');
+    await directoryMode.selectOption('by-volume');
+    await expect(numberingMode).toBeEnabled();
+    await expect(dialog).toBeInViewport();
+    await expect(footer).toBeInViewport();
+    await expect(submit).toBeVisible();
+    await expect(submit).toBeInViewport();
+    expect(browserErrors).toEqual([]);
   });
 
   test('auto-enables the editor and exposes progress plus book replacement in the side panel', async ({

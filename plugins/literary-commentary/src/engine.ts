@@ -1,5 +1,6 @@
 export type LiteraryMode = 'copy' | 'comment';
 export type InsertionKind = 'comment' | 'mistake';
+export type DeleteUnit = 'character' | 'word' | 'line';
 
 export interface LiteraryInsertion {
   id: string;
@@ -64,7 +65,7 @@ export function normalizeStudyFile(value: unknown): LiteraryStudyFile {
         }))
     : [];
 
-  return {
+  const normalized: LiteraryStudyFile = {
     schemaVersion: Number(raw.schemaVersion) || 1,
     book: {
       title: String(raw.book.title ?? ''),
@@ -85,7 +86,7 @@ export function normalizeStudyFile(value: unknown): LiteraryStudyFile {
     insertions,
     stats: {
       correct: countSourceCharacters(raw.source, cursor),
-      mistakes: Number(raw.stats?.mistakes) || 0,
+      mistakes: countInsertionCharacters(insertions, 'mistake'),
       pasted: Number(raw.stats?.pasted) || 0,
       startedAt: raw.stats?.startedAt ?? null,
       completedAt: cursor >= raw.source.length
@@ -93,6 +94,7 @@ export function normalizeStudyFile(value: unknown): LiteraryStudyFile {
         : null,
     },
   };
+  return normalized;
 }
 
 export function applyInput(
@@ -132,25 +134,100 @@ export function applyInput(
   return finishMutation(next, now);
 }
 
+/**
+ * Apply normal transcription plus inline comments from one committed input
+ * batch. Full-width brackets are control characters unless the source itself
+ * expects an opening bracket at the current cursor:
+ *
+ *   source text【inline comment】more source text
+ *
+ * This function only receives committed text. IME composition guarding lives
+ * in App.svelte so pinyin/pre-edit updates never reach the document model.
+ */
+export function applyDelimitedInput(
+  file: LiteraryStudyFile,
+  input: string,
+  initialMode: LiteraryMode,
+  pasted = false,
+  now = new Date().toISOString(),
+): { file: LiteraryStudyFile; mode: LiteraryMode } {
+  let next = file;
+  let mode = initialMode;
+  let buffer = '';
+
+  const flush = () => {
+    if (!buffer) return;
+    next = applyInput(next, buffer, mode, pasted, now);
+    buffer = '';
+  };
+
+  for (const character of input) {
+    if (mode === 'copy' && character === '【') {
+      flush();
+      // A real opening bracket in the source must remain transcribable. The
+      // keyboard shortcut can still force comment mode at this position.
+      if (!next.source.startsWith(character, next.sourceCursor)) {
+        mode = 'comment';
+        continue;
+      }
+    } else if (mode === 'comment' && character === '】') {
+      flush();
+      mode = 'copy';
+      continue;
+    }
+    buffer += character;
+  }
+  flush();
+
+  return { file: next, mode };
+}
+
 export function applyBackspace(
   file: LiteraryStudyFile,
   mode: LiteraryMode,
   now = new Date().toISOString(),
 ): LiteraryStudyFile {
-  const next = cloneFile(file);
-  const preferredKind: InsertionKind = mode === 'comment' ? 'comment' : 'mistake';
-  const index = findLatestInsertion(next, preferredKind, next.sourceCursor);
-  if (index >= 0) {
-    const insertion = next.insertions[index];
-    insertion.text = removeLastCodePoint(insertion.text);
-    if (!insertion.text) next.insertions.splice(index, 1);
-    return finishMutation(next, now);
-  }
+  return applyDeleteBackward(file, mode, 'character', now);
+}
 
-  if (mode === 'copy' && next.sourceCursor > 0) {
-    const prefix = next.source.slice(0, next.sourceCursor);
-    const last = Array.from(prefix).at(-1);
-    if (last) next.sourceCursor -= last.length;
+/**
+ * Delete from the rendered tail just like a normal editor. Inline comments
+ * and mistakes at the caret are part of that tail regardless of the current
+ * input mode, so leaving comment mode never makes a comment undeletable.
+ */
+export function applyDeleteBackward(
+  file: LiteraryStudyFile,
+  _mode: LiteraryMode,
+  unit: DeleteUnit,
+  now = new Date().toISOString(),
+): LiteraryStudyFile {
+  const next = cloneFile(file);
+  if (unit === 'character') {
+    removePreviousCharacter(next);
+  } else if (unit === 'line') {
+    let previous = peekPrevious(next)?.character ?? null;
+    while (previous && previous !== '\n') {
+      removePreviousCharacter(next);
+      previous = peekPrevious(next)?.character ?? null;
+    }
+  } else {
+    let previous = peekPrevious(next);
+    const segment = previous?.segment;
+    while (previous && previous.segment === segment && isWhitespace(previous.character)) {
+      removePreviousCharacter(next);
+      previous = peekPrevious(next);
+    }
+    if (previous && previous.segment === segment) {
+      const category = deletionCategory(previous.character);
+      while (
+        previous
+        && previous.segment === segment
+        && deletionCategory(previous.character) === category
+      ) {
+        removePreviousCharacter(next);
+        previous = peekPrevious(next);
+      }
+    }
   }
   return finishMutation(next, now);
 }
@@ -192,9 +269,9 @@ function appendInsertion(
   kind: InsertionKind,
   text: string,
 ): void {
-  const existingIndex = findLatestInsertion(file, kind, file.sourceCursor);
-  if (existingIndex >= 0) {
-    file.insertions[existingIndex].text += text;
+  const tailIndex = findLatestInsertionAtOffset(file, file.sourceCursor);
+  if (tailIndex >= 0 && file.insertions[tailIndex].kind === kind) {
+    file.insertions[tailIndex].text += text;
     return;
   }
   const nextOrder = file.insertions.reduce((max, insertion) => Math.max(max, insertion.order), -1) + 1;
@@ -207,17 +284,15 @@ function appendInsertion(
   });
 }
 
-function findLatestInsertion(
+function findLatestInsertionAtOffset(
   file: LiteraryStudyFile,
-  kind: InsertionKind,
   sourceOffset: number,
 ): number {
   let found = -1;
   let order = -Infinity;
   file.insertions.forEach((insertion, index) => {
     if (
-      insertion.kind === kind
-      && insertion.sourceOffset === sourceOffset
+      insertion.sourceOffset === sourceOffset
       && insertion.order >= order
     ) {
       found = index;
@@ -230,8 +305,58 @@ function findLatestInsertion(
 function finishMutation(file: LiteraryStudyFile, now: string): LiteraryStudyFile {
   file.sourceCursor = clampOffset(file.source, file.sourceCursor);
   file.stats.correct = countSourceCharacters(file.source, file.sourceCursor);
+  file.stats.mistakes = countInsertionCharacters(file.insertions, 'mistake');
   file.stats.completedAt = file.sourceCursor >= file.source.length ? now : null;
   return file;
+}
+
+function peekPrevious(
+  file: LiteraryStudyFile,
+): { character: string; segment: string } | null {
+  const insertionIndex = findLatestInsertionAtOffset(file, file.sourceCursor);
+  if (insertionIndex >= 0) {
+    const insertion = file.insertions[insertionIndex];
+    const character = Array.from(insertion.text).at(-1);
+    return character ? { character, segment: `insertion:${insertion.id}` } : null;
+  }
+  if (file.sourceCursor <= 0) return null;
+  const character = Array.from(file.source.slice(0, file.sourceCursor)).at(-1);
+  return character ? { character, segment: 'source' } : null;
+}
+
+function removePreviousCharacter(file: LiteraryStudyFile): string | null {
+  const insertionIndex = findLatestInsertionAtOffset(file, file.sourceCursor);
+  if (insertionIndex >= 0) {
+    const insertion = file.insertions[insertionIndex];
+    const characters = Array.from(insertion.text);
+    const removed = characters.pop() ?? null;
+    insertion.text = characters.join('');
+    if (!insertion.text) file.insertions.splice(insertionIndex, 1);
+    return removed;
+  }
+
+  if (file.sourceCursor <= 0) return null;
+  const prefix = file.source.slice(0, file.sourceCursor);
+  const removed = Array.from(prefix).at(-1) ?? null;
+  if (removed) file.sourceCursor -= removed.length;
+  return removed;
+}
+
+function deletionCategory(character: string): 'word' | 'punctuation' {
+  return /[\p{L}\p{M}\p{N}_]/u.test(character) ? 'word' : 'punctuation';
+}
+
+function isWhitespace(character: string): boolean {
+  return /\s/u.test(character);
+}
+
+function countInsertionCharacters(
+  insertions: LiteraryInsertion[],
+  kind: InsertionKind,
+): number {
+  return insertions
+    .filter((insertion) => insertion.kind === kind)
+    .reduce((total, insertion) => total + Array.from(insertion.text).length, 0);
 }
 
 function cloneFile(file: LiteraryStudyFile): LiteraryStudyFile {
@@ -255,12 +380,6 @@ function clampOffset(source: string, value: number): number {
     return bounded - 1;
   }
   return bounded;
-}
-
-function removeLastCodePoint(value: string): string {
-  const characters = Array.from(value);
-  characters.pop();
-  return characters.join('');
 }
 
 function countSourceCharacters(source: string, cursor: number): number {

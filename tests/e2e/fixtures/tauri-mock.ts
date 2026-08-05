@@ -36,7 +36,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       let projectDir = ${JSON.stringify(config.projectDir)};
       let projectConfig = ${JSON.stringify(config.projectConfig)};
       const defaultLiteraryOverview = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         sourcePath: '/mock/books/demo.txt',
         title: 'Demo Book',
         author: 'Demo Author',
@@ -48,6 +48,11 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         mistakes: 1,
         pasted: 0,
         resumeChapterPath: '学习内容/第一章.litstudy',
+        importOptions: {
+          directoryMode: 'by-volume',
+          numberingMode: 'global',
+          cleanChapterTitles: true,
+        },
         chapters: [
           {
             id: 'chapter-0001',
@@ -285,7 +290,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           ui: { type: 'file-handler', entry: 'index.html', label: 'Kanban', file_extensions: ['.kanban'] },
         },
         {
-          id: 'literary-commentary', name: 'Literary Commentary', version: '0.2.0',
+          id: 'literary-commentary', name: 'Literary Commentary', version: '0.2.5',
           description: 'Transcription and inline literary commentary',
           author: 'Novelist Team', enabled: false, builtin: true,
           path: '/mock/home/.novelist/plugins/literary-commentary',

@@ -22,6 +22,8 @@
   };
 
   type ChapterDraft = Omit<SourceChapterDraft, 'volume'> & { volume: string };
+  type DirectoryMode = 'by-volume' | 'flat';
+  type NumberingMode = 'global' | 'per-volume';
 
   type Inspection = {
     title: string;
@@ -64,6 +66,9 @@
   let inspecting = $state(false);
   let creating = $state(false);
   let confirmingReplace = $state(false);
+  let directoryMode = $state<DirectoryMode>('by-volume');
+  let numberingMode = $state<NumberingMode>('global');
+  let cleanChapterTitles = $state(true);
   let error = $state('');
   let preview = $state<HTMLTextAreaElement | null>(null);
 
@@ -86,6 +91,13 @@
         parentDir = `${home.replace(/[\\/]$/, '')}/Documents`;
       } catch {
         parentDir = '';
+      }
+    } else if (projectPath) {
+      const result = await commands.readLiteraryStudyOverview(projectPath);
+      if (result.status === 'ok') {
+        directoryMode = result.data.importOptions.directoryMode ?? 'by-volume';
+        numberingMode = result.data.importOptions.numberingMode ?? 'global';
+        cleanChapterTitles = result.data.importOptions.cleanChapterTitles ?? true;
       }
     }
   });
@@ -184,6 +196,11 @@
       title: chapter.title.trim(),
       text: chapter.text.trim(),
     }));
+    const importOptions = {
+      directoryMode,
+      numberingMode: directoryMode === 'flat' ? 'global' as const : numberingMode,
+      cleanChapterTitles,
+    };
 
     if (mode === 'replace') {
       let prepared: boolean | undefined;
@@ -211,6 +228,7 @@
         author: author.trim() || null,
         language: language.trim() || null,
         chapters: normalizedChapters,
+        importOptions,
       });
       if (result.status === 'ok') {
         try {
@@ -231,6 +249,7 @@
         author: author.trim() || null,
         language: language.trim() || null,
         chapters: normalizedChapters,
+        importOptions,
       });
       if (result.status === 'ok') {
         try {
@@ -265,7 +284,12 @@
 <div class="backdrop" onclick={onClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog" data-testid="literary-import-dialog" onclick={(event) => event.stopPropagation()}>
+  <div
+    class="dialog"
+    class:has-preview={!!inspection}
+    data-testid="literary-import-dialog"
+    onclick={(event) => event.stopPropagation()}
+  >
     <header>
       <h2>{t(mode === 'replace' ? 'literaryImport.replaceTitle' : 'literaryImport.title')}</h2>
       <button class="icon-button" title={t('newProject.cancel')} aria-label={t('newProject.cancel')} onclick={onClose}>
@@ -306,6 +330,37 @@
             </div>
           </label>
         {/if}
+      </div>
+
+      <div class="import-options" data-testid="literary-import-options">
+        <label>
+          <span>{t('literaryImport.directoryMode')}</span>
+          <select
+            bind:value={directoryMode}
+            data-testid="literary-directory-mode"
+            onchange={() => {
+              if (directoryMode === 'flat') numberingMode = 'global';
+            }}
+          >
+            <option value="by-volume">{t('literaryImport.directoryByVolume')}</option>
+            <option value="flat">{t('literaryImport.directoryFlat')}</option>
+          </select>
+        </label>
+        <label>
+          <span>{t('literaryImport.numberingMode')}</span>
+          <select
+            bind:value={numberingMode}
+            data-testid="literary-numbering-mode"
+            disabled={directoryMode === 'flat'}
+          >
+            <option value="global">{t('literaryImport.numberingGlobal')}</option>
+            <option value="per-volume">{t('literaryImport.numberingPerVolume')}</option>
+          </select>
+        </label>
+        <label class="clean-titles">
+          <input type="checkbox" bind:checked={cleanChapterTitles} />
+          <span>{t('literaryImport.cleanChapterTitles')}</span>
+        </label>
       </div>
 
       <main>
@@ -357,7 +412,7 @@
       </div>
     {/if}
 
-    <footer>
+    <footer data-testid="literary-import-footer">
       <div class:error={!!error} class:confirmation={confirmingReplace} role="alert">
         {error || (confirmingReplace ? t('literaryImport.replaceConfirm') : '')}
       </div>
@@ -366,7 +421,12 @@
           class="secondary-button"
           onclick={() => confirmingReplace ? confirmingReplace = false : onClose()}
         >{confirmingReplace ? t('literaryImport.back') : t('newProject.cancel')}</button>
-        <button class="primary-button" disabled={!canSubmit || creating} onclick={submitImport}>
+        <button
+          class="primary-button"
+          data-testid="literary-import-submit"
+          disabled={!canSubmit || creating}
+          onclick={submitImport}
+        >
           {creating
             ? t(mode === 'replace' ? 'literaryImport.replacing' : 'newProject.creating')
             : mode === 'replace'
@@ -386,12 +446,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: 16px;
     background: rgba(0, 0, 0, 0.42);
   }
   .dialog {
-    width: min(1080px, 96vw);
-    height: min(760px, 92vh);
+    width: min(960px, calc(100vw - 32px));
+    max-height: calc(100dvh - 32px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -401,7 +461,11 @@
     border-radius: 8px;
     box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
   }
+  .dialog.has-preview {
+    height: min(640px, calc(100dvh - 32px));
+  }
   header, .source-bar, footer {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     padding: 12px 16px;
@@ -478,6 +542,7 @@
     white-space: nowrap;
   }
   .metadata {
+    flex: 0 0 auto;
     display: grid;
     grid-template-columns: minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(160px, 1fr) minmax(260px, 1.5fr);
     gap: 12px;
@@ -486,6 +551,48 @@
   }
   .metadata.replace {
     grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr);
+  }
+  .import-options {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: end;
+    gap: 14px;
+    padding: 9px 16px;
+    background: color-mix(in srgb, var(--novelist-bg-secondary) 52%, transparent);
+    border-bottom: 1px solid var(--novelist-border);
+  }
+  .import-options label:not(.clean-titles) {
+    min-width: 170px;
+  }
+  .import-options label > span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--novelist-text-secondary);
+    font-size: 0.68rem;
+  }
+  .import-options select {
+    width: 100%;
+    height: 30px;
+    box-sizing: border-box;
+    padding: 0 8px;
+    color: var(--novelist-text);
+    background: var(--novelist-bg);
+    border: 1px solid var(--novelist-border);
+    border-radius: 5px;
+  }
+  .clean-titles {
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--novelist-text-secondary);
+    font-size: 0.72rem;
+  }
+  .clean-titles input {
+    accent-color: var(--novelist-accent);
+  }
+  .clean-titles > span {
+    margin: 0;
   }
   .metadata label {
     min-width: 0;
@@ -520,6 +627,7 @@
     flex: 1;
     display: grid;
     grid-template-columns: 260px minmax(0, 1fr);
+    overflow: hidden;
   }
   aside {
     min-height: 0;
@@ -601,6 +709,7 @@
     line-height: 1.9;
   }
   .empty-state {
+    min-height: 240px;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -611,8 +720,13 @@
     font-size: 0.82rem;
   }
   footer {
+    position: relative;
+    z-index: 1;
     justify-content: space-between;
     gap: 16px;
+    min-height: 56px;
+    box-sizing: border-box;
+    background: var(--novelist-bg);
     border-top: 1px solid var(--novelist-border);
     border-bottom: 0;
   }
@@ -627,14 +741,32 @@
     font-size: 0.76rem;
   }
   .actions {
+    flex: 0 0 auto;
     display: flex;
     gap: 8px;
     margin-left: auto;
   }
   @media (max-width: 800px) {
     .backdrop { padding: 8px; }
-    .dialog { width: 100%; height: 100%; }
+    .dialog { width: 100%; max-height: calc(100dvh - 16px); }
+    .dialog.has-preview { height: calc(100dvh - 16px); }
     .metadata { grid-template-columns: 1fr 1fr; }
     main { grid-template-columns: 190px minmax(0, 1fr); }
+  }
+  @media (max-width: 620px) {
+    main { grid-template-columns: 150px minmax(0, 1fr); }
+    .chapter-fields { grid-template-columns: minmax(120px, 1fr) 30px 30px 30px; }
+    .volume-input { display: none; }
+    footer { align-items: stretch; flex-direction: column; gap: 8px; }
+    .actions { width: 100%; }
+    .actions button { flex: 1; }
+    .import-options { align-items: stretch; flex-direction: column; gap: 7px; }
+    .import-options label:not(.clean-titles) { min-width: 0; }
+  }
+  @media (max-height: 680px) {
+    header, .source-bar, footer { padding-block: 9px; }
+    .metadata { padding-block: 9px; }
+    .chapter-editor { padding: 9px; }
+    textarea { padding: 14px 18px; }
   }
 </style>

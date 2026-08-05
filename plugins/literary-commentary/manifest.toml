@@ -1,7 +1,7 @@
 [plugin]
 id = "literary-commentary"
 name = "文学评注"
-version = "0.2.0"
+version = "0.2.5"
 description = "逐字抄写长文本，并在原文中插入行内评注与误字标记"
 author = "Novelist Team"
 permissions = ["read", "write", "ui"]

@@ -331,6 +331,23 @@ tokio task that filters missing paths and emits `recent-projects-updated`
 changes. Welcome screen wires a pin button per row; the Tauri mock
 mirrors the same sort for browser-mode E2E.
 
+## Per-project workspace restoration
+
+`app/lib/services/project-workspace-state.ts` stores lightweight UI session
+state in versioned local storage, keyed by the normalized project directory.
+Only safe project-relative paths are persisted: the set of visibly expanded
+sidebar folders and the last active file. `projectStore.setProject` restores
+folders in parent-before-child order, and `App.svelte` reopens the last file
+only after the target project and watcher have committed. A missing folder or
+file is pruned instead of blocking project open.
+
+Rename and move flows retarget the saved path and all descendants through the
+same `tabsStore.retargetOpenPath*` handoff used by live tabs. Successful sidebar
+deletion removes the corresponding workspace branch. Collapsing a folder drops
+its persisted descendant expansion entries, preserving the visible tree shape
+on the next launch. The state is UI-local rather than project content, so it
+does not alter `.novelist/project.toml` or travel with a shared manuscript.
+
 ## Portable mode path resolution
 
 Windows ships an optional truly-portable zip distribution. The marker file

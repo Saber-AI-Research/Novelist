@@ -19,7 +19,7 @@ const MAX_EPUB_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const LITERARY_PLUGIN_ID: &str = "literary-commentary";
 const LITERARY_CONTENT_ROOT: &str = "学习内容";
 const LITERARY_METADATA_FILE: &str = "literary-study.json";
-const LITERARY_SCHEMA_VERSION: u32 = 2;
+const LITERARY_SCHEMA_VERSION: u32 = 3;
 const MAX_LITERARY_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LITERARY_CHAPTER_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_LITERARY_CHAPTERS: usize = 4096;
@@ -31,6 +31,47 @@ pub struct LiteraryChapterDraft {
     pub volume: Option<String>,
     pub title: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiteraryDirectoryMode {
+    #[default]
+    ByVolume,
+    Flat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiteraryNumberingMode {
+    #[default]
+    Global,
+    PerVolume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteraryImportOptions {
+    #[serde(default)]
+    pub directory_mode: LiteraryDirectoryMode,
+    #[serde(default)]
+    pub numbering_mode: LiteraryNumberingMode,
+    #[serde(default = "default_true")]
+    pub clean_chapter_titles: bool,
+}
+
+impl Default for LiteraryImportOptions {
+    fn default() -> Self {
+        Self {
+            directory_mode: LiteraryDirectoryMode::ByVolume,
+            numbering_mode: LiteraryNumberingMode::Global,
+            clean_chapter_titles: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
@@ -53,6 +94,8 @@ pub struct CreateLiteraryStudyProjectRequest {
     pub author: Option<String>,
     pub language: Option<String>,
     pub chapters: Vec<LiteraryChapterDraft>,
+    #[serde(default)]
+    pub import_options: LiteraryImportOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
@@ -72,6 +115,8 @@ pub struct ReplaceLiteraryStudyBookRequest {
     pub author: Option<String>,
     pub language: Option<String>,
     pub chapters: Vec<LiteraryChapterDraft>,
+    #[serde(default)]
+    pub import_options: LiteraryImportOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Type, PartialEq, Eq)]
@@ -115,6 +160,7 @@ pub struct LiteraryStudyOverview {
     pub pasted: usize,
     pub resume_chapter_path: Option<String>,
     pub chapters: Vec<LiteraryChapterSummary>,
+    pub import_options: LiteraryImportOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +205,8 @@ struct LiteraryProjectMetadata {
     content_root: Option<String>,
     #[serde(default)]
     chapter_paths: Vec<String>,
+    #[serde(default)]
+    import_options: LiteraryImportOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1076,6 +1124,7 @@ fn replace_literary_study_book_inner(
         request.author.as_deref(),
         request.language.as_deref(),
         &request.chapters,
+        &request.import_options,
         Some(&snapshot.chapters),
     );
     let relative_paths = study_files
@@ -1148,6 +1197,7 @@ fn replace_literary_study_book_inner(
             chapter_count: study_files.len(),
             content_root: Some(LITERARY_CONTENT_ROOT.to_string()),
             chapter_paths: relative_paths.clone(),
+            import_options: request.import_options.clone(),
         };
 
         atomic_write_sync(&config_path, toml::to_string(&next_config)?.as_bytes())?;
@@ -1289,6 +1339,7 @@ fn build_literary_project(
         request.author.as_deref(),
         request.language.as_deref(),
         &request.chapters,
+        &request.import_options,
         None,
     );
     let relative_paths = study_files
@@ -1327,6 +1378,7 @@ fn build_literary_project(
             chapter_count: request.chapters.len(),
             content_root: Some(LITERARY_CONTENT_ROOT.to_string()),
             chapter_paths: relative_paths.clone(),
+            import_options: request.import_options.clone(),
         })?
         .as_bytes(),
     )?;
@@ -1339,9 +1391,10 @@ fn build_study_files(
     author: Option<&str>,
     language: Option<&str>,
     chapters: &[LiteraryChapterDraft],
+    import_options: &LiteraryImportOptions,
     existing: Option<&[(String, LiteraryStudyFile)]>,
 ) -> (Vec<(String, LiteraryStudyFile)>, usize) {
-    let relative_paths = chapter_relative_paths(chapters);
+    let relative_paths = chapter_relative_paths(chapters, import_options);
     let mut existing_by_label = HashMap::<(String, String), Vec<LiteraryStudyFile>>::new();
     if let Some(existing) = existing {
         for (_, study) in existing.iter().rev() {
@@ -1468,42 +1521,192 @@ fn preserve_compatible_progress(
         || replacement.stats.started_at.is_some()
 }
 
-fn chapter_relative_paths(chapters: &[LiteraryChapterDraft]) -> Vec<String> {
+fn chapter_relative_paths(
+    chapters: &[LiteraryChapterDraft],
+    options: &LiteraryImportOptions,
+) -> Vec<String> {
     let mut volume_numbers: HashMap<String, usize> = HashMap::new();
+    let mut chapter_numbers: HashMap<String, usize> = HashMap::new();
     let mut next_volume = 1_usize;
 
     chapters
         .iter()
         .enumerate()
         .map(|(index, chapter)| {
-            let filename = format!(
-                "{:04} {}.litstudy",
-                index + 1,
-                sanitize_path_component(chapter.title.trim())
-            );
-            let inner = if let Some(volume) = chapter
+            let volume = chapter
                 .volume
                 .as_deref()
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .filter(|value| !value.is_empty());
+            let chapter_number = if options.directory_mode == LiteraryDirectoryMode::ByVolume
+                && options.numbering_mode == LiteraryNumberingMode::PerVolume
             {
+                let key = volume.unwrap_or_default().to_string();
+                let counter = chapter_numbers.entry(key).or_default();
+                *counter += 1;
+                *counter
+            } else {
+                index + 1
+            };
+            let raw_filename_title = if options.clean_chapter_titles {
+                clean_structural_title(chapter.title.trim(), false)
+            } else {
+                chapter.title.trim().to_string()
+            };
+            let filename = if raw_filename_title.trim().is_empty() {
+                format!("{chapter_number:04}.litstudy")
+            } else {
+                format!(
+                    "{chapter_number:04} {}.litstudy",
+                    sanitize_path_component(&raw_filename_title)
+                )
+            };
+            let inner = if options.directory_mode == LiteraryDirectoryMode::Flat {
+                filename
+            } else if let Some(volume) = volume {
                 let number = *volume_numbers.entry(volume.to_string()).or_insert_with(|| {
                     let number = next_volume;
                     next_volume += 1;
                     number
                 });
-                format!(
-                    "{:02} {}/{}",
-                    number,
-                    sanitize_path_component(volume),
-                    filename
-                )
+                let cleaned_volume = if options.clean_chapter_titles {
+                    clean_structural_title(volume, true)
+                } else {
+                    volume.to_string()
+                };
+                let volume_title = if cleaned_volume.trim().is_empty() {
+                    sanitize_path_component(volume)
+                } else {
+                    sanitize_path_component(&cleaned_volume)
+                };
+                format!("{:02} {}/{}", number, volume_title, filename)
             } else {
-                format!("章节/{filename}")
+                filename
             };
             format!("{LITERARY_CONTENT_ROOT}/{inner}")
         })
         .collect()
+}
+
+fn clean_structural_title(value: &str, volume: bool) -> String {
+    let mut current = value.trim();
+    for _ in 0..3 {
+        let stripped = strip_chinese_structural_prefix(current, volume)
+            .or_else(|| strip_english_chapter_prefix(current, volume))
+            .or_else(|| strip_numeric_prefix(current));
+        let Some(next) = stripped else {
+            break;
+        };
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current.trim().to_string()
+}
+
+fn strip_chinese_structural_prefix(value: &str, volume: bool) -> Option<&str> {
+    let rest = value.strip_prefix('第')?;
+    let allowed_unit = |character: char| {
+        if volume {
+            matches!(character, '卷' | '部' | '篇' | '集')
+        } else {
+            matches!(character, '章' | '回' | '节' | '幕' | '篇' | '集')
+        }
+    };
+    for (offset, character) in rest.char_indices() {
+        if !allowed_unit(character) {
+            continue;
+        }
+        let ordinal = &rest[..offset];
+        if ordinal.is_empty()
+            || !ordinal.chars().all(|candidate| {
+                candidate.is_ascii_digit()
+                    || matches!(
+                        candidate,
+                        '零' | '〇'
+                            | '一'
+                            | '二'
+                            | '三'
+                            | '四'
+                            | '五'
+                            | '六'
+                            | '七'
+                            | '八'
+                            | '九'
+                            | '十'
+                            | '百'
+                            | '千'
+                            | '万'
+                            | '两'
+                    )
+            })
+        {
+            return None;
+        }
+        return Some(trim_structural_separators(
+            &rest[offset + character.len_utf8()..],
+        ));
+    }
+    None
+}
+
+fn strip_english_chapter_prefix(value: &str, volume: bool) -> Option<&str> {
+    let lower = value.to_ascii_lowercase();
+    let prefixes: &[&str] = if volume {
+        &["volume", "vol.", "vol", "book"]
+    } else {
+        &["chapter", "chap.", "chap", "ch.", "ch"]
+    };
+    let prefix = prefixes.iter().find(|prefix| lower.starts_with(**prefix))?;
+    let raw_after_prefix = &value[prefix.len()..];
+    if !prefix.ends_with('.')
+        && raw_after_prefix
+            .chars()
+            .next()
+            .is_some_and(|character| !character.is_whitespace() && !character.is_ascii_digit())
+    {
+        return None;
+    }
+    let after_prefix = raw_after_prefix.trim_start();
+    let ordinal_end = after_prefix
+        .char_indices()
+        .take_while(|(_, character)| {
+            character.is_ascii_digit()
+                || matches!(character.to_ascii_lowercase(), 'i' | 'v' | 'x' | 'l' | 'c')
+        })
+        .map(|(offset, character)| offset + character.len_utf8())
+        .last()?;
+    Some(trim_structural_separators(&after_prefix[ordinal_end..]))
+}
+
+fn strip_numeric_prefix(value: &str) -> Option<&str> {
+    let ordinal_end = value
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .map(|(offset, character)| offset + character.len_utf8())
+        .last()?;
+    let remainder = &value[ordinal_end..];
+    let separator = remainder.chars().next()?;
+    if !separator.is_whitespace()
+        && !matches!(
+            separator,
+            '.' | '．' | ':' | '：' | '-' | '—' | '_' | '、' | ')' | '）'
+        )
+    {
+        return None;
+    }
+    Some(trim_structural_separators(remainder))
+}
+
+fn trim_structural_separators(value: &str) -> &str {
+    value.trim_start_matches(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '.' | '．' | ':' | '：' | '-' | '—' | '_' | '、' | ')' | '）'
+            )
+    })
 }
 
 fn load_literary_project(project_dir: &str) -> Result<LiteraryProjectSnapshot, AppError> {
@@ -1671,6 +1874,7 @@ fn build_literary_overview(snapshot: &LiteraryProjectSnapshot) -> LiteraryStudyO
         pasted,
         resume_chapter_path,
         chapters,
+        import_options: snapshot.metadata.import_options.clone(),
     }
 }
 
@@ -1961,7 +2165,18 @@ fn sanitize_path_component(value: &str) -> String {
     if sanitized.is_empty() {
         "未命名".to_string()
     } else {
-        sanitized.chars().take(96).collect()
+        let mut bytes = 0_usize;
+        sanitized
+            .chars()
+            .take_while(|character| {
+                let next = bytes + character.len_utf8();
+                if next > 180 {
+                    return false;
+                }
+                bytes = next;
+                true
+            })
+            .collect()
     }
 }
 
@@ -1997,6 +2212,66 @@ mod tests {
     }
 
     #[test]
+    fn chapter_paths_clean_duplicate_numbers_and_respect_layout_options() {
+        let chapters = vec![
+            LiteraryChapterDraft {
+                id: "preface".to_string(),
+                volume: None,
+                title: "0001 前言".to_string(),
+                text: "序".to_string(),
+            },
+            LiteraryChapterDraft {
+                id: "c1".to_string(),
+                volume: Some("第一卷 白马出凉州".to_string()),
+                title: "0002 第一章 小二上酒".to_string(),
+                text: "正文".to_string(),
+            },
+            LiteraryChapterDraft {
+                id: "c2".to_string(),
+                volume: Some("第一卷 白马出凉州".to_string()),
+                title: "第二章 山雨欲来".to_string(),
+                text: "正文".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            chapter_relative_paths(&chapters, &LiteraryImportOptions::default()),
+            vec![
+                "学习内容/0001 前言.litstudy",
+                "学习内容/01 白马出凉州/0002 小二上酒.litstudy",
+                "学习内容/01 白马出凉州/0003 山雨欲来.litstudy",
+            ]
+        );
+
+        let per_volume = LiteraryImportOptions {
+            numbering_mode: LiteraryNumberingMode::PerVolume,
+            ..LiteraryImportOptions::default()
+        };
+        assert_eq!(
+            chapter_relative_paths(&chapters, &per_volume),
+            vec![
+                "学习内容/0001 前言.litstudy",
+                "学习内容/01 白马出凉州/0001 小二上酒.litstudy",
+                "学习内容/01 白马出凉州/0002 山雨欲来.litstudy",
+            ]
+        );
+
+        let flat = LiteraryImportOptions {
+            directory_mode: LiteraryDirectoryMode::Flat,
+            numbering_mode: LiteraryNumberingMode::PerVolume,
+            ..LiteraryImportOptions::default()
+        };
+        assert_eq!(
+            chapter_relative_paths(&chapters, &flat),
+            vec![
+                "学习内容/0001 前言.litstudy",
+                "学习内容/0002 小二上酒.litstudy",
+                "学习内容/0003 山雨欲来.litstudy",
+            ]
+        );
+    }
+
+    #[test]
     fn creates_project_with_linked_chapter_files() {
         let parent = tempfile::tempdir().unwrap();
         let request = CreateLiteraryStudyProjectRequest {
@@ -2006,6 +2281,7 @@ mod tests {
             title: "雪中悍刀行".to_string(),
             author: Some("烽火戏诸侯".to_string()),
             language: Some("zh-CN".to_string()),
+            import_options: LiteraryImportOptions::default(),
             chapters: vec![
                 LiteraryChapterDraft {
                     id: "c1".to_string(),
@@ -2024,13 +2300,13 @@ mod tests {
         let result = create_literary_study_project_inner(request).unwrap();
         assert_eq!(result.chapter_count, 2);
         let first = std::fs::read_to_string(result.first_chapter_path).unwrap();
-        assert!(first.contains("\"nextPath\": \"学习内容/01 白马出凉州/0002 第二章.litstudy\""));
+        assert!(first.contains("\"nextPath\": \"学习内容/01 白马出凉州/0002.litstudy\""));
         let overview = read_literary_study_overview_inner(&result.project_path).unwrap();
         assert_eq!(overview.chapter_count, 2);
         assert_eq!(overview.completed_chapters, 0);
         assert_eq!(
             overview.resume_chapter_path.as_deref(),
-            Some("学习内容/01 白马出凉州/0001 第一章.litstudy")
+            Some("学习内容/01 白马出凉州/0001.litstudy")
         );
     }
 
@@ -2044,6 +2320,7 @@ mod tests {
             title: "原书".to_string(),
             author: Some("作者".to_string()),
             language: Some("zh-CN".to_string()),
+            import_options: LiteraryImportOptions::default(),
             chapters: vec![LiteraryChapterDraft {
                 id: "c1".to_string(),
                 volume: None,
@@ -2077,6 +2354,7 @@ mod tests {
             title: "修订版".to_string(),
             author: Some("作者".to_string()),
             language: Some("zh-CN".to_string()),
+            import_options: LiteraryImportOptions::default(),
             chapters: vec![
                 LiteraryChapterDraft {
                     id: "new-c1".to_string(),
@@ -2117,6 +2395,7 @@ mod tests {
             title: "原书".to_string(),
             author: None,
             language: Some("zh-CN".to_string()),
+            import_options: LiteraryImportOptions::default(),
             chapters: vec![LiteraryChapterDraft {
                 id: "c1".to_string(),
                 volume: None,
@@ -2132,8 +2411,7 @@ mod tests {
         let original_metadata = std::fs::read(&metadata_path).unwrap();
         let collision = Path::new(&created.project_path)
             .join(LITERARY_CONTENT_ROOT)
-            .join("章节")
-            .join("0002 第二章.litstudy");
+            .join("0002.litstudy");
         std::fs::write(&collision, b"unmanaged").unwrap();
 
         let error = replace_literary_study_book_inner(ReplaceLiteraryStudyBookRequest {
@@ -2142,6 +2420,7 @@ mod tests {
             title: "新书".to_string(),
             author: None,
             language: Some("zh-CN".to_string()),
+            import_options: LiteraryImportOptions::default(),
             chapters: vec![
                 LiteraryChapterDraft {
                     id: "new-c1".to_string(),
@@ -2301,6 +2580,7 @@ mod tests {
             title: inspected.title,
             author: inspected.author,
             language: inspected.language,
+            import_options: LiteraryImportOptions::default(),
             chapters: inspected.chapters,
         })
         .unwrap();

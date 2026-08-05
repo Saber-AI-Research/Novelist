@@ -17,6 +17,8 @@
 
   let iframeEl = $state<HTMLIFrameElement | undefined>(undefined);
   let loaded = $state(false);
+  let loadFailed = $state(false);
+  let iframeRevision = $state(0);
   let lastFileOpenKey = '';
   const issuedDocuments = new Map<string, string>();
   const documentSessions = new Map<string, {
@@ -30,6 +32,28 @@
   const saveQueues = new Map<string, Promise<void>>();
 
   let tab = $derived(tabsStore.getPaneActiveTab(paneId));
+
+  $effect(() => {
+    extension.entryUrl;
+    iframeRevision;
+    loaded = false;
+    loadFailed = false;
+    const timeout = window.setTimeout(() => {
+      if (!loaded) loadFailed = true;
+    }, 6000);
+    return () => window.clearTimeout(timeout);
+  });
+
+  function markPluginLoaded() {
+    if (loaded) return;
+    loaded = true;
+    loadFailed = false;
+    lastFileOpenKey = '';
+    issuedDocuments.clear();
+    documentSessions.clear();
+    latestDocumentTokenByTab.clear();
+    latestRevisionByDocument.clear();
+  }
 
   // Send file content to plugin when tab changes or iframe loads
   $effect(() => {
@@ -144,6 +168,11 @@
     if (event.source !== iframeEl?.contentWindow) return;
     const data = event.data as Record<string, unknown>;
 
+    if (data?.type === 'plugin-ready') {
+      markPluginLoaded();
+      return;
+    }
+
     if (data?.type === 'file-state' && typeof data.content === 'string') {
       const targetTab = resolveMessageTab(data);
       if (!targetTab) return;
@@ -231,23 +260,35 @@
 <div class="plugin-file-editor">
   <!-- No sandbox: WKWebView blocks custom-protocol main-resource loads from
        sandboxed iframes, which breaks file-handler plugins served via asset://. -->
-  <iframe
-    bind:this={iframeEl}
-    src={extension.entryUrl}
-    title={extension.label}
-    onload={() => {
-      loaded = true;
-      lastFileOpenKey = '';
-      issuedDocuments.clear();
-      documentSessions.clear();
-      latestDocumentTokenByTab.clear();
-      latestRevisionByDocument.clear();
-    }}
-  ></iframe>
+  {#key iframeRevision}
+    <iframe
+      bind:this={iframeEl}
+      src={extension.entryUrl}
+      title={extension.label}
+      onload={() => {
+        // First-party file handlers explicitly announce readiness after their
+        // application code mounts. Keep onload as compatibility for external
+        // plugins that predate the handshake.
+        if (extension.pluginId !== 'literary-commentary') markPluginLoaded();
+      }}
+    ></iframe>
+  {/key}
+  {#if !loaded}
+    <div class="load-state" role={loadFailed ? 'alert' : 'status'} data-testid="plugin-file-load-state">
+      {#if loadFailed}
+        <p>{t('pluginEditor.loadFailed')}</p>
+        <button type="button" onclick={() => iframeRevision += 1}>{t('pluginEditor.retry')}</button>
+      {:else}
+        <span class="spinner" aria-hidden="true"></span>
+        <p>{t('pluginEditor.loading')}</p>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
   .plugin-file-editor {
+    position: relative;
     width: 100%;
     height: 100%;
     display: flex;
@@ -258,5 +299,49 @@
     width: 100%;
     border: none;
     background: var(--novelist-bg);
+  }
+  .load-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    color: var(--novelist-text-secondary);
+    background: var(--novelist-bg);
+    text-align: center;
+  }
+  .load-state p {
+    margin: 0;
+    font-size: 0.82rem;
+  }
+  .load-state button {
+    min-height: 32px;
+    padding: 0 14px;
+    color: var(--novelist-text);
+    background: var(--novelist-bg-secondary);
+    border: 1px solid var(--novelist-border);
+    border-radius: 6px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .load-state button:hover {
+    border-color: var(--novelist-accent);
+  }
+  .spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--novelist-border);
+    border-top-color: var(--novelist-accent);
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
   }
 </style>

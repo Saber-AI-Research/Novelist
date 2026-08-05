@@ -9,11 +9,12 @@
   import { categoryLabel, templateName, templateDescription } from '$lib/utils/templateI18n';
 
   const LITERARY_TEMPLATE_ID = 'literary-commentary';
+  const LITERARY_CATEGORY = 'literary-study';
   const LITERARY_TEMPLATE: TemplateInfo = {
     id: LITERARY_TEMPLATE_ID,
     name: 'Literary Commentary',
     description: 'Import a book and create a close-reading transcription project',
-    category: 'study',
+    category: LITERARY_CATEGORY,
     builtin: true,
   };
 
@@ -164,6 +165,7 @@
           <button
             class="category-item"
             class:category-active={selectedCategory === cat}
+            data-testid="new-project-category-{cat}"
             onclick={() => selectedCategory = cat}
           >{categoryLabel(cat)}</button>
         {/each}

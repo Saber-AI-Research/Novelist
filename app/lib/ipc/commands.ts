@@ -692,6 +692,7 @@ export type CreateLiteraryStudyProjectRequest = {
 	author: string | null,
 	language: string | null,
 	chapters: LiteraryChapterDraft[],
+	importOptions?: LiteraryImportOptions,
 };
 
 export type CreateLiteraryStudyProjectResult = {
@@ -889,6 +890,16 @@ export type LiteraryChapterSummary = {
 	completed: boolean,
 };
 
+export type LiteraryDirectoryMode = "by-volume" | "flat";
+
+export type LiteraryImportOptions = {
+	directoryMode?: LiteraryDirectoryMode,
+	numberingMode?: LiteraryNumberingMode,
+	cleanChapterTitles?: boolean,
+};
+
+export type LiteraryNumberingMode = "global" | "per-volume";
+
 export type LiterarySourceInspection = {
 	title: string,
 	author: string | null,
@@ -911,6 +922,7 @@ export type LiteraryStudyOverview = {
 	pasted: number,
 	resumeChapterPath: string | null,
 	chapters: LiteraryChapterSummary[],
+	importOptions: LiteraryImportOptions,
 };
 
 export type ManagedNameStateV1 = {
@@ -1936,6 +1948,7 @@ export type ReplaceLiteraryStudyBookRequest = {
 	author: string | null,
 	language: string | null,
 	chapters: LiteraryChapterDraft[],
+	importOptions?: LiteraryImportOptions,
 };
 
 export type ReplaceLiteraryStudyBookResult = {

@@ -3,7 +3,7 @@ import { t } from '$lib/i18n';
 
 /**
  * Look up the display label for a template category. Built-in categories
- * (`general / fiction / non-fiction / personal / custom`) resolve to their
+ * (`general / fiction / non-fiction / personal / custom / literary-study`) resolve to their
  * i18n key `template.category.<cat>`; any unknown category falls through
  * to the raw category string so user-authored templates with custom
  * categories still render.

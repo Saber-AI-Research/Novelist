@@ -234,6 +234,10 @@ class TabsStore {
   /** Monotonic counter for minting pane ids beyond pane-1/pane-2. */
   private paneSeq = 1;
 
+  private rememberActiveFile() {
+    projectStore.rememberLastOpenFile(this.activeTab?.filePath ?? null);
+  }
+
   get activePane(): PaneState {
     return this.panes.find(p => p.id === this.activePaneId) || this.panes[0];
   }
@@ -307,6 +311,7 @@ class TabsStore {
 
   setActivePane(paneId: string) {
     this.activePaneId = paneId;
+    this.rememberActiveFile();
   }
 
   getPaneTabs(paneId: string): TabState[] {
@@ -383,6 +388,7 @@ class TabsStore {
       if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
       failures.push(...await this.syncWatcherAfterPathChange(oldPath, newPath));
     }
+    projectStore.retargetWorkspacePath(oldPath, newPath);
     if (options.broadcast) {
       const failed = await runPathSyncOperation(
         'broadcast-file-renamed',
@@ -402,6 +408,7 @@ class TabsStore {
     if (!tab) return finishPathRetarget(0, []);
     const oldPath = tab.filePath;
     this.updateFilePath(tabId, newPath);
+    projectStore.retargetWorkspacePath(oldPath, newPath);
     if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
     const failures = await this.syncWatcherAfterPathChange(oldPath, newPath);
     return finishPathRetarget(1, failures);
@@ -434,6 +441,7 @@ class TabsStore {
       if (projectStore.dirPath) await migrateManagedNameCachePath(projectStore.dirPath, oldPath, newPath);
       failures.push(...await this.syncWatcherAfterPathChange(oldPath, newPath));
     }
+    projectStore.retargetWorkspacePath(oldRoot, newRoot);
     if (options.broadcast) {
       const failed = await runPathSyncOperation(
         'broadcast-file-renamed',
@@ -591,7 +599,11 @@ class TabsStore {
   openTab(filePath: string, content: string, options: OpenTabOptions = {}) {
     const pane = this.activePane;
     const existing = pane.tabs.find(t => t.filePath === filePath);
-    if (existing) { pane.activeTabId = existing.id; return; }
+    if (existing) {
+      pane.activeTabId = existing.id;
+      projectStore.rememberLastOpenFile(filePath);
+      return;
+    }
 
     const rawName = pathBasename(filePath) || filePath;
     const fileName = isScratchFile(filePath) ? nextScratchDisplayName() : rawName;
@@ -610,6 +622,7 @@ class TabsStore {
       lastSyncedH1: extractFirstH1(content) ?? '',
     });
     pane.activeTabId = id;
+    projectStore.rememberLastOpenFile(filePath);
   }
 
   /** Open a tab in a specific pane (for "Open in Other Pane"). */
@@ -617,7 +630,11 @@ class TabsStore {
     const pane = this.panes.find(p => p.id === paneId);
     if (!pane) return;
     const existing = pane.tabs.find(t => t.filePath === filePath);
-    if (existing) { pane.activeTabId = existing.id; return; }
+    if (existing) {
+      pane.activeTabId = existing.id;
+      projectStore.rememberLastOpenFile(filePath);
+      return;
+    }
 
     const fileName = pathBasename(filePath) || filePath;
     const id = crypto.randomUUID();
@@ -635,6 +652,7 @@ class TabsStore {
       lastSyncedH1: extractFirstH1(content) ?? '',
     });
     pane.activeTabId = id;
+    projectStore.rememberLastOpenFile(filePath);
   }
 
   /** Move a tab from its current pane to a target pane. */
@@ -666,6 +684,7 @@ class TabsStore {
     targetPane.tabs.splice(at, 0, tab);
     targetPane.activeTabId = tab.id;
     this.activePaneId = targetPane.id;
+    this.rememberActiveFile();
 
     // Fix source pane's active tab
     if (sourcePane.activeTabId === tabId) {
@@ -686,6 +705,7 @@ class TabsStore {
     const at = Math.max(0, Math.min(insertIndex, pane.tabs.length));
     pane.tabs.splice(at, 0, tab);
     pane.activeTabId = tab.id;
+    if (pane.id === this.activePaneId) this.rememberActiveFile();
   }
 
   /**
@@ -811,6 +831,7 @@ class TabsStore {
       }
       // An emptied non-sole column collapses away (VSCode-like).
       this.removePaneIfEmpty(pane.id);
+      this.rememberActiveFile();
       return;
     }
   }
@@ -822,6 +843,7 @@ class TabsStore {
       if (tab) {
         pane.activeTabId = id;
         this.activePaneId = pane.id;
+        this.rememberActiveFile();
         return;
       }
     }
@@ -839,6 +861,7 @@ class TabsStore {
     const len = pane.tabs.length;
     const nextIdx = ((base + delta) % len + len) % len;
     pane.activeTabId = pane.tabs[nextIdx].id;
+    this.rememberActiveFile();
   }
 
   /** Mark tab as dirty without copying content (used during typing). */
@@ -957,13 +980,14 @@ class TabsStore {
   }
 
   // Clear ALL panes
-  closeAll() {
+  closeAll(options: { preserveWorkspace?: boolean } = {}) {
     this.panes = [{ id: 'pane-1', tabs: [], activeTabId: null }];
     this.activePaneId = 'pane-1';
     this.splitActive = false;
     this.paneSizes = [1];
     this.paneSeq = 1;
     savedEditorStates.clear();
+    if (!options.preserveWorkspace) projectStore.rememberLastOpenFile(null);
   }
 
   // Returns all tabs across all panes (for auto-save)

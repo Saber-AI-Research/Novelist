@@ -4,6 +4,15 @@ import type { SortMode } from '$lib/utils/file-sort';
 import { settingsStore } from '$lib/stores/settings.svelte';
 import { flushProjectSwitch } from '$lib/services/project-switch-coordinator';
 import { pathBasename } from '$lib/utils/path';
+import {
+  loadProjectWorkspaceState,
+  removeProjectWorkspacePath,
+  resolveProjectWorkspacePath,
+  retargetProjectWorkspaceState,
+  saveProjectWorkspaceState,
+  toProjectRelativePath,
+  type ProjectWorkspaceState,
+} from '$lib/services/project-workspace-state';
 
 const VALID_SORT_MODES: readonly SortMode[] = [
   'name-asc', 'name-desc',
@@ -50,6 +59,11 @@ class ProjectStore {
   isLoading = $state(false);
   singleFileMode = $state(false);
   generation = $state(0);
+  workspaceState = $state<ProjectWorkspaceState>({
+    version: 1,
+    expandedPaths: [],
+    lastOpenPath: null,
+  });
 
   /** Reads from the unified settings store so project/global overlay is respected. */
   get sortMode(): SortMode {
@@ -90,6 +104,7 @@ class ProjectStore {
     this.dirPath = null;
     this.config = null;
     this.files = [];
+    this.workspaceState = { version: 1, expandedPaths: [], lastOpenPath: null };
   }
 
   async setProject(
@@ -110,9 +125,11 @@ class ProjectStore {
     this.generation = nextGeneration;
     this.config = config;
     this.files = files.map(toNode);
+    this.workspaceState = loadProjectWorkspaceState(dirPath);
     this.isLoading = false;
     this.singleFileMode = false;
-    return true;
+    await this.restoreExpandedFolders(nextGeneration);
+    return this.generation === nextGeneration && this.dirPath === dirPath;
   }
 
   async prepareProjectSwitch(nextProjectDir: string | null): Promise<void> {
@@ -150,6 +167,7 @@ class ProjectStore {
     this.dirPath = null;
     this.config = null;
     this.files = [];
+    this.workspaceState = { version: 1, expandedPaths: [], lastOpenPath: null };
     this.singleFileMode = false;
     // Drop back to global-only settings.
     void settingsStore.load(null);
@@ -162,7 +180,7 @@ class ProjectStore {
   }
 
   /** Expand a folder, loading its children the first time. */
-  async expandFolder(path: string): Promise<void> {
+  async expandFolder(path: string, persist = true): Promise<void> {
     const node = this.findFolder(path);
     if (!node) return;
     if (node.children === undefined) {
@@ -176,11 +194,14 @@ class ProjectStore {
       node.loading = false;
     }
     node.expanded = true;
+    if (persist) this.rememberExpandedFolder(path);
   }
 
   collapseFolder(path: string): void {
     const node = this.findFolder(path);
-    if (node) node.expanded = false;
+    if (!node) return;
+    node.expanded = false;
+    this.forgetExpandedTree(path);
   }
 
   /**
@@ -200,6 +221,7 @@ class ProjectStore {
         await this.expandFolder(node.path);
       } else {
         node.expanded = true;
+        this.rememberExpandedFolder(node.path);
       }
       if (node.children) {
         for (const child of node.children) if (child.is_dir) queue.push(child);
@@ -222,6 +244,102 @@ class ProjectStore {
       if (node.children) {
         for (const child of node.children) if (child.is_dir) stack.push(child);
       }
+    }
+    this.forgetExpandedTree(path);
+  }
+
+  get lastOpenFilePath(): string | null {
+    if (!this.dirPath || !this.workspaceState.lastOpenPath) return null;
+    return resolveProjectWorkspacePath(this.dirPath, this.workspaceState.lastOpenPath);
+  }
+
+  rememberLastOpenFile(path: string | null): void {
+    if (!this.dirPath) return;
+    const relative = path ? toProjectRelativePath(this.dirPath, path) : null;
+    if (path && !relative) return;
+    if (this.workspaceState.lastOpenPath === relative) return;
+    this.workspaceState = saveProjectWorkspaceState(this.dirPath, {
+      ...this.workspaceState,
+      lastOpenPath: relative,
+    });
+  }
+
+  retargetWorkspacePath(oldPath: string, newPath: string): void {
+    if (!this.dirPath) return;
+    this.workspaceState = retargetProjectWorkspaceState(
+      this.dirPath,
+      this.workspaceState,
+      oldPath,
+      newPath,
+    );
+  }
+
+  removeWorkspacePath(path: string): void {
+    if (!this.dirPath) return;
+    this.workspaceState = removeProjectWorkspacePath(
+      this.dirPath,
+      this.workspaceState,
+      path,
+    );
+  }
+
+  private rememberExpandedFolder(path: string): void {
+    if (!this.dirPath) return;
+    const relative = toProjectRelativePath(this.dirPath, path);
+    if (!relative || this.workspaceState.expandedPaths.includes(relative)) return;
+    this.workspaceState = saveProjectWorkspaceState(this.dirPath, {
+      ...this.workspaceState,
+      expandedPaths: [...this.workspaceState.expandedPaths, relative],
+    });
+  }
+
+  private forgetExpandedTree(path: string): void {
+    if (!this.dirPath) return;
+    if (path === this.dirPath) {
+      if (this.workspaceState.expandedPaths.length === 0) return;
+      this.workspaceState = saveProjectWorkspaceState(this.dirPath, {
+        ...this.workspaceState,
+        expandedPaths: [],
+      });
+      return;
+    }
+    const relative = toProjectRelativePath(this.dirPath, path);
+    if (!relative) return;
+    const expandedPaths = this.workspaceState.expandedPaths.filter(candidate =>
+      candidate !== relative && !candidate.startsWith(`${relative}/`)
+    );
+    if (expandedPaths.length === this.workspaceState.expandedPaths.length) return;
+    this.workspaceState = saveProjectWorkspaceState(this.dirPath, {
+      ...this.workspaceState,
+      expandedPaths,
+    });
+  }
+
+  private async restoreExpandedFolders(generation: number): Promise<void> {
+    if (!this.dirPath || this.workspaceState.expandedPaths.length === 0) return;
+    const projectDir = this.dirPath;
+    const stale = new Set<string>();
+    const paths = [...this.workspaceState.expandedPaths].sort((left, right) =>
+      left.split('/').length - right.split('/').length || left.localeCompare(right)
+    );
+    for (const relative of paths) {
+      if (this.generation !== generation || this.dirPath !== projectDir) return;
+      const path = resolveProjectWorkspacePath(projectDir, relative);
+      if (!path) {
+        stale.add(relative);
+        continue;
+      }
+      if (!this.findFolder(path)) {
+        stale.add(relative);
+        continue;
+      }
+      await this.expandFolder(path, false);
+    }
+    if (stale.size > 0 && this.generation === generation && this.dirPath === projectDir) {
+      this.workspaceState = saveProjectWorkspaceState(projectDir, {
+        ...this.workspaceState,
+        expandedPaths: this.workspaceState.expandedPaths.filter(path => !stale.has(path)),
+      });
     }
   }
 

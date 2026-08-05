@@ -575,6 +575,7 @@
 
     const result = await commands.deleteItem(entry.path);
     if (result.status === 'ok') {
+      projectStore.removeWorkspacePath(entry.path);
       await refreshFiles();
     } else {
       console.error('Failed to delete:', result.error);

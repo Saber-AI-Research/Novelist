@@ -17,9 +17,12 @@ Getting UI plugins to work on macOS WKWebView was non-trivial. Violating
 any of these rules causes silent 403s or blank iframes:
 
 - **UI plugins use the asset protocol**: `tauri.conf.json` enables
-  `assetProtocol` with scope `$HOME/.novelist/plugins/**`. Every UI
-  plugin's `vite.config.ts` **must** set `base: './'` — absolute
-  `/assets/...` paths resolve outside the plugin dir and 403.
+  `assetProtocol` with scope `$HOME/.novelist/plugins/**`. On macOS,
+  `convertFileSrc` encodes the absolute entry path as a single URL segment;
+  WKWebView consequently resolves `./assets/...` at the protocol root instead
+  of beside `index.html`. First-party file-handler plugins must therefore ship
+  a self-contained HTML entry (the literary plugin uses
+  `plugins/vite-single-file.ts`) rather than external relative JS/CSS assets.
 - **Iframes are un-sandboxed**: `PluginPanel.svelte` and
   `PluginFileEditor.svelte` intentionally omit the `sandbox` attribute.
   WKWebView blocks custom-protocol main-resource loads from sandboxed
@@ -44,16 +47,46 @@ side-panel list in `App.svelte`.
 
 Literary commentary is a dedicated `literary-study` project type backed by
 the bundled `literary-commentary` file-handler plugin. The New Project
-dialog always exposes this type, independently of the deferred plugin scan.
+dialog always exposes this type in its own `literary-study` category,
+independently of the deferred plugin scan. The import dialog uses a bounded
+preview region with internal scrolling and a non-shrinking action footer so
+the create/replace action remains reachable in compact desktop windows.
 Opening a literary project ensures the bundled `.litstudy` handler is enabled
 before the file tree is committed.
 
 EPUB/TXT inspection and project mutations live in
 `core/src/commands/literary_study.rs`. Imported chapters are stored below
 `学习内容/`; `.novelist/literary-study.json` records source metadata and the
-ordered chapter paths. The native right panel reads a bounded overview through
+ordered chapter paths plus the selected import layout. The import dialog offers
+two folder strategies (`by-volume` and `flat`) and two numbering strategies
+(`global` and `per-volume`; flat layout always uses global numbering to prevent
+collisions). By-volume import no longer creates a synthetic `章节/` directory:
+unvolumed front matter lives directly under `学习内容/`, while real volumes get
+stable numbered folders. Filename cleanup is enabled by default and removes
+redundant leading forms such as `0004 第一章` or `第一卷` without changing the
+chapter/volume titles stored inside `.litstudy` data. Bare structural headings
+become a concise numbered filename such as `0004.litstudy`. Components are
+UTF-8-byte bounded before writing so long CJK titles remain portable.
+
+The native right panel reads a bounded overview through
 `read_literary_study_overview`, while the iframe editor owns transcription,
-inline comments, mistake markers, and revision-safe saves.
+inline comments, mistake markers, and revision-safe saves. Its single-file
+entry posts `plugin-ready` after mounting; the host waits for that handshake
+before sending the document and presents a retryable error instead of a blank
+editor when startup fails. The transparent input capture follows the rendered
+caret so the operating-system IME candidate window opens beside the current
+writing position. Pre-edit pinyin is rendered as temporary underlined text but
+never compared or saved; `compositionend` is the authoritative transaction, so
+selecting a candidate replaces the pinyin and commits the selected CJK text
+exactly once. Transcription is the default interaction; typing `【` enters inline
+comment input and `】` returns to transcription (with
+`Cmd/Ctrl+Shift+Enter` retained as a keyboard-only toggle). Backspace deletes
+the actual rendered tail, including comments after returning to transcription;
+Option/Ctrl+Backspace and Command+Backspace retain word/line deletion, while
+Command/Ctrl+Z and redo restore complete input transactions. Other system
+shortcuts are not intercepted. F6 is the plugin-specific assist key: each
+press commits exactly the next reference character as one ordinary edit and
+holding it follows the platform key-repeat rate.
 
 Replacing a book is a staged transaction. Existing `.litstudy` files move to a
 temporary backup, replacement files move in from a staging directory, and the

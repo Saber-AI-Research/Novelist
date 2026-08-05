@@ -339,7 +339,21 @@ let paletteOpen = $state(false);
         if (!committed || !isCurrent()) return;
         settingsStore.commitPrepared(preparedSettings);
         uiStore.sidebarVisible = true;
-        tabsStore.closeAll();
+        const lastOpenFilePath = projectStore.lastOpenFilePath;
+        tabsStore.closeAll({ preserveWorkspace: true });
+        if (lastOpenFilePath && isCurrent()) {
+          const restored = await commands.readFile(lastOpenFilePath);
+          if (restored.status === 'ok' && isCurrent()) {
+            tabsStore.openTab(lastOpenFilePath, restored.data);
+            const registered = await commands.registerOpenFile(lastOpenFilePath);
+            if (registered.status === 'error') {
+              console.error('Failed to restore tracked open file:', registered.error);
+              showOperationError(registered.error);
+            }
+          } else if (restored.status === 'error') {
+            projectStore.removeWorkspacePath(lastOpenFilePath);
+          }
+        }
 
         // Track as recent project (backend persistence for next launch)
         const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
