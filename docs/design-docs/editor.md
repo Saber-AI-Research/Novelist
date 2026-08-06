@@ -384,6 +384,24 @@ and open-slash-menu state before dispatch. The regression matrix independently
 covers all four combinations: selected `>` during IME and while slash-open,
 plus structural Tab during IME and while slash-open.
 
+## Delete Paragraph command
+
+`editor-delete-paragraph` is registered only in `app/lib/app-commands.ts` and
+calls `app/lib/editor/delete-paragraph.ts`. With a cursor, the command removes
+the enclosing Markdown `Paragraph` syntax node; syntax-free editor tiers and
+non-paragraph blocks fall back to the current logical line. A nonempty or
+multi-range selection expands to every touched paragraph/line, merges overlaps,
+and dispatches one undoable transaction. One adjacent separator is consumed so
+the surrounding paragraph spacing remains stable. The command is a no-op for
+empty/read-only documents and while IME composition is active, and it restores
+editor focus after a successful command-palette action.
+
+Pure range behavior is covered by
+`tests/unit/editor/delete-paragraph.test.ts`; focus, one-step undo, transaction
+count, and IME refusal/resume are covered by
+`tests/integration/editor/delete-paragraph-runtime.test.ts`. Browser command
+registration and CJK execution are covered in `command-palette.spec.ts`.
+
 ## Editor right-click menu
 
 Right-clicking inside `.cm-content` shows a styled custom menu that matches

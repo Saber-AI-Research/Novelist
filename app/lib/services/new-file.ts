@@ -14,6 +14,7 @@ import {
 } from '$lib/services/managed-name-persistence';
 import { hasCanonicalTitleToken } from '$lib/utils/managed-name';
 import { extractFirstH1 } from '$lib/utils/h1';
+import { pathDirname, pathStartsWithChild, pathsEqual } from '$lib/utils/path';
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 export type ManagedNameEnrollmentOutcome = 'enrolled' | 'not-applicable' | 'failed';
@@ -89,6 +90,30 @@ export function currentFilenameTemplateRaw(): string {
 }
 
 /**
+ * Resolve the destination for the generic New File command.
+ *
+ * A pinned default remains authoritative. Otherwise, while a literary-study
+ * chapter is active, create beside that chapter so Cmd+N and the sidebar
+ * header `+` do not escape into a stale last-used folder or the project root.
+ * The containment check is deliberate: an externally-opened `.litstudy` file
+ * must never redirect project file creation outside the active project.
+ */
+export function resolveContextualNewFileDir(
+  projectDir: string,
+  activeFilePath: string | null,
+): string {
+  const configuredDir = settingsStore.resolveNewFileDir(projectDir);
+  if (settingsStore.effective.new_file.default_dir) return configuredDir;
+  if (!activeFilePath?.toLowerCase().endsWith('.litstudy')) return configuredDir;
+
+  const chapterDir = pathDirname(activeFilePath);
+  if (pathsEqual(chapterDir, projectDir) || pathStartsWithChild(chapterDir, projectDir)) {
+    return chapterDir;
+  }
+  return configuredDir;
+}
+
+/**
  * Safe enrollment helper: enrolls managed naming for a freshly-created file
  * IFF `templateRaw` contains the exact canonical `{title}` token. On any
  * persistence failure the created file is NEVER deleted; instead a static
@@ -125,8 +150,9 @@ export async function persistManagedNameEnrollment(
 /**
  * Smart new-file creation inside the active project.
  *
- * Target folder resolves: pinned default > last-used > project root. If the
- * resolved dir has been deleted, falls back to project root.
+ * Target folder resolves: pinned default > active `.litstudy` chapter folder
+ * > last-used > project root. If the resolved dir has been deleted, falls back
+ * to project root.
  *
  * Filename is derived from the user's template (`newFileSettings.template`)
  * combined with sibling-aware inference to pick the next chapter/numbering
@@ -140,7 +166,10 @@ export async function persistManagedNameEnrollment(
 export async function createNewFileInProject() {
   if (!projectStore.dirPath) return;
 
-  let targetDir = settingsStore.resolveNewFileDir(projectStore.dirPath);
+  let targetDir = resolveContextualNewFileDir(
+    projectStore.dirPath,
+    tabsStore.activeTab?.filePath ?? null,
+  );
   const probe = await commands.listDirectory(targetDir, null);
   if (probe.status !== 'ok') {
     targetDir = projectStore.dirPath;

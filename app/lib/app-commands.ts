@@ -9,6 +9,7 @@ import { aiTalkSessions } from '$lib/components/ai-talk/sessions.svelte';
 import { requestAiAgentNewSession } from '$lib/components/ai-agent/new-session-requests';
 import * as fmt from '$lib/editor/formatting';
 import { applyBlockTransform, type BlockTransformTarget } from '$lib/editor/block-transform';
+import { deleteCurrentParagraph } from '$lib/editor/delete-paragraph';
 import { i18n, t as tFn, tIn } from '$lib/i18n';
 import { pathDirname } from '$lib/utils/path';
 
@@ -39,6 +40,7 @@ export type AppCommandContext = {
   t: (key: string) => string;
   getActiveEditorView: () => EditorView | null;
   renameCurrentFile: () => void;
+  deleteCurrentFile: () => void;
   // High-level actions owned by App.svelte
   openNewWindow: () => void;
   handleNewFile: () => void;
@@ -141,6 +143,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
   reg({ id: 'export-project', labelKey: 'command.exportProject', shortcut: shortcutsStore.get('export-project'), handler: ctx.openExportDialog });
   reg({ id: 'close-tab', labelKey: 'command.closeTab', shortcut: shortcutsStore.get('close-tab'), handler: ctx.handleCloseTab });
   reg({ id: 'rename-file', labelKey: 'command.renameFile', shortcut: shortcutsStore.get('rename-file'), handler: ctx.renameCurrentFile });
+  reg({ id: 'delete-current-file', labelKey: 'command.deleteCurrentFile', handler: ctx.deleteCurrentFile });
   reg({ id: 'open-settings', labelKey: 'command.openSettings', shortcut: shortcutsStore.get('open-settings'), handler: () => uiStore.toggleSettings() });
   reg({ id: 'go-to-line', labelKey: 'command.goToLine', shortcut: shortcutsStore.get('go-to-line'), handler: ctx.handleGoToLine });
   reg({ id: 'toggle-mindmap', labelKey: 'command.toggleMindmap', shortcut: shortcutsStore.get('toggle-mindmap'), handler: ctx.toggleMindmapOverlay });
@@ -207,6 +210,9 @@ export function registerAppCommands(ctx: AppCommandContext) {
   }});
   reg({ id: 'editor-strikethrough', labelKey: 'command.strikethrough', shortcut: shortcutsStore.get('editor-strikethrough'), handler: () => {
     const view = getActiveEditorView(); if (view) fmt.toggleWrap(view, '~~');
+  }});
+  reg({ id: 'editor-delete-paragraph', labelKey: 'command.deleteParagraph', handler: () => {
+    const view = getActiveEditorView(); if (view) deleteCurrentParagraph(view);
   }});
   for (const command of BLOCK_TRANSFORM_COMMANDS) {
     reg({

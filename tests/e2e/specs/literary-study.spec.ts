@@ -185,4 +185,70 @@ test.describe('Literary commentary projects', () => {
     await expect(app.getByTestId('literary-import-dialog')).toBeVisible();
     await expect(app.getByRole('heading', { name: 'Replace Imported Book' })).toBeVisible();
   });
+
+  test('creates new files beside the active literary chapter, not in a stale directory', async ({
+    app,
+    mockState,
+    browserErrors,
+  }) => {
+    const volumeDir = `${CHAPTER_DIR}/Book I`;
+    const chapterPath = `${volumeDir}/Chapter One.litstudy`;
+    const staleDir = `${PROJECT_DIR}/其他目录`;
+    const files = [
+      { name: '学习内容', path: CHAPTER_DIR, is_dir: true, size: 0 },
+      { name: 'Book I', path: volumeDir, is_dir: true, size: 0 },
+      { name: '其他目录', path: staleDir, is_dir: true, size: 0 },
+      { name: 'Chapter One.litstudy', path: chapterPath, is_dir: false, size: 256 },
+    ];
+    await mockState.openProject(PROJECT_DIR, files);
+    await mockState.setProjectConfig(PROJECT_CONFIG);
+    await mockState.setFileContent(chapterPath, JSON.stringify({
+      schemaVersion: 1,
+      book: { title: 'The Analects', author: 'Confucius', language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-0001', title: 'Chapter One', volume: 'Book I', index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '学而时习之，不亦说乎？',
+      sourceCursor: 0,
+      insertions: [],
+      stats: { correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+    }));
+    await app.evaluate(([projectDir, lastUsedDir]) => {
+      localStorage.setItem(
+        `__novelist_mock_project_settings__:${projectDir}`,
+        JSON.stringify({
+          view: {},
+          new_file: { last_used_dir: lastUsedDir },
+          plugins: { enabled: { 'literary-commentary': true } },
+        }),
+      );
+    }, [PROJECT_DIR, staleDir] as const);
+
+    await app.evaluate(async ([projectDir, filePath]) => {
+      await (window as any).__test_api__.openProject(projectDir);
+      await (window as any).__test_api__.openFile(filePath);
+    }, [PROJECT_DIR, chapterPath] as const);
+    await expect(app.getByTestId('tab-Chapter One.litstudy')).toBeVisible();
+
+    await app.evaluate(() => (window as any).__test_api__.newFile());
+    await expect.poll(async () => {
+      const calls = await mockState.getInvokeCalls();
+      return calls.findLast((call) => call.command === 'create_file')?.args.parentDir;
+    }).toBe(volumeDir);
+
+    await app.evaluate(async (filePath) => {
+      await (window as any).__test_api__.openFile(filePath);
+    }, chapterPath);
+    await app.getByTestId('sidebar-new-file').click();
+    await app.getByTestId('sidebar-input').press('Enter');
+    await expect.poll(async () => {
+      const calls = await mockState.getInvokeCalls();
+      return calls.filter((call) => call.command === 'create_file').at(-1)?.args.parentDir;
+    }).toBe(volumeDir);
+
+    await app.getByTestId('sidebar-files').click({ button: 'right', position: { x: 8, y: 300 } });
+    await expect(app.getByTestId('sidebar-view-new-literary-commentary')).toHaveCount(0);
+    expect(browserErrors).toEqual([]);
+  });
 });

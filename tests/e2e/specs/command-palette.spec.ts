@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/app-fixture';
+import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('Command Palette', () => {
   test.beforeEach(async ({ app }) => {
@@ -184,6 +185,44 @@ test.describe('Command Palette', () => {
     expect(await app.evaluate(() => (window as any).__task15RegistryExecutions)).toEqual([
       'editor-block-quote',
     ]);
+  });
+
+  test('Delete Paragraph removes the current CJK paragraph as one command action', async ({ app }) => {
+    const filePath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    await app.getByTestId('sidebar-file-Chapter 1.md').click();
+    await expect.poll(() => app.evaluate(() => (window as any).__test_api__.getActiveEditor()?.filePath ?? null)).toBe(filePath);
+
+    const doc = '第一段\n\n要删除的第一行\n要删除的第二行\n\n第三段';
+    const cursor = doc.indexOf('第二行') + 1;
+    await app.evaluate(async ({ doc, cursor }) => {
+      await (window as any).__test_api__.setActiveEditorDocument(doc, { anchor: cursor, head: cursor });
+    }, { doc, cursor });
+
+    await app.keyboard.press('Meta+Shift+p');
+    await app.getByTestId('palette-input').fill('Delete Paragraph');
+    await expect(app.getByTestId('palette-result-0')).toContainText('Delete Paragraph');
+    await app.getByTestId('palette-result-0').click();
+
+    await expect.poll(() => app.evaluate(() =>
+      (window as any).__test_api__.getActiveEditor()?.view.state.doc.toString()
+    )).toBe('第一段\n\n第三段');
+    await expect(app.locator('.cm-content')).toBeFocused();
+  });
+
+  test('Delete Current File uses the confirmed file-deletion lifecycle', async ({ app, mockState }) => {
+    const filePath = `${MOCK_PROJECT_DIR}/Chapter 2.md`;
+    await app.getByTestId('sidebar-file-Chapter 2.md').click();
+    await expect.poll(() => app.evaluate(() => (window as any).__test_api__.getActiveEditor()?.filePath ?? null)).toBe(filePath);
+    await app.evaluate(() => { window.confirm = () => true; });
+
+    await app.keyboard.press('Meta+Shift+p');
+    await app.getByTestId('palette-input').fill('Delete Current File');
+    await expect(app.getByTestId('palette-result-0')).toContainText('Delete Current File');
+    await app.getByTestId('palette-result-0').click();
+
+    await expect.poll(() => mockState.getDeletedFiles()).toContain(filePath);
+    await expect(app.getByTestId('sidebar-file-Chapter 2.md')).toHaveCount(0);
+    await expect(app.getByTestId('tab-Chapter 2.md')).toHaveCount(0);
   });
 
 });

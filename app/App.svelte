@@ -73,6 +73,7 @@
   import { createKeydownHandler } from '$lib/composables/app-shortcuts.svelte';
   import { createCloseTab } from '$lib/composables/close-tab.svelte';
   import { createScratchFile, createNewFileInProject, executeTemplate, requestSaveCurrentAsTemplate } from '$lib/services/new-file';
+  import { deleteEntries } from '$lib/services/file-deletion';
   import { shortcutsStore, initShortcutsI18n, formatShortcut } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
   import type { HeadingItem } from '$lib/editor/outline';
@@ -545,6 +546,15 @@ let paletteOpen = $state(false);
     return createScratchFile();
   };
   const handleNewFile = () => createNewFileInProject();
+  async function handleDeleteCurrentFile() {
+    const tab = tabsStore.activeTab;
+    if (!tab || isScratchFile(tab.filePath)) return;
+    await deleteEntries([{
+      path: tab.filePath,
+      name: tab.fileName,
+      is_dir: false,
+    }], t);
+  }
   const executeTemplateWrapper = (summary: TemplateFileSummary) => executeTemplate(summary, getActiveEditorView, t);
   function saveCurrentFileAsTemplate() {
     requestSaveCurrentAsTemplate(getActiveEditorView, t, (prefill) => {
@@ -765,6 +775,7 @@ let paletteOpen = $state(false);
       t,
       getActiveEditorView,
       renameCurrentFile: () => activeEditorRef?.renameCurrentFile(),
+      deleteCurrentFile: () => { void handleDeleteCurrentFile(); },
       openNewWindow,
       handleNewFile,
       handleNewScratchFile,

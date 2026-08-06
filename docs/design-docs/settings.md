@@ -89,9 +89,14 @@ brace-tokens up front so typos like `{cN}` / `{Title}` fail loudly.
 
 Resolution: `settingsStore.resolveNewFileDir(projectRoot)` returns
 `default_dir || last_used_dir || projectRoot`. `createNewFileInProject` in
-`app/lib/services/new-file.ts` calls it, then probes with a
-`listDirectory` — if the resolved path has been deleted out from under
-us, it falls back to the project root.
+`app/lib/services/new-file.ts` adds one contextual rule: when the active file is
+a `.litstudy` chapter inside the current project and no `default_dir` is pinned,
+the chapter's parent folder takes precedence over `last_used_dir` and the
+project root. Cmd+N and the sidebar header `+` share this resolution, keeping
+new chapters alongside the active literary-study chapter. The resolved path is
+then probed with `listDirectory`; if it has been deleted, creation falls back to
+the project root. Explicit folder/blank-area context-menu actions retain their
+explicit target directory.
 
 ## Sidebar right-click menus
 

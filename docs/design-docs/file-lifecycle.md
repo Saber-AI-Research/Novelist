@@ -1,5 +1,23 @@
 # File Lifecycle
 
+## Sidebar selection and destructive actions
+
+The sidebar tree is an ARIA multi-select tree. An unmodified row click selects
+one entry and preserves its existing open/toggle behavior; Shift selects the
+visible contiguous range from the anchor, while Command/Ctrl toggles individual
+entries. Collapsing or refreshing a branch prunes hidden selections so a
+keyboard delete cannot target an invisible stale row. `Backspace` and `Delete`
+are handled only when focus is inside a tree row and never from rename/create
+inputs.
+
+Sidebar deletion and the command-palette `delete-current-file` command share
+`app/lib/services/file-deletion.ts`. It confirms once, collapses descendants of
+selected folders, runs the normal unsaved-tab close flow for every affected
+tab, aborts before filesystem mutation if any close is cancelled, calls the
+existing `delete_item` IPC command, removes workspace paths, and refreshes each
+affected parent folder. `Sidebar.svelte` remains the owner of visible selection
+state; the service owns the destructive lifecycle.
+
 The watcher, rename suppression, auto-rename, and cross-window broadcast
 form one coupled system. Breaking any of them leads to rename echoes or
 dirty-state flaps.

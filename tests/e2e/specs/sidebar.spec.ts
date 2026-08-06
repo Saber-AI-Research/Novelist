@@ -141,6 +141,38 @@ test.describe('Sidebar', () => {
     await expect(app.getByTestId('tab-bar')).toContainText('Chapter 1');
   });
 
+  test('Shift selects a visible file range and Backspace deletes it from tree focus', async ({ app, mockState }) => {
+    const chapter1 = app.getByTestId('sidebar-file-Chapter 1.md');
+    const chapter2 = app.getByTestId('sidebar-file-Chapter 2.md');
+    const chapter3 = app.getByTestId('sidebar-file-Chapter 3.md');
+
+    await chapter1.click();
+    await chapter3.click({ modifiers: ['Shift'] });
+
+    await expect(chapter1).toHaveAttribute('aria-selected', 'true');
+    await expect(chapter2).toHaveAttribute('aria-selected', 'true');
+    await expect(chapter3).toHaveAttribute('aria-selected', 'true');
+    await expect(chapter3).toBeFocused();
+
+    await app.evaluate(() => {
+      window.confirm = (message) => {
+        (window as any).__deleteConfirmation = String(message);
+        return true;
+      };
+    });
+    await app.keyboard.press('Backspace');
+
+    await expect.poll(() => mockState.getDeletedFiles()).toEqual([
+      '/tmp/novelist-test-project/Chapter 1.md',
+      '/tmp/novelist-test-project/Chapter 2.md',
+      '/tmp/novelist-test-project/Chapter 3.md',
+    ]);
+    expect(await app.evaluate(() => (window as any).__deleteConfirmation)).toContain('3 selected items');
+    await expect(chapter1).toHaveCount(0);
+    await expect(chapter2).toHaveCount(0);
+    await expect(chapter3).toHaveCount(0);
+  });
+
   test('folder tree: expand shows children, collapse hides them', async ({ app }) => {
     const folder = app.getByTestId('sidebar-folder-Notes');
     await expect(folder).toBeVisible();

@@ -241,6 +241,8 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             template: pickNF('template', '第{N}章-{title}'),
             detect_from_folder: pickNF('detect_from_folder', true),
             auto_rename_from_h1: pickNF('auto_rename_from_h1', true),
+            default_dir: pickNF('default_dir', null),
+            last_used_dir: pickNF('last_used_dir', null),
           },
           plugins: { enabled },
           is_project_scoped: dir != null,
@@ -733,7 +735,19 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               },
             };
           }
-          case 'delete_item': deletedFiles.push(args.path); return null;
+          case 'delete_item': {
+            const target = args.path;
+            deletedFiles.push(target);
+            for (let i = files.length - 1; i >= 0; i--) {
+              if (files[i].path === target || files[i].path.startsWith(target + '/')) files.splice(i, 1);
+            }
+            for (const path of Object.keys(fileContents)) {
+              if (path === target || path.startsWith(target + '/')) delete fileContents[path];
+            }
+            persistMockFiles();
+            persistMockContents();
+            return null;
+          }
           case 'duplicate_file': return args.path.replace('.md', ' copy.md');
         case 'detect_project': {
           const projectDir = args.path || args.dirPath;

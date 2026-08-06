@@ -14,13 +14,13 @@
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
-  import { confirmUnsavedChanges } from '$lib/composables/unsaved-prompt.svelte';
   import FileTreeNode from '$lib/components/FileTreeNode.svelte';
   import { compareByMode, type SortMode } from '$lib/utils/file-sort';
   import {
     currentFilenameTemplateRaw,
     persistManagedNameEnrollment,
     proposeNewFileName,
+    resolveContextualNewFileDir,
   } from '$lib/services/new-file';
   import {
     detachManagedName,
@@ -33,8 +33,9 @@
     persistStopAutoNamingMenuAction,
   } from '$lib/services/managed-name-menu-actions';
   import { SIDEBAR_PATH_MIME } from '$lib/services/pane-drop';
+  import { deleteEntries } from '$lib/services/file-deletion';
   import { fileManagerLabelKey } from '$lib/utils/platform-labels';
-  import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
+  import { pathBasename, pathDirname, pathStartsWithChild, pathsEqual } from '$lib/utils/path';
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
@@ -150,10 +151,88 @@
     );
   });
 
+  let selectedPaths = $state<string[]>([]);
+  let selectionAnchorPath = $state<string | null>(null);
+  let selectionProjectPath = $state<string | null>(null);
+  let deletionInProgress = $state(false);
+
+  function flattenVisibleNodes(nodes: FileNode[]): FileNode[] {
+    const visible: FileNode[] = [];
+    for (const node of nodes) {
+      visible.push(node);
+      if (node.is_dir && node.expanded && node.children) {
+        visible.push(...flattenVisibleNodes(
+          [...node.children].sort((a, b) => compareByMode(a, b, projectStore.sortMode)),
+        ));
+      }
+    }
+    return visible;
+  }
+
+  let visibleEntries = $derived.by<FileNode[]>(() => flattenVisibleNodes(sortedFiles));
+
+  function selectEntry(event: MouseEvent, entry: FileNode) {
+    (event.currentTarget as HTMLElement | null)?.focus();
+    const targetIndex = visibleEntries.findIndex(node => pathsEqual(node.path, entry.path));
+    const anchorIndex = selectionAnchorPath
+      ? visibleEntries.findIndex(node => pathsEqual(node.path, selectionAnchorPath!))
+      : -1;
+    const additive = event.metaKey || event.ctrlKey;
+
+    if (event.shiftKey && targetIndex >= 0 && anchorIndex >= 0) {
+      const from = Math.min(anchorIndex, targetIndex);
+      const to = Math.max(anchorIndex, targetIndex);
+      const rangePaths = visibleEntries.slice(from, to + 1).map(node => node.path);
+      selectedPaths = additive ? [...new Set([...selectedPaths, ...rangePaths])] : rangePaths;
+      return;
+    }
+
+    if (additive) {
+      selectedPaths = selectedPaths.some(path => pathsEqual(path, entry.path))
+        ? selectedPaths.filter(path => !pathsEqual(path, entry.path))
+        : [...selectedPaths, entry.path];
+    } else {
+      selectedPaths = [entry.path];
+    }
+    selectionAnchorPath = entry.path;
+  }
+
+  function selectedVisibleEntries(): FileNode[] {
+    return visibleEntries.filter(entry =>
+      selectedPaths.some(path => pathsEqual(path, entry.path))
+    );
+  }
+
+  function selectionForEntry(entry: FileNode): FileNode[] {
+    if (selectedPaths.some(path => pathsEqual(path, entry.path))) {
+      const selected = selectedVisibleEntries();
+      if (selected.length > 0) return selected;
+    }
+    return [entry];
+  }
+
   // Reset scroll position when project changes
   $effect(() => {
-    projectStore.dirPath;  // track dependency
+    const projectPath = projectStore.dirPath;
     if (filesContainer) filesContainer.scrollTop = 0;
+    if (selectionProjectPath !== projectPath) {
+      selectionProjectPath = projectPath;
+      selectedPaths = [];
+      selectionAnchorPath = null;
+    }
+  });
+
+  // A collapsed/refreshed branch must not leave an invisible destructive
+  // selection behind. Keep only rows the user can currently see.
+  $effect(() => {
+    const visiblePaths = visibleEntries.map(entry => entry.path);
+    const pruned = selectedPaths.filter(path =>
+      visiblePaths.some(visiblePath => pathsEqual(path, visiblePath))
+    );
+    if (pruned.length !== selectedPaths.length) selectedPaths = pruned;
+    if (selectionAnchorPath && !visiblePaths.some(path => pathsEqual(path, selectionAnchorPath!))) {
+      selectionAnchorPath = pruned.at(-1) ?? null;
+    }
   });
 
   // --- Refresh file list ---
@@ -209,17 +288,21 @@
   // --- New file inline input ---
   let creatingFile = $state(false);
   let creatingFolder = $state(false);
+  let creatingTargetDir = $state<string | null>(null);
   let newItemName = $state('');
   let newItemInput = $state<HTMLInputElement | null>(null);
 
   async function startCreateFile() {
     creatingFile = true;
     creatingFolder = false;
+    creatingTargetDir = projectStore.dirPath
+      ? resolveContextualNewFileDir(projectStore.dirPath, tabsStore.activeTab?.filePath ?? null)
+      : null;
     // Seed the inline input with the smart name from settings
     // (date/time macros + {N} numbering inferred from siblings) so the
     // sidebar "+" matches Cmd+N's naming, instead of always "untitled.md".
-    newItemName = projectStore.dirPath
-      ? await proposeNewFileName(projectStore.dirPath)
+    newItemName = creatingTargetDir
+      ? await proposeNewFileName(creatingTargetDir)
       : 'untitled.md';
     await tick();
     if (newItemInput) {
@@ -233,6 +316,7 @@
   async function startCreateFolder() {
     creatingFolder = true;
     creatingFile = false;
+    creatingTargetDir = null;
     newItemName = 'new-folder';
     await tick();
     if (newItemInput) {
@@ -247,10 +331,11 @@
       return;
     }
     if (creatingFile) {
+      const targetDir = creatingTargetDir ?? projectStore.dirPath;
       const templateRaw = currentFilenameTemplateRaw();
-      const result = await commands.createFile(projectStore.dirPath, newItemName.trim());
+      const result = await commands.createFile(targetDir, newItemName.trim());
       if (result.status === 'ok') {
-        void settingsStore.recordLastUsedDir(projectStore.dirPath);
+        void settingsStore.recordLastUsedDir(targetDir);
         await persistManagedNameEnrollment(
           projectStore.dirPath,
           result.data,
@@ -258,7 +343,12 @@
           '',
           'Managed-name enrollment failed during sidebar header new-file creation',
         );
-        await refreshFiles();
+        if (pathsEqual(targetDir, projectStore.dirPath)) {
+          await refreshFiles();
+        } else {
+          await projectStore.expandFolder(targetDir);
+          await projectStore.refreshFolder(targetDir);
+        }
         // Open the new file
         const readResult = await commands.readFile(result.data);
         if (readResult.status === 'ok') {
@@ -282,6 +372,7 @@
   function cancelCreate() {
     creatingFile = false;
     creatingFolder = false;
+    creatingTargetDir = null;
     newItemName = '';
   }
 
@@ -325,7 +416,7 @@
    */
   const pluginFileCreators = $derived.by(() => {
     return extensionStore.fileHandlers
-      .filter(h => h.fileExtensions && h.fileExtensions.length > 0)
+      .filter(h => h.creatable !== false && h.fileExtensions && h.fileExtensions.length > 0)
       .map(h => ({
         pluginId: h.pluginId,
         label: h.label,
@@ -433,6 +524,10 @@
 
   function handleContextMenu(e: MouseEvent, entry: FileNode) {
     e.preventDefault();
+    if (!selectedPaths.some(path => pathsEqual(path, entry.path))) {
+      selectedPaths = [entry.path];
+      selectionAnchorPath = entry.path;
+    }
     const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
     contextMenu = { x: e.clientX / zoom, y: e.clientY / zoom, entry };
     contextManagedName = null;
@@ -559,27 +654,38 @@
 
   async function handleDelete(entry: FileNode) {
     closeContextMenu();
-    const confirmed = confirm(t('sidebar.deleteConfirm', { name: entry.name }));
-    if (!confirmed) return;
-
-    const openTabs = tabsStore.allTabs.filter(tab =>
-      tab.filePath === entry.path || pathStartsWithChild(tab.filePath, entry.path)
-    );
-    for (const tab of openTabs) {
-      const pathBeforeClose = tab.filePath;
-      await tabsStore.closeTab(tab.id);
-      if (tabsStore.findByPath(pathBeforeClose)) {
-        return;
+    closeViewMenu();
+    if (deletionInProgress) return;
+    deletionInProgress = true;
+    try {
+      const result = await deleteEntries(selectionForEntry(entry), t);
+      if (result.status !== 'completed' || result.deletedPaths.length === 0) return;
+      selectedPaths = selectedPaths.filter(path => !result.deletedPaths.some(deletedPath =>
+        pathsEqual(path, deletedPath) || pathStartsWithChild(path, deletedPath)
+      ));
+      if (selectionAnchorPath && result.deletedPaths.some(deletedPath =>
+        pathsEqual(selectionAnchorPath!, deletedPath)
+        || pathStartsWithChild(selectionAnchorPath!, deletedPath)
+      )) {
+        selectionAnchorPath = selectedPaths.at(-1) ?? null;
       }
+    } finally {
+      deletionInProgress = false;
     }
+  }
 
-    const result = await commands.deleteItem(entry.path);
-    if (result.status === 'ok') {
-      projectStore.removeWorkspacePath(entry.path);
-      await refreshFiles();
-    } else {
-      console.error('Failed to delete:', result.error);
-    }
+  function handleTreeKeydown(e: KeyboardEvent) {
+    if ((e.key !== 'Backspace' && e.key !== 'Delete') || e.metaKey || e.ctrlKey || e.altKey) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('input, textarea, [contenteditable="true"]')) return;
+    const row = target.closest<HTMLElement>('[data-tree-path]');
+    const path = row?.dataset.treePath;
+    if (!path) return;
+    const entry = findTreeNodeByPath(path);
+    if (!entry) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void handleDelete(entry);
   }
 
   // --- Drag-drop ---
@@ -780,8 +886,12 @@
     <div
       class="sidebar-files"
       data-testid="sidebar-files"
+      role="tree"
+      aria-multiselectable="true"
+      tabindex="-1"
       class:drag-over-root={rootDragOver}
       bind:this={filesContainer}
+      onkeydown={handleTreeKeydown}
       ondragover={handleDragOverRoot}
       ondragleave={handleDragLeaveRoot}
       ondrop={handleDropOnRoot}
@@ -806,6 +916,7 @@
           node={entry}
           depth={0}
           onContextMenu={handleContextMenu}
+          onSelect={selectEntry}
           onFileOpen={openFile}
           onRenameRequest={startRename}
           onDragStart={handleDragStart}
@@ -813,6 +924,7 @@
           onDragLeave={handleDragLeaveFolder}
           onDrop={handleDropOnFolder}
           {isTextFile}
+          {selectedPaths}
           renamingPath={renaming?.path ?? null}
           {renameValue}
           onRenameInput={(value) => { renameValue = value; }}
@@ -950,6 +1062,7 @@
 {/if}
 
 {#if contextMenu}
+  {@const contextSelection = selectionForEntry(contextMenu.entry)}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
@@ -961,47 +1074,51 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
-    {#if contextMenu.entry.is_dir}
-      <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-file" onclick={() => createFileAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFileHere')}</button>
-      {#each pluginFileCreators as creator (creator.pluginId)}
-        <button
-          role="menuitem"
-          class="context-menu-item"
-          data-testid="context-menu-new-{creator.pluginId}"
-          onclick={() => createFileAt(contextMenu!.entry.path, creator.ext)}
-        >{t('sidebar.menu.newFileOfTypeHere', { type: creator.label })}</button>
-      {/each}
-      <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-folder" onclick={() => createFolderAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFolderHere')}</button>
-      <div class="context-menu-separator"></div>
-      <button role="menuitem" class="context-menu-item" data-testid="context-menu-expand-all" onclick={() => expandAllAt(contextMenu!.entry.path)}>{t('sidebar.menu.expandAll')}</button>
-      <button role="menuitem" class="context-menu-item" data-testid="context-menu-collapse-all" onclick={() => collapseAllAt(contextMenu!.entry.path)}>{t('sidebar.menu.collapseAll')}</button>
-      <div class="context-menu-separator"></div>
-    {/if}
-    {#if !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
-      <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
-    {/if}
-    <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t(revealInFileManagerLabelKey)}</button>
-    <button role="menuitem" class="context-menu-item" onclick={() => copyPath(contextMenu!.entry)}>{t('sidebar.copyPath')}</button>
-    <button role="menuitem" class="context-menu-item" onclick={() => copyRelativePath(contextMenu!.entry)}>{t('sidebar.copyRelativePath')}</button>
-    {#if !contextMenu.entry.is_dir}
-      <button role="menuitem" class="context-menu-item" onclick={() => handleDuplicate(contextMenu!.entry)}>{t('sidebar.duplicate')}</button>
-    {/if}
-    {#if !contextMenu.entry.is_dir && contextManagedName?.kind === 'ready'}
-      {#if contextManagedName.state.status === 'managed'}
-        <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-stop-auto-naming" onclick={() => stopAutoNaming(contextMenu!.entry)}>
-          <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h4"/><path d="M15 7h2a5 5 0 0 1 4 8"/><path d="M8 12h4"/><path d="M2 2l20 20"/></svg>
-          <span>{t('sidebar.stopAutoNaming')}</span>
-        </button>
-      {:else}
-        <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-reenable-auto-naming" onclick={() => reEnableAutoNaming(contextMenu!.entry)}>
-          <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M18 2v4h-4"/><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M6 22v-4h4"/></svg>
-          <span>{t('sidebar.reenableAutoNaming')}</span>
-        </button>
+    {#if contextSelection.length > 1}
+      <button role="menuitem" class="context-menu-item context-menu-item-danger" data-testid="context-menu-delete-selection" onclick={() => handleDelete(contextMenu!.entry)}>{t('sidebar.deleteSelected', { count: contextSelection.length })}</button>
+    {:else}
+      {#if contextMenu.entry.is_dir}
+        <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-file" onclick={() => createFileAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFileHere')}</button>
+        {#each pluginFileCreators as creator (creator.pluginId)}
+          <button
+            role="menuitem"
+            class="context-menu-item"
+            data-testid="context-menu-new-{creator.pluginId}"
+            onclick={() => createFileAt(contextMenu!.entry.path, creator.ext)}
+          >{t('sidebar.menu.newFileOfTypeHere', { type: creator.label })}</button>
+        {/each}
+        <button role="menuitem" class="context-menu-item" data-testid="context-menu-new-folder" onclick={() => createFolderAt(contextMenu!.entry.path)}>{t('sidebar.menu.newFolderHere')}</button>
+        <div class="context-menu-separator"></div>
+        <button role="menuitem" class="context-menu-item" data-testid="context-menu-expand-all" onclick={() => expandAllAt(contextMenu!.entry.path)}>{t('sidebar.menu.expandAll')}</button>
+        <button role="menuitem" class="context-menu-item" data-testid="context-menu-collapse-all" onclick={() => collapseAllAt(contextMenu!.entry.path)}>{t('sidebar.menu.collapseAll')}</button>
+        <div class="context-menu-separator"></div>
       {/if}
+      {#if !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
+        <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
+      {/if}
+      <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t(revealInFileManagerLabelKey)}</button>
+      <button role="menuitem" class="context-menu-item" onclick={() => copyPath(contextMenu!.entry)}>{t('sidebar.copyPath')}</button>
+      <button role="menuitem" class="context-menu-item" onclick={() => copyRelativePath(contextMenu!.entry)}>{t('sidebar.copyRelativePath')}</button>
+      {#if !contextMenu.entry.is_dir}
+        <button role="menuitem" class="context-menu-item" onclick={() => handleDuplicate(contextMenu!.entry)}>{t('sidebar.duplicate')}</button>
+      {/if}
+      {#if !contextMenu.entry.is_dir && contextManagedName?.kind === 'ready'}
+        {#if contextManagedName.state.status === 'managed'}
+          <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-stop-auto-naming" onclick={() => stopAutoNaming(contextMenu!.entry)}>
+            <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h4"/><path d="M15 7h2a5 5 0 0 1 4 8"/><path d="M8 12h4"/><path d="M2 2l20 20"/></svg>
+            <span>{t('sidebar.stopAutoNaming')}</span>
+          </button>
+        {:else}
+          <button role="menuitem" class="context-menu-item context-menu-item-with-icon" data-testid="context-menu-reenable-auto-naming" onclick={() => reEnableAutoNaming(contextMenu!.entry)}>
+            <svg class="context-menu-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M18 2v4h-4"/><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M6 22v-4h4"/></svg>
+            <span>{t('sidebar.reenableAutoNaming')}</span>
+          </button>
+        {/if}
+      {/if}
+      <div class="context-menu-separator"></div>
+      <button role="menuitem" class="context-menu-item" data-testid="context-menu-rename" onclick={() => startRename(contextMenu!.entry)}>{t('sidebar.rename')}</button>
+      <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>{t('sidebar.delete')}</button>
     {/if}
-    <div class="context-menu-separator"></div>
-    <button role="menuitem" class="context-menu-item" data-testid="context-menu-rename" onclick={() => startRename(contextMenu!.entry)}>{t('sidebar.rename')}</button>
-    <button role="menuitem" class="context-menu-item context-menu-item-danger" onclick={() => handleDelete(contextMenu!.entry)}>{t('sidebar.delete')}</button>
   </div>
 {/if}
 

@@ -9,6 +9,7 @@
     node: FileNode;
     depth: number;
     onContextMenu: (e: MouseEvent, node: FileNode) => void;
+    onSelect: (e: MouseEvent, node: FileNode) => void;
     onFileOpen: (node: FileNode) => void | Promise<void>;
     onRenameRequest: (node: FileNode) => void;
     onDragStart: (e: DragEvent, node: FileNode) => void;
@@ -16,6 +17,7 @@
     onDragLeave: (e: DragEvent, node: FileNode) => void;
     onDrop: (e: DragEvent, node: FileNode) => void | Promise<void>;
     isTextFile: (name: string) => boolean;
+    selectedPaths: string[];
     renamingPath?: string | null;
     renameValue?: string;
     onRenameInput?: (value: string) => void;
@@ -27,6 +29,7 @@
     node,
     depth,
     onContextMenu,
+    onSelect,
     onFileOpen,
     onRenameRequest,
     onDragStart,
@@ -34,6 +37,7 @@
     onDragLeave,
     onDrop,
     isTextFile,
+    selectedPaths,
     renamingPath = null,
     renameValue = '',
     onRenameInput,
@@ -52,6 +56,7 @@
   }
 
   const indentPx = $derived(depth * 12 + 6);
+  const selected = $derived(selectedPaths.includes(node.path));
   let renameInputEl = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
@@ -81,13 +86,15 @@
   <div
     role="treeitem"
     aria-expanded={node.expanded}
-    aria-selected={false}
+    aria-selected={selected}
     tabindex="0"
     class="tree-row tree-dir"
+    class:tree-row-selected={selected}
     class:drag-over={node.dragOver}
     class:tree-row-wrap={projectStore.wrapFileNames}
     style="padding-left: {indentPx}px;"
     data-testid="sidebar-folder-{node.name}"
+    data-tree-path={node.path}
     oncontextmenu={(e) => onContextMenu(e, node)}
     ondragover={(e) => onDragOver(e, node)}
     ondragleave={(e) => onDragLeave(e, node)}
@@ -100,6 +107,8 @@
       // blur during the in-flight expand is fine because rename overwrites it.
       const target = e.target as HTMLElement;
       if (target.closest('.tree-chevron')) return;
+      onSelect(e, node);
+      if (e.shiftKey || e.metaKey || e.ctrlKey) return;
       toggleFolder();
     }}
     ondblclick={(e) => { e.preventDefault(); onRenameRequest(node); }}
@@ -127,6 +136,7 @@
         node={child}
         depth={depth + 1}
         {onContextMenu}
+        {onSelect}
         {onFileOpen}
         {onRenameRequest}
         {onDragStart}
@@ -134,6 +144,7 @@
         {onDragLeave}
         {onDrop}
         {isTextFile}
+        {selectedPaths}
         {renamingPath}
         {renameValue}
         {onRenameInput}
@@ -144,14 +155,21 @@
   {/if}
 {:else if isTextFile(node.name)}
   <button
+    role="treeitem"
+    aria-selected={selected}
     class="tree-row tree-file"
     class:tree-file-active={tabsStore.activeTab?.filePath === node.path}
+    class:tree-row-selected={selected}
     class:tree-row-wrap={projectStore.wrapFileNames}
     style="padding-left: {indentPx + 16}px;"
     data-testid="sidebar-file-{node.name}"
+    data-tree-path={node.path}
     draggable="true"
     ondragstart={(e) => onDragStart(e, node)}
-    onclick={() => onFileOpen(node)}
+    onclick={(e) => {
+      onSelect(e, node);
+      if (!e.shiftKey && !e.metaKey && !e.ctrlKey) onFileOpen(node);
+    }}
     ondblclick={(e) => { e.preventDefault(); onRenameRequest(node); }}
     oncontextmenu={(e) => onContextMenu(e, node)}
   >
@@ -166,11 +184,13 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     role="treeitem"
-    aria-selected={false}
+    aria-selected={selected}
     tabindex="-1"
     class="tree-row tree-file tree-disabled"
+    class:tree-row-selected={selected}
     class:tree-row-wrap={projectStore.wrapFileNames}
     style="padding-left: {indentPx + 16}px;"
+    data-tree-path={node.path}
     oncontextmenu={(e) => onContextMenu(e, node)}
     ondblclick={(e) => { e.preventDefault(); onRenameRequest(node); }}
   >
@@ -228,6 +248,10 @@
     min-height: 32px;
   }
   .tree-row:hover { background: var(--novelist-sidebar-hover); }
+  .tree-row:focus-visible {
+    outline: 1px solid var(--novelist-accent);
+    outline-offset: -1px;
+  }
   .tree-dir {
     cursor: default;
     color: var(--novelist-text-secondary);
@@ -248,9 +272,14 @@
   }
   .tree-chevron:hover { color: var(--novelist-text); }
   .tree-icon { flex-shrink: 0; opacity: 0.5; }
-  .tree-file-active {
+  .tree-row-selected {
     background: var(--novelist-sidebar-active) !important;
     color: var(--novelist-text);
+  }
+  .tree-file-active {
+    background: color-mix(in srgb, var(--novelist-accent) 8%, var(--novelist-sidebar-bg));
+    color: var(--novelist-accent);
+    font-weight: 500;
   }
   .tree-file-active .tree-icon { opacity: 0.75; }
   .tree-disabled { cursor: default; opacity: 0.35; }

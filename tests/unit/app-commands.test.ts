@@ -14,7 +14,7 @@ type RegisterCall = {
   handler: (...args: unknown[]) => unknown;
 };
 
-const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, fmt, translatedKeys } = vi.hoisted(() => {
+const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys } = vi.hoisted(() => {
   const register = vi.fn();
   const shortcuts = new Map<string, string>();
   const uiCalls: string[] = [];
@@ -32,13 +32,14 @@ const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, a
   const aiAgentCreate = vi.fn();
   const requestAiAgentNewSession = vi.fn();
   const applyBlockTransform = vi.fn();
+  const deleteCurrentParagraph = vi.fn();
   const fmt = {
     toggleWrap: vi.fn(),
     wrapSelection: vi.fn(),
     toggleLinePrefix: vi.fn(),
   };
   const translatedKeys: string[] = [];
-  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, fmt, translatedKeys };
+  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys };
 });
 
 vi.mock('$lib/stores/commands.svelte', () => ({
@@ -90,6 +91,7 @@ vi.mock('$lib/components/ai-agent/new-session-requests', () => ({
 
 vi.mock('$lib/editor/formatting', () => fmt);
 vi.mock('$lib/editor/block-transform', () => ({ applyBlockTransform }));
+vi.mock('$lib/editor/delete-paragraph', () => ({ deleteCurrentParagraph }));
 
 // Dynamic-import targets — vi.mock intercepts both static and dynamic imports.
 const simplifiedToTraditional = vi.fn(async (s: string) => `T:${s}`);
@@ -122,6 +124,7 @@ function ctx(over: Partial<AppCommandContext> = {}): AppCommandContext {
     t: (k: string) => { translatedKeys.push(k); return k; },
     getActiveEditorView: () => null,
     renameCurrentFile: noop,
+    deleteCurrentFile: noop,
     openNewWindow: noop,
     handleNewFile: noop,
     handleNewScratchFile: noop,
@@ -167,6 +170,7 @@ beforeEach(() => {
   aiAgentCreate.mockClear();
   requestAiAgentNewSession.mockClear();
   applyBlockTransform.mockClear();
+  deleteCurrentParagraph.mockClear();
   fmt.toggleWrap.mockClear();
   fmt.wrapSelection.mockClear();
   fmt.toggleLinePrefix.mockClear();
@@ -224,9 +228,9 @@ describe('[contract] registerAppCommands — registration shape', () => {
     for (const anchor of [
       'toggle-sidebar', 'toggle-outline', 'toggle-zen', 'command-palette',
       'new-file', 'new-project', 'open-directory', 'close-tab',
-      'rename-file', 'open-settings', 'go-to-line', 'toggle-mindmap',
+      'rename-file', 'delete-current-file', 'open-settings', 'go-to-line', 'toggle-mindmap',
       'toggle-ai-talk', 'toggle-ai-agent', 'ai-talk-new-session', 'ai-agent-new-session',
-      'editor-bold', 'editor-italic', 'editor-link', 'editor-heading',
+      'editor-bold', 'editor-italic', 'editor-link', 'editor-heading', 'editor-delete-paragraph',
       'chinese-s2t', 'chinese-t2s', 'chinese-pinyin',
       'copy-rich-text', 'copy-plain-text',
       'run-benchmark', 'run-scroll-test', 'check-for-updates',
@@ -296,6 +300,17 @@ describe('[contract] move-file gating', () => {
     projectState.dirPath = '/proj';
     handlerFor('move-file')();
     expect(openMovePalette).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('[contract] destructive file command wiring', () => {
+  it('routes delete-current-file through the App-owned deletion lifecycle', () => {
+    const deleteCurrentFile = vi.fn();
+    registerAppCommands(ctx({ deleteCurrentFile }));
+
+    handlerFor('delete-current-file')();
+
+    expect(deleteCurrentFile).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -375,6 +390,23 @@ describe('[contract] editor formatting commands', () => {
     registerAppCommands(ctx({ getActiveEditorView: () => view }));
     handlerFor('editor-heading')();
     expect(fmt.toggleLinePrefix).toHaveBeenCalledWith(view, '#');
+  });
+
+  it('editor-delete-paragraph passes the active EditorView to the paragraph deleter', () => {
+    const view = { id: 'active-editor' } as any;
+    registerAppCommands(ctx({ getActiveEditorView: () => view }));
+
+    handlerFor('editor-delete-paragraph')();
+
+    expect(deleteCurrentParagraph).toHaveBeenCalledWith(view);
+  });
+
+  it('editor-delete-paragraph does nothing without an active EditorView', () => {
+    registerAppCommands(ctx({ getActiveEditorView: () => null }));
+
+    handlerFor('editor-delete-paragraph')();
+
+    expect(deleteCurrentParagraph).not.toHaveBeenCalled();
   });
 });
 

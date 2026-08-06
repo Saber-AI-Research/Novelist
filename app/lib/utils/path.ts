@@ -16,6 +16,18 @@ export function pathJoin(dir: string, name: string): string {
   return `${dir.replace(/[\\/]+$/, '')}${sep}${name.replace(/^[\\/]+/, '')}`;
 }
 
+export function pathsEqual(left: string, right: string): boolean {
+  let normalizedLeft = left.replace(/\\/g, '/').replace(/\/+$/, '');
+  let normalizedRight = right.replace(/\\/g, '/').replace(/\/+$/, '');
+  const windowsStyle = /[A-Za-z]:/.test(left) || /[A-Za-z]:/.test(right)
+    || left.includes('\\') || right.includes('\\');
+  if (windowsStyle) {
+    normalizedLeft = normalizedLeft.toLowerCase();
+    normalizedRight = normalizedRight.toLowerCase();
+  }
+  return normalizedLeft === normalizedRight;
+}
+
 export function pathStartsWithChild(path: string, parent: string): boolean {
   let normalizedPath = path.replace(/\\/g, '/');
   let normalizedParent = parent.replace(/\\/g, '/').replace(/\/+$/, '');

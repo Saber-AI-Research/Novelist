@@ -40,6 +40,7 @@ const { h } = vi.hoisted(() => {
   };
 
   const settingsState = {
+    defaultDir: null as string | null,
     resolveNewFileDir: vi.fn((proj: string) => proj),
     recordLastUsedDir: vi.fn(async (_: string) => {}),
   };
@@ -84,6 +85,9 @@ vi.mock('$lib/stores/ui.svelte', () => ({
 
 vi.mock('$lib/stores/settings.svelte', () => ({
   settingsStore: {
+    get effective() {
+      return { new_file: { default_dir: h.settingsState.defaultDir } };
+    },
     resolveNewFileDir: (p: string) => h.settingsState.resolveNewFileDir(p),
     recordLastUsedDir: (p: string) => h.settingsState.recordLastUsedDir(p),
   },
@@ -132,6 +136,7 @@ beforeEach(() => {
   h.uiState.toggleTemplate.mockClear();
   h.settingsState.resolveNewFileDir.mockClear().mockImplementation((p: string) => p);
   h.settingsState.recordLastUsedDir.mockClear().mockResolvedValue(undefined);
+  h.settingsState.defaultDir = null;
   h.newFileState.template = 'Chapter {N}';
   h.newFileState.detectFromFolder = true;
   h.templatesStoreMock.read.mockReset();
@@ -180,6 +185,80 @@ describe('[contract] createNewFileInProject', () => {
     expect(h.settingsState.recordLastUsedDir).toHaveBeenCalledWith('/proj');
     expect(h.tabsState.openTab).toHaveBeenCalledWith('/proj/Chapter 1.md', '', { justCreated: true });
     expect(h.cmd.writeManagedNameState).not.toHaveBeenCalled();
+  });
+
+  it('creates beside the active literary-study chapter instead of the stale resolved dir', async () => {
+    h.projectState.dirPath = '/proj';
+    h.tabsState.activeTab = {
+      filePath: '/proj/学习内容/第一卷/0001 第一章.litstudy',
+      fileName: '0001 第一章.litstudy',
+    };
+    h.settingsState.resolveNewFileDir.mockReturnValue('/proj/其他目录');
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({
+      status: 'ok',
+      data: '/proj/学习内容/第一卷/Chapter 1.md',
+    });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+    await createNewFileInProject();
+
+    expect(h.cmd.createFile).toHaveBeenCalledWith('/proj/学习内容/第一卷', 'Chapter 1.md');
+    expect(h.settingsState.recordLastUsedDir).toHaveBeenCalledWith('/proj/学习内容/第一卷');
+    expect(h.projectState.expandFolder).toHaveBeenCalledWith('/proj/学习内容/第一卷');
+    expect(h.projectState.refreshFolder).toHaveBeenCalledWith('/proj/学习内容/第一卷');
+  });
+
+  it('keeps an explicit pinned default authoritative for an active literary-study chapter', async () => {
+    h.projectState.dirPath = '/proj';
+    h.tabsState.activeTab = {
+      filePath: '/proj/学习内容/第一卷/0001 第一章.litstudy',
+      fileName: '0001 第一章.litstudy',
+    };
+    h.settingsState.defaultDir = '/proj/固定目录';
+    h.settingsState.resolveNewFileDir.mockReturnValue('/proj/固定目录');
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/固定目录/Chapter 1.md' });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+    await createNewFileInProject();
+
+    expect(h.cmd.createFile).toHaveBeenCalledWith('/proj/固定目录', 'Chapter 1.md');
+  });
+
+  it('never redirects project creation beside an external literary-study file', async () => {
+    h.projectState.dirPath = '/proj';
+    h.tabsState.activeTab = {
+      filePath: '/outside/0001 第一章.litstudy',
+      fileName: '0001 第一章.litstudy',
+    };
+    h.settingsState.resolveNewFileDir.mockReturnValue('/proj/章节');
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/章节/Chapter 1.md' });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+    await createNewFileInProject();
+
+    expect(h.cmd.createFile).toHaveBeenCalledWith('/proj/章节', 'Chapter 1.md');
+  });
+
+  it('matches Windows project paths case-insensitively for literary-study placement', async () => {
+    h.projectState.dirPath = 'C:\\作品';
+    h.tabsState.activeTab = {
+      filePath: 'c:\\作品\\学习内容\\卷一\\0001.litstudy',
+      fileName: '0001.litstudy',
+    };
+    h.settingsState.resolveNewFileDir.mockReturnValue('C:\\作品');
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({
+      status: 'ok',
+      data: 'c:\\作品\\学习内容\\卷一\\Chapter 1.md',
+    });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+    await createNewFileInProject();
+
+    expect(h.cmd.createFile).toHaveBeenCalledWith('c:\\作品\\学习内容\\卷一', 'Chapter 1.md');
   });
 
   it('enrolls managed naming for created files when template contains {title}', async () => {
