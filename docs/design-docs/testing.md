@@ -27,6 +27,21 @@ matrices (`pnpm test:rust:pandoc`) against pinned Pandoc 3.10. Those matrices
 cover styled-copy extensions plus CJK HTML/DOCX/EPUB export. `pnpm test:all` is
 Vitest plus `cargo test`; it does not include browser or native Playwright.
 
+## Suite-size discipline
+
+Test count is not a target. Audit suite value using distinct production
+branches, regression ownership, runtime, and failure diagnostics. For pure
+validators, keep the complete input partition at the validator boundary and
+use representative cases at each caller boundary; do not repeat the same
+invalid-value matrix through every wrapper. Remove runtime tests that only
+prove a TypeScript assignment compiles, because `pnpm check` already owns that
+contract. Never trade away CJK/IME coverage, persistence migrations, native
+cleanup guarantees, or a minimal past-bug reproducer merely to reduce totals.
+
+Every pruning change must pass `pnpm test:coverage` without lowering the
+enforced floors. Slow limit, timeout, and race tests should be optimized only
+when their boundary can still be exercised at production values.
+
 ## Unit and integration placement
 
 Use `tests/unit/` when the subject can be exercised without rendering the app.
