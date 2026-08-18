@@ -31,6 +31,18 @@
 
 Latest release: **[v0.4.1](https://github.com/Saber-AI-Research/Novelist/releases/tag/v0.4.1)** · 最新版本
 
+### macOS — Homebrew
+
+```sh
+brew install --cask saber-ai-research/novelist/novelist
+```
+
+Upgrade with `brew upgrade --cask novelist`. Homebrew may ask you to trust the
+tap on first install. · 升级用 `brew upgrade --cask novelist`；首次安装时
+Homebrew 可能会要求你信任该 tap。
+
+### Direct download / 直接下载
+
 | Platform / 平台 | File / 文件 |
 |---|---|
 | macOS (Apple Silicon) | [`Novelist_0.4.1_aarch64.dmg`](https://github.com/Saber-AI-Research/Novelist/releases/download/v0.4.1/Novelist_0.4.1_aarch64.dmg) |
