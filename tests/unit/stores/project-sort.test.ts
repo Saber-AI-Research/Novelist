@@ -16,6 +16,7 @@ describe('projectStore.sortMode', () => {
         last_used_dir: null,
       },
       plugins: { enabled: {} },
+      snapshot: { max_count: 100, min_interval_minutes: 60 },
       is_project_scoped: false,
     };
   });

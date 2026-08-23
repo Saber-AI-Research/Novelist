@@ -10,6 +10,8 @@ pub mod rename_migration;
 pub mod rope_benchmark;
 pub mod rope_document;
 pub mod sidecar;
+#[cfg(feature = "sync")]
+pub mod snapshot_webdav;
 pub mod snapshots;
 #[cfg(feature = "sync")]
 pub mod sync;

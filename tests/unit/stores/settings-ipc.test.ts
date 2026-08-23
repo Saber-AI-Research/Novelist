@@ -32,6 +32,7 @@ const DEFAULT_EFFECTIVE = {
     last_used_dir: null,
   },
   plugins: { enabled: {} },
+  snapshot: { max_count: 100, min_interval_minutes: 60 },
   is_project_scoped: false,
 };
 
@@ -144,7 +145,7 @@ describe('[contract] settingsStore.load', () => {
       template: 'Chapter {N}',
       default_dir: '/proj/pinned',
       last_used_dir: '/proj/recent',
-    }), null);
+    }), null, null);
     expect(settingsStore.effective.new_file.default_dir).toBe('/proj/pinned');
     expect(settingsStore.effective.new_file.last_used_dir).toBe('/proj/recent');
   });
@@ -211,6 +212,7 @@ describe('[contract] settingsStore.load — migration from localStorage', () => 
       { sort_mode: 'name-desc', show_hidden_files: null, wrap_file_names: null, sidebar_font_size: null },
       null,
       null,
+      null,
     );
     // localStorage key is cleared after successful migration.
     expect(localStorage.getItem('novelist.sortMode./proj')).toBeNull();
@@ -245,6 +247,7 @@ describe('[contract] settingsStore.load — migration from localStorage', () => 
         detect_from_folder: false,
         auto_rename_from_h1: false,
       },
+      null,
       null,
     );
   });
@@ -315,6 +318,7 @@ describe('[contract] settingsStore.writeView', () => {
       { sort_mode: 'name-asc', show_hidden_files: false, wrap_file_names: false, sidebar_font_size: 14 },
       null,
       null,
+      null,
     );
     expect(commands.writeProjectSettings).not.toHaveBeenCalled();
     expect(settingsStore.effective.view.sort_mode).toBe('name-asc');
@@ -329,6 +333,7 @@ describe('[contract] settingsStore.writeView', () => {
       { sort_mode: 'numeric-asc', show_hidden_files: false, wrap_file_names: true, sidebar_font_size: 14 },
       null,
       null,
+      null,
     );
     expect(settingsStore.effective.view.wrap_file_names).toBe(true);
   });
@@ -340,6 +345,7 @@ describe('[contract] settingsStore.writeView', () => {
 
     expect(commands.writeGlobalSettings).toHaveBeenCalledWith(
       { sort_mode: 'numeric-asc', show_hidden_files: false, wrap_file_names: false, sidebar_font_size: 16 },
+      null,
       null,
       null,
     );
@@ -429,7 +435,7 @@ describe('[contract] settingsStore.writePluginEnabled', () => {
 
     expect(commands.writeGlobalSettings).toHaveBeenCalledWith(null, null, {
       enabled: { mindmap: true },
-    });
+    }, null);
     expect(settingsStore.effective.plugins.enabled.mindmap).toBe(true);
   });
 
@@ -470,6 +476,7 @@ describe('[contract] settingsStore.writePluginEnabled', () => {
       null,
       null,
       { enabled: { mindmap: false } },
+      null,
     );
   });
 
@@ -496,6 +503,7 @@ describe('[contract] settingsStore.writePluginEnabled', () => {
       null,
       null,
       { enabled: {} },
+      null,
     );
   });
 
@@ -523,6 +531,7 @@ describe('[contract] settingsStore.writePluginEnabled', () => {
       null,
       null,
       { enabled: {} },
+      null,
     );
   });
 });
@@ -574,6 +583,7 @@ describe('[contract] settingsStore.resetPluginOverride', () => {
       null,
       null,
       { enabled: {} },
+      null,
     );
     // After the reload, inherited global default shows through.
     expect(settingsStore.effective.plugins.enabled.mindmap).toBe(true);
@@ -632,6 +642,7 @@ describe('[contract] settingsStore.promoteToGlobal', () => {
         last_used_dir: null,
       },
       { enabled: { mindmap: false } },
+      null,
     );
   });
 

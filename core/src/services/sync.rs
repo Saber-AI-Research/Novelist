@@ -526,11 +526,12 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use serial_test::serial;
 
     // Tests that touch sync_dir_for_project mutate `NOVELIST_SYNC_DATA_DIR`
-    // (process-global env). Serialize so they don't race.
-    static DATA_DIR_MUTEX: Mutex<()> = Mutex::new(());
+    // (process-global env). The `sync_data_dir` serial group is shared with
+    // services::snapshots, whose retention tests set the same variable — a
+    // module-local mutex would not have kept the two apart.
 
     fn set_data_dir(p: &std::path::Path) -> Option<std::ffi::OsString> {
         let old = std::env::var_os("NOVELIST_SYNC_DATA_DIR");
@@ -550,10 +551,6 @@ mod tests {
                 std::env::remove_var("NOVELIST_SYNC_DATA_DIR");
             }
         }
-    }
-
-    fn lock_data_dir() -> std::sync::MutexGuard<'static, ()> {
-        DATA_DIR_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -764,8 +761,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(sync_data_dir)]
     fn test_sync_config_save_and_read() {
-        let _guard = lock_data_dir();
         let data_tmp = tempfile::TempDir::new().unwrap();
         let old = set_data_dir(data_tmp.path());
 
@@ -791,8 +788,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(sync_data_dir)]
     fn test_read_sync_config_missing() {
-        let _guard = lock_data_dir();
         let data_tmp = tempfile::TempDir::new().unwrap();
         let old = set_data_dir(data_tmp.path());
 
@@ -806,8 +803,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(sync_data_dir)]
     fn test_sync_state_roundtrip() {
-        let _guard = lock_data_dir();
         let data_tmp = tempfile::TempDir::new().unwrap();
         let old = set_data_dir(data_tmp.path());
 

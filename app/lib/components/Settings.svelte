@@ -117,6 +117,18 @@
 
   let settings = $derived(uiStore.editorSettings);
 
+  /** Retention inputs are `onchange` (not `oninput`) so a half-typed number
+   *  like "1" on the way to "100" never rewrites settings and prunes snapshots. */
+  function setSnapshotMaxCount(value: number) {
+    if (!Number.isFinite(value) || value < 1 || value > 10000) return;
+    void settingsStore.writeSnapshot({ max_count: Math.round(value) });
+  }
+
+  function setSnapshotMinInterval(value: number) {
+    if (!Number.isFinite(value) || value < 0 || value > 10080) return;
+    void settingsStore.writeSnapshot({ min_interval_minutes: Math.round(value) });
+  }
+
   function setEditorMaxWidth(value: number) {
     const next = Math.max(480, Math.min(9999, Math.round(value)));
     uiStore.updateEditorSettings({ maxWidth: next });
@@ -924,6 +936,50 @@
             <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
               {t('settings.editor.newFile.defaultDirHint', { shortcut: newFileShortcutLabel })}
             </div>
+          </div>
+        </div>
+
+        <div class="settings-group" data-testid="settings-snapshot-section">
+          <h4 class="settings-group-title">{t('settings.snapshot')}</h4>
+          <div class="settings-row">
+            <label for="settings-snapshot-maxcount" class="settings-row-label">{t('settings.snapshot.maxCount')}</label>
+            <input
+              id="settings-snapshot-maxcount"
+              data-testid="settings-snapshot-maxcount"
+              type="number"
+              min="1"
+              max="10000"
+              step="1"
+              value={settingsStore.effective.snapshot.max_count}
+              onchange={(e) => setSnapshotMaxCount(Number((e.target as HTMLInputElement).value))}
+              class="settings-control settings-number-control"
+            />
+          </div>
+          <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.maxCountHint')}
+          </div>
+          <div class="settings-row">
+            <label for="settings-snapshot-mininterval" class="settings-row-label">{t('settings.snapshot.minInterval')}</label>
+            <div class="settings-range-control">
+              <input
+                id="settings-snapshot-mininterval"
+                data-testid="settings-snapshot-mininterval"
+                type="number"
+                min="0"
+                max="10080"
+                step="1"
+                value={settingsStore.effective.snapshot.min_interval_minutes}
+                onchange={(e) => setSnapshotMinInterval(Number((e.target as HTMLInputElement).value))}
+                class="settings-control settings-number-control"
+              />
+              <span class="text-xs" style="color: var(--novelist-text-secondary);">{t('settings.snapshot.minIntervalUnit')}</span>
+            </div>
+          </div>
+          <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.minIntervalHint')}
+          </div>
+          <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
+            {t('settings.snapshot.webdavHint')}
           </div>
         </div>
 

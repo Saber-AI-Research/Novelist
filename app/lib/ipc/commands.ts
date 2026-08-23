@@ -69,6 +69,11 @@ export const commands = {
 	/**  Per-plugin enable flags (deltas from the global default map). */
 	plugins?: PluginsConfig,
 	/**
+	 *  Snapshot retention overrides. `None` inherits the global policy
+	 *  wholesale; a present table overrides global field-by-field.
+	 */
+	snapshot?: SnapshotConfig_Serialize | null,
+	/**
 	 *  Per-project override for which image host is active. Credentials
 	 *  stay in global settings — only the pointer to a configured host
 	 *  can be overridden here.
@@ -114,7 +119,10 @@ export const commands = {
 	last_used_dir?: string | null,
 } | null, plugins: {
 	enabled?: { [key in string]: boolean },
-} | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins })),
+} | null, snapshot: {
+	max_count?: number | null,
+	min_interval_minutes?: number | null,
+} | null) => typedError<null, string>(__TAURI_INVOKE("write_global_settings", { view, newFile, plugins, snapshot })),
 	/**
 	 *  Patch `<dir>/.novelist/project.toml`. Only the provided sections are replaced.
 	 *  Requires that a `project.toml` already exists (i.e. `dir` is a Novelist project).
@@ -142,7 +150,10 @@ export const commands = {
 	last_used_dir?: string | null,
 } | null, plugins: {
 	enabled?: { [key in string]: boolean },
-} | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins })),
+} | null, snapshot: {
+	max_count?: number | null,
+	min_interval_minutes?: number | null,
+} | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins, snapshot })),
 	startFileWatcher: (dirPath: string) => typedError<null, string>(__TAURI_INVOKE("start_file_watcher", { dirPath })),
 	stopFileWatcher: () => typedError<null, string>(__TAURI_INVOKE("stop_file_watcher")),
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
@@ -716,6 +727,7 @@ export type EffectiveSettings = {
 	view: ResolvedView,
 	new_file: ResolvedNewFile,
 	plugins: ResolvedPlugins,
+	snapshot: ResolvedSnapshot,
 	/**  True when a project is open — lets the UI show project-vs-global affordances. */
 	is_project_scoped: boolean,
 };
@@ -797,6 +809,11 @@ export type GlobalSettings_Deserialize = {
 	new_file?: NewFileConfig_Deserialize,
 	plugins?: PluginsConfig,
 	/**
+	 *  Snapshot retention policy (count cap + minimum spacing between kept
+	 *  snapshots). Project settings may override field-by-field.
+	 */
+	snapshot?: SnapshotConfig_Deserialize,
+	/**
 	 *  Image-host providers and active-host pointer. Credentials live
 	 *  here only — never in per-project settings.
 	 */
@@ -820,6 +837,11 @@ export type GlobalSettings_Serialize = {
 	view: ViewConfig_Serialize,
 	new_file: NewFileConfig_Serialize,
 	plugins: PluginsConfig,
+	/**
+	 *  Snapshot retention policy (count cap + minimum spacing between kept
+	 *  snapshots). Project settings may override field-by-field.
+	 */
+	snapshot: SnapshotConfig_Serialize,
 	/**
 	 *  Image-host providers and active-host pointer. Credentials live
 	 *  here only — never in per-project settings.
@@ -1334,6 +1356,11 @@ export type ProjectConfig_Deserialize = {
 	/**  Per-plugin enable flags (deltas from the global default map). */
 	plugins?: PluginsConfig,
 	/**
+	 *  Snapshot retention overrides. `None` inherits the global policy
+	 *  wholesale; a present table overrides global field-by-field.
+	 */
+	snapshot?: SnapshotConfig_Deserialize | null,
+	/**
 	 *  Per-project override for which image host is active. Credentials
 	 *  stay in global settings — only the pointer to a configured host
 	 *  can be overridden here.
@@ -1351,6 +1378,11 @@ export type ProjectConfig_Serialize = {
 	new_file?: NewFileConfig_Serialize,
 	/**  Per-plugin enable flags (deltas from the global default map). */
 	plugins?: PluginsConfig,
+	/**
+	 *  Snapshot retention overrides. `None` inherits the global policy
+	 *  wholesale; a present table overrides global field-by-field.
+	 */
+	snapshot?: SnapshotConfig_Serialize | null,
 	/**
 	 *  Per-project override for which image host is active. Credentials
 	 *  stay in global settings — only the pointer to a configured host
@@ -1972,6 +2004,11 @@ export type ResolvedPlugins = {
 	enabled: { [key in string]: boolean },
 };
 
+export type ResolvedSnapshot = {
+	max_count: number,
+	min_interval_minutes: number,
+};
+
 /**  Fully resolved settings handed to the frontend — no `Option`s. */
 export type ResolvedView = {
 	sort_mode: string,
@@ -2008,6 +2045,30 @@ export type SearchMatch = {
 	line_text: string,
 	match_start: number,
 	match_end: number,
+};
+
+/**
+ *  Local snapshot retention policy. `None` on a field means "inherit"
+ *  (project → global → baked-in default).
+ */
+export type SnapshotConfig = SnapshotConfig_Serialize | SnapshotConfig_Deserialize;
+
+/**
+ *  Local snapshot retention policy. `None` on a field means "inherit"
+ *  (project → global → baked-in default).
+ */
+export type SnapshotConfig_Deserialize = {
+	max_count?: number | null,
+	min_interval_minutes?: number | null,
+};
+
+/**
+ *  Local snapshot retention policy. `None` on a field means "inherit"
+ *  (project → global → baked-in default).
+ */
+export type SnapshotConfig_Serialize = {
+	max_count?: number | null,
+	min_interval_minutes?: number | null,
 };
 
 export type SnapshotMeta = {

@@ -21,6 +21,8 @@ pub const MIN_SIDEBAR_FONT_SIZE: u16 = 12;
 pub const MAX_SIDEBAR_FONT_SIZE: u16 = 18;
 pub const DEFAULT_DETECT_FROM_FOLDER: bool = true;
 pub const DEFAULT_AUTO_RENAME_FROM_H1: bool = true;
+pub const DEFAULT_SNAPSHOT_MAX_COUNT: u32 = 100;
+pub const DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES: u32 = 60;
 
 /// Sidebar / file-tree view preferences.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -64,6 +66,16 @@ pub struct PluginsConfig {
     pub enabled: HashMap<String, bool>,
 }
 
+/// Local snapshot retention policy. `None` on a field means "inherit"
+/// (project → global → baked-in default).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SnapshotConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_interval_minutes: Option<u32>,
+}
+
 /// Shape written to `~/.novelist/settings.json`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct GlobalSettings {
@@ -73,6 +85,10 @@ pub struct GlobalSettings {
     pub new_file: NewFileConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Snapshot retention policy (count cap + minimum spacing between kept
+    /// snapshots). Project settings may override field-by-field.
+    #[serde(default)]
+    pub snapshot: SnapshotConfig,
     /// Image-host providers and active-host pointer. Credentials live
     /// here only — never in per-project settings.
     #[serde(default)]
@@ -115,10 +131,17 @@ pub struct ResolvedPlugins {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ResolvedSnapshot {
+    pub max_count: u32,
+    pub min_interval_minutes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct EffectiveSettings {
     pub view: ResolvedView,
     pub new_file: ResolvedNewFile,
     pub plugins: ResolvedPlugins,
+    pub snapshot: ResolvedSnapshot,
     /// True when a project is open — lets the UI show project-vs-global affordances.
     pub is_project_scoped: bool,
 }
@@ -134,6 +157,7 @@ pub fn resolve(
     project_view: Option<&ViewConfig>,
     project_new_file: Option<&NewFileConfig>,
     project_plugins: Option<&PluginsConfig>,
+    project_snapshot: Option<&SnapshotConfig>,
 ) -> EffectiveSettings {
     let view = ResolvedView {
         sort_mode: project_view
@@ -191,9 +215,28 @@ pub fn resolve(
         view,
         new_file,
         plugins: ResolvedPlugins { enabled },
+        snapshot: ResolvedSnapshot {
+            max_count: project_snapshot
+                .and_then(|s| s.max_count)
+                .unwrap_or_else(|| {
+                    global
+                        .snapshot
+                        .max_count
+                        .unwrap_or(DEFAULT_SNAPSHOT_MAX_COUNT)
+                }),
+            min_interval_minutes: project_snapshot
+                .and_then(|s| s.min_interval_minutes)
+                .unwrap_or_else(|| {
+                    global
+                        .snapshot
+                        .min_interval_minutes
+                        .unwrap_or(DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES)
+                }),
+        },
         is_project_scoped: project_view.is_some()
             || project_new_file.is_some()
-            || project_plugins.is_some(),
+            || project_plugins.is_some()
+            || project_snapshot.is_some(),
     }
 }
 
@@ -204,7 +247,7 @@ mod tests {
     #[test]
     fn empty_global_falls_back_to_defaults() {
         let global = GlobalSettings::default();
-        let eff = resolve(&global, None, None, None);
+        let eff = resolve(&global, None, None, None, None);
         assert_eq!(eff.view.sort_mode, DEFAULT_SORT_MODE);
         assert_eq!(eff.view.show_hidden_files, DEFAULT_SHOW_HIDDEN);
         assert_eq!(eff.view.wrap_file_names, DEFAULT_WRAP_FILE_NAMES);
@@ -233,11 +276,12 @@ mod tests {
                 last_used_dir: None,
             },
             plugins: PluginsConfig::default(),
+            snapshot: SnapshotConfig::default(),
             image_hosts: Default::default(),
             publish: Default::default(),
             pandoc_path: None,
         };
-        let eff = resolve(&global, None, None, None);
+        let eff = resolve(&global, None, None, None, None);
         assert_eq!(eff.view.sort_mode, "name-asc");
         assert!(eff.view.show_hidden_files);
         assert!(eff.view.wrap_file_names);
@@ -265,7 +309,7 @@ mod tests {
             wrap_file_names: Some(true),
             sidebar_font_size: Some(17),
         };
-        let eff = resolve(&global, Some(&project_view), None, None);
+        let eff = resolve(&global, Some(&project_view), None, None, None);
         assert_eq!(eff.view.sort_mode, "name-asc");
         assert!(eff.view.show_hidden_files);
         assert!(eff.view.wrap_file_names);
@@ -291,11 +335,15 @@ mod tests {
         };
 
         assert_eq!(
-            resolve(&too_small, None, None, None).view.sidebar_font_size,
+            resolve(&too_small, None, None, None, None)
+                .view
+                .sidebar_font_size,
             MIN_SIDEBAR_FONT_SIZE
         );
         assert_eq!(
-            resolve(&too_large, None, None, None).view.sidebar_font_size,
+            resolve(&too_large, None, None, None, None)
+                .view
+                .sidebar_font_size,
             MAX_SIDEBAR_FONT_SIZE
         );
     }
@@ -312,7 +360,7 @@ mod tests {
         };
 
         // No project overlay — fall through to global.
-        let eff = resolve(&global, None, None, None);
+        let eff = resolve(&global, None, None, None, None);
         assert_eq!(eff.new_file.default_dir.as_deref(), Some("/glob/pin"));
         assert_eq!(eff.new_file.last_used_dir.as_deref(), Some("/glob/last"));
 
@@ -321,7 +369,7 @@ mod tests {
             last_used_dir: Some("/proj/chapters".into()),
             ..Default::default()
         };
-        let eff = resolve(&global, None, Some(&proj), None);
+        let eff = resolve(&global, None, Some(&proj), None, None);
         assert_eq!(eff.new_file.default_dir.as_deref(), Some("/glob/pin"));
         assert_eq!(
             eff.new_file.last_used_dir.as_deref(),
@@ -347,7 +395,7 @@ mod tests {
             enabled: project_map,
         };
 
-        let eff = resolve(&global, None, None, Some(&project_plugins));
+        let eff = resolve(&global, None, None, Some(&project_plugins), None);
         assert_eq!(eff.plugins.enabled.get("canvas"), Some(&true));
         assert_eq!(eff.plugins.enabled.get("mindmap"), Some(&false));
         assert_eq!(eff.plugins.enabled.get("kanban"), Some(&true));
@@ -372,6 +420,7 @@ mod tests {
                 last_used_dir: Some("/tmp/last".into()),
             },
             plugins: PluginsConfig { enabled: plugins },
+            snapshot: SnapshotConfig::default(),
             image_hosts: Default::default(),
             publish: Default::default(),
             pandoc_path: None,
@@ -386,5 +435,92 @@ mod tests {
         // An empty file should produce defaults, not fail.
         let back: GlobalSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(back, GlobalSettings::default());
+    }
+
+    #[test]
+    fn snapshot_config_defaults_to_empty_options() {
+        assert_eq!(
+            SnapshotConfig::default(),
+            SnapshotConfig {
+                max_count: None,
+                min_interval_minutes: None,
+            }
+        );
+        assert_eq!(DEFAULT_SNAPSHOT_MAX_COUNT, 100);
+        assert_eq!(DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES, 60);
+    }
+
+    #[test]
+    fn snapshot_config_json_round_trip() {
+        let original = SnapshotConfig {
+            max_count: Some(42),
+            min_interval_minutes: Some(15),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: SnapshotConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn empty_snapshot_config_json_deserializes() {
+        let back: SnapshotConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, SnapshotConfig::default());
+    }
+
+    #[test]
+    fn snapshot_resolves_to_baked_defaults_when_unset() {
+        let global = GlobalSettings::default();
+        let eff = resolve(&global, None, None, None, None);
+        assert_eq!(eff.snapshot.max_count, DEFAULT_SNAPSHOT_MAX_COUNT);
+        assert_eq!(
+            eff.snapshot.min_interval_minutes,
+            DEFAULT_SNAPSHOT_MIN_INTERVAL_MINUTES
+        );
+    }
+
+    #[test]
+    fn global_snapshot_config_overrides_baked_default() {
+        let global = GlobalSettings {
+            snapshot: SnapshotConfig {
+                max_count: Some(50),
+                min_interval_minutes: Some(30),
+            },
+            ..Default::default()
+        };
+        let eff = resolve(&global, None, None, None, None);
+        assert_eq!(eff.snapshot.max_count, 50);
+        assert_eq!(eff.snapshot.min_interval_minutes, 30);
+    }
+
+    #[test]
+    fn project_snapshot_overrides_global_field_by_field() {
+        let global = GlobalSettings {
+            snapshot: SnapshotConfig {
+                max_count: Some(50),
+                min_interval_minutes: Some(30),
+            },
+            ..Default::default()
+        };
+        let project_snap = SnapshotConfig {
+            max_count: Some(10),
+            min_interval_minutes: None,
+        };
+        let eff = resolve(&global, None, None, None, Some(&project_snap));
+        assert_eq!(eff.snapshot.max_count, 10);
+        assert_eq!(eff.snapshot.min_interval_minutes, 30); // inherited from global
+        assert!(eff.is_project_scoped);
+    }
+
+    #[test]
+    fn min_interval_zero_is_valid() {
+        let global = GlobalSettings {
+            snapshot: SnapshotConfig {
+                max_count: None,
+                min_interval_minutes: Some(0),
+            },
+            ..Default::default()
+        };
+        let eff = resolve(&global, None, None, None, None);
+        assert_eq!(eff.snapshot.min_interval_minutes, 0);
     }
 }

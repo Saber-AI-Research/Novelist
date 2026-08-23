@@ -221,6 +221,43 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       function writeMockProject(dir, s) {
         try { localStorage.setItem(MOCK_PROJECT_SETTINGS_KEY_PREFIX + dir, JSON.stringify(s)); } catch {}
       }
+      // Snapshot store with the same retention rules the Rust service applies
+      // (replace-within-interval, then cap pruning), so E2E can assert on the
+      // policy without a real filesystem.
+      let snapshotList = [];
+      let snapshotMaxCount = 100;
+      let snapshotMinIntervalMinutes = 60;
+      let snapshotCounter = 0;
+
+      function mockCreateSnapshot(name) {
+        const now = Date.now();
+        const minIntervalMs = snapshotMinIntervalMinutes * 60 * 1000;
+        const newest = snapshotList.length > 0 ? snapshotList[0] : null;
+        const shouldReplace = snapshotMinIntervalMinutes > 0
+          && newest != null
+          && now - newest.timestamp < minIntervalMs;
+        if (shouldReplace) {
+          snapshotList.shift();
+        } else {
+          while (snapshotList.length >= snapshotMaxCount) snapshotList.pop();
+        }
+        snapshotCounter++;
+        const meta = {
+          id: 'snap-' + snapshotCounter,
+          name,
+          timestamp: now,
+          file_count: 3,
+          total_bytes: 1024,
+        };
+        snapshotList.unshift(meta);
+        return meta;
+      }
+
+      function applySnapshotPatch(patch) {
+        if (patch.max_count != null) snapshotMaxCount = patch.max_count;
+        if (patch.min_interval_minutes != null) snapshotMinIntervalMinutes = patch.min_interval_minutes;
+      }
+
       function resolveMockEffective(dir) {
         const g = readMockGlobal();
         const p = dir ? (readMockProject(dir) || { view: {}, new_file: {}, plugins: { enabled: {} } }) : null;
@@ -245,6 +282,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             last_used_dir: pickNF('last_used_dir', null),
           },
           plugins: { enabled },
+          snapshot: {
+            max_count: snapshotMaxCount,
+            min_interval_minutes: snapshotMinIntervalMinutes,
+          },
           is_project_scoped: dir != null,
         };
       }
@@ -1078,9 +1119,13 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'write_draft_note': case 'delete_draft_note': return null;
           case 'has_draft_note': return false;
           case 'search_in_project': return [];
-          case 'list_snapshots': return [];
-          case 'create_snapshot': return { id: 'snap-1', name: args.name, timestamp: Date.now(), file_count: 3, total_bytes: 1024 };
-          case 'delete_snapshot': case 'restore_snapshot': return null;
+          case 'list_snapshots': return snapshotList.map(s => ({ ...s }));
+          case 'create_snapshot': return mockCreateSnapshot(args.name);
+          case 'delete_snapshot': {
+            snapshotList = snapshotList.filter(s => s.id !== args.snapshotId);
+            return null;
+          }
+          case 'restore_snapshot': return null;
           case 'record_writing_stats': return null;
           case 'get_writing_stats': return { daily: [], total_words: 0, chapters: [], streak_days: 0, today_words: 0, today_minutes: 0 };
           case 'list_templates': return [];
@@ -1279,6 +1324,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             if (args.view != null) current.view = args.view;
             if (args.newFile != null) current.new_file = args.newFile;
             if (args.plugins != null) current.plugins = args.plugins;
+            if (args.snapshot != null) applySnapshotPatch(args.snapshot);
             writeMockGlobal(current);
             return null;
           }
@@ -1287,6 +1333,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             if (args.view != null) current.view = args.view;
             if (args.newFile != null) current.new_file = args.newFile;
             if (args.plugins != null) current.plugins = args.plugins;
+            if (args.snapshot != null) applySnapshotPatch(args.snapshot);
             writeMockProject(args.dirPath, current);
             return null;
           }
@@ -1440,6 +1487,13 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get files() { return files.map(f => ({ ...f })); },
         get projectDir() { return projectDir; },
         get recentProjects() { return recentProjects.map(p => ({ ...p })); },
+        get snapshots() { return snapshotList.map(s => ({ ...s })); },
+        setSnapshotRetention(maxCount, minIntervalMinutes) {
+          snapshotMaxCount = maxCount;
+          snapshotMinIntervalMinutes = minIntervalMinutes;
+          snapshotList = [];
+          snapshotCounter = 0;
+        },
         get claudeCliSpawnUuidHistory() { return [...claudeCliSpawnUuidHistory]; },
         get claudeCliSendCount() { return claudeCliSendCount; },
         get claudeCliKillCount() { return claudeCliKillCount; },

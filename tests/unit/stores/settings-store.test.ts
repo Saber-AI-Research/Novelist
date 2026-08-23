@@ -24,6 +24,7 @@ function seedEffective(partial: Partial<typeof settingsStore.effective.new_file>
       ...partial,
     },
     plugins: { enabled: {} },
+    snapshot: { max_count: 100, min_interval_minutes: 60 },
     is_project_scoped: false,
   };
 }

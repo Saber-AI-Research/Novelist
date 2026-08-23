@@ -1361,6 +1361,7 @@ fn build_literary_project(
         view: Default::default(),
         new_file: Default::default(),
         plugins,
+        snapshot: None,
         active_image_host_id: None,
     };
     atomic_write_sync(

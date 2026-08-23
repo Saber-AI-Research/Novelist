@@ -12,7 +12,8 @@
 use crate::error::AppError;
 use crate::models::project::ProjectConfig;
 use crate::models::settings::{
-    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, ViewConfig,
+    resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, ResolvedSnapshot,
+    SnapshotConfig, ViewConfig,
 };
 use std::path::{Path, PathBuf};
 
@@ -91,6 +92,17 @@ pub async fn get_global_settings() -> Result<GlobalSettings, AppError> {
     Ok(read_global_settings().await)
 }
 
+/// Internal helper used by the snapshot service to resolve `max_count` /
+/// `min_interval_minutes` for a specific project directory. Not a Tauri
+/// command — the retention engine calls it directly.
+pub async fn get_resolved_snapshot_config(project_dir: &str) -> ResolvedSnapshot {
+    let global = read_global_settings().await;
+    let project_snap = read_project_config_if_any(project_dir)
+        .await
+        .and_then(|p| p.snapshot);
+    resolve(&global, None, None, None, project_snap.as_ref()).snapshot
+}
+
 /// Return effective settings, merging global defaults with an optional
 /// project overlay. `dir_path = None` returns global-only (scratch mode).
 #[tauri::command]
@@ -99,21 +111,27 @@ pub async fn get_effective_settings(
     dir_path: Option<String>,
 ) -> Result<EffectiveSettings, AppError> {
     let global = read_global_settings().await;
-    let (view, new_file, plugins) = match dir_path {
+    let (view, new_file, plugins, snapshot): (
+        Option<ViewConfig>,
+        Option<NewFileConfig>,
+        Option<PluginsConfig>,
+        Option<SnapshotConfig>,
+    ) = match dir_path {
         Some(d) => {
             let project = read_project_config_if_any(&d).await;
             match project {
-                Some(p) => (Some(p.view), Some(p.new_file), Some(p.plugins)),
-                None => (None, None, None),
+                Some(p) => (Some(p.view), Some(p.new_file), Some(p.plugins), p.snapshot),
+                None => (None, None, None, None),
             }
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
     Ok(resolve(
         &global,
         view.as_ref(),
         new_file.as_ref(),
         plugins.as_ref(),
+        snapshot.as_ref(),
     ))
 }
 
@@ -125,6 +143,7 @@ pub async fn write_global_settings(
     view: Option<ViewConfig>,
     new_file: Option<NewFileConfig>,
     plugins: Option<PluginsConfig>,
+    snapshot: Option<SnapshotConfig>,
 ) -> Result<(), AppError> {
     let mut current = read_global_settings().await;
     if let Some(v) = view {
@@ -135,6 +154,9 @@ pub async fn write_global_settings(
     }
     if let Some(p) = plugins {
         current.plugins = p;
+    }
+    if let Some(s) = snapshot {
+        current.snapshot = s;
     }
     write_global_settings_to_disk(&current).await
 }
@@ -148,6 +170,7 @@ pub async fn write_project_settings(
     view: Option<ViewConfig>,
     new_file: Option<NewFileConfig>,
     plugins: Option<PluginsConfig>,
+    snapshot: Option<SnapshotConfig>,
 ) -> Result<(), AppError> {
     let mut config = read_project_config_if_any(&dir_path)
         .await
@@ -160,6 +183,9 @@ pub async fn write_project_settings(
     }
     if let Some(p) = plugins {
         config.plugins = p;
+    }
+    if let Some(s) = snapshot {
+        config.snapshot = Some(s);
     }
     write_project_config(&dir_path, &config).await
 }
@@ -216,6 +242,7 @@ template = "Chapter {N}"
                 wrap_file_names: None,
                 sidebar_font_size: None,
             }),
+            None,
             None,
             None,
         )
@@ -277,6 +304,7 @@ show_hidden_files = true
             Some(ViewConfig::default()),
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(res, Err(AppError::FileNotFound(_))));
@@ -312,6 +340,7 @@ auto_save_minutes = 7
                 wrap_file_names: Some(true),
                 sidebar_font_size: None,
             }),
+            None,
             None,
             None,
         )

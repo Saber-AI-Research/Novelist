@@ -1,4 +1,4 @@
-use crate::models::settings::{NewFileConfig, PluginsConfig, ViewConfig};
+use crate::models::settings::{NewFileConfig, PluginsConfig, SnapshotConfig, ViewConfig};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -22,6 +22,10 @@ pub struct ProjectConfig {
     /// Per-plugin enable flags (deltas from the global default map).
     #[serde(default, skip_serializing_if = "is_default_plugins")]
     pub plugins: PluginsConfig,
+    /// Snapshot retention overrides. `None` inherits the global policy
+    /// wholesale; a present table overrides global field-by-field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotConfig>,
     /// Per-project override for which image host is active. Credentials
     /// stay in global settings — only the pointer to a configured host
     /// can be overridden here.
@@ -145,6 +149,7 @@ name = "Minimal"
             view: Default::default(),
             new_file: Default::default(),
             plugins: Default::default(),
+            snapshot: None,
             active_image_host_id: None,
         };
 
@@ -249,6 +254,7 @@ enabled = { mindmap = false }
             view: Default::default(),
             new_file: Default::default(),
             plugins: Default::default(),
+            snapshot: None,
             active_image_host_id: None,
         };
         let serialized = toml::to_string(&config).unwrap();

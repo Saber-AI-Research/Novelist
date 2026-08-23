@@ -126,6 +126,8 @@ export const test = base.extend<{
     getDeletedFiles: () => Promise<string[]>;
     getFiles: () => Promise<MockFileEntry[]>;
     getRecentProjects: () => Promise<Array<{ path: string; name: string; pinned?: boolean }>>;
+    getSnapshots: () => Promise<Array<{ id: string; name: string; timestamp: number }>>;
+    setSnapshotRetention: (maxCount: number, minIntervalMinutes: number) => Promise<void>;
     seedRecentProjects: (list: Array<{ path: string; name: string; last_opened: string; pinned?: boolean; sort_order?: number | null }>) => Promise<void>;
     emitEvent: (event: string, payload: unknown, targetLabel?: string) => Promise<void>;
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
@@ -324,6 +326,15 @@ export const test = base.extend<{
       },
       async getRecentProjects() {
         return app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.recentProjects);
+      },
+      async getSnapshots() {
+        return app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.snapshots);
+      },
+      async setSnapshotRetention(maxCount: number, minIntervalMinutes: number) {
+        await app.evaluate(
+          ([max, min]) => (window as any).__TAURI_MOCK_STATE__.setSnapshotRetention(max, min),
+          [maxCount, minIntervalMinutes] as const,
+        );
       },
       async seedRecentProjects(list: Array<{ path: string; name: string; last_opened: string; pinned?: boolean; sort_order?: number | null }>) {
         await app.evaluate(
