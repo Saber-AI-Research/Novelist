@@ -404,21 +404,24 @@ class CheckboxWidget extends WidgetType {
 }
 
 /**
- * Pre-compute cursor positions into a sorted array for fast range checks.
- * Avoids re-iterating state.selection.ranges on every node.
+ * Reveal source across every selected logical line before editing starts.
+ * A multi-line construct stays revealed while any of its lines is active.
+ * Selection ranges are already sorted, so their expanded line ends are too.
  */
-function makeCursorSet(state: EditorState): number[] {
-  return state.selection.ranges.map(r => r.head).sort((a, b) => a - b);
+function activeLineRanges(state: EditorState): { from: number; to: number }[] {
+  return state.selection.ranges.map(range => ({
+    from: state.doc.lineAt(range.from).from,
+    to: state.doc.lineAt(range.to).to,
+  }));
 }
 
-function cursorInRangeFast(heads: number[], from: number, to: number): boolean {
-  // Binary search for first head >= from
-  let lo = 0, hi = heads.length;
+function touchesActiveLine(ranges: readonly { from: number; to: number }[], from: number, to: number): boolean {
+  let lo = 0, hi = ranges.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (heads[mid] < from) lo = mid + 1; else hi = mid;
+    if (ranges[mid].to < from) lo = mid + 1; else hi = mid;
   }
-  return lo < heads.length && heads[lo] <= to;
+  return lo < ranges.length && ranges[lo].from <= to;
 }
 
 /**
@@ -599,14 +602,14 @@ function clampReplaceRange(
 function buildDecorations(view: EditorView): DecorationSet {
   const { state } = view;
   const decos: Range<Decoration>[] = [];
-  const cursorHeads = makeCursorSet(state);
+  const activeLines = activeLineRanges(state);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
       to,
       enter(node) {
-        const cursorInside = cursorInRangeFast(cursorHeads, node.from, node.to);
+        const cursorInside = touchesActiveLine(activeLines, node.from, node.to);
         const markerClass = cursorInside ? 'cm-novelist-marker-visible' : 'cm-novelist-hidden';
 
         // --- ATX Headings ---
@@ -621,8 +624,9 @@ function buildDecorations(view: EditorView): DecorationSet {
         if (node.name in headingClasses) {
           const headingNode = node.node;
 
-          // Find HeaderMark children (the # symbols)
-          let markerEnd = node.from;
+          // HeaderMark also includes an optional closing hash run. Only the
+          // opening mark owns the required separator before heading content.
+          let openingMarkerEnd = node.from;
           const cursor = headingNode.cursor();
           if (cursor.firstChild()) {
             do {
@@ -639,32 +643,19 @@ function buildDecorations(view: EditorView): DecorationSet {
                     if (r) decos.push(Decoration.replace({}).range(r.from, r.to));
                   }
                 }
-                if (cursor.to > markerEnd) {
-                  markerEnd = cursor.to;
-                }
+                if (cursor.from === node.from) openingMarkerEnd = cursor.to;
               }
             } while (cursor.nextSibling());
           }
 
-          // Also handle the space between # marks and heading text.
-          const afterMarker = markerEnd;
+          // Leave the active separator in the same text node as new content.
+          // Marking it separately splits the first IME character off from its
+          // native composition node. Extra spaces belong to the user's text.
           const lineEndPos = state.doc.lineAt(node.from).to;
-          const maxSpaces = Math.min(lineEndPos - afterMarker, 4);
-          let contentStart = afterMarker;
-          if (maxSpaces > 0) {
-            const chunk = state.doc.sliceString(afterMarker, afterMarker + maxSpaces);
-            while (contentStart - afterMarker < chunk.length && chunk[contentStart - afterMarker] === ' ') {
-              contentStart++;
-            }
-          }
-          if (contentStart > afterMarker && afterMarker < lineEndPos) {
-            if (cursorInside) {
-              decos.push(
-                Decoration.mark({ class: 'cm-novelist-marker-visible' }).range(afterMarker, contentStart)
-              );
-            } else {
-              const r = clampReplaceRange(state, afterMarker, contentStart);
-              if (r) decos.push(Decoration.replace({}).range(r.from, r.to));
+          if (!cursorInside && openingMarkerEnd < lineEndPos) {
+            const separator = state.doc.sliceString(openingMarkerEnd, openingMarkerEnd + 1);
+            if (separator === ' ' || separator === '\t') {
+              decos.push(Decoration.replace({}).range(openingMarkerEnd, openingMarkerEnd + 1));
             }
           }
 
@@ -802,8 +793,7 @@ function buildDecorations(view: EditorView): DecorationSet {
         // --- FencedCode ---
         if (node.name === 'FencedCode') {
           const fcNode = node.node;
-          const cursorIn = cursorInRangeFast(cursorHeads, node.from, node.to);
-          const fenceMarkerClass = cursorIn ? 'cm-novelist-marker-visible' : 'cm-novelist-hidden';
+          const fenceMarkerClass = markerClass;
 
           // Apply line decorations — walk by position to avoid line-number lookups
           const codeDeco = Decoration.line({ class: 'cm-novelist-codeblock-line' });
@@ -998,7 +988,7 @@ function buildDecorations(view: EditorView): DecorationSet {
  * Helper for inline markup nodes (bold, italic, strikethrough, inline code).
  * Finds marker children, hides/reveals them, and applies content styling.
  *
- * When the cursor is NOT on the node (`markerClass === 'cm-novelist-hidden'`)
+ * When no selected line touches the node (`markerClass === 'cm-novelist-hidden'`)
  * we use `Decoration.replace({})` to fully collapse the `**` / `*` / `~~` /
  * `` ` `` markers. `visibility: hidden` would leave a per-marker horizontal
  * gap (e.g. `**姓名**` rendered as "  姓名  "), which users perceive as an
@@ -1052,73 +1042,48 @@ function handleInlineMarkup(
  */
 class WysiwygPluginClass {
   decorations: DecorationSet;
-  private lastCursorLine = -1;
 
   constructor(view: EditorView) {
     this.decorations = buildDecorations(view);
-    this.lastCursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
   }
 
   update(update: ViewUpdate) {
     const wasComposing = update.startState.field(imeComposingField, false);
     const isComposing = update.state.field(imeComposingField, false);
 
-    // CRITICAL: rebuild on doc change even during IME composition.
-    //
-    // If we skip rebuilding here and just let CM6 map the previous
-    // DecorationSet through the transaction, a composition that inserts
-    // a newline (or any multi-line run) into a replace range will produce
-    // a stale decoration whose [from..to] now crosses a line break — and
-    // CM6 throws `RangeError: Decorations that replace line breaks may not
-    // be specified via plugins` at the next render. Rebuilding produces a
-    // fresh set matched to the current doc, which is always safe.
-    if (update.docChanged || update.viewportChanged || (wasComposing && !isComposing)) {
-      this.decorations = buildDecorations(update.view);
-      this.lastCursorLine = update.state.doc.lineAt(update.state.selection.main.head).number;
-      return;
-    }
-
-    // For non-doc updates during IME composition, leave decorations alone
-    // (cursor may jump transiently but no doc change means no cross-line risk).
-    if (isComposing) return;
-
-    // Rebuild when the incremental parser advances the syntax tree, even
-    // without a doc/selection/viewport change.
-    //
-    // CM6's language ViewPlugin parses lazily in the background and dispatches
-    // tree-only transactions (no docChanged, no selectionSet) as it catches up.
-    // In a long document an edit (e.g. typing in a table cell) invalidates a
-    // large region, so the first post-edit rebuild runs against an incomplete
-    // tree — headings beyond the synchronous parse budget aren't recognized yet,
-    // leaving their marker decorations stale. Without this guard the WYSIWYG
-    // decorations are never refreshed when the parser finishes, so on-screen
-    // headings render wrong until the next unrelated doc/selection/viewport
-    // change. The table plugins (table.ts) already guard on this same condition.
-    if (syntaxTree(update.state) !== syntaxTree(update.startState)) {
-      this.decorations = buildDecorations(update.view);
-      this.lastCursorLine = update.state.doc.lineAt(update.state.selection.main.head).number;
-      return;
-    }
-
-    // For selection-only changes: skip rebuild if cursor stayed on the same line.
-    if (update.selectionSet) {
-      const newLine = update.state.doc.lineAt(update.state.selection.main.head).number;
-      if (newLine !== this.lastCursorLine) {
-        this.decorations = buildDecorations(update.view);
-        this.lastCursorLine = newLine;
+    if (isComposing) {
+      if (update.docChanged) {
+        // Preserve the native composition text node instead of rebuilding
+        // marks against every provisional parse. Mapping alone is unsafe:
+        // inserting a newline into a hidden URL/marker can make a replacement
+        // cross a line break, which CM6 forbids for ViewPlugin decorations.
+        // Reveal just those invalid replacements until composition settles.
+        this.decorations = this.decorations.map(update.changes).update({
+          filter: (from, to, value) => !value.point || to <= update.state.doc.lineAt(from).to,
+        });
       }
+      return;
+    }
+
+    // Selection changes must settle source visibility before the next input,
+    // including range selections and moves within one logical line. Tree-only
+    // updates also matter when the incremental parser finishes in the background.
+    if (update.docChanged || update.selectionSet || update.viewportChanged || wasComposing ||
+        syntaxTree(update.state) !== syntaxTree(update.startState)) {
+      this.decorations = buildDecorations(update.view);
     }
   }
 }
 
 /**
- * Names of the syntax-marker nodes this file collapses when the cursor is off
- * the node: `**`, `*`, `~~`, `` ` ``.
+ * Names of the inline syntax markers collapsed on inactive lines:
+ * `**`, `*`, `~~`, `` ` ``, `==`.
  */
 const INLINE_MARKER_NODES = new Set([
   'EmphasisMark',
   'CodeMark',
   'StrikethroughMark',
+  'HighlightMark',
 ]);
 
 /**
@@ -1141,8 +1106,8 @@ function endOfMarkerRun(state: EditorState, pos: number): number {
 /**
  * Keep the caret out of collapsed marker runs when it arrives by coordinates.
  *
- * Markers render at zero width while the cursor is off their node, so a line
- * ending in `**加粗**` measures 11 columns but *paints* 7. CodeMirror maps a
+ * Markers render at zero width on inactive lines, so a line ending in
+ * `**加粗**` measures 11 columns but *paints* 7. CodeMirror maps a
  * vertical move or a click through the painted geometry, so aiming at the end
  * of that line lands the caret at column 9 — the near edge of the collapsed
  * `**`. The markers then reappear (the cursor is inside the node again) and
@@ -1155,15 +1120,20 @@ function endOfMarkerRun(state: EditorState, pos: number): number {
  * keys is how you edit them.
  */
 export const markerBoundarySnap = EditorState.transactionFilter.of((tr) => {
-  if (tr.docChanged || !tr.selection) return tr;
+  if (tr.docChanged || !tr.selection || tr.isUserEvent('input.type.compose') ||
+      tr.startState.field(imeComposingField, false)) return tr;
   const fromPointer = tr.isUserEvent('select.pointer');
-  const previousLine = tr.startState.doc.lineAt(tr.startState.selection.main.head).number;
+  const activeLines = activeLineRanges(tr.startState);
 
   let changed = false;
-  const ranges = tr.selection.ranges.map((range) => {
+  const ranges = tr.selection.ranges.map((range, index) => {
     if (!range.empty) return range;
+    const previous = tr.startState.selection.ranges[index] ?? tr.startState.selection.main;
+    const previousLine = tr.startState.doc.lineAt(previous.head).number;
     const line = tr.startState.doc.lineAt(range.head);
     if (!fromPointer && line.number === previousLine) return range;
+    const marker = syntaxTree(tr.startState).resolveInner(range.head, 1);
+    if (marker.parent && touchesActiveLine(activeLines, marker.parent.from, marker.parent.to)) return range;
     const snapped = endOfMarkerRun(tr.startState, range.head);
     if (snapped === range.head) return range;
     changed = true;

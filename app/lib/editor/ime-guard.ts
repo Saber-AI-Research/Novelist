@@ -1,5 +1,5 @@
 import { StateField, StateEffect } from '@codemirror/state';
-import { EditorView } from '@codemirror/view';
+import { EditorView, ViewPlugin } from '@codemirror/view';
 
 const setComposing = StateEffect.define<boolean>();
 const nativeE2eComposition = new WeakMap<EditorView, boolean>();
@@ -14,16 +14,49 @@ export const imeComposingField = StateField.define<boolean>({
   },
 });
 
-export const imeGuardPlugin = EditorView.domEventHandlers({
-  compositionstart(event, view) {
-    view.dispatch({ effects: setComposing.of(true) });
-  },
-  compositionend(event, view) {
-    // Small delay to let the final input settle
-    setTimeout(() => {
-      view.dispatch({ effects: setComposing.of(false) });
+export const imeGuardPlugin = ViewPlugin.fromClass(class {
+  private settleTimer: number | undefined;
+
+  constructor(readonly view: EditorView) {}
+
+  private cancelSettle() {
+    if (this.settleTimer !== undefined) {
+      window.clearTimeout(this.settleTimer);
+      this.settleTimer = undefined;
+    }
+  }
+
+  start() {
+    // A previous compositionend may still be waiting for its final input.
+    // It must never clear the guard or notify watchers during this session.
+    this.cancelSettle();
+    this.view.dispatch({ effects: setComposing.of(true) });
+  }
+
+  end() {
+    this.cancelSettle();
+    this.settleTimer = window.setTimeout(() => {
+      this.settleTimer = undefined;
+      this.view.dispatch({ effects: setComposing.of(false) });
       window.dispatchEvent(new CustomEvent('novelist-composition-end'));
     }, 20);
+  }
+
+  destroy() {
+    this.cancelSettle();
+    nativeE2eComposition.delete(this.view);
+  }
+}, {
+  provide: () => imeComposingField,
+  eventHandlers: {
+    compositionstart(event, view) {
+      if (!(event.target instanceof Element) || event.target.closest('[contenteditable]') !== view.contentDOM) return;
+      this.start();
+    },
+    compositionend(event, view) {
+      if (!(event.target instanceof Element) || event.target.closest('[contenteditable]') !== view.contentDOM) return;
+      this.end();
+    },
   },
 });
 

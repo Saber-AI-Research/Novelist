@@ -117,26 +117,38 @@ the cursor entering the table does **not** reveal raw markdown: cells are
   that leaves the table (and on `Escape`), and immediately on any structural
   change. `commitFromDom` reads cell text via `cellDomToMarkdown`, keeps
   alignments from the current source, and dispatches one replace transaction.
-  Commit is skipped mid-IME-composition and deferred to `compositionend`.
-- **`updateDOM` preserves focus.** A commit changes the doc → the StateField
-  rebuilds the widget. `TableWidget.updateDOM` patches non-focused cells in
-  place and returns `true` when the shape is unchanged, so cell focus/caret
-  survive. It returns `false` on a shape change (add/remove row/col) to force a
-  fresh DOM; `tableFocusPlugin` then restores focus to the intended cell via a
-  module-level `pendingFocus` keyed by the table's source-range start.
+  Blur commits run after DOM reconciliation; composition commits wait until
+  the final native input following `compositionend` has settled. Enter, Tab,
+  Escape and structural actions never consume IME candidate keys.
+- **Safe table exit.** Escape commits and places the caret in real editable
+  prose in one transaction, never at the replaced table boundary. Preserve
+  a blank separator before that paragraph and before following content;
+  terminal tables gain a separated paragraph so the next Chinese input
+  cannot become another table row.
+- **DOM owns editing state.** `tableOwners` retains the listener owner's
+  composition, focus and menu state when `updateDOM` reuses the widget DOM.
+  Only changed, non-focused/non-composing cell content is patched; unchanged
+  cells can contain local edits that have not committed yet. A shape change
+  rebuilds DOM; per-EditorView pending focus is mapped through transactions
+  and restored in a microtask after reconciliation, without stealing newer
+  focus from another surface.
 - **Range is resolved fresh, never stored.** `currentTableRange` uses
-  `view.posAtDOM(tableEl)` + the syntax tree, so commits stay correct after
-  edits to other tables shift positions.
+  connected `view.posAtDOM(tableEl)` and the current block-decoration ranges,
+  accepting either replacement edge after edits shift positions.
 - **Serialization is compact** (`| a | b |`, no column realignment) for clean
   diffs; literal `|` in a cell is escaped to `\|`. Structural ops
   (`insertRow`/`deleteRow`/`insertColumn`/`deleteColumn`/`setAlignment`) are
-  pure model transforms. Both a focus-anchored toolbar (row + column gutters)
-  and a right-click context menu (reusing the global `.context-menu` classes)
-  trigger them.
+  pure model transforms. Reserved, wrapping row/column controls sit above a
+  horizontally scrollable table; focusing cells must not move surrounding
+  prose. Block spacing uses padding, never unmeasured vertical margins.
+  Controls use existing theme tokens, disabled deletion states, alignment
+  pressed states and visible focus. Alt+F10 reaches controls; Shift+F10 opens
+  the shared context menu, whose arrows and Escape retain keyboard access.
 
 Coverage: pure logic in `tests/unit/editor/table.test.ts` (parse, serialize,
-DOM→markdown, model ops); interaction in `tests/e2e/specs/table-edit.spec.ts`
-(edit/commit, Tab-append-row, CJK, context-menu delete, Escape, toolbar).
+DOM→markdown, model ops); browser interaction in `table-edit.spec.ts` covers
+commit, composition ordering/DOM reuse, separated CJK prose, repeated row and
+column edits, focus restoration, and compact-window/zoom geometry.
 
 ## Slash command menu
 
@@ -339,10 +351,13 @@ row, so that's what we use.
 
 ## Inline marker caret boundaries
 
-Inline markup markers (`**`, `*`, `~~`, `` ` ``) are collapsed with
-`Decoration.replace({})` whenever the cursor is off their node — see
-`handleInlineMarkup` in `app/lib/editor/wysiwyg.ts`, and the note there
-on why `visibility: hidden` is not an option.
+Inline markup markers (`**`, `*`, `~~`, `` ` ``, `==`) collapse with
+`Decoration.replace({})` on inactive logical lines. `activeLineRanges` and
+`touchesActiveLine` reveal source for every selected line, including whole
+multiline constructs that intersect it. Selection changes settle decoration
+visibility before typing; moving elsewhere on the same line must not defer a
+width/wrap change to the next keystroke. Inactive markers still occupy no
+visible gap.
 
 ### The bug that motivated `markerBoundarySnap`
 
@@ -371,10 +386,10 @@ walks forward from the landing position over any run of marker nodes
 that starts exactly there — consuming nested runs, so `***both***`
 resolves past the whole construct — and moves the caret to the far edge.
 
-It is **scoped deliberately**: it only fires for carets that arrive from
-a different line or from a pointer select. Within one line the markers
-are already revealed, and walking into them with ArrowLeft is how they
-get edited — snapping there would make the arrow key look dead.
+It is **scoped deliberately**: only collapsed markers reached from a
+different line or pointer selection are snapped. Already-visible markers,
+nonempty selections and active composition remain untouched. ArrowLeft must
+still edit source one character at a time.
 
 ### Invariants — things that must stay true
 
@@ -392,6 +407,26 @@ get edited — snapping there would make the arrow key look dead.
 - **When the snap applies:** the `fromPointer` / line-number guard in
   `markerBoundarySnap`. Widening it to all selection changes breaks
   in-line horizontal navigation (invariant 3).
+
+### IME and heading text-node continuity
+
+`ime-guard.ts` owns one settle timer per EditorView, cancelling it when a new
+composition begins or the extension/view is destroyed. A stale end event
+must not release a newer composition or notify deferred file watchers.
+
+During composition, WYSIWYG decorations map through document changes rather
+than rebuilding against provisional syntax. Any mapped point replacement
+that crosses a newline is removed, keeping every line editable and avoiding
+CM6's cross-line ViewPlugin replacement error. Rebuild once composition
+settles, including incremental-parser-only updates.
+
+The required separator after `##` stays plain editable text while the line
+is active, contiguous with the first composed character. Inactive headings
+collapse only their required first separator; extra content whitespace is
+preserved. Runtime regressions in `wysiwyg-runtime.test.ts` cover exact CJK
+source/caret, text-node continuity, provisional markup, newline mapping and
+overlapping/destroyed composition sessions. Browser `insertText` tests do not
+by themselves prove an operating-system input method's candidate lifecycle.
 
 ## Block transforms and structural hierarchy
 

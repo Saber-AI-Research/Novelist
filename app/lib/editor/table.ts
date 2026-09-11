@@ -223,10 +223,12 @@ function getTableRanges(state: EditorState): BlockRange[] {
   return ranges;
 }
 
-/* ── Pending cell-focus across a structural rebuild ───────── */
+/* ── DOM-owned lifecycle and per-editor focus ─────────────── */
 
 interface PendingFocus { from: number; row: number; col: number; }
-let pendingFocus: PendingFocus | null = null;
+// CodeMirror may replace the WidgetType instance while retaining its DOM.
+// Event listeners and their composition/focus state belong to that DOM's owner.
+const tableOwners = new WeakMap<HTMLElement, TableWidget>();
 
 /* ── Table widget ─────────────────────────────────────────── */
 
@@ -236,25 +238,14 @@ function applyAlign(cell: HTMLElement, align: Align | undefined) {
 
 /** Locate the current document range of the Table backing a rendered DOM table. */
 function currentTableRange(view: EditorView, tableEl: HTMLElement): BlockRange | null {
+  if (!view.dom.contains(tableEl)) return null;
   let pos: number;
   try { pos = view.posAtDOM(tableEl); } catch { return null; }
-  const tree = syntaxTree(view.state);
-  let found: BlockRange | null = null;
-  tree.iterate({
-    from: pos,
-    to: Math.min(pos + 1, view.state.doc.length),
-    enter(n) {
-      if (n.name === 'Table') { found = { from: n.from, to: n.to }; return false; }
-    },
-  });
-  if (found) return found;
-  // Fallback: walk ancestors of the node resolved at pos.
-  let node: ReturnType<typeof tree.resolve> | null = tree.resolve(pos, 1);
-  while (node) {
-    if (node.name === 'Table') return { from: node.from, to: node.to };
-    node = node.parent;
-  }
-  return null;
+  // posAtDOM can resolve to either edge of a block replacement. The field's
+  // ranges describe the same decorations as the current document.
+  return view.state.field(tableBlockDecoField).ranges.find(range =>
+    range.from <= pos && pos <= range.to
+  ) ?? null;
 }
 
 /** Read the editable text of every cell back into a {headers, rows} pair. */
@@ -282,6 +273,29 @@ function commitFromDom(view: EditorView, tableEl: HTMLElement): boolean {
   return true;
 }
 
+/** Commit and leave a blank, editable paragraph outside the replaced block. */
+function exitTable(view: EditorView, tableEl: HTMLElement): void {
+  const range = currentTableRange(view, tableEl);
+  if (!range) return;
+  const parsed = parseMarkdownTable(view.state.doc.sliceString(range.from, range.to));
+  if (!parsed) return;
+  const md = serializeTable({ ...readDomText(tableEl), alignments: parsed.alignments });
+  const doc = view.state.doc;
+  let after = range.to;
+  while (after < doc.length && doc.sliceString(after, after + 1) === '\n') after++;
+  // Keep a separator before the new paragraph, and (when there is following
+  // content) after it too. Typing into the first newline would extend the table.
+  const needed = after === doc.length ? 2 : 4;
+  const padding = '\n'.repeat(Math.max(0, needed - (after - range.to)));
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert: md + padding },
+    selection: { anchor: range.from + md.length + 2 },
+    scrollIntoView: true,
+    userEvent: 'input',
+  });
+  view.focus();
+}
+
 /**
  * Apply a structural change: fold pending DOM text edits, transform the model,
  * and replace the source. Optionally request focus on a cell afterwards.
@@ -301,12 +315,19 @@ function applyStructural(
   const base: ParsedTable = { headers, alignments: parsed.alignments, rows };
   const next = fn(base);
   const md = serializeTable(next);
-  if (focusCell) {
-    const target = focusCell(next);
-    pendingFocus = { from: range.from, row: target.row, col: target.col };
-  }
+  const active = tableEl.querySelector<HTMLElement>(':focus');
+  const target = focusCell?.(next) ?? {
+    row: Number(active?.dataset.r ?? -1),
+    col: Number(active?.dataset.c ?? 0),
+  };
+  view.plugin(tableFocusPlugin)?.request({
+    from: range.from,
+    row: clamp(target.row, -1, next.rows.length - 1),
+    col: clamp(target.col, 0, next.headers.length - 1),
+  });
   view.dispatch({
     changes: { from: range.from, to: range.to, insert: md },
+    selection: { anchor: range.from },
     scrollIntoView: true,
   });
 }
@@ -329,7 +350,9 @@ function makeToolButton(html: string, title: string, onClick: () => void): HTMLB
   btn.type = 'button';
   btn.className = 'cm-novelist-table-tool-btn';
   btn.title = title;
+  btn.setAttribute('aria-label', title);
   btn.innerHTML = html;
+  btn.querySelector('svg')?.setAttribute('aria-hidden', 'true');
   // mousedown + preventDefault so the focused cell doesn't blur before the op.
   btn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
   btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
@@ -358,6 +381,10 @@ class TableWidget extends WidgetType {
   private menu: HTMLElement | null = null;
   private composing = false;
   private commitOnComposeEnd = false;
+  private compositionTimer: number | undefined;
+  private composingCell: HTMLElement | null = null;
+  private controls: HTMLElement | null = null;
+  private menuCleanup: (() => void) | null = null;
 
   constructor(
     private table: ParsedTable,
@@ -374,6 +401,9 @@ class TableWidget extends WidgetType {
     cell.className = 'cm-novelist-table-cell';
     cell.dataset.r = String(row);
     cell.dataset.c = String(col);
+    cell.setAttribute('aria-label', row < 0 ? `Column ${col + 1} heading` : `Row ${row + 1}, column ${col + 1}`);
+    cell.setAttribute('aria-keyshortcuts', 'Alt+F10 Shift+F10');
+    if (row < 0) cell.scope = 'col';
     cell.innerHTML = renderInlineMarkdown(text);
     applyAlign(cell, this.table.alignments[col]);
   }
@@ -383,6 +413,7 @@ class TableWidget extends WidgetType {
     wrapper.className = 'cm-novelist-table-widget';
     // The wrapper is a non-editable island; only cells re-enable editing.
     wrapper.contentEditable = 'false';
+    tableOwners.set(wrapper, this);
 
     const tableEl = document.createElement('table');
     tableEl.className = 'cm-novelist-rendered-table';
@@ -410,7 +441,16 @@ class TableWidget extends WidgetType {
     });
     tableEl.appendChild(tbody);
 
-    wrapper.appendChild(tableEl);
+    const controls = document.createElement('div');
+    controls.className = 'cm-novelist-table-controls';
+    this.controls = controls;
+    this.rowToolbar = this.buildRowToolbar(tableEl, view);
+    this.colToolbar = this.buildColToolbar(tableEl, view);
+    controls.append(this.rowToolbar, this.colToolbar);
+    const scroller = document.createElement('div');
+    scroller.className = 'cm-novelist-table-scroll';
+    scroller.appendChild(tableEl);
+    wrapper.append(controls, scroller);
     this.attachHandlers(wrapper, tableEl, view);
     return wrapper;
   }
@@ -423,29 +463,52 @@ class TableWidget extends WidgetType {
       return (el?.closest?.('td,th') as HTMLTableCellElement) ?? null;
     };
 
-    wrapper.addEventListener('compositionstart', () => { this.composing = true; });
-    wrapper.addEventListener('compositionend', () => {
-      this.composing = false;
-      if (this.commitOnComposeEnd) {
-        this.commitOnComposeEnd = false;
-        commitFromDom(view, tableEl);
-      }
+    wrapper.addEventListener('compositionstart', (e) => {
+      e.stopPropagation();
+      window.clearTimeout(this.compositionTimer);
+      this.compositionTimer = undefined;
+      this.composing = true;
+      this.composingCell = cellOf(e.target);
+      this.closeMenu();
+      this.refreshToolbars();
+    });
+    wrapper.addEventListener('compositionend', (e) => {
+      e.stopPropagation();
+      // WebKit may send the confirming key and final input after compositionend.
+      // Leave its DOM/caret untouched until that native event sequence settles.
+      this.compositionTimer = window.setTimeout(() => {
+        this.compositionTimer = undefined;
+        this.composing = false;
+        this.composingCell = null;
+        this.refreshToolbars();
+        if (this.commitOnComposeEnd) {
+          this.commitOnComposeEnd = false;
+          if (!wrapper.contains(view.root.activeElement)) commitFromDom(view, tableEl);
+        }
+      }, 0);
     });
 
     wrapper.addEventListener('focusin', (e) => {
       const cell = cellOf(e.target);
       if (!cell) return;
       this.active = { row: Number(cell.dataset.r), col: Number(cell.dataset.c) };
-      this.showToolbars(wrapper, tableEl, view, cell);
+      this.refreshToolbars();
+      this.controls?.classList.add('cm-novelist-table-controls-active');
     });
 
     // Commit when focus leaves the whole table.
     wrapper.addEventListener('focusout', (e) => {
       const next = (e as FocusEvent).relatedTarget as Node | null;
+      if (next && this.menu?.contains(next)) return;
       if (next && wrapper.contains(next)) return; // moving between cells/toolbars
       this.hideToolbars();
       if (this.composing) { this.commitOnComposeEnd = true; return; }
-      commitFromDom(view, tableEl);
+      // Blurring can happen during a structural rebuild. Wait until CM has
+      // reconciled DOM, then commit only a still-connected editing island.
+      queueMicrotask(() => {
+        if (this.composing) { this.commitOnComposeEnd = true; return; }
+        if (!wrapper.contains(view.root.activeElement)) commitFromDom(view, tableEl);
+      });
     });
 
     // Isolate the cell's editing context from CM6: keyboard/input events that
@@ -460,6 +523,14 @@ class TableWidget extends WidgetType {
     }
 
     wrapper.addEventListener('keydown', (e) => {
+      if ((e.target as HTMLElement).closest('.cm-novelist-table-controls')) {
+        e.stopPropagation();
+        if (e.key === 'Escape' && !this.composing) {
+          e.preventDefault();
+          this.focusCell(tableEl, this.active?.row ?? -1, this.active?.col ?? 0, true);
+        }
+        return;
+      }
       const cell = cellOf(e.target);
       if (!cell) return;
       this.onCellKeydown(e, cell, tableEl, view);
@@ -496,6 +567,25 @@ class TableWidget extends WidgetType {
   }
 
   private onCellKeydown(e: KeyboardEvent, cell: HTMLTableCellElement, tableEl: HTMLElement, view: EditorView) {
+    if (this.composing || e.isComposing || e.keyCode === 229) return;
+    // Keep Tab's cell navigation while making structural controls keyboard reachable.
+    if (e.altKey && e.key === 'F10') {
+      e.preventDefault();
+      this.controls?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+      return;
+    }
+    if (e.key === 'Escape' && this.menu) {
+      e.preventDefault();
+      this.closeMenu();
+      return;
+    }
+    if (e.shiftKey && e.key === 'F10') {
+      e.preventDefault();
+      const rect = cell.getBoundingClientRect();
+      this.openContextMenu(new MouseEvent('contextmenu', { clientX: rect.left, clientY: rect.bottom }), tableEl, view);
+      this.menu?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+      return;
+    }
     const row = Number(cell.dataset.r);
     const col = Number(cell.dataset.c);
     const ncols = this.table.headers.length;
@@ -537,7 +627,7 @@ class TableWidget extends WidgetType {
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (row < 0) { this.focusCell(tableEl, 0, col, true); return; }      // header → first body row
+      if (row < 0 && nrows > 0) { this.focusCell(tableEl, 0, col, true); return; }
       if (row >= nrows - 1) {
         // Last row → append and move down.
         applyStructural(view, tableEl, t => insertRow(t, t.rows.length), () => ({ row: nrows, col }));
@@ -556,13 +646,7 @@ class TableWidget extends WidgetType {
 
     if (e.key === 'Escape') {
       e.preventDefault();
-      const committed = commitFromDom(view, tableEl);
-      const range = currentTableRange(view, tableEl);
-      // After commit the range may have shifted by the length delta; re-resolve.
-      const anchor = range ? Math.min(range.to, view.state.doc.length) : view.state.selection.main.head;
-      void committed;
-      view.focus();
-      view.dispatch({ selection: { anchor } });
+      exitTable(view, tableEl);
       return;
     }
   }
@@ -573,6 +657,8 @@ class TableWidget extends WidgetType {
     const bar = document.createElement('div');
     bar.className = 'cm-novelist-table-toolbar cm-novelist-table-toolbar-row';
     bar.contentEditable = 'false';
+    bar.setAttribute('role', 'group');
+    bar.setAttribute('aria-label', 'Table row actions');
     bar.appendChild(makeToolButton(ICON.rowAbove, MENU.rowAbove, () => {
       const r = this.active?.row ?? 0;
       applyStructural(view, tableEl, t => insertRow(t, Math.max(0, r)), () => ({ row: Math.max(0, r), col: this.active?.col ?? 0 }));
@@ -584,7 +670,7 @@ class TableWidget extends WidgetType {
     bar.appendChild(makeToolButton(ICON.trash, MENU.delRow, () => {
       const r = this.active?.row ?? -1;
       if (r < 0) return; // header isn't a deletable body row
-      applyStructural(view, tableEl, t => deleteRow(t, r));
+      applyStructural(view, tableEl, t => deleteRow(t, r), () => ({ row: r, col: this.active?.col ?? 0 }));
     }));
     return bar;
   }
@@ -593,6 +679,8 @@ class TableWidget extends WidgetType {
     const bar = document.createElement('div');
     bar.className = 'cm-novelist-table-toolbar cm-novelist-table-toolbar-col';
     bar.contentEditable = 'false';
+    bar.setAttribute('role', 'group');
+    bar.setAttribute('aria-label', 'Table column actions');
     bar.appendChild(makeToolButton(ICON.colLeft, MENU.colLeft, () => {
       const c = this.active?.col ?? 0;
       applyStructural(view, tableEl, t => insertColumn(t, c), () => ({ row: this.active?.row ?? -1, col: c }));
@@ -603,7 +691,7 @@ class TableWidget extends WidgetType {
     }));
     bar.appendChild(makeToolButton(ICON.trash, MENU.delCol, () => {
       const c = this.active?.col ?? 0;
-      applyStructural(view, tableEl, t => deleteColumn(t, c));
+      applyStructural(view, tableEl, t => deleteColumn(t, c), () => ({ row: this.active?.row ?? -1, col: c }));
     }));
     const setAlign = (a: Align) => {
       const c = this.active?.col ?? 0;
@@ -615,36 +703,39 @@ class TableWidget extends WidgetType {
     return bar;
   }
 
-  private showToolbars(wrapper: HTMLElement, tableEl: HTMLElement, view: EditorView, cell: HTMLElement) {
-    if (!this.rowToolbar) { this.rowToolbar = this.buildRowToolbar(tableEl, view); wrapper.appendChild(this.rowToolbar); }
-    if (!this.colToolbar) { this.colToolbar = this.buildColToolbar(tableEl, view); wrapper.appendChild(this.colToolbar); }
-    // Anchor relative to the wrapper using offset geometry.
-    const top = cell.offsetTop;
-    const left = cell.offsetLeft;
-    this.rowToolbar.style.top = `${top}px`;
-    this.rowToolbar.style.left = '0px';
-    this.rowToolbar.style.transform = 'translateX(-100%)';
-    this.colToolbar.style.left = `${left}px`;
-    this.colToolbar.style.top = '0px';
-    this.colToolbar.style.transform = 'translateY(-100%)';
-    this.rowToolbar.style.display = 'flex';
-    this.colToolbar.style.display = 'flex';
+  private refreshToolbars() {
+    if (!this.rowToolbar || !this.colToolbar) return;
+    const row = this.active?.row ?? -1;
+    const col = this.active?.col ?? 0;
+    const rowButtons = this.rowToolbar.querySelectorAll('button');
+    rowButtons.forEach(button => { button.disabled = this.composing; });
+    rowButtons[2].disabled = this.composing || row < 0;
+    const colButtons = this.colToolbar.querySelectorAll('button');
+    colButtons.forEach(button => { button.disabled = this.composing; });
+    colButtons[2].disabled = this.composing || this.table.headers.length <= 1;
+    const align = this.table.alignments[col] ?? 'default';
+    for (const [index, value] of ['left', 'center', 'right'].entries()) {
+      colButtons[index + 3].setAttribute('aria-pressed', String(align === value || (value === 'left' && align === 'default')));
+    }
+    this.rowToolbar.setAttribute('aria-label', row < 0 ? 'Table header actions' : `Table row ${row + 1} actions`);
+    this.colToolbar.setAttribute('aria-label', `Table column ${col + 1} actions`);
   }
 
   private hideToolbars() {
-    if (this.rowToolbar) this.rowToolbar.style.display = 'none';
-    if (this.colToolbar) this.colToolbar.style.display = 'none';
+    this.controls?.classList.remove('cm-novelist-table-controls-active');
   }
 
   /* — Context menu — */
 
   private openContextMenu(e: MouseEvent, tableEl: HTMLElement, view: EditorView) {
     this.closeMenu();
+    if (this.composing) return;
     const menu = document.createElement('div');
     menu.className = 'context-menu cm-novelist-table-menu';
     menu.contentEditable = 'false';
-    menu.style.left = `${e.clientX}px`;
-    menu.style.top = `${e.clientY}px`;
+    const scale = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
+    menu.style.left = `${e.clientX / scale}px`;
+    menu.style.top = `${e.clientY / scale}px`;
 
     const r = this.active?.row ?? -1;
     const c = this.active?.col ?? 0;
@@ -655,22 +746,28 @@ class TableWidget extends WidgetType {
       b.className = 'context-menu-item' + (danger ? ' context-menu-item-danger' : '');
       b.textContent = label;
       b.addEventListener('mousedown', (ev) => ev.preventDefault());
-      b.addEventListener('click', (ev) => { ev.preventDefault(); this.closeMenu(); onClick(); });
+      b.disabled = label === MENU.delCol && this.table.headers.length <= 1;
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        if (this.composing) return;
+        this.closeMenu();
+        onClick();
+      });
       menu.appendChild(b);
     };
     const sep = () => { const d = document.createElement('div'); d.className = 'context-menu-separator'; menu.appendChild(d); };
 
-    item(MENU.rowAbove, () => applyStructural(view, tableEl, t => insertRow(t, Math.max(0, r))));
-    item(MENU.rowBelow, () => applyStructural(view, tableEl, t => insertRow(t, r + 1)));
-    item(MENU.colLeft, () => applyStructural(view, tableEl, t => insertColumn(t, c)));
-    item(MENU.colRight, () => applyStructural(view, tableEl, t => insertColumn(t, c + 1)));
+    item(MENU.rowAbove, () => applyStructural(view, tableEl, t => insertRow(t, Math.max(0, r)), () => ({ row: Math.max(0, r), col: c })));
+    item(MENU.rowBelow, () => applyStructural(view, tableEl, t => insertRow(t, r + 1), () => ({ row: r + 1, col: c })));
+    item(MENU.colLeft, () => applyStructural(view, tableEl, t => insertColumn(t, c), () => ({ row: r, col: c })));
+    item(MENU.colRight, () => applyStructural(view, tableEl, t => insertColumn(t, c + 1), () => ({ row: r, col: c + 1 })));
     sep();
-    if (r >= 0) item(MENU.delRow, () => applyStructural(view, tableEl, t => deleteRow(t, r)), true);
-    item(MENU.delCol, () => applyStructural(view, tableEl, t => deleteColumn(t, c)), true);
+    if (r >= 0) item(MENU.delRow, () => applyStructural(view, tableEl, t => deleteRow(t, r), () => ({ row: r, col: c })), true);
+    item(MENU.delCol, () => applyStructural(view, tableEl, t => deleteColumn(t, c), () => ({ row: r, col: c })), true);
     sep();
-    item(MENU.alignLeft, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'left')));
-    item(MENU.alignCenter, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'center')));
-    item(MENU.alignRight, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'right')));
+    item(MENU.alignLeft, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'left'), () => ({ row: r, col: c })));
+    item(MENU.alignCenter, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'center'), () => ({ row: r, col: c })));
+    item(MENU.alignRight, () => applyStructural(view, tableEl, t => setAlignment(t, c, 'right'), () => ({ row: r, col: c })));
     sep();
     item(MENU.delTable, () => {
       const range = currentTableRange(view, tableEl);
@@ -683,27 +780,43 @@ class TableWidget extends WidgetType {
 
     document.body.appendChild(menu);
     this.menu = menu;
+    const viewport = window.visualViewport;
+    const width = (viewport?.width ?? window.innerWidth) / scale;
+    const height = (viewport?.height ?? window.innerHeight) / scale;
+    menu.style.maxHeight = `${Math.max(0, height - 16)}px`;
+    menu.style.left = `${clamp(e.clientX / scale, 8, Math.max(8, width - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${clamp(e.clientY / scale, 8, Math.max(8, height - menu.offsetHeight - 8))}px`;
+    menu.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.closeMenu();
+        this.focusCell(tableEl, r, c, true);
+      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        buttons[(index + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+      }
+    });
 
     const close = (ev: Event) => {
       if (ev instanceof KeyboardEvent && ev.key !== 'Escape') return;
       if (ev instanceof MouseEvent && menu.contains(ev.target as Node)) return;
       this.closeMenu();
     };
-    // Defer so the opening click doesn't immediately close it.
-    setTimeout(() => {
-      document.addEventListener('mousedown', close);
-      document.addEventListener('keydown', close);
-      (menu as any)._close = close;
-    }, 0);
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    this.menuCleanup = () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
   }
 
   private closeMenu() {
     if (!this.menu) return;
-    const close = (this.menu as any)._close;
-    if (close) {
-      document.removeEventListener('mousedown', close);
-      document.removeEventListener('keydown', close);
-    }
+    this.menuCleanup?.();
+    this.menuCleanup = null;
     this.menu.remove();
     this.menu = null;
   }
@@ -722,6 +835,8 @@ class TableWidget extends WidgetType {
   updateDOM(dom: HTMLElement, _view: EditorView): boolean {
     const tableEl = dom.querySelector('table');
     if (!tableEl) return false;
+    const owner = tableOwners.get(dom);
+    if (!owner) return false;
     const ncols = this.table.headers.length;
     const headerCells = tableEl.querySelectorAll('thead th');
     const bodyRows = tableEl.querySelectorAll('tbody tr');
@@ -732,29 +847,36 @@ class TableWidget extends WidgetType {
 
     const active = document.activeElement;
     headerCells.forEach((th, i) => {
-      if (th === active) return;
+      applyAlign(th as HTMLElement, this.table.alignments[i]);
+      if (th === active || th === owner.composingCell || this.table.headers[i] === owner.table.headers[i]) return;
       const html = renderInlineMarkdown(this.table.headers[i] ?? '');
       if (th.innerHTML !== html) th.innerHTML = html;
-      applyAlign(th as HTMLElement, this.table.alignments[i]);
     });
     bodyRows.forEach((tr, r) => {
       tr.querySelectorAll('td').forEach((td, c) => {
-        if (td === active) return;
+        applyAlign(td as HTMLElement, this.table.alignments[c]);
+        if (td === active || td === owner.composingCell || this.table.rows[r]?.[c] === owner.table.rows[r]?.[c]) return;
         const html = renderInlineMarkdown(this.table.rows[r]?.[c] ?? '');
         if (td.innerHTML !== html) td.innerHTML = html;
-        applyAlign(td as HTMLElement, this.table.alignments[c]);
       });
     });
+    owner.table = this.table;
+    owner.raw = this.raw;
+    owner.refreshToolbars();
     return true;
   }
 
-  destroy() {
-    this.closeMenu();
+  destroy(dom: HTMLElement) {
+    const owner = tableOwners.get(dom);
+    if (!owner) return;
+    owner.closeMenu();
+    window.clearTimeout(owner.compositionTimer);
+    tableOwners.delete(dom);
   }
 
   get estimatedHeight(): number {
-    // ~34px header + ~30px per body row + toolbar gutter.
-    return 40 + this.table.rows.length * 30;
+    // Header, reserved controls, padding, and compact body rows.
+    return 84 + this.table.rows.length * 38;
   }
 
   ignoreEvent(): boolean {
@@ -801,32 +923,64 @@ const tableBlockDecoField = StateField.define<TableBlockState>({
 /* ── Pending-focus flusher (after structural rebuild) ────── */
 
 class TableFocusPluginClass {
+  private pending: PendingFocus | null = null;
+  private origin: Element | null = null;
+  private scheduled = false;
+  private destroyed = false;
+
+  constructor(private view: EditorView) {}
+
+  request(target: PendingFocus) {
+    this.pending = target;
+    this.origin = this.view.root.activeElement;
+    this.schedule();
+  }
+
   update(update: ViewUpdate) {
-    if (!pendingFocus) return;
-    if (!update.docChanged && !update.viewportChanged) return;
-    const target = pendingFocus;
-    const view = update.view;
-    // Find the rendered table whose source range starts at the recorded offset.
-    const tables = view.dom.querySelectorAll<HTMLElement>('table.cm-novelist-rendered-table');
-    for (const tableEl of Array.from(tables)) {
-      const range = currentTableRange(view, tableEl);
-      if (!range || range.from !== target.from) continue;
-      const sel = target.row < 0
-        ? tableEl.querySelector(`thead th[data-c="${target.col}"]`)
-        : tableEl.querySelector(`tbody tr[data-r="${target.row}"] td[data-c="${target.col}"]`);
-      const cell = sel as HTMLElement | null;
-      if (cell) {
-        cell.focus();
-        const r = document.createRange();
-        r.selectNodeContents(cell);
-        r.collapse(false);
-        const s = window.getSelection();
-        s?.removeAllRanges();
-        s?.addRange(r);
-      }
-      break;
+    if (!this.pending) return;
+    if (update.docChanged) {
+      this.pending.from = update.changes.mapPos(this.pending.from, -1);
     }
-    pendingFocus = null;
+    this.schedule();
+  }
+
+  private schedule() {
+    if (this.scheduled) return;
+    this.scheduled = true;
+    // ViewPlugin.update runs before CM reconciles widget DOM. Focus only after
+    // that synchronous update finishes, never the soon-to-be-detached old cell.
+    queueMicrotask(() => {
+      this.scheduled = false;
+      if (this.destroyed || !this.pending) return;
+      const active = this.view.root.activeElement;
+      if (active && active !== this.origin && active !== document.body &&
+          !(active === this.view.contentDOM && !this.origin?.isConnected)) {
+        this.pending = null;
+        return;
+      }
+      const target = this.pending;
+      for (const tableEl of this.view.dom.querySelectorAll<HTMLElement>('table.cm-novelist-rendered-table')) {
+        if (currentTableRange(this.view, tableEl)?.from !== target.from) continue;
+        const cell = tableEl.querySelector<HTMLElement>(`[data-r="${target.row}"][data-c="${target.col}"]`);
+        if (!cell) return;
+        this.pending = null;
+        cell.focus({ preventScroll: true });
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        range.collapse(false);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      // A viewport update can render the target later; retain the request.
+    });
+  }
+
+  destroy() {
+    this.destroyed = true;
+    this.pending = null;
   }
 }
 

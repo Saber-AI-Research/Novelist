@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stabilize Markdown source visibility across active logical lines so moving
+  around inline bold does not postpone a wrap/caret jump until the next edit.
+- Preserve the first Chinese composition after heading markers, map decorations
+  safely during IME input, and cancel stale composition-end timers on a new
+  session or editor teardown.
+- Keep table candidate-confirmation keys inside the cell, retain composition
+  state across DOM reuse, and restore focus after row/column changes. Escape
+  now commits into a separated editable paragraph rather than a table boundary.
+
+### Changed
+
+- Refine tables with theme-aware headers and grid lines, clearer focus and
+  alignment states, bounded horizontal scrolling, and stable wrapping row/column
+  controls with keyboard access.
+
 ## [0.4.1] - 2026-07-20
 
 ### Fixed
