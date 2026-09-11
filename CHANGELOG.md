@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-11
+
+### Added
+
+- Literary study projects with EPUB/TXT import, chapter organization,
+  transcription, inline commentary, caret-based revision and host typography.
+- Configurable snapshot retention and WebDAV snapshot mirroring.
+- Contextual sidebar file actions and automatic stable Homebrew cask updates.
+
 ### Fixed
 
 - Stabilize Markdown source visibility across active logical lines so moving
