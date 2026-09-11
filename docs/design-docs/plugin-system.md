@@ -75,18 +75,77 @@ entry posts `plugin-ready` after mounting; the host waits for that handshake
 before sending the document and presents a retryable error instead of a blank
 editor when startup fails. The transparent input capture follows the rendered
 caret so the operating-system IME candidate window opens beside the current
-writing position. Pre-edit pinyin is rendered as temporary underlined text but
-never compared or saved; `compositionend` is the authoritative transaction, so
-selecting a candidate replaces the pinyin and commits the selected CJK text
-exactly once. Transcription is the default interaction; typing `【` enters inline
+writing position. Pre-edit pinyin is never compared or saved;
+`compositionend` is the authoritative transaction, so selecting a candidate
+replaces the pinyin and commits the selected CJK text exactly once.
+
+Pre-edit text renders in a **floating overlay pinned under the caret**, not
+inline. It used to be an inline `<span>`, which meant every pinyin keystroke
+re-flowed all the pending grey source after the caret — the whole page
+appeared to shiver while composing. The overlay is `position: fixed`, so the
+transcript behind it cannot move; `literary-plugin-render.spec.ts` asserts
+that the pending text's bounding box is pixel-identical before and after a
+composition starts.
+
+Transcription is the default interaction; typing `【` enters inline
 comment input and `】` returns to transcription (with
-`Cmd/Ctrl+Shift+Enter` retained as a keyboard-only toggle). Backspace deletes
-the actual rendered tail, including comments after returning to transcription;
-Option/Ctrl+Backspace and Command+Backspace retain word/line deletion, while
-Command/Ctrl+Z and redo restore complete input transactions. Other system
-shortcuts are not intercepted. F6 is the plugin-specific assist key: each
-press commits exactly the next reference character as one ordinary edit and
-holding it follows the platform key-repeat rate.
+`Cmd/Ctrl+Shift+Enter` retained as a keyboard-only toggle).
+
+### The caret model
+
+The document records only how far the source has been transcribed
+(`sourceCursor`); the reader's own output lives entirely in `insertions`
+anchored at source offsets. Editing used to happen exclusively at that
+frontier, so arrow keys did nothing and there was no way to go back and
+annotate a passage already copied.
+
+`engine.ts` therefore layers a **caret index** over the model: a UTF-16
+offset into the *rendered copied region* (source prefix plus every insertion
+anchored inside it), where `0` is the top of the chapter and
+`renderedLength(file)` is the frontier. It is view state, not document
+state — the `.litstudy` schema is unchanged. `resolveCaret` maps an index
+back to a `CaretAnchor`; `buildRenderPieces(file, caretIndex)` places the
+caret marker and splits the piece around it, and every copied piece carries
+`data-caret-start` so a click maps back to an index.
+
+The editing rules follow from what the artefact *is*: the source is the
+model being studied, so it is fixed.
+
+| Caret position | Typing | Backspace |
+|---|---|---|
+| At the frontier | Matching source advances `sourceCursor`; anything else becomes a mistake mark | Deletes inline text, then un-transcribes source |
+| Rewound | Always an insertion — commentary in comment mode, a mistake mark otherwise | Deletes insertion text only; **stops at the first source character** |
+
+A rewound caret paints wider and amber to say that typing annotates rather
+than transcribes, the footer swaps the progress readout for a "回改前文"
+notice, and `Escape` returns to the frontier (after leaving comment mode, if
+active). `↑`/`↓` use real geometry — the transcript wraps, so a logical line
+spans many visual rows — probing `caretPositionFromPoint` a row at a time and
+holding the original column so repeated presses travel straight down.
+
+Backspace deletes the actual rendered tail, including comments after
+returning to transcription; Option/Ctrl+Backspace and Command+Backspace
+retain word/line deletion, while Command/Ctrl+Z and redo restore complete
+input transactions (the caret index rides along in the undo snapshot).
+Other system shortcuts are not intercepted.
+
+`Tab` is the follow-along assist key: one press commits exactly the next
+reference character as one ordinary edit, and holding it follows the
+platform key-repeat rate. `Shift+Tab` fills in the rest of the current
+sentence — stopping after the first terminator and absorbing trailing
+closing punctuation — for a character the reader cannot produce without
+holding the key down. `F6` remains wired as the original alias; it was the
+only binding, but on a Mac keyboard it needs `Fn` to reach. Auto-typing
+always appends at the frontier, so it returns the caret there first.
+
+### Host typography
+
+Plugin iframes get their look from a single `theme-update` message. That
+payload carries the `--novelist-editor-*` vars (font, size, line-height,
+max width) alongside the palette — see `app/lib/utils/plugin-theme.ts` —
+because a plugin that renders a document body is part of the writing
+surface. Without them, Settings → Editor → Width moved the main editor
+while the literary editor stayed pinned at its own hard-coded column.
 
 Replacing a book is a staged transaction. Existing `.litstudy` files move to a
 temporary backup, replacement files move in from a staging directory, and the

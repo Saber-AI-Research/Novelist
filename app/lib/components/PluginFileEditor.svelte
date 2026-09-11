@@ -4,6 +4,7 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { collectPluginThemeVars } from '$lib/utils/plugin-theme';
   import { projectStore } from '$lib/stores/project.svelte';
   import { pathJoin, pathStartsWithChild } from '$lib/utils/path';
   import {
@@ -100,23 +101,12 @@
   // Send theme updates
   $effect(() => {
     const _theme = uiStore.themeId;
+    const _typography = uiStore.editorSettings;
     if (!iframeEl?.contentWindow || !loaded) return;
-    const styles = getComputedStyle(document.documentElement);
-    const vars: Record<string, string> = {};
-    for (const prop of [
-      '--novelist-bg',
-      '--novelist-bg-secondary',
-      '--novelist-bg-tertiary',
-      '--novelist-text',
-      '--novelist-text-secondary',
-      '--novelist-text-tertiary',
-      '--novelist-accent',
-      '--novelist-border',
-      '--novelist-error',
-    ]) {
-      vars[prop] = styles.getPropertyValue(prop);
-    }
-    iframeEl.contentWindow.postMessage({ type: 'theme-update', theme: vars }, '*');
+    iframeEl.contentWindow.postMessage(
+      { type: 'theme-update', theme: collectPluginThemeVars() },
+      '*',
+    );
   });
 
   // Keep plugin chrome in sync when the host locale changes without

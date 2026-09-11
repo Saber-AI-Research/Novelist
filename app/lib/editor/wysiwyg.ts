@@ -1,6 +1,13 @@
 import { ViewPlugin, Decoration, type DecorationSet, EditorView, type ViewUpdate, WidgetType } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
-import { type EditorState, type Extension, type Range, StateEffect, StateField } from '@codemirror/state';
+import {
+  EditorSelection,
+  EditorState,
+  type Extension,
+  type Range,
+  StateEffect,
+  StateField,
+} from '@codemirror/state';
 import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { imeComposingField } from './ime-guard';
@@ -1104,10 +1111,75 @@ class WysiwygPluginClass {
   }
 }
 
+/**
+ * Names of the syntax-marker nodes this file collapses when the cursor is off
+ * the node: `**`, `*`, `~~`, `` ` ``.
+ */
+const INLINE_MARKER_NODES = new Set([
+  'EmphasisMark',
+  'CodeMark',
+  'StrikethroughMark',
+]);
+
+/**
+ * Walk forward over a run of inline markers starting exactly at `pos`,
+ * returning the far edge of the run (or `pos` when there is none). Nested
+ * markup (`***both***` parses as two adjacent `EmphasisMark`s) is consumed as
+ * one run so the caret ends up outside the whole construct.
+ */
+function endOfMarkerRun(state: EditorState, pos: number): number {
+  const lineEnd = state.doc.lineAt(pos).to;
+  let at = pos;
+  for (;;) {
+    if (at >= lineEnd) return at;
+    const node = syntaxTree(state).resolveInner(at, 1);
+    if (!INLINE_MARKER_NODES.has(node.name) || node.from !== at || node.to <= at) return at;
+    at = Math.min(node.to, lineEnd);
+  }
+}
+
+/**
+ * Keep the caret out of collapsed marker runs when it arrives by coordinates.
+ *
+ * Markers render at zero width while the cursor is off their node, so a line
+ * ending in `**加粗**` measures 11 columns but *paints* 7. CodeMirror maps a
+ * vertical move or a click through the painted geometry, so aiming at the end
+ * of that line lands the caret at column 9 — the near edge of the collapsed
+ * `**`. The markers then reappear (the cursor is inside the node again) and
+ * the caret is suddenly sitting before two asterisks it never asked for;
+ * typing extends the bold run instead of following it.
+ *
+ * Snap those arrivals to the far edge of the marker run. Deliberately scoped
+ * to carets that arrive from another line or from a pointer: within one line
+ * the markers are already revealed, and stepping through them with the arrow
+ * keys is how you edit them.
+ */
+export const markerBoundarySnap = EditorState.transactionFilter.of((tr) => {
+  if (tr.docChanged || !tr.selection) return tr;
+  const fromPointer = tr.isUserEvent('select.pointer');
+  const previousLine = tr.startState.doc.lineAt(tr.startState.selection.main.head).number;
+
+  let changed = false;
+  const ranges = tr.selection.ranges.map((range) => {
+    if (!range.empty) return range;
+    const line = tr.startState.doc.lineAt(range.head);
+    if (!fromPointer && line.number === previousLine) return range;
+    const snapped = endOfMarkerRun(tr.startState, range.head);
+    if (snapped === range.head) return range;
+    changed = true;
+    return EditorSelection.cursor(snapped, -1);
+  });
+
+  return changed
+    ? [tr, { selection: EditorSelection.create(ranges, tr.selection.mainIndex) }]
+    : tr;
+});
+
 export const wysiwygPlugin: Extension = [
   imageDocumentDirField,
   cursorImageLineField,
   imageBlockDecoField,
+  markerBoundarySnap,
   ViewPlugin.fromClass(WysiwygPluginClass, {
     decorations: (v) => v.decorations,
   }),

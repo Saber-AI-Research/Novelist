@@ -67,6 +67,38 @@ comparator (`app/lib/utils/file-sort.ts → compareByMode`) falls back
 to `mtime` when `ctime` is null so filesystems without birth-time
 support still produce a deterministic order.
 
+### Snapshot retention (`[snapshot]`)
+
+| Field                  | Type | Where surfaced |
+|------------------------|------|-----------------|
+| `max_count`            | u32  | Settings → Editor → Snapshots. Cap on kept snapshots; default 100. |
+| `min_interval_minutes` | u32  | Settings → Editor → Snapshots. Default 60. `0` disables replacement entirely. |
+
+Unlike the other sections, `ProjectConfig.snapshot` is
+`Option<SnapshotConfig>` — an absent table inherits the global policy
+wholesale, a present one overrides field-by-field like everything else.
+
+`services/snapshots.rs` applies two rules, in this order:
+
+1. **Replace within the interval.** If the newest snapshot is younger than
+   `min_interval_minutes`, it becomes the victim and the new snapshot
+   replaces it. A replacement keeps the count flat, so it deliberately does
+   *not* trigger cap pruning.
+2. **Prune to the cap.** Otherwise, anything past `max_count` is dropped
+   oldest-first.
+
+Snapshots stage into a `<id>.pending` directory and are `rename`d into
+place, so a crash never leaves a half-written snapshot; stale `.pending`
+dirs are swept on the next create and never surface in `list_snapshots`.
+Old snapshots are only retired *after* the new one is durably in place.
+
+Retention reads global settings and (with `feature = "sync"`) the WebDAV
+sync config, so any unit test that calls `create_snapshot` must isolate all
+three data-dir seams — `NOVELIST_SNAPSHOTS_DATA_DIR`,
+`NOVELIST_SETTINGS_DATA_DIR`, `NOVELIST_SYNC_DATA_DIR` — and join the
+`snapshots_data_dir, settings_data_dir, sync_data_dir` serial group.
+Falling through to `portable::novelist_home()` panics in a test process.
+
 ### Filename template grammar
 
 See `docs/product-specs/2026-05-07-v0.2.4-rename-and-macros.md` for

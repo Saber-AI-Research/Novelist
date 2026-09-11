@@ -6,11 +6,16 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import MessageSquareText from '@lucide/svelte/icons/message-square-text';
   import {
-    applyDeleteBackward,
-    applyDelimitedInput,
+    applyDeleteBackwardAtCaret,
+    applyDelimitedInputAtCaret,
     applyInput,
     buildRenderPieces,
+    clampCaret,
+    moveCaret,
     normalizeStudyFile,
+    renderedLength,
+    resolveCaret,
+    type CaretMove,
     type DeleteUnit,
     type LiteraryMode,
     type LiteraryStudyFile,
@@ -19,6 +24,7 @@
   interface EditorSnapshot {
     file: LiteraryStudyFile;
     mode: LiteraryMode;
+    caretIndex: number;
   }
 
   let file = $state<LiteraryStudyFile | null>(null);
@@ -33,6 +39,15 @@
   let captureLeft = $state(0);
   let captureTop = $state(0);
   let captureHeight = $state(24);
+  // The insertion point, as a rendered offset (see engine.ts CaretAnchor).
+  // Editing is no longer pinned to the transcription frontier — the reader can
+  // rewind into copied text to annotate it.
+  let caretIndex = $state(0);
+  // Column the caret should try to keep while stepping vertically, so a run of
+  // Up/Down presses doesn't drift left through short lines.
+  let preferredColumnX: number | null = null;
+  let preeditLeft = $state(0);
+  let preeditTop = $state(0);
   let locale = $state<'en' | 'zh-CN'>('zh-CN');
   const saveTimers = new Map<string, number>();
   const undoStack: EditorSnapshot[] = [];
@@ -49,8 +64,9 @@
       commentHint: 'Type 【 to add a comment',
       commentActive: 'Writing comment',
       commentEndHint: 'Type 】 to finish',
-      autoTypeShortcut: 'F6 types the next source character',
-      autoTypeHint: 'F6 next character',
+      autoTypeShortcut: 'Tab types the next source character · Shift+Tab finishes the sentence',
+      autoTypeHint: 'Tab next character',
+      rewound: 'Editing earlier text — Esc returns to the end',
       previousChapter: 'Previous chapter',
       nextChapter: 'Next chapter',
       inputComment: 'Type commentary',
@@ -69,8 +85,9 @@
       commentHint: '输入【开始评注',
       commentActive: '正在评注',
       commentEndHint: '输入】结束',
-      autoTypeShortcut: 'F6 自动录入范文下一字',
-      autoTypeHint: 'F6 跟打下一字',
+      autoTypeShortcut: 'Tab 自动录入下一字 · Shift+Tab 补完整句',
+      autoTypeHint: 'Tab 跟打下一字',
+      rewound: '正在回改前文 · Esc 回到末尾',
       previousChapter: '上一章',
       nextChapter: '下一章',
       inputComment: '输入评注',
@@ -86,7 +103,8 @@
     },
   } as const;
 
-  let pieces = $derived(file ? buildRenderPieces(file) : []);
+  let pieces = $derived(file ? buildRenderPieces(file, caretIndex) : []);
+  let atFrontier = $derived(file ? resolveCaret(file, caretIndex).atFrontier : true);
   let copiedCharacters = $derived(file
     ? Array.from(file.source.slice(0, file.sourceCursor)).length
     : 0);
@@ -115,6 +133,11 @@
     captureLeft = Math.max(0, Math.min(window.innerWidth - 2, rect.left));
     captureTop = Math.max(0, Math.min(window.innerHeight - rect.height, rect.top));
     captureHeight = Math.max(20, rect.height);
+    // The pre-edit overlay hangs below the caret rather than sitting inline:
+    // pinyin letters are transient and vary in width, and an inline run would
+    // reflow every following character on each keystroke.
+    preeditLeft = Math.max(8, Math.min(window.innerWidth - 8, rect.left));
+    preeditTop = Math.min(window.innerHeight - 8, rect.bottom + 4);
   }
 
   function focusCapture() {
@@ -126,6 +149,88 @@
     await tick();
     caret?.scrollIntoView({ block: 'center', inline: 'nearest' });
     syncCapturePosition();
+  }
+
+  function setCaret(next: number, keepColumn = false) {
+    if (!file) return;
+    const clamped = clampCaret(file, next);
+    if (clamped !== caretIndex) caretIndex = clamped;
+    if (!keepColumn) preferredColumnX = null;
+    void revealCaret();
+  }
+
+  function step(move: CaretMove) {
+    if (!file) return;
+    setCaret(moveCaret(file, caretIndex, move));
+  }
+
+  /**
+   * Map a viewport point to a caret index.
+   *
+   * Every copied render piece carries its own start offset in
+   * `data-caret-start`, so a hit inside one resolves to `start + offset`. The
+   * pending grey source has no start (it is not part of the document yet), so
+   * clicking it parks the caret at the frontier instead.
+   */
+  function caretIndexFromPoint(x: number, y: number): number | null {
+    if (!file) return null;
+    const doc = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    let node: Node | null = null;
+    let offset = 0;
+    if (typeof doc.caretPositionFromPoint === 'function') {
+      const position = doc.caretPositionFromPoint(x, y);
+      if (!position) return null;
+      node = position.offsetNode;
+      offset = position.offset;
+    } else if (typeof document.caretRangeFromPoint === 'function') {
+      const range = document.caretRangeFromPoint(x, y);
+      if (!range) return null;
+      node = range.startContainer;
+      offset = range.startOffset;
+    }
+    if (!node) return null;
+    const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as Element);
+    const host = element?.closest?.('[data-caret-start]') as HTMLElement | null;
+    if (!host) {
+      // Landed on the untranscribed tail (or outside the article entirely).
+      return element?.closest?.('article') ? renderedLength(file) : null;
+    }
+    const start = Number(host.dataset.caretStart);
+    if (!Number.isFinite(start)) return null;
+    return clampCaret(file, start + offset);
+  }
+
+  function handleArticleClick(event: MouseEvent) {
+    const next = caretIndexFromPoint(event.clientX, event.clientY);
+    if (next !== null) setCaret(next);
+    focusCapture();
+  }
+
+  /**
+   * Vertical movement needs real geometry: the transcript wraps, so a logical
+   * line can span many visual rows. Probe one row above/below the caret and
+   * keep the original column so repeated presses travel straight down.
+   */
+  function stepVertically(direction: -1 | 1) {
+    if (!file || !caret) return;
+    const rect = caret.getBoundingClientRect();
+    const row = Math.max(16, rect.height);
+    const x = preferredColumnX ?? rect.left;
+    for (let multiplier = 1; multiplier <= 3; multiplier += 1) {
+      const y = direction < 0
+        ? rect.top - row * (multiplier - 0.5)
+        : rect.bottom + row * (multiplier - 0.5);
+      const next = caretIndexFromPoint(x, y);
+      if (next !== null && next !== caretIndex) {
+        preferredColumnX = x;
+        setCaret(next, true);
+        return;
+      }
+    }
+    // Nothing above/below — fall back to the document edge, like a text editor.
+    setCaret(direction < 0 ? 0 : renderedLength(file));
   }
 
   function serialize(): string {
@@ -181,7 +286,7 @@
   }
 
   function snapshot(): EditorSnapshot | null {
-    return file ? { file: cloneFile(file), mode } : null;
+    return file ? { file: cloneFile(file), mode, caretIndex } : null;
   }
 
   function filesEqual(left: LiteraryStudyFile, right: LiteraryStudyFile): boolean {
@@ -197,11 +302,17 @@
     if (capture) capture.value = '';
   }
 
-  function mutate(next: LiteraryStudyFile, nextMode = mode, recordHistory = true) {
+  function mutate(
+    next: LiteraryStudyFile,
+    nextMode = mode,
+    nextCaret = renderedLength(next),
+    recordHistory = true,
+  ) {
     if (!file) return;
     const changed = !filesEqual(file, next);
     if (!changed) {
       mode = nextMode;
+      setCaret(nextCaret);
       focusCapture();
       return;
     }
@@ -213,6 +324,8 @@
     }
     file = next;
     mode = nextMode;
+    caretIndex = clampCaret(next, nextCaret);
+    preferredColumnX = null;
     revision += 1;
     publishState();
   }
@@ -226,6 +339,8 @@
     resetComposition();
     file = cloneFile(target.file);
     mode = target.mode;
+    caretIndex = clampCaret(file, target.caretIndex);
+    preferredColumnX = null;
     revision += 1;
     publishState();
   }
@@ -233,8 +348,8 @@
   function commitText(input: string, pasted = false) {
     if (!file) return;
     if (!input) return;
-    const result = applyDelimitedInput(file, input, mode, pasted);
-    mutate(result.file, result.mode);
+    const result = applyDelimitedInputAtCaret(file, caretIndex, input, mode, pasted);
+    mutate(result.file, result.mode, result.caretIndex);
   }
 
   function commitCapture(element: HTMLTextAreaElement) {
@@ -305,14 +420,48 @@
 
   function deleteBackward(unit: DeleteUnit) {
     if (!file) return;
-    mutate(applyDeleteBackward(file, mode, unit));
+    const result = applyDeleteBackwardAtCaret(file, caretIndex, mode, unit);
+    mutate(result.file, mode, result.caretIndex);
+  }
+
+  /**
+   * Auto-type from the source. Only ever appends at the frontier — a rewound
+   * caret is parked in already-copied text, so the transcript must return there
+   * first (the caret jumps back to the frontier).
+   */
+  function autoType(run: string) {
+    if (!file || !run) return;
+    const next = applyInput(file, run, 'copy');
+    mutate(next, 'copy', renderedLength(next));
   }
 
   function typeNextSourceCharacter() {
     if (!file || file.sourceCursor >= file.source.length) return;
-    const character = Array.from(file.source.slice(file.sourceCursor))[0];
-    if (!character) return;
-    mutate(applyInput(file, character, 'copy'), 'copy');
+    autoType(Array.from(file.source.slice(file.sourceCursor))[0] ?? '');
+  }
+
+  /**
+   * Fill in the rest of the current sentence in one press — the escape hatch
+   * for a character the reader cannot produce, without holding the key down.
+   * Stops after the first terminator, or at the line break, whichever is first.
+   */
+  const SENTENCE_TERMINATORS = /[。！？；…!?;\n]/;
+
+  function typeNextSourceSentence() {
+    if (!file || file.sourceCursor >= file.source.length) return;
+    const pending = file.source.slice(file.sourceCursor);
+    let run = '';
+    for (const character of pending) {
+      run += character;
+      if (SENTENCE_TERMINATORS.test(character)) {
+        // Absorb trailing closing punctuation so quotes don't strand.
+        const rest = pending.slice(run.length);
+        const trailing = /^[」』”’）】\]]+/.exec(rest);
+        if (trailing) run += trailing[0];
+        break;
+      }
+    }
+    autoType(run);
   }
 
   function handleBeforeInput(event: InputEvent) {
@@ -342,9 +491,13 @@
     if (!file || composing || event.isComposing || event.keyCode === 229) return;
     const primary = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
-    if (event.key === 'F6') {
+    // Tab is the follow-along key: one press types the next source character,
+    // Shift+Tab fills the rest of the sentence. F6 stays as an alias — it was
+    // the original binding, but on a Mac keyboard it needs Fn to reach.
+    if (event.key === 'Tab' || event.key === 'F6') {
       event.preventDefault();
-      typeNextSourceCharacter();
+      if (event.shiftKey && event.key === 'Tab') typeNextSourceSentence();
+      else typeNextSourceCharacter();
       return;
     }
     if (primary && event.shiftKey && event.key === 'Enter') {
@@ -367,6 +520,43 @@
       restoreHistory(redoStack, undoStack);
       return;
     }
+    // Caret navigation across the transcribed region. Without this the caret is
+    // welded to the frontier and a reader cannot go back to annotate.
+    if (!event.altKey && !event.ctrlKey) {
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        step(event.metaKey ? 'lineStart' : 'left');
+        return;
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        step(event.metaKey ? 'lineEnd' : 'right');
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (event.metaKey) step('documentStart');
+        else stepVertically(-1);
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (event.metaKey) step('documentEnd');
+        else stepVertically(1);
+        return;
+      }
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        step(event.key === 'Home' ? 'lineStart' : 'lineEnd');
+        return;
+      }
+    }
+    if (event.ctrlKey && !event.metaKey && !event.altKey && ['a', 'e'].includes(key)) {
+      event.preventDefault();
+      step(key === 'a' ? 'lineStart' : 'lineEnd');
+      return;
+    }
+
     const backwardDelete = event.key === 'Backspace'
       || event.code === 'Backspace'
       || (event.metaKey && event.key === 'Delete');
@@ -380,9 +570,12 @@
       deleteBackward(key === 'h' ? 'character' : (key === 'w' ? 'word' : 'line'));
       return;
     }
-    if (event.key === 'Escape' && mode === 'comment') {
+    if (event.key === 'Escape') {
       event.preventDefault();
-      setMode('copy');
+      // Escape is the way back: leave commentary first, then return the caret
+      // to the frontier so typing resumes the transcription.
+      if (mode === 'comment') setMode('copy');
+      else if (!atFrontier) setCaret(renderedLength(file));
       return;
     }
     if (event.key === 'Enter') {
@@ -433,6 +626,8 @@
       revision = Number.isInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
       setLocale(data.locale);
       mode = 'copy';
+      caretIndex = renderedLength(file);
+      preferredColumnX = null;
       resetComposition();
       undoStack.length = 0;
       redoStack.length = 0;
@@ -527,21 +722,39 @@
       onpaste={() => { pastePending = true; }}
     ></textarea>
 
+    <!-- The pre-edit overlay is deliberately outside the article flow: an
+         inline run of pinyin letters reflows every character after the caret
+         on each keystroke, which makes the whole page appear to shiver. -->
+    {#if compositionText}
+      <div
+        class="composition-overlay"
+        class:comment-preedit={mode === 'comment'}
+        style:left={`${preeditLeft}px`}
+        style:top={`${preeditTop}px`}
+        aria-hidden="true"
+      >{compositionText}</div>
+    {/if}
+
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <main onclick={focusCapture} onscroll={syncCapturePosition}>
+    <main onclick={handleArticleClick} onscroll={syncCapturePosition}>
       <article class:comment-mode={mode === 'comment'}>
         <!-- Keep the inline pieces adjacent. Literal formatting whitespace
              here becomes a visible gap at the insertion point under
-             `white-space: pre-wrap`, including around IME pre-edit text. -->
-        {#each pieces as piece}{#if piece.type === 'source'}<span class:copied={piece.copied} class:pending={!piece.copied}>{piece.text}</span>{:else if piece.type === 'insertion'}<span class:comment={piece.insertion.kind === 'comment'} class:mistake={piece.insertion.kind === 'mistake'}>{piece.insertion.text}</span>{:else}<span bind:this={caret} class="typing-caret" class:comment-caret={mode === 'comment'} class:composing></span>{#if compositionText}<span class="composition-preedit" class:comment-preedit={mode === 'comment'}>{compositionText}</span>{/if}{/if}{/each}
+             `white-space: pre-wrap`. `data-caret-start` carries each piece's
+             rendered offset so a click maps back to a caret index. -->
+        {#each pieces as piece}{#if piece.type === 'source'}<span class:copied={piece.copied} class:pending={!piece.copied} data-caret-start={piece.start ?? undefined}>{piece.text}</span>{:else if piece.type === 'insertion'}<span class:comment={piece.insertion.kind === 'comment'} class:mistake={piece.insertion.kind === 'mistake'} data-caret-start={piece.start}>{piece.text}</span>{:else}<span bind:this={caret} class="typing-caret" class:comment-caret={mode === 'comment'} class:composing class:rewound={!atFrontier}></span>{/if}{/each}
       </article>
     </main>
 
     <footer>
       <span class="progress-status" title={text('autoTypeShortcut')}>
-        {Math.round(progress)}% · {text('autoTypeHint')}
+        {#if atFrontier}
+          {Math.round(progress)}% · {text('autoTypeHint')}
+        {:else}
+          {text('rewound')}
+        {/if}
       </span>
       <span class="chapter-stats">
         {copiedCharacters} {text('copied')} ·
@@ -718,14 +931,21 @@
     overflow: auto;
     cursor: text;
   }
+  /* Typography follows Settings → Editor. The host forwards its
+     `--novelist-editor-*` vars with every theme update, so the width slider
+     moves this column exactly like it moves the main editor; the literals are
+     only the standalone fallback when no host is attached. */
   article {
-    width: min(820px, calc(100% - 48px));
+    width: min(var(--novelist-editor-max-width, 820px), calc(100% - 48px));
     min-height: 100%;
     margin: 0 auto;
     padding: 54px 0 100px;
-    font-family: "LXGW WenKai", "Noto Serif SC", "Songti SC", Georgia, serif;
-    font-size: 18px;
-    line-height: 2.05;
+    font-family: var(
+      --novelist-editor-font,
+      "LXGW WenKai", "Noto Serif SC", "Songti SC", Georgia, serif
+    );
+    font-size: var(--novelist-editor-font-size, 18px);
+    line-height: var(--novelist-editor-line-height, 2.05);
     white-space: pre-wrap;
     word-break: break-word;
     letter-spacing: 0;
@@ -767,16 +987,35 @@
   .typing-caret.composing {
     animation: none;
   }
-  .composition-preedit {
-    color: var(--novelist-text, #252525);
-    background: color-mix(in srgb, #cceaff 30%, transparent);
-    text-decoration: underline solid #6faed6;
-    text-decoration-thickness: 1px;
-    text-underline-offset: 4px;
+  /* Away from the frontier the caret is wider and amber: typing here annotates
+     the transcript instead of continuing it. */
+  .typing-caret.rewound {
+    width: 2px;
+    background: #c9821f;
   }
-  .composition-preedit.comment-preedit {
+  /* Floating, not inline: the overlay is taken out of the text flow so the
+     transcript behind it never moves while an IME candidate is being typed. */
+  .composition-overlay {
+    position: fixed;
+    z-index: 5;
+    max-width: min(60ch, calc(100vw - 32px));
+    padding: 2px 7px;
+    color: var(--novelist-text, #252525);
+    background: var(--novelist-bg, #fff);
+    border: 1px solid color-mix(in srgb, #6faed6 60%, var(--novelist-border, #e2e2e2));
+    border-radius: 5px;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    letter-spacing: 0.02em;
+    white-space: pre-wrap;
+    pointer-events: none;
+  }
+  .composition-overlay.comment-preedit {
     color: #2d6f9f;
-    background: color-mix(in srgb, #cceaff 58%, var(--novelist-bg, #fff));
+    border-color: color-mix(in srgb, #83bee5 70%, transparent);
+    background: color-mix(in srgb, #eaf6ff 70%, var(--novelist-bg, #fff));
   }
   footer {
     min-height: 27px;
@@ -828,7 +1067,6 @@
     article {
       width: calc(100% - 30px);
       padding-top: 32px;
-      font-size: 16px;
     }
     .chapter-stats { display: none; }
   }

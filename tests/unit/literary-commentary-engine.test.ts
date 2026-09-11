@@ -2,10 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   applyBackspace,
   applyDeleteBackward,
+  applyDeleteBackwardAtCaret,
   applyDelimitedInput,
+  applyDelimitedInputAtCaret,
   applyInput,
   buildRenderPieces,
+  clampCaret,
+  insertAtCaret,
+  moveCaret,
   normalizeStudyFile,
+  renderedLength,
+  renderedText,
+  resolveCaret,
   type LiteraryStudyFile,
 } from '../../plugins/literary-commentary/src/engine';
 
@@ -41,8 +49,8 @@ describe('literary commentary engine', () => {
     expect(next.sourceCursor).toBe(3);
     const sources = buildRenderPieces(next).filter((piece) => piece.type === 'source');
     expect(sources).toEqual([
-      { type: 'source', text: '最终，', copied: true },
-      { type: 'source', text: '绝对', copied: false },
+      { type: 'source', text: '最终，', copied: true, start: 0 },
+      { type: 'source', text: '绝对', copied: false, start: null },
     ]);
   });
 
@@ -167,5 +175,142 @@ describe('literary commentary engine', () => {
     });
     expect(normalized.sourceCursor).toBe(1);
     expect(normalized.stats.correct).toBe(1);
+  });
+});
+
+/**
+ * Rewound editing: the caret used to be welded to the transcription frontier,
+ * so a reader who noticed something two sentences back had no way to annotate
+ * it. These lock in the rules that replaced that: free movement across copied
+ * text, insertions editable anywhere, source characters read-only away from
+ * the frontier.
+ */
+describe('[regression] literary commentary caret', () => {
+  function copied(source = '最终，绝对', upTo = source.length): LiteraryStudyFile {
+    return applyInput(study(source), source.slice(0, upTo), 'copy', false, '2026-08-02T00:00:00Z');
+  }
+
+  it('treats the frontier as the last caret index and clamps beyond it', () => {
+    const file = copied('最终，绝对', 3);
+    expect(renderedLength(file)).toBe(3);
+    expect(renderedText(file)).toBe('最终，');
+    expect(clampCaret(file, 99)).toBe(3);
+    expect(clampCaret(file, -5)).toBe(0);
+    expect(resolveCaret(file, 3).atFrontier).toBe(true);
+    expect(resolveCaret(file, 1).atFrontier).toBe(false);
+  });
+
+  it('counts insertions as part of the rendered transcript', () => {
+    const withComment = applyDelimitedInput(copied('最终，绝对', 3), '【好】', 'copy').file;
+    // three copied source characters plus a one-character comment
+    expect(renderedLength(withComment)).toBe(4);
+    expect(renderedText(withComment)).toBe('最终，好');
+  });
+
+  it('steps left and right by code point and stops at both ends', () => {
+    const file = copied('最终，绝对');
+    expect(moveCaret(file, 5, 'left')).toBe(4);
+    expect(moveCaret(file, 0, 'left')).toBe(0);
+    expect(moveCaret(file, 4, 'right')).toBe(5);
+    expect(moveCaret(file, 5, 'right')).toBe(5);
+  });
+
+  it('never lands the caret between the halves of a surrogate pair', () => {
+    const file = copied('a𝄞b');
+    // '𝄞' occupies UTF-16 offsets 1..3 — index 2 is not a legal caret stop.
+    expect(clampCaret(file, 2)).toBe(1);
+    expect(moveCaret(file, 3, 'left')).toBe(1);
+    expect(moveCaret(file, 1, 'right')).toBe(3);
+  });
+
+  it('moves to the start and end of the current logical line', () => {
+    const file = copied('第一行\n第二行');
+    expect(moveCaret(file, 5, 'lineStart')).toBe(4);
+    expect(moveCaret(file, 5, 'lineEnd')).toBe(7);
+    expect(moveCaret(file, 1, 'lineStart')).toBe(0);
+    expect(moveCaret(file, 1, 'lineEnd')).toBe(3);
+  });
+
+  it('renders the caret at a rewound position and splits the piece around it', () => {
+    const pieces = buildRenderPieces(copied('最终，绝对', 3), 1);
+    expect(pieces.map((p) => (p.type === 'caret' ? '|' : p.text))).toEqual([
+      '最',
+      '|',
+      '终，',
+      '绝对',
+    ]);
+  });
+
+  it('inserts commentary at a rewound caret without moving the source cursor', () => {
+    const file = copied('最终，绝对', 3);
+    const result = applyDelimitedInputAtCaret(file, 1, '【好】', 'copy');
+    expect(result.file.sourceCursor).toBe(3);
+    expect(result.mode).toBe('copy');
+    expect(result.file.insertions).toHaveLength(1);
+    expect(result.file.insertions[0]).toMatchObject({ kind: 'comment', text: '好', sourceOffset: 1 });
+    // Caret advanced past the text it just inserted.
+    expect(result.caretIndex).toBe(2);
+    expect(renderedText(result.file)).toBe('最好终，');
+  });
+
+  it('marks rewound plain typing as a mistake rather than consuming source', () => {
+    const file = copied('最终，绝对', 3);
+    const result = applyDelimitedInputAtCaret(file, 1, '错', 'copy');
+    expect(result.file.sourceCursor).toBe(3);
+    expect(result.file.insertions[0]).toMatchObject({ kind: 'mistake', text: '错' });
+    expect(result.file.stats.mistakes).toBe(1);
+  });
+
+  it('extends an existing same-kind insertion instead of fragmenting it', () => {
+    const file = copied('最终，绝对', 3);
+    const first = applyDelimitedInputAtCaret(file, 1, '【好】', 'copy');
+    const second = applyDelimitedInputAtCaret(first.file, first.caretIndex, '【句】', 'copy');
+    expect(second.file.insertions).toHaveLength(1);
+    expect(second.file.insertions[0].text).toBe('好句');
+  });
+
+  it('keeps a different-kind insertion separate when typed mid-run', () => {
+    const file = copied('最终，绝对', 3);
+    const commented = applyDelimitedInputAtCaret(file, 1, '【好句】', 'copy').file;
+    // caret sits between 好 and 句 inside the comment
+    const split = insertAtCaret(commented, 2, 'mistake', '×');
+    const kinds = split.file.insertions
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((i) => `${i.kind}:${i.text}`);
+    expect(kinds).toEqual(['comment:好', 'mistake:×', 'comment:句']);
+    expect(renderedText(split.file)).toBe('最好×句终，');
+  });
+
+  it('backspace at a rewound caret deletes insertion text only', () => {
+    const file = copied('最终，绝对', 3);
+    const commented = applyDelimitedInputAtCaret(file, 1, '【好】', 'copy');
+    const deleted = applyDeleteBackwardAtCaret(commented.file, commented.caretIndex, 'copy', 'character');
+    expect(deleted.file.insertions).toHaveLength(0);
+    expect(deleted.file.sourceCursor).toBe(3);
+    expect(deleted.caretIndex).toBe(1);
+  });
+
+  it('refuses to un-transcribe source when the caret is rewound', () => {
+    const file = copied('最终，绝对', 3);
+    const result = applyDeleteBackwardAtCaret(file, 2, 'copy', 'character');
+    expect(result.file.sourceCursor).toBe(3);
+    expect(result.caretIndex).toBe(2);
+  });
+
+  it('still un-transcribes source when the caret is at the frontier', () => {
+    const file = copied('最终，绝对', 3);
+    const result = applyDeleteBackwardAtCaret(file, 3, 'copy', 'character');
+    expect(result.file.sourceCursor).toBe(2);
+    expect(result.caretIndex).toBe(2);
+  });
+
+  it('word delete at a rewound caret stops at the first source character', () => {
+    const file = copied('最终，绝对', 3);
+    const commented = applyDelimitedInputAtCaret(file, 1, '【good】', 'copy');
+    const result = applyDeleteBackwardAtCaret(commented.file, commented.caretIndex, 'copy', 'word');
+    expect(result.file.insertions).toHaveLength(0);
+    expect(result.file.sourceCursor).toBe(3);
+    expect(renderedText(result.file)).toBe('最终，');
   });
 });

@@ -2,6 +2,7 @@
   import type { UIExtension } from '$lib/stores/extensions.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { collectPluginThemeVars } from '$lib/utils/plugin-theme';
 
   let { extension, onNavigate }: { extension: UIExtension; onNavigate?: (from: number) => void } = $props();
 
@@ -20,13 +21,12 @@
   $effect(() => {
     // Track theme changes
     const _theme = uiStore.themeId;
+    const _typography = uiStore.editorSettings;
     if (!iframeEl?.contentWindow) return;
-    const styles = getComputedStyle(document.documentElement);
-    const vars: Record<string, string> = {};
-    for (const prop of ['--novelist-bg', '--novelist-bg-secondary', '--novelist-text', '--novelist-text-secondary', '--novelist-accent', '--novelist-border']) {
-      vars[prop] = styles.getPropertyValue(prop);
-    }
-    iframeEl.contentWindow.postMessage({ type: 'theme-update', theme: vars }, '*');
+    iframeEl.contentWindow.postMessage(
+      { type: 'theme-update', theme: collectPluginThemeVars() },
+      '*',
+    );
   });
 
   function handleMessage(event: MessageEvent) {

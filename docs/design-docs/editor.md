@@ -337,6 +337,62 @@ inline fragment backgrounds are fundamentally glyph-bound. Native
 `::selection` is the only mechanism that paints the full continuation
 row, so that's what we use.
 
+## Inline marker caret boundaries
+
+Inline markup markers (`**`, `*`, `~~`, `` ` ``) are collapsed with
+`Decoration.replace({})` whenever the cursor is off their node — see
+`handleInlineMarkup` in `app/lib/editor/wysiwyg.ts`, and the note there
+on why `visibility: hidden` is not an option.
+
+### The bug that motivated `markerBoundarySnap`
+
+Collapsing changes a line's **painted** width without changing its
+**measured** width. A line reading `前面的文字**加粗**` is 11 columns of
+document but paints 7 columns of glyphs while the cursor is elsewhere.
+CodeMirror resolves coordinate-based caret placement — clicks and
+vertical arrow moves — against the painted geometry, so:
+
+- Clicking past the visible end of that line landed the caret at column
+  9, the near edge of the collapsed `**`, not at column 11.
+- A single Down-then-Up round trip moved the caret from column 11 to
+  column 9 **without the user pressing anything horizontal**: the goal
+  column was captured while the markers were revealed, then mapped back
+  into the line after it had shrunk.
+
+In both cases the markers then reappear (the caret is inside the node
+again), so the caret visibly sits before two asterisks it never asked
+for, and the next keystroke extends the bold run instead of following
+it. That is the "cursor jumps when a line ends in bold" report.
+
+### The fix
+
+`markerBoundarySnap` (a `EditorState.transactionFilter` in `wysiwyg.ts`)
+walks forward from the landing position over any run of marker nodes
+that starts exactly there — consuming nested runs, so `***both***`
+resolves past the whole construct — and moves the caret to the far edge.
+
+It is **scoped deliberately**: it only fires for carets that arrive from
+a different line or from a pointer select. Within one line the markers
+are already revealed, and walking into them with ArrowLeft is how they
+get edited — snapping there would make the arrow key look dead.
+
+### Invariants — things that must stay true
+
+| # | Invariant | Guard |
+|---|-----------|-------|
+| 1 | Clicking past a line-ending marker run types *after* it, for bold / italic / code / strikethrough | `marker-boundary.spec.ts` → `clicking past a line-ending … run types after it` |
+| 2 | A Down/Up round trip leaves the caret column unchanged on a line ending in markup | `marker-boundary.spec.ts` → `a Down/Up round trip leaves the caret at the end of a bold line` |
+| 3 | ArrowLeft still steps character-by-character through markers revealed on the caret's own line | `marker-boundary.spec.ts` → `arrow keys still step through markers that are revealed on the caret line` |
+
+### Where to change things
+
+- **Which node names count as markers:** `INLINE_MARKER_NODES` in
+  `app/lib/editor/wysiwyg.ts`. Adding a new collapsed marker type means
+  adding it here too, or it inherits the original bug.
+- **When the snap applies:** the `fromPointer` / line-number guard in
+  `markerBoundarySnap`. Widening it to all selection changes breaks
+  in-line horizontal navigation (invariant 3).
+
 ## Block transforms and structural hierarchy
 
 Block formatting is one command surface backed by
