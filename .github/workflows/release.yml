@@ -4,18 +4,60 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build (for example v0.5.0)'
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - name: Verify immutable release tag and version
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          jq -e --arg version "${RELEASE_TAG#v}" '.version == $version' package.json core/tauri.conf.json
+
   # ── Self-hosted macOS ARM build (M1/M2) ───────────────
   build-macos-arm:
+    needs: validate-release
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -51,7 +93,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           APP="core/target/release/bundle/macos/Novelist.app"
           DMG="core/target/release/bundle/dmg/Novelist_${VERSION}_aarch64.dmg"
           if [ ! -f "$DMG" ]; then
@@ -69,6 +111,7 @@ jobs:
 
   # ── GitHub-hosted builds (Intel Mac, Linux, Windows) ──
   build-other:
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +137,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -133,11 +177,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: core
           args: ${{ matrix.tauri-args }} -- --locked
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Novelist ${{ github.ref_name }}'
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: 'Novelist ${{ env.RELEASE_TAG }}'
           releaseBody: |
             See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
           releaseDraft: true
@@ -149,7 +194,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = "${{ github.ref_name }}" -replace '^v',''
+          $ver = $env:RELEASE_TAG -replace '^v',''
           $rel = "core/target/release"
           $outDir = "$rel/bundle/zip"
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
@@ -211,7 +256,7 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.tar.gz.sig
             artifacts/windows-portable/*.zip
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: true
 
       # `tauri-action` runs only on the Linux + Windows matrix legs, so the
@@ -225,7 +270,7 @@ jobs:
         if: hashFiles('artifacts/**/*.app.tar.gz.sig') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
