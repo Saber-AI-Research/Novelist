@@ -13,6 +13,7 @@ on:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  APPLE_SIGNING_IDENTITY: '-'
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -58,6 +59,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.93.1
+          components: clippy,rustfmt
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -88,6 +92,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build -- --locked
+
+      - name: Verify macOS resource signature
+        run: codesign --verify --deep --strict core/target/release/bundle/macos/Novelist.app
 
       - name: Create styled DMG
         if: always()
@@ -143,6 +150,8 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
+          toolchain: 1.93.1
+          components: clippy,rustfmt
 
       - name: Install Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -188,6 +197,10 @@ jobs:
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
+
+      - name: Verify Intel macOS resource signature
+        if: matrix.platform == 'macos-14'
+        run: codesign --verify --deep --strict core/target/x86_64-apple-darwin/release/bundle/macos/Novelist.app
 
       - name: Stage Windows portable zips
         if: matrix.platform == 'windows-latest'
