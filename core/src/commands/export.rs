@@ -102,12 +102,14 @@ pub async fn check_pandoc() -> Result<PandocStatus, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_pandoc_path(path: Option<String>) -> Result<(), AppError> {
-    let mut g = crate::commands::settings::read_global_settings().await;
-    g.pandoc_path = match path {
-        Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        _ => None,
-    };
-    crate::commands::settings::write_global_settings_to_disk(&g).await
+    crate::commands::settings::update_global_settings(move |current| {
+        current.pandoc_path = match path {
+            Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        };
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]

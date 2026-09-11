@@ -285,9 +285,11 @@ pub async fn get_publish_settings() -> Result<PublishSettings, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_publish_settings(settings: PublishSettings) -> Result<(), AppError> {
-    let mut g = crate::commands::settings::read_global_settings().await;
-    g.publish = settings;
-    crate::commands::settings::write_global_settings_to_disk(&g).await
+    crate::commands::settings::update_global_settings(move |current| {
+        current.publish = settings;
+        Ok(())
+    })
+    .await
 }
 
 /// Task 14: read the persisted per-channel Publish form drafts for one
@@ -1237,30 +1239,25 @@ pub async fn bind_legacy_publication(
 #[cfg(test)]
 mod bind_tests {
     use super::*;
+    use crate::commands::settings::SettingsDataDirGuard;
     use crate::models::publish::{ChannelConfig, PlatformConfig};
     use crate::services::publish::binding::{BindingCapability, VerifiedBinding};
     use crate::services::publish::sidecar::{
         read_publish_sidecar, update_publish_sidecar, ChannelState, CURRENT_SCHEMA_VERSION,
     };
     use crate::services::publish::types::ProviderRevision;
-    use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::Mutex as AsyncMutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    static ENV_LOCK: once_cell::sync::Lazy<Arc<AsyncMutex<()>>> =
-        once_cell::sync::Lazy::new(|| Arc::new(AsyncMutex::new(())));
-
     struct SettingsFixture {
-        _guard: tokio::sync::OwnedMutexGuard<()>,
+        _settings_dir: SettingsDataDirGuard,
         _tmp: TempDir,
     }
 
     async fn install_settings(channels: Vec<ChannelConfig>) -> SettingsFixture {
-        let guard = ENV_LOCK.clone().lock_owned().await;
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("NOVELIST_SETTINGS_DATA_DIR", tmp.path());
+        let settings_dir = SettingsDataDirGuard::set(tmp.path());
         let settings = crate::models::settings::GlobalSettings {
             publish: crate::models::publish::PublishSettings { channels },
             ..Default::default()
@@ -1270,7 +1267,7 @@ mod bind_tests {
             .await
             .unwrap();
         SettingsFixture {
-            _guard: guard,
+            _settings_dir: settings_dir,
             _tmp: tmp,
         }
     }
@@ -1334,6 +1331,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn publish_result_create_persists_remote_without_touching_form_cover_or_siblings() {
         let fixture = install_settings(vec![ghost_channel("https://ghost.example.com")]).await;
         let project = TempDir::new().unwrap();
@@ -1431,6 +1429,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn publish_result_update_cannot_rotate_existing_remote_id() {
         let fixture = install_settings(vec![ghost_channel("https://ghost.example.com")]).await;
         let project = TempDir::new().unwrap();
@@ -1491,6 +1490,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn bind_writes_only_remote_and_preserves_form_and_cover_on_target_channel() {
         let server = MockServer::start().await;
         let canonical_url = format!("{}/hello/", server.uri());
@@ -1576,6 +1576,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn bind_medium_failure_leaves_sidecar_absent() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1615,6 +1616,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn bind_leaves_sidecar_byte_identical_when_verification_fails() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1669,6 +1671,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn bind_rejects_missing_channel_without_touching_provider() {
         let fixture = install_settings(vec![]).await;
         let project = TempDir::new().unwrap();
@@ -1686,6 +1689,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn bind_rejects_invalid_channel_id_before_settings_lookup() {
         let fixture = install_settings(vec![]).await;
         let project = TempDir::new().unwrap();
@@ -1703,6 +1707,7 @@ mod bind_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(settings_data_dir)]
     async fn two_channels_can_be_bound_without_losing_each_other() {
         let ghost_server = MockServer::start().await;
         let ghost_url = format!("{}/hello/", ghost_server.uri());

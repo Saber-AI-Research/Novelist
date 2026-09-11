@@ -357,3 +357,112 @@ test('[regression] Shift+Tab fills in the rest of the sentence', async ({ page }
   await capture.press('Shift+Tab');
   await expect(page.locator('.chapter-stats')).toContainText('10 已抄 · 0 错字 · 0 评注');
 });
+
+test('[regression] Enter and IME confirmation keep editing an earlier annotation in the plugin iframe', async ({ page }) => {
+  await page.route('**/literary-enter-host', (route) => route.fulfill({
+    contentType: 'text/html',
+    body: '<!doctype html><iframe title="Literary commentary" src="/plugins/literary-commentary/index.html" style="width:100%;height:90vh;border:0"></iframe><output id="saved-study" hidden></output>',
+  }));
+  await page.goto('/literary-enter-host');
+  const plugin = page.frameLocator('iframe[title="Literary commentary"]');
+  await expect(plugin.getByText('正在打开文学评注章节...')).toBeVisible();
+
+  await page.evaluate(() => {
+    const iframe = document.querySelector('iframe')!;
+    const saved = document.querySelector('#saved-study')!;
+    window.addEventListener('message', (event) => {
+      if (event.source === iframe.contentWindow && event.data?.type === 'file-state') {
+        saved.textContent = event.data.content;
+      }
+    });
+    iframe.contentWindow!.postMessage({
+      type: 'file-open',
+      documentId: 'rewound-enter-test',
+      revision: 0,
+      filePath: '/mock/换行评注.litstudy',
+      locale: 'zh-CN',
+      content: JSON.stringify({
+        schemaVersion: 1,
+        book: { title: '换行评注测试', author: null, language: 'zh-CN' },
+        chapter: {
+          id: 'chapter-enter', title: '换行评注', volume: null, index: 1, total: 1,
+          previousPath: null, nextPath: null,
+        },
+        source: '北凉王府\n龙盘虎踞',
+        sourceCursor: 4,
+        insertions: [
+          { id: 'early', kind: 'comment', sourceOffset: 2, order: 0, text: '风骨凛然' },
+          { id: 'later', kind: 'comment', sourceOffset: 4, order: 1, text: '后文评注' },
+        ],
+        stats: { correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+      }),
+    }, '*');
+  });
+
+  const capture = plugin.locator('textarea.input-capture');
+  const article = plugin.locator('article');
+  const earlierComment = plugin.locator('.comment').filter({ hasText: '风骨凛然' });
+  await expect(earlierComment).toBeVisible();
+  const clickPosition = await earlierComment.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild!, 1);
+    range.setEnd(element.firstChild!, 2);
+    const character = range.getBoundingClientRect();
+    const host = element.getBoundingClientRect();
+    return { x: character.right - host.left - 1, y: character.top - host.top + character.height / 2 };
+  });
+  await earlierComment.click({ position: clickPosition });
+  const textBeforeCaret = () => article.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element, 0);
+    range.setEndBefore(element.querySelector('.typing-caret')!);
+    return range.toString();
+  });
+  await expect.poll(textBeforeCaret).toBe('北凉风骨');
+  await capture.press('Control+Shift+Enter');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+
+  await capture.press('Enter');
+  await expect.poll(() => article.textContent()).toBe('北凉风骨\n凛然王府后文评注\n龙盘虎踞');
+  await expect.poll(textBeforeCaret).toBe('北凉风骨\n');
+  await capture.fill('续注');
+  await expect.poll(textBeforeCaret).toBe('北凉风骨\n续注');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+
+  // Enter confirms pre-edit text; it must not insert another line break or
+  // jump to the transcription frontier, including WebKit's keyCode 229 path.
+  await capture.evaluate((element: HTMLTextAreaElement) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { data: '' }));
+    element.value = 'bu';
+    element.dispatchEvent(new CompositionEvent('compositionupdate', { data: 'bu' }));
+    element.dispatchEvent(new InputEvent('input', {
+      data: 'bu', inputType: 'insertCompositionText', isComposing: true,
+    }));
+    element.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', isComposing: true, bubbles: true, cancelable: true,
+    }));
+    element.value = '补';
+    element.dispatchEvent(new CompositionEvent('compositionend', { data: '补' }));
+    element.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', keyCode: 229, bubbles: true, cancelable: true,
+    }));
+    element.dispatchEvent(new InputEvent('input', {
+      data: '补', inputType: 'insertFromComposition', isComposing: false,
+    }));
+  });
+  await expect.poll(() => article.textContent()).toBe('北凉风骨\n续注补凛然王府后文评注\n龙盘虎踞');
+  await expect.poll(textBeforeCaret).toBe('北凉风骨\n续注补');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await expect(plugin.locator('.composition-overlay')).toHaveCount(0);
+  await expect(plugin.locator('.mistake')).toHaveCount(0);
+  await expect(plugin.locator('.pending')).toHaveText('\n龙盘虎踞');
+  await expect.poll(async () => JSON.parse(await page.locator('#saved-study').textContent() || 'null')).toMatchObject({
+    source: '北凉王府\n龙盘虎踞',
+    sourceCursor: 4,
+    insertions: expect.arrayContaining([
+      { id: 'early', kind: 'comment', sourceOffset: 2, order: expect.any(Number), text: '风骨\n续注补凛然' },
+      { id: 'later', kind: 'comment', sourceOffset: 4, order: 1, text: '后文评注' },
+    ]),
+    stats: { correct: 4, mistakes: 0, pasted: 0, completedAt: null },
+  });
+});

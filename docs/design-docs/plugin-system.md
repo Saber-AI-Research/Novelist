@@ -11,6 +11,21 @@
   to `~/.novelist/plugins/` on startup (version-gated by
   `ensure_bundled_plugins`).
 
+## QuickJS resource limits
+
+Each loaded Rust-hosted plugin owns a lazily created QuickJS runtime with a
+64 MiB heap limit, 256 KiB stack limit and 500 ms deadline per load/command.
+The deadline covers injected API code, plugin code, getters and result conversion.
+Source and aggregate returned text are bounded at 8 MiB; result arrays are
+bounded at 10,000 entries because Rust-side copies are not charged to the JS heap.
+Diagnostics are bounded without invoking untrusted exception stringification.
+
+Failed reloads preserve the previous plugin. A failed command publishes no
+partial replacements and drops only the offending plugin runtime/registrations,
+discarding retained heap and queued jobs. Commands must finish synchronously;
+Promise-returning handlers fail explicitly. These are in-process cooperative
+QuickJS limits, not OS isolation or limits on UI iframe plugins/total app RSS.
+
 ## WKWebView + asset protocol quirks
 
 Getting UI plugins to work on macOS WKWebView was non-trivial. Violating
@@ -127,6 +142,9 @@ Backspace deletes the actual rendered tail, including comments after
 returning to transcription; Option/Ctrl+Backspace and Command+Backspace
 retain word/line deletion, while Command/Ctrl+Z and redo restore complete
 input transactions (the caret index rides along in the undo snapshot).
+Enter uses the same caret-aware committed-text path as typing: in an earlier
+annotation it inserts there and preserves the transcription frontier. Native
+IME Enter confirmation remains excluded, including keyCode 229.
 Other system shortcuts are not intercepted.
 
 `Tab` is the follow-along assist key: one press commits exactly the next
@@ -147,12 +165,13 @@ because a plugin that renders a document body is part of the writing
 surface. Without them, Settings → Editor → Width moved the main editor
 while the literary editor stayed pinned at its own hard-coded column.
 
-Replacing a book is a staged transaction. Existing `.litstudy` files move to a
-temporary backup, replacement files move in from a staging directory, and the
-project config plus metadata are written atomically. Compatible chapter
-progress is preserved by volume/title and source-prefix matching. Any collision
-or write failure rolls the chapter files and metadata back before returning an
-error.
+Replacing a book is a staged transaction under the shared project-settings
+guard. Original config/metadata bytes are durably saved in the backup before
+chapters move. Compatible chapter progress is preserved by volume/title and
+source-prefix matching. On failure, rollback atomically copies original chapters
+back without consuming the backup. Any restore error (including a missing moved
+original) retains every surviving original and reports the recovery directory.
+Only successful rollback or committed replacement removes that backup.
 
 ## Plugin scaffolding
 

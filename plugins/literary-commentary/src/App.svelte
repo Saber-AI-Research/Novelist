@@ -580,7 +580,7 @@
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      mutate(applyInput(file, '\n', mode));
+      commitText('\n');
     }
   }
 

@@ -44,11 +44,10 @@ if [ -z "$VERSION" ]; then
   echo "Resolved latest published release: v${VERSION}"
 fi
 
-# A draft release is not a valid public cask source — its assets 404 for
-# anyone without repo access, so brew would break for every user.
-DRAFT="$(gh release view "v${VERSION}" --repo "$REPO" --json isDraft -q '.isDraft')"
-if [ "$DRAFT" = "true" ]; then
-  echo "Release v${VERSION} is still a draft; publish it before bumping the cask." >&2
+# Both automatic and manual callers must target a published stable release.
+RELEASE_STATE="$(gh release view "v${VERSION}" --repo "$REPO" --json isDraft,isPrerelease -q 'if .isDraft then "draft" elif .isPrerelease then "prerelease" else "stable" end')"
+if [ "$RELEASE_STATE" != "stable" ]; then
+  echo "Release v${VERSION} is ${RELEASE_STATE:-unverified}; only published stable releases may update the cask." >&2
   exit 1
 fi
 

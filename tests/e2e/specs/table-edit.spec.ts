@@ -183,6 +183,31 @@ test.describe('Editable tables', () => {
     await expect(app.locator('thead th').first()).toBeFocused();
   });
 
+  test('large prose fonts preserve compact readable tables without hiding cell text', async ({ app }) => {
+    await app.setViewportSize({ width: 1100, height: 800 });
+    const source = '| 章节名称 | 出场人物 | 故事地点 | 修订状态 |\n| --- | --- | --- | --- |\n| 初见 | 林月与周南 | 江南小城 | 等待复核 |\n\n正文保持大字号。';
+    await loadTable(app, source);
+    const table = app.locator('.cm-novelist-rendered-table');
+    const before = await table.boundingBox();
+    await app.evaluate(() => {
+      document.documentElement.style.setProperty('--novelist-editor-font-size', '32px');
+    });
+    const bodySize = await app.locator('.cm-line', { hasText: '正文' }).evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+    expect(bodySize).toBe(32);
+    const tableSize = await table.evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+    expect(tableSize).toBeGreaterThanOrEqual(14);
+    expect(tableSize).toBeLessThanOrEqual(16);
+    const after = await table.boundingBox();
+    expect(after!.height).toBeCloseTo(before!.height, 0);
+    expect(await app.locator('.cm-novelist-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await expect(table).toContainText('林月与周南');
+    await app.locator('tbody td').last().click();
+    await app.keyboard.press('Meta+A');
+    await app.keyboard.insertText('已复核');
+    await app.keyboard.press('Escape');
+    await expect.poll(() => docText(app)).toContain('| 初见 | 林月与周南 | 江南小城 | 已复核 |');
+  });
+
   test('wide tables remain bounded with stable controls and prose at compact zoom', async ({ app }) => {
     await app.setViewportSize({ width: 900, height: 700 });
     await app.evaluate(() => {

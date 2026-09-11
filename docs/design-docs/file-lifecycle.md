@@ -17,6 +17,8 @@ tab, aborts before filesystem mutation if any close is cancelled, calls the
 existing `delete_item` IPC command, removes workspace paths, and refreshes each
 affected parent folder. `Sidebar.svelte` remains the owner of visible selection
 state; the service owns the destructive lifecycle.
+Cancellation is checked by the just-closed tab ID, not by file path: another
+pane may still display the same document and must be processed separately.
 
 The watcher, rename suppression, auto-rename, and cross-window broadcast
 form one coupled system. Breaking any of them leads to rename echoes or
@@ -86,6 +88,40 @@ which is exactly when the user is looking at it.
 - `file-changed` handler in `app/lib/composables/app-events.svelte.ts`
   must tolerate paths without `/` (root-level files have no parent
   slash); guard parent-path calc accordingly.
+
+## Encoding-preserving saves
+
+Normal and conditional saves reject text that the original legacy encoding
+cannot represent, before creating a temporary file or registering watcher
+suppression. The original disk bytes and encoding state remain unchanged;
+the save reports an error rather than silently replacing characters or
+converting to UTF-8.
+
+## WebDAV synchronization
+
+`services/sync.rs` tracks a common BLAKE3 content hash per file. Only successful
+transfers or byte-equality advance that baseline; conflicts and failed transfers
+leave it unchanged and appear in `SyncStatus.errors`. Legacy timestamp-only
+states remain readable: equal versions establish a common hash, while differing
+versions require explicit reconciliation instead of guessing from timestamps.
+
+Recursive local/remote discovery uses the shared project-content allowlist.
+Directory capabilities reject local symlink traversal. Downloads compare local
+bytes again before atomic replacement; uploads use `If-None-Match: *` for new
+files or a strong ETag precondition for existing remote files. A server without
+a usable ETag cannot safely accept an automatic overwrite; the error is surfaced.
+
+All WebDAV operations construct URLs by encoding logical path segments once.
+CJK and literal `#`, `?`, `%` filenames retain distinct identities. DAV hrefs
+are decoded once and confined to the queried collection; traversal, ambiguous
+encoded separators, fragments and embedded URL credentials are rejected.
+
+Snapshot mirroring removes any stale completion marker before retrying content.
+Every directory and file transfer must succeed and match local metadata counts
+before the final `metadata.json` PUT. Failed uploads remain visibly incomplete.
+Requests, including response bodies, have a 30-second deadline; a snapshot upload
+has a 300-second overall limit so stalled optional mirroring cannot retain the
+project snapshot lock indefinitely.
 
 ## Save flow auto-rename
 

@@ -269,6 +269,67 @@ describe('[regression] literary commentary caret', () => {
     expect(second.file.insertions[0].text).toBe('好句');
   });
 
+  it('keeps newline and subsequent typing inside an earlier annotation', () => {
+    const now = '2026-08-02T00:00:00Z';
+    const original = applyDelimitedInput(
+      study('北凉王府\n龙盘虎踞'), '北凉【风骨凛然】王府【后文评注】', 'copy', false, now,
+    ).file;
+    const newline = applyDelimitedInputAtCaret(original, 4, '\n', 'comment', false, now);
+
+    expect(newline.caretIndex).toBe(5);
+    expect(newline.mode).toBe('comment');
+    expect(renderedText(newline.file)).toBe('北凉风骨\n凛然王府后文评注');
+
+    const continued = applyDelimitedInputAtCaret(
+      newline.file, newline.caretIndex, '续注', newline.mode, false, now,
+    );
+    expect(continued.caretIndex).toBe(7);
+    expect(continued.mode).toBe('comment');
+    expect(renderedText(continued.file)).toBe('北凉风骨\n续注凛然王府后文评注');
+    expect(continued.file.source).toBe(original.source);
+    expect(continued.file.sourceCursor).toBe(original.sourceCursor);
+    expect(continued.file.insertions).toHaveLength(2);
+    expect(continued.file.insertions.find((insertion) => insertion.id === original.insertions[0].id)).toMatchObject({
+      id: original.insertions[0].id, kind: 'comment', sourceOffset: 2, text: '风骨\n续注凛然',
+    });
+    expect(continued.file.insertions.find((insertion) => insertion.id === original.insertions[1].id))
+      .toEqual(original.insertions[1]);
+    expect(continued.file.stats).toEqual(original.stats);
+    expect(renderedText(original)).toBe('北凉风骨凛然王府后文评注');
+  });
+
+  it('transcribes a matching frontier newline and marks an unmatched newline as a mistake', () => {
+    const now = '2026-08-02T00:00:00Z';
+    const original = copied('首行\n续行', 2);
+    const matched = applyDelimitedInputAtCaret(original, renderedLength(original), '\n', 'copy', false, now);
+    expect(matched.file.sourceCursor).toBe(3);
+    expect(matched.caretIndex).toBe(3);
+    expect(matched.mode).toBe('copy');
+    expect(matched.file.insertions).toEqual([]);
+    expect(renderedText(matched.file)).toBe('首行\n');
+
+    const unmatched = applyDelimitedInputAtCaret(
+      matched.file, matched.caretIndex, '\n', matched.mode, false, now,
+    );
+    expect(unmatched.file.sourceCursor).toBe(3);
+    expect(unmatched.caretIndex).toBe(4);
+    expect(unmatched.file.insertions).toMatchObject([{ kind: 'mistake', sourceOffset: 3, text: '\n' }]);
+    expect(unmatched.file.stats.mistakes).toBe(1);
+    expect(renderedText(unmatched.file)).toBe('首行\n\n');
+  });
+
+  it('keeps a frontier newline in comment mode even when the source expects a newline', () => {
+    const original = copied('首行\n续行', 2);
+    const result = applyDelimitedInputAtCaret(
+      original, renderedLength(original), '\n', 'comment', false, '2026-08-02T00:00:00Z',
+    );
+    expect(result.file.sourceCursor).toBe(2);
+    expect(result.caretIndex).toBe(3);
+    expect(result.mode).toBe('comment');
+    expect(result.file.insertions).toMatchObject([{ kind: 'comment', sourceOffset: 2, text: '\n' }]);
+    expect(result.file.stats.mistakes).toBe(0);
+  });
+
   it('keeps a different-kind insertion separate when typed mid-run', () => {
     const file = copied('最终，绝对', 3);
     const commented = applyDelimitedInputAtCaret(file, 1, '【好句】', 'copy').file;

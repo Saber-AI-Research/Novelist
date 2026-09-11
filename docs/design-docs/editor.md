@@ -144,6 +144,11 @@ the cursor entering the table does **not** reveal raw markdown: cells are
   Controls use existing theme tokens, disabled deletion states, alignment
   pressed states and visible focus. Alt+F10 reaches controls; Shift+F10 opens
   the shared context menu, whose arrows and Escape retain keyboard access.
+- **Table typography is independent of prose size.** Cells use
+  `--novelist-table-font-size` (14px by default), a 1.5 line height and compact
+  padding. Enlarging editor prose must not inflate every column. Application
+  zoom still scales tables; wide content scrolls within the table, whose
+  inline-size containment prevents expansion of CodeMirror's flex content.
 
 Coverage: pure logic in `tests/unit/editor/table.test.ts` (parse, serialize,
 DOM→markdown, model ops); browser interaction in `table-edit.spec.ts` covers

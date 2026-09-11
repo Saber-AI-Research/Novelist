@@ -89,7 +89,11 @@ test.describe('[regression] inline marker caret boundaries', () => {
 
   test('editing ordinary prose around multiple inline bold spans keeps wrapped caret geometry stable', async ({ app }) => {
     const source = `${'这是普通前文，'.repeat(16)}**局部加粗**${'这里仍是普通正文，'.repeat(16)}**另一个重点**${'这是普通后文，'.repeat(16)}`;
-    const positions = [2, source.indexOf('这里') + 2, source.lastIndexOf('这是') + 2];
+    const positions = [
+      2, source.indexOf('**') - 1,
+      source.indexOf('这里'), source.indexOf('这里') + 2,
+      source.lastIndexOf('**') + 2, source.lastIndexOf('这是') + 2,
+    ];
     for (const position of positions) {
       await setDocument(app, `${source}\n\n下一段`, source.indexOf('局部') + 1);
       await app.evaluate((position) => {

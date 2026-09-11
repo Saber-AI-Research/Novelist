@@ -12,7 +12,6 @@ const h = vi.hoisted(() => {
     closeTab: vi.fn(async (id: string) => {
       tabs.allTabs = tabs.allTabs.filter(tab => tab.id !== id);
     }),
-    findByPath: vi.fn((path: string) => tabs.allTabs.find(tab => tab.filePath === path)),
   };
   return { deleteItem, project, tabs };
 });
@@ -40,7 +39,6 @@ beforeEach(() => {
   h.project.refreshFolder.mockReset().mockResolvedValue(undefined);
   h.tabs.allTabs = [];
   h.tabs.closeTab.mockClear();
-  h.tabs.findByPath.mockClear();
   vi.stubGlobal('confirm', vi.fn(() => true));
 });
 
@@ -79,6 +77,36 @@ describe('[contract] deleteEntries', () => {
     ], t);
 
     expect(result.status).toBe('cancelled');
+    expect(h.deleteItem).not.toHaveBeenCalled();
+  });
+
+  it('closes both panes showing the same file before deleting it once', async () => {
+    h.tabs.allTabs = [
+      { id: 'left', filePath: '/project/第一章.md' },
+      { id: 'right', filePath: '/project/第一章.md' },
+      { id: 'other', filePath: '/project/第二章.md' },
+    ];
+    const result = await deleteEntries([
+      { path: '/project/第一章.md', name: '第一章.md', is_dir: false },
+    ], t);
+    expect(result).toEqual({ status: 'completed', deletedPaths: ['/project/第一章.md'], failedPaths: [] });
+    expect(h.tabs.allTabs).toEqual([{ id: 'other', filePath: '/project/第二章.md' }]);
+    expect(h.deleteItem.mock.calls).toEqual([['/project/第一章.md']]);
+  });
+
+  it('keeps the file when the second pane refuses to close', async () => {
+    h.tabs.allTabs = [
+      { id: 'left', filePath: '/project/第一章.md' },
+      { id: 'right', filePath: '/project/第一章.md' },
+    ];
+    h.tabs.closeTab.mockImplementationOnce(async (id: string) => {
+      h.tabs.allTabs = h.tabs.allTabs.filter(tab => tab.id !== id);
+    }).mockImplementationOnce(async () => {});
+    const result = await deleteEntries([
+      { path: '/project/第一章.md', name: '第一章.md', is_dir: false },
+    ], t);
+    expect(result.status).toBe('cancelled');
+    expect(h.tabs.allTabs).toEqual([{ id: 'right', filePath: '/project/第一章.md' }]);
     expect(h.deleteItem).not.toHaveBeenCalled();
   });
 

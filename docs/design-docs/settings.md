@@ -22,6 +22,17 @@ Modelled on VSCode's `.vscode/settings.json` and Obsidian's `.obsidian/`:
   `write_project_settings(dir, view?, new_file?, plugins?)` — patch one
   section at a time; others unchanged.
 
+All global mutations (section patches, Publish channels, image hosts and Pandoc
+path) use `update_global_settings`: one canonical destination lock spans strict
+read, mutation and unique-temp atomic write. Only a missing settings file starts
+from defaults; malformed existing data is not overwritten. Project writes use
+`acquire_project_settings_guard`, also held by literary replacement and snapshot
+capture/restore. Started filesystem workers retain their guards if the caller
+is cancelled. Read-only helpers remain lock-free to avoid reentrant locking.
+
+Frontend snapshot-setting responses use the same generation/scope checks as
+other sections; a late project A response cannot overwrite project B's state.
+
 ### Frontend hub
 
 `app/lib/stores/settings.svelte.ts` (`settingsStore`). Reads on project
@@ -91,6 +102,26 @@ Snapshots stage into a `<id>.pending` directory and are `rename`d into
 place, so a crash never leaves a half-written snapshot; stale `.pending`
 dirs are swept on the next create and never surface in `list_snapshots`.
 Old snapshots are only retired *after* the new one is durably in place.
+
+A canonical-project lock serializes creation, cleanup, listing, deletion,
+restoration and remote mirroring. Snapshot IDs include a unique monotonic suffix
+so same-second creates cannot collide; legacy `snap-<seconds>` IDs and existing
+path-hash storage namespaces remain readable. Lock order is snapshot, then
+project settings; the settings lock is released before network mirroring.
+
+`services/project_files.rs` defines the shared snapshot/sync allowlist. It includes
+Markdown/text/JSON/CSV plus `.litstudy`, `.canvas`, `.kanban`, and exactly
+`.novelist/project.toml` plus `.novelist/literary-study.json`. Other hidden data,
+credentials, transaction backups and caches are excluded. Capture/restore use
+directory capabilities and reject symlink components instead of following them.
+
+Restoration stages and syncs every file before replacing originals through
+same-directory atomic rename. Read/preflight/staging failure preserves original
+bytes; a later rename error is reported and can leave earlier files restored.
+This is per-file atomic recovery, not a whole-project rollback transaction.
+Staged files share one pinned directory handle per distinct parent. A missing
+project root does not hide or prevent deletion of existing snapshots; restore
+recreates missing directory components without following symlinks.
 
 Retention reads global settings and (with `feature = "sync"`) the WebDAV
 sync config, so any unit test that calls `create_snapshot` must isolate all

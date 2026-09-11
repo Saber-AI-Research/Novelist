@@ -5,6 +5,7 @@ pub mod image_host;
 pub mod pandoc;
 pub mod plugin_host;
 pub mod portable;
+pub(crate) mod project_files;
 pub mod publish;
 pub mod rename_migration;
 pub mod rope_benchmark;

@@ -63,6 +63,8 @@ not a valid cask source). Manual edits will be overwritten on the next release.
 
 The same workflow can be re-run by hand from the Actions tab, and the cask can
 be rendered locally with `scripts/bump-homebrew-cask.sh` in the main repo.
+Both entrypoints refuse drafts and prereleases before downloading assets or
+rewriting the stable cask.
 
 [release]: https://github.com/Saber-AI-Research/Novelist/releases
 [workflow]: https://github.com/Saber-AI-Research/Novelist/blob/main/.github/workflows/bump-homebrew.yml

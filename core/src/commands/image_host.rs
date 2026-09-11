@@ -278,9 +278,11 @@ pub async fn get_image_host_settings() -> Result<ImageHostSettings, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_image_host_settings(settings: ImageHostSettings) -> Result<(), AppError> {
-    let mut g = crate::commands::settings::read_global_settings().await;
-    g.image_hosts = settings;
-    crate::commands::settings::write_global_settings_to_disk(&g).await
+    crate::commands::settings::update_global_settings(move |current| {
+        current.image_hosts = settings;
+        Ok(())
+    })
+    .await
 }
 
 /// Read a Markdown image through a project/document capability. `reference`

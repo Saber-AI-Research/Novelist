@@ -144,8 +144,10 @@
   border-spacing: 0;
   width: 100%;
   margin: 0;
-  font-size: inherit;
-  line-height: 1.6;
+  /* Tables keep a compact reading size even when prose is enlarged. App zoom
+     still scales the whole surface for accessibility. */
+  font-size: var(--novelist-table-font-size, 14px);
+  line-height: 1.5;
 }
 
 .cm-novelist-rendered-table th,
@@ -153,7 +155,7 @@
   border: 0;
   border-inline-end: 1px solid var(--novelist-border);
   border-block-end: 1px solid var(--novelist-border);
-  padding: 6px 10px;
+  padding: 5px 9px;
   text-align: left;
   vertical-align: top;
 }
@@ -168,7 +170,7 @@
 
 .cm-novelist-table-cell {
   outline: none;
-  min-width: 5em;
+  min-width: 4em;
   max-width: 28em;
   overflow-wrap: anywhere;
   cursor: text;

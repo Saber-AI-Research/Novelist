@@ -17,12 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep table candidate-confirmation keys inside the cell, retain composition
   state across DOM reuse, and restore focus after row/column changes. Escape
   now commits into a separated editable paragraph rather than a table boundary.
+- Preserve original chapters and project metadata when literary-book rollback
+  fails, and reject legacy-encoding saves that would lose characters.
+- Serialize settings read-modify-write operations, including first-use writes,
+  and ignore stale cross-project snapshot-setting responses.
+- Confine snapshot capture/restoration to safe directory handles; serialize
+  staging and retention, support same-second IDs and missing-project recovery,
+  and include literary, canvas and kanban files plus required project metadata.
+- Keep unresolved WebDAV conflicts and failed transfers from advancing file
+  baselines. Encode reserved path characters correctly, publish snapshot completion
+  metadata only after all files succeed, and bound stalled remote requests.
+- Bound QuickJS plugin memory, stack, execution and returned data; discard failed
+  plugin state without partial edits and reject malformed surrogate strings safely.
+- Insert literary annotation newlines at the current caret, close same-file tabs
+  by identity before deletion, and reject prereleases from the stable Homebrew cask.
 
 ### Changed
 
 - Refine tables with theme-aware headers and grid lines, clearer focus and
   alignment states, bounded horizontal scrolling, and stable wrapping row/column
   controls with keyboard access.
+- Keep tables at an independent compact 14px reading size when prose is enlarged;
+  application zoom remains available. No-space inline bold boundaries are covered
+  by mixed-prose editing regressions.
 
 ## [0.4.1] - 2026-07-20
 

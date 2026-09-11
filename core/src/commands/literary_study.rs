@@ -1,4 +1,5 @@
 use crate::commands::file::decode_bytes;
+use crate::commands::settings::acquire_project_settings_guard;
 use crate::error::AppError;
 use crate::models::project::{OutlineConfig, ProjectConfig, ProjectMeta, WritingConfig};
 use crate::models::settings::PluginsConfig;
@@ -294,9 +295,13 @@ pub async fn read_literary_study_overview(
 pub async fn replace_literary_study_book(
     request: ReplaceLiteraryStudyBookRequest,
 ) -> Result<ReplaceLiteraryStudyBookResult, AppError> {
-    tokio::task::spawn_blocking(move || replace_literary_study_book_inner(request))
-        .await
-        .map_err(|error| AppError::Custom(format!("Literary replacement task failed: {error}")))?
+    let guard = acquire_project_settings_guard(Path::new(&request.project_dir)).await?;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        replace_literary_study_book_inner(request)
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("Literary replacement task failed: {error}")))?
 }
 
 fn inspect_literary_source_inner(path: &str) -> Result<LiterarySourceInspection, AppError> {
@@ -1110,6 +1115,8 @@ fn read_literary_study_overview_inner(
     Ok(build_literary_overview(&snapshot))
 }
 
+/// The command holds the project-settings guard through this entire transaction.
+/// Tests may call directly only with their own isolated project directories.
 fn replace_literary_study_book_inner(
     request: ReplaceLiteraryStudyBookRequest,
 ) -> Result<ReplaceLiteraryStudyBookResult, AppError> {
@@ -1144,24 +1151,37 @@ fn replace_literary_study_book_inner(
     let unique = unique_suffix();
     let stage_dir = novelist_dir.join(format!(".literary-stage-{unique}"));
     let backup_dir = novelist_dir.join(format!(".literary-backup-{unique}"));
-    std::fs::create_dir(&stage_dir)?;
-    std::fs::create_dir(&backup_dir)?;
-
     let config_path = novelist_dir.join("project.toml");
     let metadata_path = novelist_dir.join(LITERARY_METADATA_FILE);
-    let original_config = std::fs::read(&config_path)?;
-    let original_metadata = std::fs::read(&metadata_path)?;
+    let original_config = read_bounded(&config_path, MAX_LITERARY_METADATA_BYTES)?;
+    let original_metadata = read_bounded(&metadata_path, MAX_LITERARY_METADATA_BYTES)?;
+    std::fs::create_dir(&stage_dir)?;
+    if let Err(error) = std::fs::create_dir(&backup_dir) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(error.into());
+    }
+
+    // Persist both metadata originals before moving any chapters. The recovery
+    // directory mirrors the project layout and remains self-contained on failure.
+    let preparation = (|| -> Result<(), AppError> {
+        atomic_write_sync(&backup_dir.join(".novelist/project.toml"), &original_config)?;
+        atomic_write_sync(
+            &backup_dir.join(".novelist").join(LITERARY_METADATA_FILE),
+            &original_metadata,
+        )?;
+        write_study_files(&stage_dir, &study_files)
+    })();
+    if let Err(error) = preparation {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        let _ = std::fs::remove_dir_all(&backup_dir);
+        return Err(error);
+    }
     let mut moved_old = Vec::<String>::new();
     let mut moved_new = Vec::<String>::new();
 
     let transaction = (|| -> Result<(), AppError> {
-        write_study_files(&stage_dir, &study_files)?;
-
         for (relative, _) in &snapshot.chapters {
             let source = checked_project_path(&snapshot.root, relative)?;
-            if !source.exists() {
-                continue;
-            }
             let destination = checked_project_path(&backup_dir, relative)?;
             ensure_safe_parent(&backup_dir, relative)?;
             std::fs::rename(&source, &destination)?;
@@ -1205,6 +1225,8 @@ fn replace_literary_study_book_inner(
             &metadata_path,
             serde_json::to_string_pretty(&next_metadata)?.as_bytes(),
         )?;
+        #[cfg(test)]
+        tests::run_replacement_commit_hook(&snapshot.root, &backup_dir)?;
         Ok(())
     })();
 
@@ -1232,30 +1254,34 @@ fn replace_literary_study_book_inner(
             let source = checked_project_path(&backup_dir, relative);
             let destination = checked_project_path(&snapshot.root, relative);
             match (source, destination) {
-                (Ok(source), Ok(destination)) if source.exists() => {
-                    if let Err(rollback_error) = ensure_safe_parent(&snapshot.root, relative)
-                        .and_then(|_| std::fs::rename(&source, &destination).map_err(AppError::Io))
-                    {
+                (Ok(source), Ok(destination)) => {
+                    // Copy back atomically, keeping every original in the backup
+                    // until the entire rollback succeeds, including metadata.
+                    let restored = ensure_safe_parent(&snapshot.root, relative)
+                        .and_then(|_| read_bounded(&source, MAX_LITERARY_CHAPTER_BYTES))
+                        .and_then(|bytes| atomic_write_sync(&destination, &bytes));
+                    if let Err(rollback_error) = restored {
                         rollback_errors.push(format!(
-                            "restore {}: {rollback_error}",
-                            destination.display()
+                            "restore {} from {}: {rollback_error}",
+                            destination.display(),
+                            source.display()
                         ));
                     }
                 }
                 (Err(rollback_error), _) | (_, Err(rollback_error)) => {
                     rollback_errors.push(rollback_error.to_string())
                 }
-                _ => {}
             }
         }
         let _ = std::fs::remove_dir_all(&stage_dir);
-        let _ = std::fs::remove_dir_all(&backup_dir);
         if rollback_errors.is_empty() {
+            let _ = std::fs::remove_dir_all(&backup_dir);
             return Err(error);
         }
         return Err(AppError::Custom(format!(
-            "{error}; rollback also reported: {}",
-            rollback_errors.join("; ")
+            "{error}; rollback also reported: {}; original recovery files retained at {}",
+            rollback_errors.join("; "),
+            backup_dir.display()
         )));
     }
 
@@ -2186,6 +2212,79 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    type ReplacementCommitHook = Box<dyn FnOnce(&Path, &Path) -> Result<(), AppError>>;
+
+    thread_local! {
+        // The synchronous transaction and its one-shot failure run on this test's
+        // thread only; concurrent tests cannot consume another project's hook.
+        static REPLACEMENT_COMMIT_HOOK: std::cell::RefCell<Option<ReplacementCommitHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn run_replacement_commit_hook(root: &Path, backup: &Path) -> Result<(), AppError> {
+        let hook = REPLACEMENT_COMMIT_HOOK.with(|hook| hook.borrow_mut().take());
+        match hook {
+            Some(hook) => hook(root, backup),
+            None => Ok(()),
+        }
+    }
+
+    fn replacement_fixture() -> (
+        tempfile::TempDir,
+        CreateLiteraryStudyProjectResult,
+        ReplaceLiteraryStudyBookRequest,
+    ) {
+        let parent = tempfile::tempdir().unwrap();
+        let created = create_literary_study_project_inner(CreateLiteraryStudyProjectRequest {
+            project_name: "rollback".to_string(),
+            parent_dir: parent.path().to_string_lossy().to_string(),
+            source_path: "/tmp/original.txt".to_string(),
+            title: "Original book".to_string(),
+            author: None,
+            language: None,
+            import_options: LiteraryImportOptions::default(),
+            chapters: vec![
+                LiteraryChapterDraft {
+                    id: "c1".to_string(),
+                    volume: None,
+                    title: "第一章".to_string(),
+                    text: "原始正文一".to_string(),
+                },
+                LiteraryChapterDraft {
+                    id: "c2".to_string(),
+                    volume: None,
+                    title: "第二章".to_string(),
+                    text: "原始正文二".to_string(),
+                },
+            ],
+        })
+        .unwrap();
+        let request = ReplaceLiteraryStudyBookRequest {
+            project_dir: created.project_path.clone(),
+            source_path: "/tmp/replacement.txt".to_string(),
+            title: "Replacement book".to_string(),
+            author: None,
+            language: None,
+            import_options: LiteraryImportOptions::default(),
+            chapters: vec![LiteraryChapterDraft {
+                id: "replacement".to_string(),
+                volume: None,
+                title: "第一章".to_string(),
+                text: "替换正文".to_string(),
+            }],
+        };
+        (parent, created, request)
+    }
+
+    fn replacement_artifacts(root: &Path, prefix: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(root.join(".novelist"))
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .map(|entry| entry.path())
+            .collect()
+    }
+
     #[test]
     fn splits_common_chinese_txt_headings() {
         let chapters =
@@ -2458,6 +2557,163 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn failed_rollback_retains_every_original_and_names_recovery_directory() {
+        let (_parent, created, request) = replacement_fixture();
+        let root = Path::new(&created.project_path).canonicalize().unwrap();
+        let config_path = root.join(".novelist/project.toml");
+        let metadata_path = root.join(".novelist").join(LITERARY_METADATA_FILE);
+        let original_config = std::fs::read(&config_path).unwrap();
+        let original_metadata = std::fs::read(&metadata_path).unwrap();
+        let chapters = load_literary_project(&created.project_path)
+            .unwrap()
+            .chapters;
+        let original_chapters = chapters
+            .iter()
+            .map(|(relative, _)| {
+                (
+                    relative.clone(),
+                    std::fs::read(root.join(relative)).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let blocked_chapter = original_chapters[0].0.clone();
+        REPLACEMENT_COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |root, _| {
+                // Both metadata writes and chapter moves already happened. Make
+                // config restoration and one chapter restoration fail on real IO.
+                let config = root.join(".novelist/project.toml");
+                std::fs::remove_file(&config)?;
+                std::fs::create_dir(&config)?;
+                let chapter = root.join(blocked_chapter);
+                std::fs::remove_file(&chapter)?;
+                std::fs::create_dir(&chapter)?;
+                Err(AppError::Io(std::io::Error::other(
+                    "injected commit failure",
+                )))
+            }));
+        });
+
+        let error = replace_literary_study_book_inner(request)
+            .unwrap_err()
+            .to_string();
+        let backups = replacement_artifacts(&root, ".literary-backup-");
+        assert_eq!(backups.len(), 1, "{error}");
+        let backup = &backups[0];
+        assert!(error.contains(backup.to_str().unwrap()), "{error}");
+        assert!(error.contains("project config"), "{error}");
+        assert!(error.contains(&original_chapters[0].0), "{error}");
+        assert_eq!(
+            std::fs::read(backup.join(".novelist/project.toml")).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            std::fs::read(backup.join(".novelist").join(LITERARY_METADATA_FILE)).unwrap(),
+            original_metadata
+        );
+        for (relative, bytes) in &original_chapters {
+            assert_eq!(&std::fs::read(backup.join(relative)).unwrap(), bytes);
+        }
+        // Even the successfully restored chapter is still available in recovery.
+        assert_eq!(
+            std::fs::read(root.join(&original_chapters[1].0)).unwrap(),
+            original_chapters[1].1
+        );
+        assert_eq!(std::fs::read(&metadata_path).unwrap(), original_metadata);
+        assert!(replacement_artifacts(&root, ".literary-stage-").is_empty());
+
+        // The retained directory contains enough exact original bytes to recover.
+        std::fs::remove_dir(&config_path).unwrap();
+        std::fs::remove_dir(root.join(&original_chapters[0].0)).unwrap();
+        std::fs::copy(backup.join(".novelist/project.toml"), &config_path).unwrap();
+        for (relative, _) in &original_chapters {
+            std::fs::copy(backup.join(relative), root.join(relative)).unwrap();
+        }
+        let recovered = read_literary_study_overview_inner(&created.project_path).unwrap();
+        assert_eq!(recovered.title, "Original book");
+        assert_eq!(recovered.chapter_count, 2);
+    }
+
+    #[test]
+    fn missing_moved_original_makes_rollback_fail_and_keeps_remaining_backups() {
+        let (_parent, created, request) = replacement_fixture();
+        let root = Path::new(&created.project_path).canonicalize().unwrap();
+        let chapters = load_literary_project(&created.project_path)
+            .unwrap()
+            .chapters;
+        let missing = chapters[0].0.clone();
+        let retained = chapters[1].0.clone();
+        let retained_bytes = std::fs::read(root.join(&retained)).unwrap();
+        let missing_in_hook = missing.clone();
+        REPLACEMENT_COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_, backup| {
+                std::fs::remove_file(backup.join(missing_in_hook))?;
+                Err(AppError::Io(std::io::Error::other(
+                    "injected missing backup",
+                )))
+            }));
+        });
+
+        let error = replace_literary_study_book_inner(request)
+            .unwrap_err()
+            .to_string();
+        let backups = replacement_artifacts(&root, ".literary-backup-");
+        assert_eq!(backups.len(), 1, "{error}");
+        let backup = &backups[0];
+        assert!(error.contains(backup.to_str().unwrap()), "{error}");
+        assert!(error.contains(&missing), "{error}");
+        assert_eq!(
+            std::fs::read(backup.join(&retained)).unwrap(),
+            retained_bytes
+        );
+        assert_eq!(std::fs::read(root.join(&retained)).unwrap(), retained_bytes);
+        for metadata in ["project.toml", LITERARY_METADATA_FILE] {
+            assert_eq!(
+                std::fs::read(backup.join(".novelist").join(metadata)).unwrap(),
+                std::fs::read(root.join(".novelist").join(metadata)).unwrap()
+            );
+        }
+        assert!(!root.join(missing).exists());
+    }
+
+    #[test]
+    fn successful_rollback_restores_committed_metadata_and_removes_backups() {
+        let (_parent, created, request) = replacement_fixture();
+        let root = Path::new(&created.project_path);
+        let config_path = root.join(".novelist/project.toml");
+        let metadata_path = root.join(".novelist").join(LITERARY_METADATA_FILE);
+        let original_config = std::fs::read(&config_path).unwrap();
+        let original_metadata = std::fs::read(&metadata_path).unwrap();
+        let original_chapters = load_literary_project(&created.project_path)
+            .unwrap()
+            .chapters
+            .iter()
+            .map(|(relative, _)| {
+                (
+                    relative.clone(),
+                    std::fs::read(root.join(relative)).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        REPLACEMENT_COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|_, _| {
+                Err(AppError::Io(std::io::Error::other(
+                    "injected commit failure",
+                )))
+            }));
+        });
+
+        let error = replace_literary_study_book_inner(request).unwrap_err();
+        assert!(matches!(error, AppError::Io(_)));
+        assert_eq!(std::fs::read(config_path).unwrap(), original_config);
+        assert_eq!(std::fs::read(metadata_path).unwrap(), original_metadata);
+        for (relative, bytes) in original_chapters {
+            assert_eq!(std::fs::read(root.join(relative)).unwrap(), bytes);
+        }
+        assert!(replacement_artifacts(root, ".literary-backup-").is_empty());
+        assert!(replacement_artifacts(root, ".literary-stage-").is_empty());
     }
 
     #[test]

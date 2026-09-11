@@ -425,6 +425,36 @@ describe('[contract] settingsStore.writeNewFile', () => {
   });
 });
 
+describe('[regression] snapshot settings scope ownership', () => {
+  beforeEach(resetStore);
+
+  it('does not apply a late project A write to project B or copy it into B next write', async () => {
+    const pending = deferred<{ status: 'ok'; data: null }>();
+    vi.mocked(commands.getEffectiveSettings).mockResolvedValue({
+      status: 'ok', data: { ...DEFAULT_EFFECTIVE, is_project_scoped: true },
+    });
+    await settingsStore.load('/project-a');
+    vi.mocked(commands.writeProjectSettings).mockReturnValueOnce(pending.promise);
+    const writingA = settingsStore.writeSnapshot({ max_count: 7 });
+
+    const b = { max_count: 43, min_interval_minutes: 15 };
+    vi.mocked(commands.getEffectiveSettings).mockResolvedValue({
+      status: 'ok', data: { ...DEFAULT_EFFECTIVE, snapshot: b, is_project_scoped: true },
+    });
+    await settingsStore.load('/project-b');
+    pending.resolve({ status: 'ok', data: null });
+    await writingA;
+    expect(settingsStore.effective.snapshot).toEqual(b);
+
+    vi.mocked(commands.writeProjectSettings).mockResolvedValue({ status: 'ok', data: null });
+    await settingsStore.writeSnapshot({ min_interval_minutes: 20 });
+    expect(commands.writeProjectSettings).toHaveBeenLastCalledWith(
+      '/project-b', null, null, null, { max_count: 43, min_interval_minutes: 20 },
+    );
+    expect(settingsStore.effective.snapshot).toEqual({ max_count: 43, min_interval_minutes: 20 });
+  });
+});
+
 describe('[contract] settingsStore.writePluginEnabled', () => {
   beforeEach(resetStore);
 

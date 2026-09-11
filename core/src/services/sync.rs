@@ -1,10 +1,17 @@
-use crate::services::webdav::{self, DavEntry, WebDavAuth};
+use crate::services::project_files::is_project_content_path;
+use crate::services::webdav::{self, WebDavAuth};
 use crate::AppError;
+use cap_fs_ext::DirExt;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize, Clone, Type, Debug)]
@@ -37,12 +44,15 @@ pub struct SyncStatus {
     pub in_progress: bool,
 }
 
-/// Persisted sync state: tracks last sync time and file modification times at last sync
+/// Per-file common content established only by a successful transfer or equality.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SyncState {
     pub last_sync_iso: Option<String>,
     /// Map of relative path -> last known modification time (as seconds since epoch)
     pub file_mod_times: HashMap<String, u64>,
+    /// Legacy timestamps are retained, but cannot safely resolve two-sided edits.
+    #[serde(default)]
+    pub common_hashes: HashMap<String, String>,
 }
 
 /// Get the sync data directory for a project: ~/.novelist/sync/{project-hash}/
@@ -81,11 +91,14 @@ pub fn read_sync_config(project_dir: &str) -> Result<SyncConfig, AppError> {
 
 /// Save sync config to disk
 pub fn save_sync_config_to_disk(project_dir: &str, config: &SyncConfig) -> Result<(), AppError> {
+    if !config.webdav_url.is_empty() {
+        webdav::remote_url(&config.webdav_url, "")?;
+    }
     let dir = sync_dir_for_project(project_dir)?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.json");
     let data = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, data)?;
+    atomic_write_state(&path, data.as_bytes())?;
     Ok(())
 }
 
@@ -107,361 +120,374 @@ fn write_sync_state(project_dir: &str, state: &SyncState) -> Result<(), AppError
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("sync-state.json");
     let data = serde_json::to_string_pretty(state)?;
-    std::fs::write(&path, data)?;
+    atomic_write_state(&path, data.as_bytes())?;
     Ok(())
 }
 
-/// Check if a file extension is syncable
-fn is_syncable(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("md" | "markdown" | "txt" | "json" | "jsonl" | "csv")
-    )
+fn atomic_write_state(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput("Missing sync state parent".into()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)
+        .map_err(|error| AppError::Io(error.error))?;
+    Ok(())
 }
 
-fn is_safe_relative_sync_path(path: &str) -> bool {
-    if path.trim().is_empty() || path.contains('\0') {
-        return false;
-    }
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return false;
-    }
-    path.components().all(|component| match component {
-        Component::Normal(part) => {
-            let name = part.to_string_lossy();
-            !name.is_empty() && !name.starts_with('.')
+fn content_directory(relative: &str) -> bool {
+    relative == ".novelist" || relative.split('/').all(|part| !part.starts_with('.'))
+}
+
+fn collect_local_files(root: &Dir) -> Result<BTreeSet<String>, AppError> {
+    fn walk(dir: &Dir, prefix: &str, files: &mut BTreeSet<String>) -> Result<(), AppError> {
+        for entry in dir.entries()? {
+            let entry = entry?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| AppError::InvalidInput("Project filename is not UTF-8".into()))?;
+            let relative = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            webdav::validate_remote_path(&relative)?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink()
+                && (is_project_content_path(Path::new(&relative)) || content_directory(&relative))
+            {
+                return Err(AppError::PathNotAllowed(format!(
+                    "Project sync does not follow symlinks: {relative}"
+                )));
+            }
+            if kind.is_dir() && content_directory(&relative) {
+                walk(&dir.open_dir_nofollow(&name)?, &relative, files)?;
+            } else if kind.is_file() && is_project_content_path(Path::new(&relative)) {
+                files.insert(relative);
+            }
         }
-        Component::CurDir => true,
-        Component::ParentDir | Component::RootDir | Component::Prefix(_) => false,
-    })
+        Ok(())
+    }
+    let mut files = BTreeSet::new();
+    walk(root, "", &mut files)?;
+    Ok(files)
 }
 
-/// Collect local syncable files with their modification timestamps (seconds since epoch)
-fn collect_local_files(project_dir: &Path) -> Result<HashMap<String, u64>, AppError> {
-    let mut files = HashMap::new();
-    for entry in walkdir::WalkDir::new(project_dir)
-        .into_iter()
-        .filter_entry(|e| {
-            // Skip hidden directories
-            let name = e.file_name().to_str().unwrap_or("");
-            !name.starts_with('.')
-        })
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() || !is_syncable(path) {
+async fn collect_remote_files(
+    client: &Client,
+    base_url: &str,
+    remote_base: &str,
+    auth: &WebDavAuth,
+) -> Result<BTreeSet<String>, AppError> {
+    let mut files = BTreeSet::new();
+    let mut pending = vec![String::new()];
+    let mut visited = HashSet::new();
+    while let Some(prefix) = pending.pop() {
+        if !visited.insert(prefix.clone()) {
             continue;
         }
-        let relative = path.strip_prefix(project_dir).unwrap_or(path);
-        let rel_str = relative.to_string_lossy().to_string();
-        let modified = path
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        files.insert(rel_str, modified);
+        let remote = if prefix.is_empty() {
+            remote_base.to_string()
+        } else {
+            format!("{remote_base}/{prefix}")
+        };
+        let collection = webdav::remote_url(base_url, &remote)?;
+        for entry in webdav::list_remote(client, base_url, &remote, auth).await? {
+            let child = webdav::relative_href(&collection, &entry.href)?;
+            if child.is_empty() {
+                continue;
+            }
+            // Depth:1 responses may only describe this collection's children.
+            if child.contains('/') {
+                return Err(AppError::InvalidInput(
+                    "WebDAV listing escaped requested depth".into(),
+                ));
+            }
+            let relative = if prefix.is_empty() {
+                child
+            } else {
+                format!("{prefix}/{child}")
+            };
+            if entry.is_collection && content_directory(&relative) {
+                pending.push(relative);
+            } else if !entry.is_collection && is_project_content_path(Path::new(&relative)) {
+                files.insert(relative);
+            }
+        }
     }
     Ok(files)
 }
 
-/// Parse an HTTP date (RFC 2822 / RFC 7231) into seconds since epoch.
-/// Handles common WebDAV date format: "Mon, 01 Jan 2024 12:00:00 GMT"
-fn parse_http_date_to_epoch(date_str: &str) -> Option<u64> {
-    // Simple parser for "Day, DD Mon YYYY HH:MM:SS GMT"
-    let parts: Vec<&str> = date_str.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    let day: u64 = parts[1].parse().ok()?;
-    let month = match parts[2] {
-        "Jan" => 1u64,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        _ => return None,
+static SYNC_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn sync_guard(project: &Path) -> Result<tokio::sync::OwnedMutexGuard<()>, AppError> {
+    let mutex = {
+        let mut locks = SYNC_LOCKS
+            .lock()
+            .map_err(|_| AppError::Custom("Sync lock poisoned".into()))?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(project).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(project.to_path_buf(), Arc::downgrade(&lock));
+            lock
+        }
     };
-    let year: u64 = parts[3].parse().ok()?;
-    let time_parts: Vec<&str> = parts[4].split(':').collect();
-    if time_parts.len() < 3 {
-        return None;
-    }
-    let hour: u64 = time_parts[0].parse().ok()?;
-    let min: u64 = time_parts[1].parse().ok()?;
-    let sec: u64 = time_parts[2].parse().ok()?;
+    Ok(mutex.lock_owned().await)
+}
 
-    // Approximate epoch calculation (not perfect for leap seconds, but fine for comparison)
-    let mut days = 0u64;
-    for y in 1970..year {
-        days += if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
-            366
-        } else {
-            365
+fn hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn optional_local(root: &Dir, relative: &str) -> Result<Option<Vec<u8>>, AppError> {
+    match webdav::read_confined(root, Path::new(relative)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn assert_local_unchanged(
+    root: &Dir,
+    relative: &str,
+    expected: Option<&str>,
+) -> Result<(), AppError> {
+    let actual = optional_local(root, relative)?.as_deref().map(hash);
+    if actual.as_deref() != expected {
+        return Err(AppError::Custom(
+            "Conflict: local file changed during transfer".into(),
+        ));
+    }
+    Ok(())
+}
+
+static DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Stage and compare before the atomic rename, using a pinned parent capability.
+fn commit_download(
+    root: &Dir,
+    relative: &str,
+    bytes: &[u8],
+    expected: Option<&str>,
+) -> Result<(), AppError> {
+    let path = Path::new(relative);
+    let parent = webdav::confined_parent(root, path, true)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::InvalidInput("Invalid sync filename".into()))?;
+    let counter = DOWNLOAD_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = format!(".novelist-sync-{}-{counter}.tmp", std::process::id());
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = parent.open_with(&temp, &options)?;
+    let result = (|| -> Result<(), AppError> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        assert_local_unchanged(root, relative, expected)?;
+        // Also compare through the pinned parent if its ambient path moved.
+        assert_local_unchanged(&parent, name, expected)?;
+        parent.rename(&temp, &parent, name)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = parent.remove_file(&temp);
+    }
+    result
+}
+
+async fn ensure_remote_parents(
+    client: &Client,
+    base_url: &str,
+    remote_path: &str,
+    auth: &WebDavAuth,
+) -> Result<(), AppError> {
+    for (index, _) in remote_path.match_indices('/') {
+        webdav::create_collection(client, base_url, &remote_path[..index], auth).await?;
+    }
+    Ok(())
+}
+
+enum Transfer {
+    Unchanged,
+    Uploaded,
+    Downloaded,
+}
+
+struct SyncSession<'a> {
+    root: &'a Dir,
+    project: &'a Path,
+    client: &'a Client,
+    config: &'a SyncConfig,
+    remote_base: &'a str,
+    auth: &'a WebDavAuth,
+}
+
+async fn sync_file(
+    session: &SyncSession<'_>,
+    relative: &str,
+    remote_exists: bool,
+    common_hash: Option<&str>,
+) -> Result<(String, Transfer), AppError> {
+    let SyncSession {
+        root,
+        project,
+        client,
+        config,
+        remote_base,
+        auth,
+    } = *session;
+    let local = optional_local(root, relative)?;
+    let local_hash = local.as_deref().map(hash);
+    let remote_path = format!("{remote_base}/{relative}");
+    let remote = if remote_exists {
+        Some(webdav::get_file(client, &config.webdav_url, &remote_path, auth).await?)
+    } else {
+        None
+    };
+    let remote_hash = remote.as_ref().map(|file| hash(&file.bytes));
+    if let Some(common) = local_hash
+        .as_ref()
+        .filter(|local| Some(*local) == remote_hash.as_ref())
+    {
+        assert_local_unchanged(root, relative, Some(common))?;
+        return Ok((common.clone(), Transfer::Unchanged));
+    }
+    let upload = match (local.as_ref(), remote.as_ref()) {
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (Some(_), Some(_)) if common_hash.is_some() && remote_hash.as_deref() == common_hash => true,
+        (Some(_), Some(_)) if common_hash.is_some() && local_hash.as_deref() == common_hash => false,
+        _ => return Err(AppError::Custom("Conflict: local and remote differ without a common unchanged version; resolve explicitly".into())),
+    };
+    if upload {
+        let condition = match remote.as_ref() {
+            None => webdav::PutCondition::Absent,
+            Some(file) => webdav::PutCondition::Matches(file.etag.as_deref().ok_or_else(|| {
+                AppError::Custom("Cannot safely replace remote file without a strong ETag".into())
+            })?),
         };
-    }
-    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30];
-    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    for m in 1..month {
-        days += month_days[m as usize];
-        if m == 2 && is_leap {
-            days += 1;
-        }
-    }
-    days += day - 1;
-
-    Some(days * 86400 + hour * 3600 + min * 60 + sec)
-}
-
-/// Build a map of relative paths to modification times from PROPFIND entries
-fn build_remote_file_map(entries: &[DavEntry], base_href: &str) -> HashMap<String, u64> {
-    let mut map = HashMap::new();
-    let base = base_href.trim_end_matches('/');
-    for entry in entries {
-        if entry.is_collection {
-            continue;
-        }
-        // Decode href and make it relative to base
-        let href = &entry.href;
-        let relative = if let Some(stripped) = href.strip_prefix(base) {
-            stripped.trim_start_matches('/')
+        ensure_remote_parents(client, &config.webdav_url, &remote_path, auth).await?;
+        assert_local_unchanged(root, relative, local_hash.as_deref())?;
+        webdav::put_bytes(
+            client,
+            &config.webdav_url,
+            &remote_path,
+            local.unwrap(),
+            auth,
+            condition,
+        )
+        .await?;
+        assert_local_unchanged(root, relative, local_hash.as_deref())?;
+        Ok((local_hash.unwrap(), Transfer::Uploaded))
+    } else {
+        let _settings_guard = if matches!(
+            relative,
+            ".novelist/project.toml" | ".novelist/literary-study.json"
+        ) {
+            Some(crate::commands::settings::acquire_project_settings_guard(project).await?)
         } else {
-            // Try URL-decoded comparison
-            href.trim_start_matches('/')
+            None
         };
-        if relative.is_empty() {
-            continue;
-        }
-        // Percent-decode the relative path
-        let decoded = percent_decode(relative);
-        if !is_safe_relative_sync_path(&decoded) || !is_syncable(Path::new(&decoded)) {
-            continue;
-        }
-        let mod_time = entry
-            .last_modified
-            .as_deref()
-            .and_then(parse_http_date_to_epoch)
-            .unwrap_or(0);
-        map.insert(decoded, mod_time);
+        commit_download(
+            root,
+            relative,
+            &remote.unwrap().bytes,
+            local_hash.as_deref(),
+        )?;
+        Ok((remote_hash.unwrap(), Transfer::Downloaded))
     }
-    map
 }
 
-/// Simple percent-decoding for URL paths
-fn percent_decode(s: &str) -> String {
-    let mut result = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = &s[i + 1..i + 3];
-            if let Ok(val) = u8::from_str_radix(hex, 16) {
-                result.push(val);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
-}
-
-/// Perform an incremental sync between local project and remote WebDAV
+/// One canonical-project lock covers discovery, transfers, and baseline persistence.
 pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
+    let project = std::fs::canonicalize(project_dir)?;
+    let _guard = sync_guard(&project).await?;
     let config = read_sync_config(project_dir)?;
-    if !config.enabled {
-        return Ok(SyncStatus {
-            last_sync: None,
-            files_uploaded: 0,
-            files_downloaded: 0,
-            errors: vec!["Sync is not enabled".into()],
-            in_progress: false,
-        });
-    }
-
+    let mut state = read_sync_state(project_dir)?;
     let mut status = SyncStatus {
-        last_sync: None,
+        last_sync: state.last_sync_iso.clone(),
         files_uploaded: 0,
         files_downloaded: 0,
         errors: Vec::new(),
-        in_progress: true,
+        in_progress: false,
     };
-
+    if !config.enabled {
+        status.errors.push("Sync is not enabled".into());
+        return Ok(status);
+    }
+    webdav::remote_url(&config.webdav_url, "")?;
     let auth = WebDavAuth {
         username: config.username.clone(),
         password: config.password.clone(),
     };
-
-    let client = Client::new();
-    let project_path = Path::new(project_dir);
-    let project_name = project_path
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(webdav::REQUEST_TIMEOUT)
+        .timeout(webdav::REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| AppError::Custom("Cannot create WebDAV client".into()))?;
+    let project_name = project
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project");
-    let remote_base = format!("novelist/{}", project_name);
-
-    // Ensure remote directories exist
-    if let Err(e) = webdav::create_collection(&client, &config.webdav_url, "novelist", &auth).await
-    {
-        tracing::warn!("Failed to create novelist collection: {e}");
-    }
-    if let Err(e) =
-        webdav::create_collection(&client, &config.webdav_url, &remote_base, &auth).await
-    {
-        tracing::warn!("Failed to create project collection: {e}");
-    }
-
-    // Load previous sync state
-    let prev_state = read_sync_state(project_dir).unwrap_or_default();
-
-    // Collect local files
-    let local_files = collect_local_files(project_path)?;
-
-    // List remote files
-    let remote_entries =
-        match webdav::list_remote(&client, &config.webdav_url, &remote_base, &auth).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                status.errors.push(format!("Failed to list remote: {e}"));
-                status.in_progress = false;
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::InvalidInput("Project name is not UTF-8".into()))?;
+    let remote_base = format!("novelist/{project_name}");
+    let root = Dir::open_ambient_dir(&project, ambient_authority())?;
+    let local_files = collect_local_files(&root)?;
+    ensure_remote_parents(
+        &client,
+        &config.webdav_url,
+        &format!("{remote_base}/file"),
+        &auth,
+    )
+    .await?;
+    let remote_files =
+        match collect_remote_files(&client, &config.webdav_url, &remote_base, &auth).await {
+            Ok(files) => files,
+            Err(error) => {
+                status.errors.push(format!("Remote discovery: {error}"));
                 return Ok(status);
             }
         };
-
-    // Build the base href for relative path extraction
-    // The first entry in PROPFIND is usually the requested collection itself
-    let base_href_guess = format!("/{}/", remote_base.trim_matches('/'));
-    let remote_files = build_remote_file_map(&remote_entries, &base_href_guess);
-
-    // Sync: compare local vs remote
-    // 1. Files that exist locally
-    for (rel_path, local_mod) in &local_files {
-        if let Some(&remote_mod) = remote_files.get(rel_path) {
-            // Both exist — compare modification times
-            if *local_mod > remote_mod {
-                // Local is newer -> upload
-                let local_path = project_path.join(rel_path);
-                let remote_path = format!("{}/{}", remote_base, rel_path);
-                match webdav::upload_file(
-                    &client,
-                    &config.webdav_url,
-                    &remote_path,
-                    &local_path,
-                    &auth,
-                )
-                .await
-                {
-                    Ok(()) => status.files_uploaded += 1,
-                    Err(e) => status.errors.push(format!("Upload {rel_path}: {e}")),
-                }
-            } else if remote_mod > *local_mod {
-                // Remote is newer — only download if local hasn't changed since last sync
-                let prev_mod = prev_state
-                    .file_mod_times
-                    .get(rel_path)
-                    .copied()
-                    .unwrap_or(0);
-                if *local_mod <= prev_mod {
-                    let local_path = project_path.join(rel_path);
-                    let remote_path = format!("{}/{}", remote_base, rel_path);
-                    match webdav::download_file(
-                        &client,
-                        &config.webdav_url,
-                        &remote_path,
-                        &local_path,
-                        &auth,
-                    )
-                    .await
-                    {
-                        Ok(()) => status.files_downloaded += 1,
-                        Err(e) => status.errors.push(format!("Download {rel_path}: {e}")),
-                    }
-                } else {
-                    tracing::info!(
-                        "Conflict for {rel_path}: both local and remote modified. Keeping local."
-                    );
-                }
-            }
-        } else {
-            // Local only -> upload
-            // Ensure parent directories exist on remote
-            if let Some(parent) = Path::new(rel_path).parent() {
-                if parent != Path::new("") {
-                    let parent_remote = format!("{}/{}", remote_base, parent.to_string_lossy());
-                    let _ = webdav::create_collection(
-                        &client,
-                        &config.webdav_url,
-                        &parent_remote,
-                        &auth,
-                    )
-                    .await;
-                }
-            }
-            let local_path = project_path.join(rel_path);
-            let remote_path = format!("{}/{}", remote_base, rel_path);
-            match webdav::upload_file(
-                &client,
-                &config.webdav_url,
-                &remote_path,
-                &local_path,
-                &auth,
-            )
-            .await
-            {
-                Ok(()) => status.files_uploaded += 1,
-                Err(e) => status.errors.push(format!("Upload {rel_path}: {e}")),
-            }
-        }
-    }
-
-    // 2. Files that exist only on remote -> download
-    for rel_path in remote_files.keys() {
-        if !local_files.contains_key(rel_path) {
-            if !is_safe_relative_sync_path(rel_path) || !is_syncable(Path::new(rel_path)) {
-                continue;
-            }
-            let local_path = project_path.join(rel_path);
-            let remote_path = format!("{}/{}", remote_base, rel_path);
-            match webdav::download_file(
-                &client,
-                &config.webdav_url,
-                &remote_path,
-                &local_path,
-                &auth,
-            )
-            .await
-            {
-                Ok(()) => status.files_downloaded += 1,
-                Err(e) => status.errors.push(format!("Download {rel_path}: {e}")),
-            }
-        }
-    }
-
-    // Update sync state
-    let now = chrono_now_iso();
-    let mut new_state = SyncState {
-        last_sync_iso: Some(now.clone()),
-        file_mod_times: HashMap::new(),
+    let session = SyncSession {
+        root: &root,
+        project: &project,
+        client: &client,
+        config: &config,
+        remote_base: &remote_base,
+        auth: &auth,
     };
-    // Re-read local files to capture any downloaded files' new mod times
-    if let Ok(updated_local) = collect_local_files(project_path) {
-        new_state.file_mod_times = updated_local;
+    for relative in local_files.union(&remote_files) {
+        match sync_file(
+            &session,
+            relative,
+            remote_files.contains(relative),
+            state.common_hashes.get(relative).map(String::as_str),
+        )
+        .await
+        {
+            Ok((common_hash, transfer)) => {
+                state.common_hashes.insert(relative.clone(), common_hash);
+                // Never rescan local content to bless edits made during another transfer.
+                state.file_mod_times.remove(relative);
+                match transfer {
+                    Transfer::Uploaded => status.files_uploaded += 1,
+                    Transfer::Downloaded => status.files_downloaded += 1,
+                    Transfer::Unchanged => {}
+                }
+            }
+            Err(error) => status.errors.push(format!("Sync {relative}: {error}")),
+        }
     }
-    let _ = write_sync_state(project_dir, &new_state);
-
+    let now = chrono_now_iso();
+    state.last_sync_iso = Some(now.clone());
+    write_sync_state(project_dir, &state)?;
     status.last_sync = Some(now);
-    status.in_progress = false;
-
     Ok(status)
 }
 
@@ -526,310 +552,333 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::webdav::test_server::DavServer;
     use serial_test::serial;
 
-    // Tests that touch sync_dir_for_project mutate `NOVELIST_SYNC_DATA_DIR`
-    // (process-global env). The `sync_data_dir` serial group is shared with
-    // services::snapshots, whose retention tests set the same variable — a
-    // module-local mutex would not have kept the two apart.
-
-    fn set_data_dir(p: &std::path::Path) -> Option<std::ffi::OsString> {
-        let old = std::env::var_os("NOVELIST_SYNC_DATA_DIR");
-        unsafe {
-            std::env::set_var("NOVELIST_SYNC_DATA_DIR", p);
-        }
-        old
+    struct SyncFixture {
+        _data: tempfile::TempDir,
+        _project: tempfile::TempDir,
+        old_data: Option<std::ffi::OsString>,
+        project: String,
+        server: DavServer,
+        remote_base: String,
     }
 
-    fn restore_data_dir(old: Option<std::ffi::OsString>) {
-        if let Some(v) = old {
+    impl SyncFixture {
+        fn new() -> Self {
+            let data = tempfile::tempdir().unwrap();
+            let project_dir = tempfile::tempdir().unwrap();
+            let project = project_dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            let old_data = std::env::var_os("NOVELIST_SYNC_DATA_DIR");
             unsafe {
-                std::env::set_var("NOVELIST_SYNC_DATA_DIR", v);
+                std::env::set_var("NOVELIST_SYNC_DATA_DIR", data.path());
             }
-        } else {
+            let server = DavServer::start();
+            let config = SyncConfig {
+                enabled: true,
+                webdav_url: server.url.clone(),
+                username: "test".into(),
+                password: "not-a-credential".into(),
+                interval_minutes: 30,
+            };
+            save_sync_config_to_disk(&project, &config).unwrap();
+            let remote_base = format!(
+                "novelist/{}",
+                Path::new(&project).file_name().unwrap().to_str().unwrap()
+            );
+            Self {
+                _data: data,
+                _project: project_dir,
+                old_data,
+                project,
+                server,
+                remote_base,
+            }
+        }
+
+        fn remote_path(&self, relative: &str) -> String {
+            webdav::remote_url(
+                &self.server.url,
+                &format!("{}/{relative}", self.remote_base),
+            )
+            .unwrap()
+            .path()
+            .to_string()
+        }
+
+        fn local_write(&self, relative: &str, bytes: &[u8]) {
+            let path = Path::new(&self.project).join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn remote_write(&self, relative: &str, bytes: &[u8]) {
+            let path = self.remote_path(relative);
+            let mut state = self.server.state.lock().unwrap();
+            for (index, _) in path.match_indices('/').skip(1) {
+                state.collections.insert(path[..index].to_string());
+            }
+            state.files.insert(path, bytes.to_vec());
+        }
+    }
+
+    impl Drop for SyncFixture {
+        fn drop(&mut self) {
             unsafe {
-                std::env::remove_var("NOVELIST_SYNC_DATA_DIR");
+                if let Some(old) = &self.old_data {
+                    std::env::set_var("NOVELIST_SYNC_DATA_DIR", old);
+                } else {
+                    std::env::remove_var("NOVELIST_SYNC_DATA_DIR");
+                }
             }
         }
     }
 
-    #[test]
-    fn test_sync_config_default() {
-        let config = SyncConfig::default();
-        assert!(!config.enabled);
-        assert!(config.webdav_url.is_empty());
-        assert!(config.username.is_empty());
-        assert!(config.password.is_empty());
-        assert_eq!(config.interval_minutes, 30);
-    }
-
-    #[test]
-    fn test_sync_config_roundtrip() {
-        let config = SyncConfig {
-            enabled: true,
-            webdav_url: "https://dav.example.com".to_string(),
-            username: "user".to_string(),
-            password: "pass".to_string(),
-            interval_minutes: 15,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: SyncConfig = serde_json::from_str(&json).unwrap();
-        assert!(parsed.enabled);
-        assert_eq!(parsed.webdav_url, "https://dav.example.com");
-        assert_eq!(parsed.username, "user");
-        assert_eq!(parsed.interval_minutes, 15);
-    }
-
-    #[test]
-    fn test_sync_state_default() {
-        let state = SyncState::default();
-        assert!(state.last_sync_iso.is_none());
-        assert!(state.file_mod_times.is_empty());
-    }
-
-    #[test]
-    fn test_is_syncable() {
-        assert!(is_syncable(Path::new("chapter.md")));
-        assert!(is_syncable(Path::new("notes.markdown")));
-        assert!(is_syncable(Path::new("readme.txt")));
-        assert!(!is_syncable(Path::new("image.png")));
-        assert!(is_syncable(Path::new("data.json")));
-        assert!(is_syncable(Path::new("data.jsonl")));
-        assert!(is_syncable(Path::new("data.csv")));
-        assert!(!is_syncable(Path::new("script.js")));
-        assert!(!is_syncable(Path::new("noext")));
-    }
-
-    #[test]
-    fn test_percent_decode_no_encoding() {
-        assert_eq!(percent_decode("hello/world.md"), "hello/world.md");
-    }
-
-    #[test]
-    fn test_percent_decode_space() {
-        assert_eq!(percent_decode("my%20file.md"), "my file.md");
-    }
-
-    #[test]
-    fn test_percent_decode_chinese() {
-        // %E4%BD%A0%E5%A5%BD = 你好
-        assert_eq!(percent_decode("%E4%BD%A0%E5%A5%BD.md"), "你好.md");
-    }
-
-    #[test]
-    fn test_percent_decode_invalid_hex() {
-        // Invalid hex should pass through
-        assert_eq!(percent_decode("%ZZ"), "%ZZ");
-    }
-
-    #[test]
-    fn test_percent_decode_truncated() {
-        // Truncated percent at end
-        assert_eq!(percent_decode("test%2"), "test%2");
-    }
-
-    #[test]
-    fn test_parse_http_date_valid() {
-        let date = "Mon, 01 Jan 2024 12:00:00 GMT";
-        let epoch = parse_http_date_to_epoch(date);
-        assert!(epoch.is_some());
-        // 2024-01-01 12:00:00 UTC should be > 1704067200 (2024-01-01 00:00:00)
-        let val = epoch.unwrap();
-        assert!(val >= 1704067200);
-        assert!(val <= 1704153600); // Before 2024-01-02 00:00:00
-    }
-
-    #[test]
-    fn test_parse_http_date_epoch() {
-        let date = "Thu, 01 Jan 1970 00:00:00 GMT";
-        let epoch = parse_http_date_to_epoch(date);
-        assert_eq!(epoch, Some(0));
-    }
-
-    #[test]
-    fn test_parse_http_date_invalid() {
-        assert!(parse_http_date_to_epoch("invalid").is_none());
-        assert!(parse_http_date_to_epoch("").is_none());
-        assert!(parse_http_date_to_epoch("Mon 01").is_none());
-    }
-
-    #[test]
-    fn test_build_remote_file_map_empty() {
-        let map = build_remote_file_map(&[], "/novelist/project/");
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_build_remote_file_map_skips_collections() {
-        let entries = vec![DavEntry {
-            href: "/novelist/project/".to_string(),
-            last_modified: None,
-            content_length: None,
-            is_collection: true,
-        }];
-        let map = build_remote_file_map(&entries, "/novelist/project/");
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_build_remote_file_map_file() {
-        let entries = vec![DavEntry {
-            href: "/novelist/project/chapter1.md".to_string(),
-            last_modified: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
-            content_length: Some(100),
-            is_collection: false,
-        }];
-        let map = build_remote_file_map(&entries, "/novelist/project");
-        assert!(map.contains_key("chapter1.md"));
-    }
-
-    #[test]
-    fn test_build_remote_file_map_rejects_unsafe_paths() {
-        let entries = vec![
-            DavEntry {
-                href: "/novelist/project/../escape.md".to_string(),
-                last_modified: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
-                content_length: Some(1),
-                is_collection: false,
-            },
-            DavEntry {
-                href: "/novelist/project/.hidden.md".to_string(),
-                last_modified: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
-                content_length: Some(1),
-                is_collection: false,
-            },
-            DavEntry {
-                href: "/novelist/project/safe.md".to_string(),
-                last_modified: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
-                content_length: Some(1),
-                is_collection: false,
-            },
-        ];
-
-        let map = build_remote_file_map(&entries, "/novelist/project");
-
-        assert_eq!(map.len(), 1);
-        assert!(map.contains_key("safe.md"));
-    }
-
-    #[test]
-    fn test_chrono_now_iso_format() {
-        let iso = chrono_now_iso();
-        // Should match YYYY-MM-DDTHH:MM:SSZ
-        assert_eq!(iso.len(), 20);
-        assert_eq!(&iso[4..5], "-");
-        assert_eq!(&iso[7..8], "-");
-        assert_eq!(&iso[10..11], "T");
-        assert_eq!(&iso[13..14], ":");
-        assert_eq!(&iso[16..17], ":");
-        assert!(iso.ends_with('Z'));
-    }
-
-    #[test]
-    fn test_collect_local_files() {
-        // Use prefix without dot — collect_local_files skips dirs starting with '.'
-        let dir = tempfile::Builder::new()
-            .prefix("novelist_test_")
-            .tempdir()
-            .unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::write(root.join("chapter1.md"), "content").unwrap();
-        std::fs::write(root.join("notes.txt"), "notes").unwrap();
-        std::fs::write(root.join("image.png"), [0u8; 10]).unwrap();
-
-        let files = collect_local_files(&root).unwrap();
-        assert!(files.contains_key("chapter1.md"));
-        assert!(files.contains_key("notes.txt"));
-        assert!(!files.contains_key("image.png"));
-    }
-
-    #[test]
-    fn test_collect_local_files_skips_hidden() {
-        let dir = tempfile::Builder::new()
-            .prefix("novelist_test_")
-            .tempdir()
-            .unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let hidden = root.join(".git");
-        std::fs::create_dir(&hidden).unwrap();
-        std::fs::write(hidden.join("config.md"), "git config").unwrap();
-        std::fs::write(root.join("visible.md"), "content").unwrap();
-
-        let files = collect_local_files(&root).unwrap();
-        assert!(files.contains_key("visible.md"));
-        assert!(!files.keys().any(|k| k.contains(".git")));
-    }
-
-    #[test]
+    #[tokio::test]
     #[serial(sync_data_dir)]
-    fn test_sync_config_save_and_read() {
-        let data_tmp = tempfile::TempDir::new().unwrap();
-        let old = set_data_dir(data_tmp.path());
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let project = dir.path().to_string_lossy().to_string();
-
-        let config = SyncConfig {
-            enabled: true,
-            webdav_url: "https://example.com/dav".to_string(),
-            username: "testuser".to_string(),
-            password: "testpass".to_string(),
-            interval_minutes: 10,
-        };
-
-        save_sync_config_to_disk(&project, &config).unwrap();
-        let loaded = read_sync_config(&project).unwrap();
-        assert!(loaded.enabled);
-        assert_eq!(loaded.webdav_url, "https://example.com/dav");
-        assert_eq!(loaded.username, "testuser");
-        assert_eq!(loaded.interval_minutes, 10);
-
-        restore_data_dir(old);
-    }
-
-    #[test]
-    #[serial(sync_data_dir)]
-    fn test_read_sync_config_missing() {
-        let data_tmp = tempfile::TempDir::new().unwrap();
-        let old = set_data_dir(data_tmp.path());
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let project = dir.path().to_string_lossy().to_string();
-        let config = read_sync_config(&project).unwrap();
-        assert!(!config.enabled);
-        assert!(config.webdav_url.is_empty());
-
-        restore_data_dir(old);
-    }
-
-    #[test]
-    #[serial(sync_data_dir)]
-    fn test_sync_state_roundtrip() {
-        let data_tmp = tempfile::TempDir::new().unwrap();
-        let old = set_data_dir(data_tmp.path());
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let project = dir.path().to_string_lossy().to_string();
-
-        let mut file_mod_times = HashMap::new();
-        file_mod_times.insert("chapter1.md".to_string(), 1704067200u64);
-
-        let state = SyncState {
-            last_sync_iso: Some("2024-01-01T00:00:00Z".to_string()),
-            file_mod_times,
-        };
-
-        write_sync_state(&project, &state).unwrap();
-        let loaded = read_sync_state(&project).unwrap();
+    async fn unresolved_conflict_survives_two_sync_passes_and_preserves_both_sides() {
+        let fixture = SyncFixture::new();
+        fixture.local_write("chapter.md", b"baseline");
+        fixture.remote_write("chapter.md", b"baseline");
+        assert!(perform_sync(&fixture.project)
+            .await
+            .unwrap()
+            .errors
+            .is_empty());
+        let baseline = read_sync_state(&fixture.project).unwrap().common_hashes;
+        fixture.local_write("chapter.md", b"local edit");
+        fixture.remote_write("chapter.md", b"remote edit");
+        for _ in 0..2 {
+            let status = perform_sync(&fixture.project).await.unwrap();
+            assert_eq!(status.files_uploaded, 0);
+            assert_eq!(status.files_downloaded, 0);
+            assert!(status
+                .errors
+                .iter()
+                .any(|error| error.contains("Conflict") && error.contains("chapter.md")));
+            assert_eq!(
+                std::fs::read(Path::new(&fixture.project).join("chapter.md")).unwrap(),
+                b"local edit"
+            );
+            assert_eq!(
+                fixture.server.state.lock().unwrap().files[&fixture.remote_path("chapter.md")],
+                b"remote edit"
+            );
+            assert_eq!(
+                read_sync_state(&fixture.project).unwrap().common_hashes,
+                baseline
+            );
+        }
+        // Explicitly making the two versions equal resolves the conflict.
+        fixture.local_write("chapter.md", b"remote edit");
+        assert!(perform_sync(&fixture.project)
+            .await
+            .unwrap()
+            .errors
+            .is_empty());
         assert_eq!(
-            loaded.last_sync_iso,
-            Some("2024-01-01T00:00:00Z".to_string())
+            read_sync_state(&fixture.project).unwrap().common_hashes["chapter.md"],
+            hash(b"remote edit")
+        );
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn nested_cjk_product_documents_and_metadata_sync_both_directions() {
+        let fixture = SyncFixture::new();
+        fixture.local_write("卷一/角色#?%/人物.canvas", b"canvas");
+        fixture.local_write(".novelist/project.toml", b"name = 'novel'");
+        fixture.local_write(".novelist/credentials.json", b"never upload");
+        fixture.remote_write("卷二/章节#?%/第一章.litstudy", b"study");
+        fixture.remote_write("卷二/章节#?%/计划.kanban", b"board");
+        fixture.remote_write(".novelist/literary-study.json", b"{}");
+        fixture.remote_write(".novelist/publish.json", b"never download");
+        let first = perform_sync(&fixture.project).await.unwrap();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.files_uploaded, 2);
+        assert_eq!(first.files_downloaded, 3);
+        assert_eq!(
+            std::fs::read(Path::new(&fixture.project).join("卷二/章节#?%/第一章.litstudy"))
+                .unwrap(),
+            b"study"
+        );
+        assert!(!Path::new(&fixture.project)
+            .join(".novelist/publish.json")
+            .exists());
+        assert!(!fixture
+            .server
+            .state
+            .lock()
+            .unwrap()
+            .files
+            .contains_key(&fixture.remote_path(".novelist/credentials.json")));
+        let second = perform_sync(&fixture.project).await.unwrap();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!((second.files_uploaded, second.files_downloaded), (0, 0));
+        fixture.local_write("卷一/角色#?%/人物.canvas", b"edited canvas");
+        fixture.remote_write("卷二/章节#?%/第一章.litstudy", b"edited study");
+        let third = perform_sync(&fixture.project).await.unwrap();
+        assert!(third.errors.is_empty(), "{:?}", third.errors);
+        assert_eq!((third.files_uploaded, third.files_downloaded), (1, 1));
+        assert_eq!(
+            std::fs::read(Path::new(&fixture.project).join("卷二/章节#?%/第一章.litstudy"))
+                .unwrap(),
+            b"edited study"
         );
         assert_eq!(
-            loaded.file_mod_times.get("chapter1.md"),
-            Some(&1704067200u64)
+            fixture.server.state.lock().unwrap().files
+                [&fixture.remote_path("卷一/角色#?%/人物.canvas")],
+            b"edited canvas"
         );
+    }
 
-        restore_data_dir(old);
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn failed_transfer_preserves_baseline_and_retries_without_blessing_local_edits() {
+        let fixture = SyncFixture::new();
+        fixture.local_write("chapter.md", b"baseline");
+        fixture.remote_write("chapter.md", b"baseline");
+        perform_sync(&fixture.project).await.unwrap();
+        fixture.local_write("chapter.md", b"to upload");
+        let remote = fixture.remote_path("chapter.md");
+        fixture
+            .server
+            .state
+            .lock()
+            .unwrap()
+            .fail
+            .insert(("PUT".into(), remote.clone()));
+        for _ in 0..2 {
+            assert!(!perform_sync(&fixture.project)
+                .await
+                .unwrap()
+                .errors
+                .is_empty());
+            assert_eq!(
+                read_sync_state(&fixture.project).unwrap().common_hashes["chapter.md"],
+                hash(b"baseline")
+            );
+            assert_eq!(
+                fixture.server.state.lock().unwrap().files[&remote],
+                b"baseline"
+            );
+        }
+        fixture.server.state.lock().unwrap().fail.clear();
+        fixture.server.state.lock().unwrap().edit_local = Some((
+            "PUT".into(),
+            remote.clone(),
+            Path::new(&fixture.project).join("chapter.md"),
+            b"edited during transfer".to_vec(),
+        ));
+        assert!(!perform_sync(&fixture.project)
+            .await
+            .unwrap()
+            .errors
+            .is_empty());
+        assert_eq!(
+            read_sync_state(&fixture.project).unwrap().common_hashes["chapter.md"],
+            hash(b"baseline")
+        );
+        assert_eq!(
+            fixture.server.state.lock().unwrap().files[&remote],
+            b"to upload"
+        );
+        assert_eq!(
+            std::fs::read(Path::new(&fixture.project).join("chapter.md")).unwrap(),
+            b"edited during transfer"
+        );
+        assert!(!perform_sync(&fixture.project)
+            .await
+            .unwrap()
+            .errors
+            .is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn download_does_not_overwrite_an_edit_made_during_get() {
+        let fixture = SyncFixture::new();
+        fixture.local_write("chapter.md", b"baseline");
+        fixture.remote_write("chapter.md", b"baseline");
+        perform_sync(&fixture.project).await.unwrap();
+        fixture.remote_write("chapter.md", b"remote edit");
+        fixture.server.state.lock().unwrap().edit_local = Some((
+            "GET".into(),
+            fixture.remote_path("chapter.md"),
+            Path::new(&fixture.project).join("chapter.md"),
+            b"late local edit".to_vec(),
+        ));
+        assert!(!perform_sync(&fixture.project)
+            .await
+            .unwrap()
+            .errors
+            .is_empty());
+        assert_eq!(
+            std::fs::read(Path::new(&fixture.project).join("chapter.md")).unwrap(),
+            b"late local edit"
+        );
+        assert_eq!(
+            read_sync_state(&fixture.project).unwrap().common_hashes["chapter.md"],
+            hash(b"baseline")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_discovery_and_download_reject_symlink_ancestors() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("chapter.md"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("linked")).unwrap();
+        let root = Dir::open_ambient_dir(project.path(), ambient_authority()).unwrap();
+        assert!(collect_local_files(&root).is_err());
+        assert!(commit_download(&root, "linked/chapter.md", b"remote", None).is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("chapter.md")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn stalled_sync_request_times_out_and_releases_project_lock() {
+        let fixture = SyncFixture::new();
+        fixture.local_write("chapter.md", b"baseline");
+        fixture.remote_write("chapter.md", b"baseline");
+        let remote = fixture.remote_path("chapter.md");
+        fixture
+            .server
+            .state
+            .lock()
+            .unwrap()
+            .stall
+            .insert(("GET".into(), remote));
+        let status =
+            tokio::time::timeout(webdav::REQUEST_TIMEOUT * 3, perform_sync(&fixture.project))
+                .await
+                .expect("stalled request must finish before outer watchdog")
+                .unwrap();
+        assert!(!status.errors.is_empty());
+        assert!(read_sync_state(&fixture.project)
+            .unwrap()
+            .common_hashes
+            .is_empty());
+        fixture.server.state.lock().unwrap().stall.clear();
+        let retried =
+            tokio::time::timeout(webdav::REQUEST_TIMEOUT * 3, perform_sync(&fixture.project))
+                .await
+                .expect("sync lock must be usable after timeout")
+                .unwrap();
+        assert!(retried.errors.is_empty(), "{:?}", retried.errors);
+        assert_eq!(
+            read_sync_state(&fixture.project).unwrap().common_hashes["chapter.md"],
+            hash(b"baseline")
+        );
     }
 }

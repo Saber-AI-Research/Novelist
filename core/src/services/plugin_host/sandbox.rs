@@ -1,10 +1,193 @@
-use rquickjs::{Context, Function, Runtime};
+use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::models::plugin::{PluginInfo, PluginManifest, RegisteredCommandInfo};
 
 use super::permissions;
+
+// Limits apply per plugin. Runtime creation remains lazy (only on plugin load).
+const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const PLUGIN_STACK_LIMIT: usize = 256 * 1024;
+const PLUGIN_EXECUTION_LIMIT: Duration = Duration::from_millis(500);
+// Rust-owned result copies are not charged to QuickJS's heap. Bound them too,
+// including repeated references to the same JS string and sparse arrays.
+const PLUGIN_TRANSFER_LIMIT: usize = 8 * 1024 * 1024;
+const PLUGIN_RESULT_LIMIT: u32 = 10_000;
+const PLUGIN_ERROR_CHARS: usize = 256;
+
+/// Armed outside Context::with, so Drop never re-locks an already-held runtime.
+/// The same deadline covers injected code, plugin code, getters and conversion.
+struct ExecutionBudget {
+    runtime: Runtime,
+    deadline: Instant,
+}
+
+impl ExecutionBudget {
+    fn arm(runtime: &Runtime) -> Self {
+        let deadline = Instant::now() + PLUGIN_EXECUTION_LIMIT;
+        runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+        Self {
+            runtime: runtime.clone(),
+            deadline,
+        }
+    }
+
+    fn check(&self) -> rquickjs::Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(rquickjs::Error::new_from_js_message(
+                "plugin execution",
+                "host result",
+                "execution deadline exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn run<T>(
+        &self,
+        context: &Context,
+        phase: &str,
+        operation: impl for<'js> FnOnce(Ctx<'js>, &Self) -> rquickjs::Result<T>,
+    ) -> Result<T, String> {
+        let result = context.with(|ctx| {
+            self.check()
+                .and_then(|()| operation(ctx.clone(), self))
+                .map_err(|error| self.describe_error(&ctx, phase, error))
+        });
+        // Native conversions may not poll QuickJS's interrupt hook. Do not
+        // publish a result that finished after the deadline either.
+        if self.check().is_err() {
+            return Err(format!(
+                "{phase}: plugin execution time limit ({} ms) exceeded; reduce the work per command or fix an infinite loop",
+                PLUGIN_EXECUTION_LIMIT.as_millis()
+            ));
+        }
+        result
+    }
+
+    fn describe_error(&self, ctx: &Ctx<'_>, phase: &str, error: rquickjs::Error) -> String {
+        // Never stringify a plugin-controlled exception or its stack: both can
+        // execute JS and produce arbitrarily large Rust strings. Reading a
+        // message getter is still covered by the armed deadline.
+        let thrown = ctx.catch();
+        let message = if let Some(string) = thrown.as_string() {
+            string.clone().to_cstring().ok()
+        } else if let Some(object) = thrown.as_object() {
+            object
+                .get::<_, rquickjs::String>("message")
+                .and_then(|string| string.to_cstring())
+                .ok()
+        } else {
+            None
+        };
+        let detail: String = match message.as_ref() {
+            Some(message) => match checked_js_string(message) {
+                Ok(message) => message.chars().take(PLUGIN_ERROR_CHARS).collect(),
+                Err(_) => {
+                    "Plugin exception contains invalid UTF-8 (unpaired UTF-16 surrogate)".into()
+                }
+            },
+            None => error.to_string().chars().take(PLUGIN_ERROR_CHARS).collect(),
+        };
+        // Clear any exception raised while inspecting the original failure.
+        drop(ctx.catch());
+        if matches!(error, rquickjs::Error::Allocation) || detail.contains("out of memory") {
+            format!("{phase}: plugin memory limit (64 MiB) exhausted; reduce allocations or document size")
+        } else if detail.contains("stack overflow")
+            || detail.contains("Maximum call stack size exceeded")
+        {
+            format!("{phase}: plugin stack limit (256 KiB) exceeded; reduce recursion")
+        } else {
+            format!("{phase}: {detail}; plugin limits: 64 MiB heap, 256 KiB stack, 500 ms execution; reduce plugin work if resource-limited")
+        }
+    }
+}
+
+impl Drop for ExecutionBudget {
+    fn drop(&mut self) {
+        self.runtime.set_interrupt_handler(None);
+    }
+}
+
+fn checked_js_string<'a>(
+    string: &'a rquickjs::CString<'_>,
+) -> Result<&'a str, std::str::Utf8Error> {
+    // QuickJS may encode unpaired UTF-16 surrogates as non-UTF-8 bytes.
+    // rquickjs 0.9's CString::as_str uses from_utf8_unchecked, so do not use it.
+    // SAFETY: CString owns a live allocation containing len() readable bytes;
+    // this slice borrows it and never includes or scans beyond its terminator.
+    let bytes = unsafe { std::slice::from_raw_parts(string.as_ptr().cast::<u8>(), string.len()) };
+    std::str::from_utf8(bytes)
+}
+
+fn read_result_string<'js>(
+    object: &Object<'js>,
+    key: &str,
+    remaining: &mut usize,
+) -> rquickjs::Result<String> {
+    let string: rquickjs::String = object.get(key)?;
+    let string = string.to_cstring()?;
+    if string.len() > *remaining {
+        return Err(rquickjs::Error::new_from_js_message(
+            "plugin string",
+            "host result",
+            "8 MiB result transfer limit exceeded; return less text",
+        ));
+    }
+    *remaining -= string.len();
+    let text = checked_js_string(&string).map_err(|_| {
+        rquickjs::Error::new_from_js_message(
+            "plugin string",
+            "host result",
+            "invalid UTF-8 (unpaired UTF-16 surrogate)",
+        )
+    })?;
+    Ok(text.to_owned())
+}
+
+fn result_length(object: &Object<'_>) -> rquickjs::Result<u32> {
+    let length: Value = object.get("length")?;
+    let length = length.as_number().filter(|length| {
+        length.is_finite()
+            && *length >= 0.0
+            && length.fract() == 0.0
+            && *length <= f64::from(PLUGIN_RESULT_LIMIT)
+    });
+    length.map(|length| length as u32).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message(
+            "plugin results",
+            "host results",
+            "invalid result length or 10000-item result limit exceeded",
+        )
+    })
+}
+
+fn bind_document<'js>(
+    ctx: &Ctx<'js>,
+    novelist: &Object<'js>,
+    document: &str,
+    selection: (usize, usize),
+    word_count: usize,
+) -> rquickjs::Result<()> {
+    // Capture document text inside the limited JS heap, not inside Rust
+    // callbacks that a plugin could retain across arbitrarily many commands.
+    let bind: Function = ctx.eval(
+        r#"(function(novelist, document, from, to, wordCount) {
+            novelist.getDocument = function() { return document; };
+            novelist.getSelection = function() { return {from: from, to: to}; };
+            novelist.getWordCount = function() { return wordCount; };
+        })"#,
+    )?;
+    bind.call((
+        novelist.clone(),
+        document,
+        selection.0,
+        selection.1,
+        word_count,
+    ))
+}
 
 /// A loaded plugin instance with its own QuickJS context.
 pub struct PluginInstance {
@@ -21,26 +204,13 @@ struct RegisteredCommand {
 }
 
 struct PluginHostInner {
-    /// Lazily constructed — startup-critical path doesn't pay for QuickJS
-    /// initialization until the first plugin load/exec.
-    runtime: Option<Runtime>,
+    // Each Context owns its runtime. A failed plugin can release its entire
+    // heap (including queued promise jobs) without disrupting other plugins.
     plugins: HashMap<String, PluginInstance>,
     document_content: String,
     selection: (usize, usize),
     word_count: usize,
     registered_commands: Vec<RegisteredCommand>,
-}
-
-impl PluginHostInner {
-    /// Create the runtime on first demand.
-    fn ensure_runtime(&mut self) -> Result<&Runtime, String> {
-        if self.runtime.is_none() {
-            let rt =
-                Runtime::new().map_err(|e| format!("Failed to create QuickJS runtime: {e}"))?;
-            self.runtime = Some(rt);
-        }
-        Ok(self.runtime.as_ref().expect("runtime just set"))
-    }
 }
 
 /// A text replacement produced by a plugin command (replaceSelection / replaceRange).
@@ -67,12 +237,9 @@ pub struct PluginHostState {
 
 impl PluginHostState {
     pub fn new() -> Self {
-        // Runtime is deferred — see `PluginHostInner::ensure_runtime`.
-        // Startup-critical path used to pay ~10-30 ms for Runtime::new()
-        // even when no plugin was ever invoked.
+        // No QuickJS allocation until a plugin is actually loaded.
         Self {
             inner: Mutex::new(PluginHostInner {
-                runtime: None,
                 plugins: HashMap::new(),
                 document_content: String::new(),
                 selection: (0, 0),
@@ -99,135 +266,71 @@ impl PluginHostState {
     /// Load a plugin from its manifest and source code.
     pub fn load_plugin(&self, manifest: PluginManifest, source: &str) -> Result<(), String> {
         let mut inner = lock_inner!(self)?;
-        let plugin_id = manifest.plugin.id.clone();
-
-        // Create a new context for this plugin (spins up QuickJS on first load).
-        let runtime = inner.ensure_runtime()?;
-        let context = Context::full(runtime).map_err(|e| format!("QuickJS context error: {e}"))?;
-
-        // Inject the novelist API and run plugin code
-        let pid = plugin_id.clone();
-
-        // We need to collect registered commands outside the context
-        let doc_content = inner.document_content.clone();
-        let sel = inner.selection;
-        let wc = inner.word_count;
-
-        // Store commands that will be registered
-        let mut new_commands: Vec<RegisteredCommand> = Vec::new();
-
-        context.with(|ctx| -> Result<(), String> {
+        if source.len() > PLUGIN_TRANSFER_LIMIT {
+            return Err("Plugin source exceeds the 8 MiB input limit; reduce plugin size".into());
+        }
+        let runtime =
+            Runtime::new().map_err(|error| format!("Failed to create QuickJS runtime: {error}"))?;
+        runtime.set_memory_limit(PLUGIN_MEMORY_LIMIT);
+        runtime.set_max_stack_size(PLUGIN_STACK_LIMIT);
+        let budget = ExecutionBudget::arm(&runtime);
+        let context = Context::full(&runtime).map_err(|error| {
+            format!("QuickJS context creation failed within the 64 MiB memory limit: {error}")
+        })?;
+        let plugin_id = &manifest.plugin.id;
+        let new_commands = budget.run(&context, "Plugin load", |ctx, budget| {
             let globals = ctx.globals();
-
-            // Create novelist object
-            let novelist = rquickjs::Object::new(ctx.clone())
-                .map_err(|e| format!("Failed to create novelist object: {e}"))?;
-
-            // getDocument() -> string
-            {
-                let doc = doc_content.clone();
-                let func = Function::new(ctx.clone(), move || -> String { doc.clone() })
-                    .map_err(|e| format!("Failed to create getDocument: {e}"))?;
-                novelist
-                    .set("getDocument", func)
-                    .map_err(|e| format!("Failed to set getDocument: {e}"))?;
-            }
-
-            // getSelection() -> { from, to }
-            {
-                let (sel_from, sel_to) = sel;
-                let func = Function::new(ctx.clone(), move || -> HashMap<String, usize> {
-                    let mut m = HashMap::new();
-                    m.insert("from".to_string(), sel_from);
-                    m.insert("to".to_string(), sel_to);
-                    m
-                })
-                .map_err(|e| format!("Failed to create getSelection: {e}"))?;
-                novelist
-                    .set("getSelection", func)
-                    .map_err(|e| format!("Failed to set getSelection: {e}"))?;
-            }
-
-            // getWordCount() -> number
-            {
-                let func = Function::new(ctx.clone(), move || -> usize { wc })
-                    .map_err(|e| format!("Failed to create getWordCount: {e}"))?;
-                novelist
-                    .set("getWordCount", func)
-                    .map_err(|e| format!("Failed to set getWordCount: {e}"))?;
-            }
-
-            // registerCommand(id, label, handler) — store the command metadata
-            // The handler is stored in the JS context; we just record the command.
-            {
-                let func = Function::new(
-                    ctx.clone(),
-                    move |_id: String, _label: String, _handler: Function<'_>| {
-                        // Placeholder; the real registration is handled by the JS override below
-                    },
-                )
-                .map_err(|e| format!("Failed to create registerCommand: {e}"))?;
-                novelist
-                    .set("registerCommand", func)
-                    .map_err(|e| format!("Failed to set registerCommand: {e}"))?;
-            }
-
-            // Set the novelist global
-            globals
-                .set("novelist", novelist)
-                .map_err(|e| format!("Failed to set novelist global: {e}"))?;
-
-            // Add a command registry array in JS
+            let novelist = Object::new(ctx.clone())?;
+            bind_document(
+                &ctx,
+                &novelist,
+                &inner.document_content,
+                inner.selection,
+                inner.word_count,
+            )?;
+            globals.set("novelist", novelist)?;
             ctx.eval::<(), _>(
                 r#"
                 var __registered_commands = [];
-                var __novelist_original_register = novelist.registerCommand;
                 novelist.registerCommand = function(id, label, handler) {
                     __registered_commands.push({id: id, label: label});
                     globalThis["__cmd_" + id] = handler;
                 };
                 "#,
-            )
-            .map_err(|e| format!("Failed to set up command registry: {e}"))?;
+            )?;
+            ctx.eval::<(), _>(source)?;
 
-            // Run the plugin source
-            ctx.eval::<(), _>(source)
-                .map_err(|e| format!("Plugin eval error: {e}"))?;
-
-            // Collect registered commands
-            let cmds: Vec<HashMap<String, String>> =
-                ctx.eval("__registered_commands").unwrap_or_default();
-
-            for cmd in cmds {
-                if let (Some(id), Some(label)) = (cmd.get("id"), cmd.get("label")) {
-                    new_commands.push(RegisteredCommand {
-                        plugin_id: pid.clone(),
-                        command_id: id.clone(),
-                        label: label.clone(),
-                    });
-                }
+            let commands: Object = globals.get("__registered_commands")?;
+            let count = result_length(&commands)?;
+            let mut remaining = PLUGIN_TRANSFER_LIMIT;
+            let mut registered = Vec::new();
+            for index in 0..count {
+                budget.check()?;
+                let command: Object = commands.get(index)?;
+                registered.push(RegisteredCommand {
+                    plugin_id: plugin_id.clone(),
+                    command_id: read_result_string(&command, "id", &mut remaining)?,
+                    label: read_result_string(&command, "label", &mut remaining)?,
+                });
             }
-
-            Ok(())
+            Ok(registered)
         })?;
+        drop(budget);
 
-        // Remove any old commands for this plugin
+        // Commit registration only once source and metadata conversion both
+        // succeed. A failed reload leaves the previous instance untouched.
         inner
             .registered_commands
-            .retain(|c| c.plugin_id != plugin_id);
-
-        // Add new commands
+            .retain(|c| c.plugin_id != *plugin_id);
         inner.registered_commands.extend(new_commands);
-
         inner.plugins.insert(
-            plugin_id,
+            plugin_id.clone(),
             PluginInstance {
                 manifest,
                 context,
                 active: true,
             },
         );
-
         Ok(())
     }
 
@@ -289,67 +392,31 @@ impl PluginHostState {
         {
             return Err(format!("Invalid command ID: {command_id}"));
         }
-        let inner = lock_inner!(self)?;
+        let mut inner = lock_inner!(self)?;
         let plugin = inner
             .plugins
             .get(plugin_id)
             .ok_or_else(|| format!("Plugin not found: {plugin_id}"))?;
-
         if !plugin.active {
             return Err(format!("Plugin is not active: {plugin_id}"));
         }
-
-        plugin
-            .context
-            .with(|ctx| -> Result<Vec<PendingReplacement>, String> {
-                // Update the document state in JS before calling command
-                let doc = inner.document_content.clone();
+        let budget = ExecutionBudget::arm(plugin.context.runtime());
+        let result = budget.run(&plugin.context, "Plugin command", |ctx, budget| {
+            let novelist: Object = ctx.globals().get("novelist")?;
+            bind_document(
+                &ctx,
+                &novelist,
+                &inner.document_content,
+                inner.selection,
+                inner.word_count,
+            )?;
+            let has_write =
+                permissions::has_permission(&plugin.manifest.plugin.permissions, "write");
+            if has_write {
                 let (sel_from, sel_to) = inner.selection;
-                let wc = inner.word_count;
-
-                // Re-bind getDocument with current state
-                let novelist: rquickjs::Object = ctx
-                    .globals()
-                    .get("novelist")
-                    .map_err(|e| format!("Failed to get novelist: {e}"))?;
-
-                {
-                    let doc_clone = doc.clone();
-                    let func = Function::new(ctx.clone(), move || -> String { doc_clone.clone() })
-                        .map_err(|e| format!("Failed to create getDocument: {e}"))?;
-                    novelist
-                        .set("getDocument", func)
-                        .map_err(|e| format!("Failed to set getDocument: {e}"))?;
-                }
-                {
-                    let func = Function::new(ctx.clone(), move || -> HashMap<String, usize> {
-                        let mut m = HashMap::new();
-                        m.insert("from".to_string(), sel_from);
-                        m.insert("to".to_string(), sel_to);
-                        m
-                    })
-                    .map_err(|e| format!("Failed to create getSelection: {e}"))?;
-                    novelist
-                        .set("getSelection", func)
-                        .map_err(|e| format!("Failed to set getSelection: {e}"))?;
-                }
-                {
-                    let func = Function::new(ctx.clone(), move || -> usize { wc })
-                        .map_err(|e| format!("Failed to create getWordCount: {e}"))?;
-                    novelist
-                        .set("getWordCount", func)
-                        .map_err(|e| format!("Failed to set getWordCount: {e}"))?;
-                }
-
-                // Set up replacement collector if plugin has write permission
-                let has_write =
-                    permissions::has_permission(&plugin.manifest.plugin.permissions, "write");
-                if has_write {
-                    ctx.eval::<(), _>("var __pending_replacements = [];")
-                        .map_err(|e| format!("Failed to init replacements: {e}"))?;
-
-                    let eval_code = format!(
-                        r#"
+                ctx.eval::<(), _>("var __pending_replacements = [];")?;
+                ctx.eval::<(), _>(format!(
+                    r#"
                     novelist.replaceSelection = function(text) {{
                         __pending_replacements.push({{from: {sel_from}, to: {sel_to}, text: text}});
                     }};
@@ -357,49 +424,46 @@ impl PluginHostState {
                         __pending_replacements.push({{from: from, to: to, text: text}});
                     }};
                     "#
-                    );
-                    ctx.eval::<(), _>(eval_code.as_bytes())
-                        .map_err(|e| format!("Failed to set up write API: {e}"))?;
+                ))?;
+            }
+
+            let handler: Function = ctx.globals().get(format!("__cmd_{command_id}"))?;
+            let returned: Value = handler.call(())?;
+            if returned.is_promise() {
+                return Err(rquickjs::Error::new_from_js_message(
+                    "Promise",
+                    "plugin command result",
+                    "commands must complete synchronously",
+                ));
+            }
+            let mut replacements = Vec::new();
+            if has_write {
+                let pending: Object = ctx.globals().get("__pending_replacements")?;
+                let count = result_length(&pending)?;
+                let mut remaining = PLUGIN_TRANSFER_LIMIT;
+                for index in 0..count {
+                    budget.check()?;
+                    let replacement: Object = pending.get(index)?;
+                    replacements.push(PendingReplacement {
+                        from: replacement.get("from")?,
+                        to: replacement.get("to")?,
+                        text: read_result_string(&replacement, "text", &mut remaining)?,
+                    });
                 }
-
-                // Call the command handler
-                let call_code = format!(
-                    r#"
-                (function() {{
-                    var fn = globalThis["__cmd_{command_id}"];
-                    if (fn) fn();
-                }})()
-                "#
-                );
-                ctx.eval::<(), _>(call_code.as_bytes())
-                    .map_err(|e| format!("Command execution error: {e}"))?;
-
-                // Collect replacements
-                if has_write {
-                    let replacements: Vec<HashMap<String, rquickjs::Value>> =
-                        ctx.eval("__pending_replacements").unwrap_or_default();
-
-                    let mut result = Vec::new();
-                    for r in &replacements {
-                        let from: usize = r
-                            .get("from")
-                            .and_then(|v| v.as_number().map(|n| n as usize))
-                            .unwrap_or(0);
-                        let to: usize = r
-                            .get("to")
-                            .and_then(|v| v.as_number().map(|n| n as usize))
-                            .unwrap_or(0);
-                        let text: String = r
-                            .get("text")
-                            .and_then(|v| v.as_string().map(|s| s.to_string().unwrap_or_default()))
-                            .unwrap_or_default();
-                        result.push(PendingReplacement { from, to, text });
-                    }
-                    Ok(result)
-                } else {
-                    Ok(vec![])
-                }
-            })
+            }
+            Ok(replacements)
+        });
+        drop(budget);
+        if result.is_err() {
+            // A command may have queued replacements, jobs or retained a full
+            // heap before failing. Never reuse that partially mutated context.
+            // Dropping its isolated runtime discards jobs and runs QuickJS GC.
+            inner.plugins.remove(plugin_id);
+            inner
+                .registered_commands
+                .retain(|c| c.plugin_id != plugin_id);
+        }
+        result
     }
 }
 
@@ -614,5 +678,331 @@ mod tests {
         let cmds = host.get_registered_commands();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command_id, "new_cmd");
+    }
+
+    /// Run adversarial JS in a killable copy of this test binary. A missing
+    /// interrupt must fail the regression rather than hang the entire suite.
+    fn isolated_resource_case(test: impl FnOnce()) {
+        let name = std::thread::current().name().unwrap().to_owned();
+        const CHILD_CASE: &str = "NOVELIST_SANDBOX_RESOURCE_CASE";
+        if std::env::var(CHILD_CASE).as_deref() == Ok(name.as_str()) {
+            test();
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+            .env(CHILD_CASE, &name)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "sandbox regression failed: {status}");
+                return;
+            }
+            if Instant::now() >= deadline {
+                let killed = child.kill();
+                let waited = child.wait();
+                panic!("sandbox child exceeded 8 seconds: kill={killed:?}, wait={waited:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn load_healthy(host: &PluginHostState, id: &str) {
+        host.load_plugin(
+            make_manifest(id, vec!["write"]),
+            r#"novelist.registerCommand("healthy", "Healthy", function() {
+                novelist.replaceRange(0, 1, "健康");
+            });"#,
+        )
+        .unwrap();
+    }
+
+    fn assert_healthy(host: &PluginHostState, id: &str) {
+        let replacements = host.invoke_command(id, "healthy").unwrap();
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].from, 0);
+        assert_eq!(replacements[0].to, 1);
+        assert_eq!(replacements[0].text, "健康");
+    }
+
+    fn assert_failed_command_recovers(host: &PluginHostState, source: &str, cause: &str) {
+        load_healthy(host, "healthy");
+        host.load_plugin(make_manifest("bad", vec!["write"]), source)
+            .unwrap();
+        let error = host.invoke_command("bad", "bad").unwrap_err();
+        assert!(error.contains(cause), "{error}");
+        assert!(host.list_loaded_plugins().iter().all(|p| p.id != "bad"));
+        assert!(host
+            .get_registered_commands()
+            .iter()
+            .all(|c| c.plugin_id != "bad"));
+        assert_healthy(host, "healthy");
+        // A fresh copy of the failed ID must not inherit pending edits, jobs,
+        // an expired deadline or an exhausted heap from the failed instance.
+        load_healthy(host, "bad");
+        assert_healthy(host, "bad");
+        assert_healthy(host, "bad");
+    }
+
+    #[test]
+    fn resource_limit_interrupts_infinite_source_and_preserves_previous_plugin() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            load_healthy(&host, "reload");
+            let error = host
+                .load_plugin(
+                    make_manifest("reload", vec!["write"]),
+                    r#"novelist.registerCommand("partial", "Partial", function() {});
+                    while (true) {}"#,
+                )
+                .unwrap_err();
+            assert!(error.contains("time limit"), "{error}");
+            assert_eq!(host.get_registered_commands().len(), 1);
+            assert_eq!(host.get_registered_commands()[0].command_id, "healthy");
+            assert_healthy(&host, "reload");
+            load_healthy(&host, "new");
+            assert_healthy(&host, "new");
+        });
+    }
+
+    #[test]
+    fn resource_limit_interrupts_command_without_leaking_pending_replacements() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    novelist.replaceSelection("must not escape");
+                    while (true) {}
+                });"#,
+                "time limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_rejects_allocation_exhaustion_on_load() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            load_healthy(&host, "healthy");
+            let error = host
+                .load_plugin(
+                    make_manifest("bad", vec!["read"]),
+                    "globalThis.retained = new ArrayBuffer(128 * 1024 * 1024);",
+                )
+                .unwrap_err();
+            assert!(error.contains("memory limit"), "{error}");
+            assert_healthy(&host, "healthy");
+            load_healthy(&host, "bad");
+            assert_healthy(&host, "bad");
+        });
+    }
+
+    #[test]
+    fn resource_limit_reclaims_failed_heap_and_queued_jobs() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    novelist.replaceSelection("must not escape");
+                    var retained = {buffer: new ArrayBuffer(16 * 1024 * 1024)};
+                    retained.self = retained;
+                    Promise.resolve().then(function() { return retained; });
+                    globalThis.exhausted = new ArrayBuffer(128 * 1024 * 1024);
+                });"#,
+                "memory limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_rejects_stack_exhaustion_and_recovers() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function recur() {
+                    return 1 + recur();
+                });"#,
+                "stack limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_covers_injected_api_setters() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {});
+                Object.defineProperty(novelist, "replaceSelection", {
+                    set: function() { while (true) {} }
+                });"#,
+                "time limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_covers_registration_conversion() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            let error = host
+                .load_plugin(
+                    make_manifest("bad", vec!["read"]),
+                    r#"__registered_commands.push({id: "bad", get label() { while (true) {} }});"#,
+                )
+                .unwrap_err();
+            assert!(error.contains("time limit"), "{error}");
+            assert!(host.get_registered_commands().is_empty());
+            load_healthy(&host, "healthy");
+            assert_healthy(&host, "healthy");
+        });
+    }
+
+    #[test]
+    fn resource_limit_covers_replacement_conversion_and_discards_partial_results() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    novelist.replaceSelection("must not escape");
+                    __pending_replacements.push({from: 0, to: 1, get text() { while (true) {} }});
+                });"#,
+                "time limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_bounds_repeated_result_strings() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    var text = "x".repeat(1024 * 1024);
+                    for (var i = 0; i < 9; i++) novelist.replaceSelection(text);
+                });"#,
+                "result transfer limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_rejects_sparse_result_arrays() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    __pending_replacements.length = 0xffffffff;
+                });"#,
+                "result limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_covers_exception_message_getters() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    throw {get message() { while (true) {} }};
+                });"#,
+                "time limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_bounds_exception_diagnostics() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            let error = host
+                .load_plugin(
+                    make_manifest("bad", vec!["read"]),
+                    "throw 'x'.repeat(1024 * 1024);",
+                )
+                .unwrap_err();
+            assert!(error.len() < 512);
+            load_healthy(&host, "healthy");
+            assert_healthy(&host, "healthy");
+        });
+    }
+
+    #[test]
+    fn resource_limit_async_failure_cannot_publish_partial_replacements() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", async function() {
+                    novelist.replaceSelection("must not escape");
+                    throw new Error("failed asynchronously");
+                });"#,
+                "must complete synchronously",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_conversion_allocation_failure_cannot_publish_partial_replacements() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    novelist.replaceSelection("must not escape");
+                    __pending_replacements.push({from: 0, to: 1, get text() {
+                        return new ArrayBuffer(128 * 1024 * 1024);
+                    }});
+                });"#,
+                "memory limit",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_rejects_unpaired_surrogate_replacements_without_partial_results() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    novelist.replaceSelection("must not escape");
+                    novelist.replaceSelection("\ud800");
+                });"#,
+                "invalid UTF-8",
+            );
+        });
+    }
+
+    #[test]
+    fn resource_limit_reports_unpaired_surrogate_exceptions_safely_and_recovers() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    throw "\ud800";
+                });"#,
+                "invalid UTF-8",
+            );
+            assert_failed_command_recovers(
+                &host,
+                r#"novelist.registerCommand("bad", "Bad", function() {
+                    throw {message: "\ud800"};
+                });"#,
+                "invalid UTF-8",
+            );
+        });
     }
 }

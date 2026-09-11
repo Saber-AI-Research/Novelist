@@ -56,10 +56,10 @@ The cask lives in `Saber-AI-Research/homebrew-novelist`; users install with
 The tag workflow never touches the tap, because a draft release is not a valid
 public cask source — its assets 404 for anyone without repo access. The bump
 runs from `.github/workflows/bump-homebrew.yml` on `release: published`, which
-fires the moment a maintainer publishes the reviewed draft. Prereleases are
-skipped. The workflow needs `HOMEBREW_TAP_TOKEN` (a PAT with `contents:write`
-on the tap repo) and can also be re-run manually from the Actions tab with an
-explicit version.
+fires the moment a maintainer publishes the reviewed draft. The render script
+rejects both drafts and prereleases, including explicitly selected versions in
+manual runs. The workflow needs `HOMEBREW_TAP_TOKEN` (a PAT with
+`contents:write` on the tap repo).
 
 Both the workflow and manual runs render the cask through
 `scripts/bump-homebrew-cask.sh`, so there is one cask template, not two. To

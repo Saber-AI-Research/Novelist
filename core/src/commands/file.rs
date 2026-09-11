@@ -151,7 +151,9 @@ fn encode_string(content: &str, encoding_name: &str) -> Result<Vec<u8>, AppError
         .ok_or_else(|| AppError::Custom(format!("Unknown encoding: {}", encoding_name)))?;
     let (encoded, _, had_errors) = encoding.encode(content);
     if had_errors {
-        tracing::warn!("Re-encoding to {} had unmappable characters", encoding_name);
+        return Err(AppError::InvalidInput(format!(
+            "Cannot save using {encoding_name}: the text contains characters this encoding cannot represent. The file has not been changed."
+        )));
     }
     Ok(encoded.into_owned())
 }
@@ -3220,6 +3222,82 @@ mod tests {
         // Verify raw bytes on disk are GBK, not UTF-8
         let raw = fs::read(&file_path).unwrap();
         assert_eq!(raw, &*original_bytes, "Written bytes should be GBK-encoded");
+    }
+
+    #[tokio::test]
+    async fn test_gbk_unmappable_save_preserves_original_and_allows_retry() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("gbk.txt");
+        let text = "第一章\n落霞与孤鹜齐飞，秋水共长天一色。";
+        let (original_bytes, _, _) = encoding_rs::GBK.encode(text);
+        fs::write(&file_path, &original_bytes).unwrap();
+        let path = file_path.to_string_lossy();
+        let canonical = file_path
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let state = enc();
+        let watcher = crate::services::file_watcher::FileWatcherState::new();
+        assert_eq!(read_file_inner(&path, &state).await.unwrap(), text);
+        assert_eq!(
+            state.encodings.lock().unwrap().get(&canonical),
+            Some(&"GBK")
+        );
+
+        let unmappable = format!("{text}\u{1f642}");
+        let error = write_file_with_watcher_inner(&path, &unmappable, &state, &watcher)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::InvalidInput(_)));
+        assert_eq!(fs::read(&file_path).unwrap(), original_bytes.as_ref());
+        assert_eq!(
+            state.encodings.lock().unwrap().get(&canonical),
+            Some(&"GBK")
+        );
+        assert!(!Path::new(&format!("{path}.novelist-tmp")).exists());
+
+        let error = write_file_if_unchanged_inner(
+            &dir.path().to_string_lossy(),
+            &path,
+            Some(text),
+            &unmappable,
+            &state,
+            &watcher,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::InvalidInput(_)));
+        assert_eq!(fs::read(&file_path).unwrap(), original_bytes.as_ref());
+        assert_eq!(
+            state.encodings.lock().unwrap().get(&canonical),
+            Some(&"GBK")
+        );
+        assert!(!Path::new(&format!("{path}.novelist-tmp")).exists());
+
+        let representable = format!("{text}\n第二章");
+        let result = write_file_if_unchanged_inner(
+            &dir.path().to_string_lossy(),
+            &path,
+            Some(text),
+            &representable,
+            &state,
+            &watcher,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, WriteFileIfUnchangedResult::Written);
+        let (expected_bytes, _, _) = encoding_rs::GBK.encode(&representable);
+        assert_eq!(fs::read(&file_path).unwrap(), expected_bytes.as_ref());
+        assert_eq!(
+            state.encodings.lock().unwrap().get(&canonical),
+            Some(&"GBK")
+        );
+
+        write_file_with_watcher_inner(&path, text, &state, &watcher)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&file_path).unwrap(), original_bytes.as_ref());
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@
   }
 
   async function handleCreate() {
-    if (!projectStore.dirPath || !newName.trim()) return;
+    if (loading || !projectStore.dirPath || !newName.trim()) return;
     loading = true;
     error = '';
     try {
@@ -108,6 +108,7 @@
       <input
         type="text"
         bind:value={newName}
+        disabled={loading}
         placeholder={t('snapshot.namePlaceholder')}
         class="flex-1 min-w-0"
         style="
@@ -119,7 +120,7 @@
           color: var(--novelist-text);
           outline: none;
         "
-        onkeydown={(e) => { if (e.key === 'Enter') handleCreate(); }}
+        onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing) handleCreate(); }}
       />
       <button
         onclick={handleCreate}

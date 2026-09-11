@@ -424,6 +424,8 @@ class SettingsStore {
    * so writing one field never silently resets the other.
    */
   async writeSnapshot(patch: Partial<SnapshotConfig>): Promise<void> {
+    const generation = this.loadGeneration;
+    const scopeDirPath = this.dirPath;
     const current = this.effective.snapshot;
     const next: SnapshotConfig = {
       max_count: patch.max_count ?? current.max_count,
@@ -436,6 +438,7 @@ class SettingsStore {
       console.error('[settings] writeSnapshot failed:', res.error);
       return;
     }
+    if (!this.isCurrentScope(generation, scopeDirPath)) return;
     this.effective = {
       ...this.effective,
       snapshot: {

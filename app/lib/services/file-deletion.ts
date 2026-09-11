@@ -50,9 +50,8 @@ export async function deleteEntries(
     )
   );
   for (const tab of openTabs) {
-    const pathBeforeClose = tab.filePath;
     await tabsStore.closeTab(tab.id);
-    if (tabsStore.findByPath(pathBeforeClose)) {
+    if (tabsStore.allTabs.some(open => open.id === tab.id)) {
       return { status: 'cancelled', deletedPaths: [], failedPaths: [] };
     }
   }
