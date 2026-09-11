@@ -396,9 +396,9 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let project_name = project.path().to_str().unwrap();
         let snapshot = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(snapshot.path().join("files/卷一/章节#?%")).unwrap();
+        std::fs::create_dir_all(snapshot.path().join("files/卷一/章节#%")).unwrap();
         std::fs::write(
-            snapshot.path().join("files/卷一/章节#?%/第一章.md"),
+            snapshot.path().join("files/卷一/章节#%/第一章.md"),
             b"chapter",
         )
         .unwrap();
@@ -426,7 +426,7 @@ mod tests {
         let remote = remote_snap_dir(project_name, &meta.id);
         let file_path = webdav::remote_url(
             &server.url,
-            &format!("{remote}/files/卷一/章节#?%/第一章.md"),
+            &format!("{remote}/files/卷一/章节#%/第一章.md"),
         )
         .unwrap()
         .path()
@@ -477,7 +477,7 @@ mod tests {
             assert_eq!((&last.method, &last.path), (&"PUT".to_string(), &marker));
         }
         // A failed nested MKCOL on a subsequent retry must invalidate the old marker too.
-        let directory = webdav::remote_url(&server.url, &format!("{remote}/files/卷一/章节#?%"))
+        let directory = webdav::remote_url(&server.url, &format!("{remote}/files/卷一/章节#%"))
             .unwrap()
             .path()
             .to_string();

@@ -2604,7 +2604,10 @@ mod tests {
         let backup = &backups[0];
         assert!(error.contains(backup.to_str().unwrap()), "{error}");
         assert!(error.contains("project config"), "{error}");
-        assert!(error.contains(&original_chapters[0].0), "{error}");
+        assert!(
+            error.contains(root.join(&original_chapters[0].0).to_str().unwrap()),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read(backup.join(".novelist/project.toml")).unwrap(),
             original_config
@@ -2663,7 +2666,10 @@ mod tests {
         assert_eq!(backups.len(), 1, "{error}");
         let backup = &backups[0];
         assert!(error.contains(backup.to_str().unwrap()), "{error}");
-        assert!(error.contains(&missing), "{error}");
+        assert!(
+            error.contains(backup.join(&missing).to_str().unwrap()),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read(backup.join(&retained)).unwrap(),
             retained_bytes

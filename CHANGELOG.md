@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-11
+
+### Fixed
+
+- Release snapshot directory handles before publishing or deleting staged
+  snapshots so Windows sharing rules do not block creation and retention.
+- Make rollback-path assertions and local WebDAV fixtures portable to Windows
+  without removing reserved-character URL coverage or recovery-byte checks.
+- Pin the verified Rust release toolchain and explicitly configure Node/pnpm
+  on self-hosted runners. macOS bundles now seal resources with ad-hoc signatures.
+
 ## [0.5.0] - 2026-09-11
 
 ### Added

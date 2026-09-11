@@ -368,6 +368,7 @@ fn delete_local(base: &Dir, id: &str) -> Result<(), AppError> {
 // Only called while holding the project snapshot guard. Active stages therefore
 // cannot be mistaken for crash debris, including after caller cancellation.
 fn cleanup_pending_dirs(base: &Dir) -> Result<(), AppError> {
+    let mut pending = Vec::new();
     for entry in base.entries()? {
         let entry = entry?;
         let name = entry.file_name();
@@ -376,9 +377,13 @@ fn cleanup_pending_dirs(base: &Dir) -> Result<(), AppError> {
                 .strip_suffix(".pending")
                 .is_some_and(|id| validate_snapshot_id(id).is_ok())
             {
-                delete_local(base, name)?;
+                pending.push(name.to_owned());
             }
         }
+    }
+    // Release directory entries and the iterator before removing any stage.
+    for name in pending {
+        delete_local(base, &name)?;
     }
     Ok(())
 }
@@ -465,11 +470,16 @@ fn create_snapshot_locked(
         serde_json::to_writer_pretty(&mut output, &meta)?;
         output.flush()?;
         output.sync_all()?;
-        drop(output);
-        // The immutable snapshot becomes visible only when all bytes are ready.
-        base.rename(&pending_name, &base, &id)?;
         Ok::<_, AppError>(meta)
     })();
+    // Staging closes every source/file handle even on failure. Close the stage
+    // itself before either rename or cleanup: Windows pins open directories.
+    drop(pending);
+    let result = result.and_then(|meta| {
+        // The immutable snapshot becomes visible only when all bytes are synced.
+        base.rename(&pending_name, &base, &id)?;
+        Ok(meta)
+    });
     let meta = match result {
         Ok(meta) => meta,
         Err(error) => {
@@ -594,6 +604,7 @@ fn stage_restore_file(
             output.flush()?;
             output.sync_all()
         })();
+        // Close before both commit and error cleanup; only the parent stays pinned.
         drop(output);
         result?;
         return Ok(staged);
@@ -1540,6 +1551,14 @@ mod tests {
         assert_eq!(list_snapshots(project).await.unwrap()[0].id, snapshot.id);
         assert!(create_snapshot(project, "missing source").await.is_err());
         assert!(!root.exists(), "creation must not invent an empty project");
+        assert_eq!(list_snapshots(project).await.unwrap()[0].id, snapshot.id);
+        assert!(std::fs::read_dir(snapshots_dir(project))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".pending")));
         restore_snapshot(project, &snapshot.id).await.unwrap();
         assert_eq!(
             std::fs::read(root.join("book.md")).unwrap(),

@@ -692,11 +692,11 @@ mod tests {
     #[serial(sync_data_dir)]
     async fn nested_cjk_product_documents_and_metadata_sync_both_directions() {
         let fixture = SyncFixture::new();
-        fixture.local_write("卷一/角色#?%/人物.canvas", b"canvas");
+        fixture.local_write("卷一/角色#%/人物.canvas", b"canvas");
         fixture.local_write(".novelist/project.toml", b"name = 'novel'");
         fixture.local_write(".novelist/credentials.json", b"never upload");
-        fixture.remote_write("卷二/章节#?%/第一章.litstudy", b"study");
-        fixture.remote_write("卷二/章节#?%/计划.kanban", b"board");
+        fixture.remote_write("卷二/章节#%/第一章.litstudy", b"study");
+        fixture.remote_write("卷二/章节#%/计划.kanban", b"board");
         fixture.remote_write(".novelist/literary-study.json", b"{}");
         fixture.remote_write(".novelist/publish.json", b"never download");
         let first = perform_sync(&fixture.project).await.unwrap();
@@ -704,8 +704,7 @@ mod tests {
         assert_eq!(first.files_uploaded, 2);
         assert_eq!(first.files_downloaded, 3);
         assert_eq!(
-            std::fs::read(Path::new(&fixture.project).join("卷二/章节#?%/第一章.litstudy"))
-                .unwrap(),
+            std::fs::read(Path::new(&fixture.project).join("卷二/章节#%/第一章.litstudy")).unwrap(),
             b"study"
         );
         assert!(!Path::new(&fixture.project)
@@ -721,19 +720,18 @@ mod tests {
         let second = perform_sync(&fixture.project).await.unwrap();
         assert!(second.errors.is_empty(), "{:?}", second.errors);
         assert_eq!((second.files_uploaded, second.files_downloaded), (0, 0));
-        fixture.local_write("卷一/角色#?%/人物.canvas", b"edited canvas");
-        fixture.remote_write("卷二/章节#?%/第一章.litstudy", b"edited study");
+        fixture.local_write("卷一/角色#%/人物.canvas", b"edited canvas");
+        fixture.remote_write("卷二/章节#%/第一章.litstudy", b"edited study");
         let third = perform_sync(&fixture.project).await.unwrap();
         assert!(third.errors.is_empty(), "{:?}", third.errors);
         assert_eq!((third.files_uploaded, third.files_downloaded), (1, 1));
         assert_eq!(
-            std::fs::read(Path::new(&fixture.project).join("卷二/章节#?%/第一章.litstudy"))
-                .unwrap(),
+            std::fs::read(Path::new(&fixture.project).join("卷二/章节#%/第一章.litstudy")).unwrap(),
             b"edited study"
         );
         assert_eq!(
             fixture.server.state.lock().unwrap().files
-                [&fixture.remote_path("卷一/角色#?%/人物.canvas")],
+                [&fixture.remote_path("卷一/角色#%/人物.canvas")],
             b"edited canvas"
         );
     }
