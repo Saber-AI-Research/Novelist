@@ -1,0 +1,77 @@
+name: Bump Homebrew Cask
+
+# `release.yml` deliberately leaves a tag build as a GitHub *draft* so a
+# maintainer can inspect the asset set before anything ships. A draft is not a
+# valid cask source — its assets 404 for anyone without repo access, so a cask
+# pointing at one breaks `brew install` for every user. `release: published`
+# fires exactly when that draft is published, which is the first moment the
+# DMGs are publicly fetchable. That is why the bump lives here and not in the
+# tag workflow.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the leading v (e.g. 0.4.1). Defaults to the latest published release.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-homebrew
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Prereleases must not move the stable cask.
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Novelist
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      # Requires a PAT in HOMEBREW_TAP_TOKEN with `contents:write` on the tap.
+      - name: Checkout tap
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Saber-AI-Research/homebrew-novelist
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true
+          path: tap
+
+      - name: Render Casks/novelist.rb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION:-}" ]; then
+            bash scripts/bump-homebrew-cask.sh "$VERSION" --out tap
+          else
+            bash scripts/bump-homebrew-cask.sh --out tap
+          fi
+
+      - name: Commit and push to tap
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet -- Casks/novelist.rb; then
+            echo "Cask already up to date; nothing to commit."
+            exit 0
+          fi
+          CASK_VERSION=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/novelist.rb | head -1)
+          if [ -z "$CASK_VERSION" ]; then
+            echo "Could not parse version out of the rendered cask." >&2
+            exit 1
+          fi
+          git config user.name  "novelist-release-bot"
+          git config user.email "release-bot@novelist.dev"
+          git add Casks/novelist.rb
+          git commit -m "novelist ${CASK_VERSION}"
+          git push origin HEAD
+          echo "Pushed novelist ${CASK_VERSION} to the tap."
