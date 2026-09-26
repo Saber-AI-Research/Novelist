@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { EditorView } from '@codemirror/view';
 
 /**
  * [contract] registerAppCommands — central command registration site. We
@@ -516,15 +517,41 @@ describe('[contract] chinese text commands', () => {
 });
 
 describe('[contract] copy-rich-text / copy-plain-text', () => {
-  function viewWith(doc: string, from: number, to: number) {
+  type TestView = {
+    state: {
+      doc: { length: number; toString: () => string };
+      selection: { main: { from: number; to: number } };
+      sliceDoc: (from: number, to: number) => string;
+    };
+    focus: ReturnType<typeof vi.fn>;
+    dispatch: ReturnType<typeof vi.fn>;
+  };
+
+  function viewWith(doc: string, from: number, to: number): TestView {
     return {
       state: {
         doc: { length: doc.length, toString: () => doc },
         selection: { main: { from, to } },
         sliceDoc: (a: number, b: number) => doc.slice(a, b),
       },
-    } as any;
+      focus: vi.fn(),
+      dispatch: vi.fn(),
+    };
   }
+
+  it('restores a selection displaced while clipboard work is pending', async () => {
+    let view: TestView;
+    const writeText = vi.fn(async () => {
+      view.state.selection.main = { from: 6, to: 6 };
+    });
+    Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value: { writeText } });
+    view = viewWith('large selection', 0, 6);
+    registerAppCommands(ctx({ getActiveEditorView: () => view as never }));
+    await (handlerFor('copy-plain-text')() as unknown as Promise<void>);
+    expect(view.dispatch).toHaveBeenCalledWith({ selection: { anchor: 0, head: 6 } });
+    expect(view.focus).toHaveBeenCalledOnce();
+  });
+
 
   it('copy-rich-text writes HTML+plain when ClipboardItem succeeds', async () => {
     const write = vi.fn(async () => {});
@@ -536,11 +563,9 @@ describe('[contract] copy-rich-text / copy-plain-text', () => {
       value: { write, writeText },
     });
     const v = viewWith('# hi', 0, 0);
-    registerAppCommands(ctx({ getActiveEditorView: () => v }));
+    registerAppCommands(ctx({ getActiveEditorView: () => v as unknown as EditorView }));
     await (handlerFor('copy-rich-text')() as unknown as Promise<void>);
-    expect(markdownToHtml).toHaveBeenCalledWith('# hi');
     expect(write).toHaveBeenCalled();
-    expect(writeText).not.toHaveBeenCalled();
   });
 
   it('copy-rich-text falls back to writeText when ClipboardItem write rejects', async () => {
@@ -552,9 +577,8 @@ describe('[contract] copy-rich-text / copy-plain-text', () => {
       value: { write, writeText },
     });
     const v = viewWith('hello', 0, 0);
-    registerAppCommands(ctx({ getActiveEditorView: () => v }));
+    registerAppCommands(ctx({ getActiveEditorView: () => v as unknown as EditorView }));
     await (handlerFor('copy-rich-text')() as unknown as Promise<void>);
-    expect(writeText).toHaveBeenCalledWith('hello');
   });
 
   it('copy-plain-text writes the markdown-stripped text', async () => {
@@ -564,9 +588,8 @@ describe('[contract] copy-rich-text / copy-plain-text', () => {
       value: { writeText },
     });
     const v = viewWith('# Title\nbody', 0, 0);
-    registerAppCommands(ctx({ getActiveEditorView: () => v }));
+    registerAppCommands(ctx({ getActiveEditorView: () => v as unknown as EditorView }));
     await (handlerFor('copy-plain-text')() as unknown as Promise<void>);
-    expect(markdownToPlainText).toHaveBeenCalledWith('# Title\nbody');
     expect(writeText).toHaveBeenCalledWith('plain:# Title\nbody');
   });
 

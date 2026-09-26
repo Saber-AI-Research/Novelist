@@ -3,7 +3,7 @@ import {
   EditorView, ViewPlugin, lineNumbers, highlightActiveLine, keymap, drawSelection,
   dropCursor, rectangularSelection, scrollPastEnd, placeholder,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab, cursorLineUp, cursorLineDown, selectLineUp, selectLineDown } from '@codemirror/commands';
 import { markdown, markdownLanguage, markdownKeymap } from '@codemirror/lang-markdown';
 import { json } from '@codemirror/lang-json';
 import { GFM } from '@lezer/markdown';
@@ -562,6 +562,13 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
     ...(options?.tallDoc ? [] : [EditorView.lineWrapping]),
     novelistTheme,
     keymap.of([
+      // Cmd+Up/Down should move one logical editor line, not jump to the
+      // document edges. CM6's line commands retain the goal column, so an
+      // Up/Down pair returns to the original caret when the intervening line
+      // can represent that column. Shift keeps the native range extension.
+      { key: 'Mod-ArrowUp', run: cursorLineUp, shift: selectLineUp },
+      { key: 'Mod-ArrowDown', run: cursorLineDown, shift: selectLineDown },
+
       ...structuralHierarchyKeymap,
       indentWithTab,
       ...closeBracketsKeymap,
@@ -635,6 +642,9 @@ function createLargeFileExtensions(): Extension[] {
     novelistSearch,
     keymap.of([
       ...structuralHierarchyKeymap,
+      { key: 'Mod-ArrowUp', run: cursorLineUp, shift: selectLineUp },
+      { key: 'Mod-ArrowDown', run: cursorLineDown, shift: selectLineDown },
+
       indentWithTab,
       ...defaultKeymap,
       ...historyKeymap,
@@ -644,10 +654,6 @@ function createLargeFileExtensions(): Extension[] {
   ];
 }
 
-/**
- * Read-only extension set for very large files (>=3.5MB).
- * No parser, no gutters — absolute minimum for viewing large text.
- */
 function createReadOnlyExtensions(): Extension[] {
   return [
     EditorState.readOnly.of(true),
@@ -658,6 +664,8 @@ function createReadOnlyExtensions(): Extension[] {
     novelistTheme,
     novelistSearch,
     keymap.of([
+      { key: 'Mod-ArrowUp', run: cursorLineUp, shift: selectLineUp },
+      { key: 'Mod-ArrowDown', run: cursorLineDown, shift: selectLineDown },
       ...searchKeymapNoModF,
       { key: 'Mod-f', run: openOrRefocusSearch },
     ]),

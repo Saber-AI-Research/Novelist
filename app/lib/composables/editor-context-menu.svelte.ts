@@ -47,7 +47,17 @@ export function createEditorContextMenu(getView: () => EditorView | null) {
     if (!view || !state) return;
     const { from, to } = state;
     if (from === to) return;
+
+    // A WebKit context-menu mousedown collapses the native selection. Restore
+    // the captured CM selection before copying so a large selection does not
+    // leave the caret at the menu-click position. The selection-only dispatch
+    // does not alter the document or undo history.
+    const selection = view.state.selection.main;
+    if (selection.from !== from || selection.to !== to) {
+      view.dispatch({ selection: { anchor: from, head: to } });
+    }
     try { await navigator.clipboard.writeText(view.state.sliceDoc(from, to)); } catch {}
+    view.focus();
   }
 
   async function paste() {

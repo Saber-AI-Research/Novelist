@@ -270,6 +270,10 @@ export function registerAppCommands(ctx: AppCommandContext) {
   }});
 
   // Rich/plain text copy
+  // Rich/plain copy snapshots the text before any asynchronous clipboard work.
+  // Restore focus after the write as well: WebKit may move focus to the menu
+  // while handling a large selection, which otherwise leaves the caret visually
+  // detached from the copied range.
   reg({ id: 'copy-rich-text', labelKey: 'command.copyRichText', handler: async () => {
     const view = getActiveEditorView();
     if (!view) return;
@@ -287,6 +291,10 @@ export function registerAppCommands(ctx: AppCommandContext) {
     } catch {
       await navigator.clipboard.writeText(text);
     }
+    if (view.state.selection.main.from !== from || view.state.selection.main.to !== to) {
+      view.dispatch({ selection: { anchor: from, head: to } });
+    }
+    view.focus();
   }});
   reg({ id: 'copy-plain-text', labelKey: 'command.copyPlainText', handler: async () => {
     const view = getActiveEditorView();
@@ -296,6 +304,10 @@ export function registerAppCommands(ctx: AppCommandContext) {
     const { markdownToPlainText } = await import('$lib/utils/markdown-copy');
     const plain = markdownToPlainText(text);
     await navigator.clipboard.writeText(plain);
+    if (view.state.selection.main.from !== from || view.state.selection.main.to !== to) {
+      view.dispatch({ selection: { anchor: from, head: to } });
+    }
+    view.focus();
   }});
 
   // Diagnostics

@@ -166,13 +166,25 @@ describe('[contract] cut', () => {
 });
 
 describe('[contract] copy', () => {
-  it('writes selection text to clipboard without mutating the doc', async () => {
+  it('restores a collapsed WebKit selection before copying and focus after', async () => {
     writeText.mockResolvedValue(undefined);
     const m = menu();
+    m.view!.state.selection.main = { from: 2, to: 2 };
     m.state = { x: 0, y: 0, hasSelection: true, from: 0, to: 5 };
     await m.copy();
+    expect(m.view!.dispatch).toHaveBeenCalledWith({ selection: { anchor: 0, head: 5 } });
     expect(writeText).toHaveBeenCalledWith('hello');
+    expect(m.view!.focus).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch when the live selection already matches', async () => {
+    writeText.mockResolvedValue(undefined);
+    const m = menu();
+    m.view!.state.selection.main = { from: 0, to: 5 };
+    m.state = { x: 0, y: 0, hasSelection: true, from: 0, to: 5 };
+    await m.copy();
     expect(m.view!.dispatch).not.toHaveBeenCalled();
+    expect(writeText).toHaveBeenCalledWith('hello');
   });
 
   it('no-ops when from === to', async () => {

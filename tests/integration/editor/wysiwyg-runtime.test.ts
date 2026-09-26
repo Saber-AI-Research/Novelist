@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Compartment, EditorSelection, EditorState, type Extension } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
-import { cursorCharLeft, cursorCharRight, selectCharRight } from '@codemirror/commands';
+import { cursorCharLeft, cursorCharRight, cursorLineDown, cursorLineUp, selectCharRight } from '@codemirror/commands';
+
 import { markdown } from '@codemirror/lang-markdown';
 import { wysiwygPlugin } from '$lib/editor/wysiwyg';
 import { createEditorExtensions } from '$lib/editor/setup';
@@ -362,3 +363,4 @@ describe('[regression] WYSIWYG source visibility and IME lifecycle', () => {
       .toEqual(['中', 'en']);
   });
 });
+
