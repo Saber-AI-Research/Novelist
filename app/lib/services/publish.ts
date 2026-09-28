@@ -100,6 +100,29 @@ export function stripFrontMatter(body: string): string {
   return body.replace(re, '');
 }
 
+/**
+ * Drop the document's leading H1 (ATX `# Title` or setext `Title\n===`) when
+ * it is the first block of the body. Ghost and WordPress render the post's
+ * `title` field above the content themselves, so keeping the H1 in the HTML
+ * shows the title twice. H1s later in the body are left alone.
+ */
+export function stripLeadingTitleHeading(body: string): string {
+  const lines = body.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  if (i >= lines.length) return body;
+
+  let end: number | null = null;
+  if (/^ {0,3}#(?:[ \t]+.*)?$/.test(lines[i]) && !/^ {0,3}##/.test(lines[i])) {
+    end = i + 1;
+  } else if (i + 1 < lines.length && /^ {0,3}=+[ \t]*$/.test(lines[i + 1]) && !/^ {0,3}(?:[-*+>]|\d+[.)])[ \t]/.test(lines[i])) {
+    end = i + 2;
+  }
+  if (end === null) return body;
+  while (end < lines.length && lines[end].trim() === '') end++;
+  return lines.slice(end).join('\n');
+}
+
 /** Find every `![alt](path)` reference in `body`, return the path strings (in order). */
 export function extractLocalImageRefs(body: string): string[] {
   const re = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
@@ -246,8 +269,10 @@ async function verifyTrackedWordPressUpdate(
  *      record its hosted URL (Ghost: `feature_image`) and attachment
  *      id (WordPress: `featured_media`).
  *   5. Rewrite the body with the image URL map.
- *   6. For Ghost / WordPress / WP.com: convert Markdown → HTML via
- *      Pandoc. For Medium: pass body through unchanged.
+ *   6. For Ghost / WordPress / WP.com: drop the leading H1 (those
+ *      platforms render the title field themselves) and convert
+ *      Markdown → HTML via Pandoc. For Medium: pass body through
+ *      unchanged — Medium only displays a title that is in the content.
  *   7. Submit the platform create or update call and persist its identity.
  *
  * Throws on any failure — caller (PublishDialog) catches and shows
@@ -320,7 +345,7 @@ export async function dispatchPublish(
     body = rewritten;
     bodyFormat = 'markdown';
   } else {
-    const htmlResult = await commands.convertMarkdownToHtml(rewritten);
+    const htmlResult = await commands.convertMarkdownToHtml(stripLeadingTitleHeading(rewritten));
     if (htmlResult.status !== 'ok') {
       throw new Error(`Pandoc conversion failed: ${htmlResult.error}`);
     }

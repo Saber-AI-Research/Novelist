@@ -175,6 +175,30 @@ describe('rewriteBodyWithUrlMap', () => {
   });
 });
 
+describe('stripLeadingTitleHeading', () => {
+  it('drops a leading ATX H1 and the blank lines after it', async () => {
+    const { stripLeadingTitleHeading } = await import('$lib/services/publish');
+    expect(stripLeadingTitleHeading('# 第一章 序幕\n\n正文第一段。\n')).toBe('正文第一段。\n');
+  });
+
+  it('skips leading blank lines and handles CRLF and closing hashes', async () => {
+    const { stripLeadingTitleHeading } = await import('$lib/services/publish');
+    expect(stripLeadingTitleHeading('\r\n# Title #\r\n\r\nBody')).toBe('Body');
+  });
+
+  it('drops a leading setext H1', async () => {
+    const { stripLeadingTitleHeading } = await import('$lib/services/publish');
+    expect(stripLeadingTitleHeading('标题\n===\n\n正文')).toBe('正文');
+  });
+
+  it('keeps bodies that do not start with an H1', async () => {
+    const { stripLeadingTitleHeading } = await import('$lib/services/publish');
+    for (const body of ['## 小节\n\n正文', '前言\n\n# 第一章\n\n正文', '#hashtag 不是标题', '- 列表\n===']) {
+      expect(stripLeadingTitleHeading(body)).toBe(body);
+    }
+  });
+});
+
 describe('dispatchPublish', () => {
   it('routes Medium without Pandoc conversion', async () => {
     mockSettings.channels = [
@@ -211,6 +235,34 @@ describe('dispatchPublish', () => {
     expect(pub).toBeDefined();
     expect((pub!.args[0] as { body_format: string }).body_format).toBe('html');
     expect((pub!.args[0] as { body: string }).body).toBe('<html>hello</html>');
+  });
+
+  it.each([
+    ['ghost', { id: 'g', name: 'Ghost', platform: 'ghost', admin_url: 'x', api_key: 'a:b' }],
+    ['wordpress_self_hosted', { id: 'w', name: 'WP', platform: 'wordpress_self_hosted', site_url: 'https://wp.example.com', username: 'u', app_password: 'p' }],
+  ])('does not render the title H1 into the %s body (title field carries it)', async (_platform, channel) => {
+    mockSettings.channels = [channel];
+    const { dispatchPublish } = await import('$lib/services/publish');
+    await dispatchPublish(
+      channel as never,
+      { title: '第一章 序幕', tags: [], status: 'draft' },
+      { dir: '/p', text: '---\ntags: [a]\n---\n# 第一章 序幕\n\n正文。\n\n# 第二节\n' },
+    );
+    const conv = calls.find(c => c.name === 'convertMarkdownToHtml');
+    expect(conv!.args[0]).toBe('正文。\n\n# 第二节\n');
+  });
+
+  it('keeps the H1 in Medium content, where it is the only displayed title', async () => {
+    const channel = { id: 'm', name: 'Medium', platform: 'medium', token: 't' };
+    mockSettings.channels = [channel];
+    const { dispatchPublish } = await import('$lib/services/publish');
+    await dispatchPublish(
+      channel as never,
+      { title: '第一章', tags: [], status: 'public' },
+      { dir: '/p', text: '# 第一章\n\n正文' },
+    );
+    const pub = calls.find(c => c.name === 'publish_medium');
+    expect((pub!.args[0] as { body: string }).body).toBe('# 第一章\n\n正文');
   });
 
   it('uploads local images and rewrites the body before submission', async () => {
