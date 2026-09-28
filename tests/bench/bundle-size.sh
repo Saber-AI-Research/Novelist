@@ -25,7 +25,9 @@ fi
 echo "  PASS"
 
 # Check DMG if present
-DMG_PATH=$(find core/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+# `|| true`: a missing bundle dir makes find exit non-zero, which pipefail
+# would otherwise turn into a failed benchmark before the "skipping" branch.
+DMG_PATH=$(find core/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1 || true)
 if [ -n "$DMG_PATH" ]; then
   DMG_KB=$(du -sk "$DMG_PATH" | awk '{print $1}')
   echo "DMG size: ${DMG_KB} KB (threshold: ${DMG_MAX_KB} KB)"
