@@ -10,6 +10,7 @@
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { fileMetaStore } from '$lib/stores/file-meta.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
@@ -61,6 +62,31 @@
     projectStore.setSortMode(mode);
     sortMenuOpen = false;
   }
+
+  // --- Per-file word count / last-saved meta line ---
+  // Re-walk counts when the project or its tree changes (watcher refreshes
+  // replace `files`), and after any tab goes dirty → clean (a save).
+  $effect(() => {
+    void projectStore.files;
+    void projectStore.generation;
+    fileMetaStore.scheduleRefresh(projectStore.dirPath);
+  });
+  $effect(() => fileMetaStore.startClock());
+  let dirtyPaths = new Set<string>();
+  $effect(() => {
+    const nowDirty = new Set(
+      tabsStore.allTabs.filter((tab) => tab.isDirty && tab.filePath).map((tab) => tab.filePath as string),
+    );
+    let saved = false;
+    for (const path of dirtyPaths) {
+      if (!nowDirty.has(path)) {
+        fileMetaStore.touch(path);
+        saved = true;
+      }
+    }
+    dirtyPaths = nowDirty;
+    if (saved) fileMetaStore.scheduleRefresh(projectStore.dirPath);
+  });
 
   $effect(() => {
     if (!sortMenuOpen) return;
@@ -866,6 +892,18 @@
                   <span class="sidebar-sort-label">{t(opt.labelKey)}</span>
                 </button>
               {/each}
+              <div class="sidebar-sort-separator" role="separator"></div>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={fileMetaStore.showFileMeta}
+                class="sidebar-sort-item"
+                data-testid="sidebar-toggle-file-meta"
+                onclick={() => fileMetaStore.setShowFileMeta(!fileMetaStore.showFileMeta)}
+              >
+                <span class="sidebar-sort-check">{fileMetaStore.showFileMeta ? '\u2713' : ''}</span>
+                <span class="sidebar-sort-label">{t('sidebar.showFileMeta')}</span>
+              </button>
             </div>
           {/if}
         </div>
@@ -1194,6 +1232,11 @@
     text-align: left;
     cursor: pointer;
     transition: background 80ms;
+  }
+  .sidebar-sort-separator {
+    height: 1px;
+    margin: 4px 8px;
+    background: var(--novelist-border-subtle, var(--novelist-border));
   }
   .sidebar-sort-item:hover {
     background: var(--novelist-sidebar-hover);

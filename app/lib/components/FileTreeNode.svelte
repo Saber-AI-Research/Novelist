@@ -1,6 +1,8 @@
 <script lang="ts">
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
+  import { fileMetaStore, formatRelativeTime } from '$lib/stores/file-meta.svelte';
+  import { i18n, t } from '$lib/i18n';
   import { compareByMode } from '$lib/utils/file-sort';
   // Self-import replaces <svelte:self> (deprecated in Svelte 5).
   import FileTreeNode from './FileTreeNode.svelte';
@@ -56,6 +58,26 @@
   }
 
   const indentPx = $derived(depth * 12 + 6);
+
+  // "2,233 字 · 8 分钟前" under text files (OpenFic-style chapter list).
+  const wordCount = $derived(fileMetaStore.showFileMeta ? fileMetaStore.wordCounts[node.path] : undefined);
+  const editedAt = $derived(
+    fileMetaStore.showFileMeta
+      ? Math.max(fileMetaStore.savedAt[node.path] ?? 0, node.mtime ?? 0) || undefined
+      : undefined,
+  );
+  const metaText = $derived.by(() => {
+    if (!fileMetaStore.showFileMeta) return '';
+    const parts: string[] = [];
+    if (wordCount !== undefined) {
+      parts.push(t('sidebar.fileMeta.words', { count: wordCount.toLocaleString(i18n.locale) }));
+    }
+    if (editedAt !== undefined) {
+      parts.push(formatRelativeTime(editedAt, i18n.locale, fileMetaStore.now, t('sidebar.fileMeta.justNow')));
+    }
+    return parts.join(' · ');
+  });
+  const unsaved = $derived(tabsStore.allTabs.some((tab) => tab.filePath === node.path && tab.isDirty));
   const selected = $derived(selectedPaths.includes(node.path));
   let renameInputEl = $state<HTMLInputElement | null>(null);
 
@@ -177,7 +199,17 @@
       <path d="M4 2h5l3 3v9H4z" />
       <path d="M9 2v3h3" />
     </svg>
-    <span class="tree-name">{node.name.replace(/\.(md|markdown|txt|json|jsonl|csv)$/i, '')}</span>
+    {#if metaText}
+      <span class="tree-text">
+        <span class="tree-name">{node.name.replace(/\.(md|markdown|txt|json|jsonl|csv)$/i, '')}</span>
+        <span class="tree-meta" data-testid="sidebar-row-meta">{metaText}</span>
+      </span>
+    {:else}
+      <span class="tree-name">{node.name.replace(/\.(md|markdown|txt|json|jsonl|csv)$/i, '')}</span>
+    {/if}
+    {#if unsaved}
+      <span class="tree-dirty-dot" title={t('sidebar.fileMeta.unsaved')} aria-label={t('sidebar.fileMeta.unsaved')}></span>
+    {/if}
     <span class="tree-ext">.{node.name.split('.').pop()}</span>
   </button>
 {:else}
@@ -296,6 +328,34 @@
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+  .tree-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .tree-meta {
+    font-size: 11px;
+    line-height: 1.3;
+    font-weight: 400;
+    color: var(--novelist-text-tertiary, var(--novelist-text-secondary));
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tree-file-active .tree-meta {
+    color: color-mix(in srgb, var(--novelist-accent) 60%, var(--novelist-text-tertiary, var(--novelist-text-secondary)));
+  }
+  .tree-dirty-dot {
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--novelist-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--novelist-accent) 18%, transparent);
   }
   .tree-ext {
     color: var(--novelist-text-tertiary, var(--novelist-text-secondary));

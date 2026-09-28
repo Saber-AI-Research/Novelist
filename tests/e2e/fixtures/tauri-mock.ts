@@ -1127,7 +1127,35 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           case 'restore_snapshot': return null;
           case 'record_writing_stats': return null;
-          case 'get_writing_stats': return { daily: [], total_words: 0, chapters: [], streak_days: 0, today_words: 0, today_minutes: 0 };
+          case 'get_writing_stats': {
+            // Mirror core count_words_cjk: each CJK char is a word, runs of
+            // other non-space chars are one word. Char codes avoid regex
+            // escaping inside this template-literal script.
+            const countWords = (text) => {
+              let n = 0;
+              let inWord = false;
+              for (const ch of String(text)) {
+                const c = ch.codePointAt(0);
+                const cjk = (c >= 0x3400 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0x20000 && c <= 0x2fa1f);
+                const space = c === 32 || c === 9 || c === 10 || c === 13 || c === 0x3000;
+                if (cjk) { if (inWord) { n++; inWord = false; } n++; }
+                else if (space) { if (inWord) { n++; inWord = false; } }
+                else inWord = true;
+              }
+              return inWord ? n + 1 : n;
+            };
+            const root = String(args.projectDir ?? '');
+            const chapters = Object.keys({ ...fileContents, ...writtenFiles })
+              .filter((path) => path.startsWith(root + '/') && /[.](md|markdown|txt)$/i.test(path)
+                && !path.slice(root.length + 1).split('/').some((seg) => seg.startsWith('.')))
+              .map((path) => ({
+                file_name: path.split('/').pop(),
+                file_path: path,
+                word_count: countWords(writtenFiles[path] ?? fileContents[path] ?? ''),
+              }));
+            const total = chapters.reduce((sum, c) => sum + c.word_count, 0);
+            return { daily: [], total_words: total, chapters, streak_days: 0, today_words: 0, today_minutes: 0 };
+          }
           case 'list_templates': return [];
 
           // --- Snippet-template commands (bundled + project .md files) ---

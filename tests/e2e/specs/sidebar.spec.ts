@@ -238,4 +238,23 @@ test.describe('Sidebar', () => {
     expect(calls.filter(call => call.command === 'move_item')).toHaveLength(1);
     expect(calls.filter(call => call.command === 'broadcast_file_renamed')).toHaveLength(0);
   });
+
+  test('file rows show a CJK-aware word count, toggle it off, and mark unsaved files', async ({ app }) => {
+    const row = app.getByTestId('sidebar-file-Chapter 1.md');
+    // Mock get_writing_stats counts like core count_words_cjk: 16 words.
+    await expect(row.getByTestId('sidebar-row-meta')).toHaveText(/^16 words · /);
+    await expect(row.locator('.tree-name')).toHaveText('Chapter 1');
+
+    await row.click();
+    await app.locator('.cm-content').click();
+    await app.keyboard.press('End');
+    await app.keyboard.type(' 新增');
+    await expect(row.locator('.tree-dirty-dot')).toBeVisible();
+
+    await app.getByTestId('sidebar-sort-button').click();
+    await app.getByTestId('sidebar-toggle-file-meta').click();
+    await expect(row.getByTestId('sidebar-row-meta')).toHaveCount(0);
+    const stored = await app.evaluate(() => localStorage.getItem('novelist:sidebar:show-file-meta'));
+    expect(stored).toBe('false');
+  });
 });
