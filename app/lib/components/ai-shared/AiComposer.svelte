@@ -9,6 +9,8 @@
   import { filterMentionItems, filterSlashCommands } from './menu-items';
   import { getCaretCoordinates } from './caret-coordinates';
   import { IconClose, IconDocument } from '../icons';
+  import ArrowUp from '@lucide/svelte/icons/arrow-up';
+  import Square from '@lucide/svelte/icons/square';
 
   type SuggestedSelection = {
     attachment: AiContextAttachment;
@@ -42,7 +44,12 @@
     onAttachSelection?: () => void;
     onDismissSelection?: () => void;
     onDropPaths?: (paths: string[]) => void;
+    /** Right side of the footer, before the send button. */
     actions?: Snippet;
+    /** Left side of the footer (mode / model chips). */
+    footer?: Snippet;
+    /** Hint shown under the box (e.g. keyboard shortcuts). */
+    hint?: string;
   };
 
   let {
@@ -73,7 +80,20 @@
     onDismissSelection,
     onDropPaths,
     actions,
+    footer,
+    hint,
   }: Props = $props();
+
+  let focused = $state(false);
+
+  // Grow the textarea with its content (2–10 lines) instead of a fixed
+  // 3-row box with a manual resize handle.
+  $effect(() => {
+    void value;
+    if (!textareaEl) return;
+    textareaEl.style.height = 'auto';
+    textareaEl.style.height = `${Math.min(textareaEl.scrollHeight, 240)}px`;
+  });
 
   let contextItems = $derived(attachments.map(attachmentToContextItem));
 
@@ -188,7 +208,7 @@
     onRemove={onRemoveAttachment}
     onClear={onClearAttachments}
   />
-  <div class="input-wrap">
+  <div class="composer-box" class:focused>
     {#if menuLength > 0}
       <div class="menu-anchor" style="left: {caretLeft}px; top: {caretTop}px;">
         <AiCommandMenu items={commandItems} activeIndex={activeMenuIndex} onPick={onPickCommand} />
@@ -198,36 +218,75 @@
     <textarea
       bind:this={textareaEl}
       data-testid={inputTestId}
-      rows="3"
+      rows="2"
       {placeholder}
       value={value}
       oninput={(e) => onInput(e.currentTarget.value)}
       onkeydown={keydown}
+      onfocus={() => (focused = true)}
+      onblur={() => (focused = false)}
     ></textarea>
   </div>
-  <div class="composer-actions">
-    {#if actions}
-      {@render actions()}
+  <div class="composer-footer">
+    {#if footer}
+      <div class="footer-start">{@render footer()}</div>
     {/if}
-    {#if busy}
-      <button class="novelist-btn novelist-btn-primary" data-testid={stopTestId} type="button" onclick={() => onStop?.()}>Stop</button>
-    {:else}
-      <button class="novelist-btn novelist-btn-primary" data-testid={sendTestId} type="button" onclick={onSend} disabled={!canSend}>{sendLabel}</button>
-    {/if}
+    <div class="footer-end">
+      {#if actions}
+        {@render actions()}
+      {/if}
+      {#if busy}
+        <button
+          class="send-btn stop"
+          data-testid={stopTestId}
+          type="button"
+          aria-label="Stop"
+          title="Stop"
+          onclick={() => onStop?.()}
+        ><Square size={11} fill="currentColor" strokeWidth={0} /></button>
+      {:else}
+        <button
+          class="send-btn"
+          data-testid={sendTestId}
+          type="button"
+          aria-label={sendLabel}
+          title="{sendLabel} (⌘/Ctrl+Enter)"
+          onclick={onSend}
+          disabled={!canSend}
+        ><ArrowUp size={15} strokeWidth={2.25} /></button>
+      {/if}
+    </div>
   </div>
+  {#if hint}
+    <div class="composer-hint">{hint}</div>
+  {/if}
 </div>
 
 <style>
   .ai-composer {
-    border-top: 1px solid var(--novelist-border);
-    padding: 8px;
+    padding: 8px 12px 10px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    background: var(--novelist-bg-secondary);
+    gap: 8px;
+    background: var(--novelist-bg);
   }
-  .input-wrap {
+  /* One rounded surface holding the textarea and its toolbar, the way
+     chat-first writing tools (OpenFic, Cursor) frame the prompt box. */
+  .composer-box {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, var(--novelist-text) 16%, var(--novelist-border));
+    border-radius: 10px;
+    background: var(--novelist-bg);
+    /* Soft upward fade so the box floats over the scrolling transcript. */
+    box-shadow:
+      0 -10px 18px color-mix(in srgb, var(--novelist-bg) 72%, transparent),
+      0 -1px 0 color-mix(in srgb, var(--novelist-text) 4%, transparent);
+    transition: border-color 200ms ease, box-shadow 200ms ease;
+  }
+  .composer-box.focused {
+    border-color: color-mix(in srgb, var(--novelist-text) 42%, var(--novelist-border));
   }
   /* Floats above the caret line; the composer sits at the panel bottom so
      there is always room above. translateY lifts the menu by its own height. */
@@ -243,20 +302,80 @@
   textarea {
     width: 100%;
     box-sizing: border-box;
-    background: var(--novelist-bg);
-    border: 1px solid var(--novelist-border);
+    min-height: 52px;
+    max-height: 240px;
+    background: transparent;
+    border: 0;
+    outline: none;
     color: var(--novelist-text);
-    border-radius: 4px;
-    padding: 6px 8px;
+    padding: 10px;
     font: inherit;
-    resize: vertical;
+    font-size: 13.5px;
+    line-height: 1.5;
+    resize: none;
+  }
+  textarea::placeholder {
+    color: var(--novelist-text-tertiary);
+  }
+  .composer-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 2px;
+    min-width: 0;
+  }
+  .footer-start {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+  .footer-end {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    flex: 0 0 auto;
+  }
+  .send-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: var(--novelist-text);
+    color: var(--novelist-bg);
+    cursor: pointer;
+    transition: background 100ms, opacity 150ms, transform 100ms;
+  }
+  .send-btn:not(:disabled):hover {
+    background: color-mix(in srgb, var(--novelist-text) 82%, var(--novelist-bg));
+  }
+  .send-btn:not(:disabled):active {
+    transform: scale(0.94);
+  }
+  .send-btn:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+  }
+  .composer-hint {
+    padding: 0 4px;
+    font-size: 10.5px;
+    color: var(--novelist-text-tertiary);
+    text-align: center;
+    user-select: none;
   }
   .selection-suggestion {
     display: flex;
     align-items: center;
     border: 1px dashed color-mix(in srgb, var(--novelist-accent) 45%, var(--novelist-border));
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--novelist-accent) 8%, var(--novelist-bg));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--novelist-accent) 6%, var(--novelist-bg));
     overflow: hidden;
   }
   .suggestion-main {
@@ -268,7 +387,7 @@
     border: 0;
     background: transparent;
     color: var(--novelist-text);
-    padding: 4px 6px;
+    padding: 5px 8px;
     font: inherit;
     font-size: 11px;
     cursor: pointer;
@@ -284,14 +403,7 @@
     border: 0;
     background: transparent;
     color: var(--novelist-text-secondary);
-    padding: 4px 6px;
+    padding: 5px 8px;
     cursor: pointer;
-  }
-  .composer-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
   }
 </style>

@@ -22,6 +22,8 @@ export type DisplayMessage = {
    * OpenRouter `reasoning`). Rendered in a collapsible block and persisted.
    */
   reasoning?: string;
+  /** Wall-clock duration of the reasoning phase, shown as "Reasoned 4.8s". */
+  reasoningMs?: number;
   /** Accept/reject state of parsed ```novelist-edit suggestions, by id. */
   suggestionStatus?: Record<string, SuggestionStatus>;
 };

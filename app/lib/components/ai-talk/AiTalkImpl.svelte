@@ -56,7 +56,24 @@
   import { promptPresets } from './presets.svelte';
   import { commands } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
-  import { IconGear } from '../icons';
+  import { renderChatMarkdown } from '$lib/components/ai-shared/chat-markdown';
+  import { t } from '$lib/i18n';
+  import Brain from '@lucide/svelte/icons/brain';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Check from '@lucide/svelte/icons/check';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
+  import Save from '@lucide/svelte/icons/save';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import Bookmark from '@lucide/svelte/icons/bookmark';
+  import ListChevronsDownUp from '@lucide/svelte/icons/list-chevrons-down-up';
+  import Settings2 from '@lucide/svelte/icons/settings-2';
+  import Feather from '@lucide/svelte/icons/feather';
+  import Sparkles from '@lucide/svelte/icons/sparkles';
+  import History from '@lucide/svelte/icons/history';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
 
   let settingsOpen = $state(false);
   let saveStatus = $state<string | null>(null); // brief toast after saving
@@ -96,6 +113,16 @@
   let chatStreaming = $state(false);
   let chatStreamId: string | null = null;
   let chatScroller = $state<HTMLDivElement | undefined>(undefined);
+  // Follow the stream only while the reader is already at the bottom; once
+  // they scroll up to reread, stop yanking the view and offer a jump button.
+  let stickToBottom = $state(true);
+  // Live clock for the "Reasoning 3.2s" / "Thinking 1.4s" counters.
+  let now = $state(Date.now());
+  let turnStartedAt = $state<number | null>(null);
+  let clockTimer: ReturnType<typeof setInterval> | null = null;
+  let copiedIndex = $state<number | null>(null);
+  /** User overrides of the reasoning disclosure, keyed by message index. */
+  let reasoningOpen = $state<Record<number, boolean>>({});
   // No trailing trim: a trailing space (inserted after picking a command)
   // must close the menu so Enter/Tab go back to normal typing.
   let commandMenuVisible = $derived(/^\s*\/[a-z-]*$/.test(chatInput));
@@ -408,7 +435,13 @@
     const working: DisplayMessage[] = [...history, { role: 'assistant', content: '' }];
     aiTalkSessions.updateMessages(sessionId, working);
     chatStreaming = true;
-    scrollChat();
+    turnStartedAt = Date.now();
+    now = turnStartedAt;
+    clockTimer ??= setInterval(() => (now = Date.now()), 100);
+    delete reasoningOpen[assistantIdx];
+    scrollChat(true);
+    let reasoningStartedAt: number | null = null;
+    let reasoningMs: number | undefined;
 
     let buffered = '';
     let bufferedReasoning = '';
@@ -425,13 +458,20 @@
       for await (const ev of aiStream(chatStreamId)) {
         if (ev.kind === 'chunk') {
           const delta = parseChatChunk(ev.data);
-          if (delta?.reasoning) bufferedReasoning += delta.reasoning;
-          if (delta?.content) buffered += delta.content;
+          if (delta?.reasoning) {
+            reasoningStartedAt ??= Date.now();
+            bufferedReasoning += delta.reasoning;
+          }
+          if (delta?.content) {
+            if (reasoningStartedAt !== null && reasoningMs === undefined) reasoningMs = Date.now() - reasoningStartedAt;
+            buffered += delta.content;
+          }
           if (delta?.reasoning || delta?.content) {
             working[assistantIdx] = {
               role: 'assistant',
               content: buffered,
               reasoning: bufferedReasoning || undefined,
+              reasoningMs,
             };
             aiTalkSessions.updateMessages(sessionId, [...working]);
             scrollChat();
@@ -453,10 +493,21 @@
       };
       aiTalkSessions.updateMessages(sessionId, [...working]);
     } finally {
+      if (reasoningStartedAt !== null && reasoningMs === undefined) {
+        working[assistantIdx] = { ...working[assistantIdx], reasoningMs: Date.now() - reasoningStartedAt };
+        aiTalkSessions.updateMessages(sessionId, [...working]);
+      }
+      stopClock();
       chatStreaming = false;
       chatStreamId = null;
       await persistProjectSessions();
     }
+  }
+
+  function stopClock() {
+    if (clockTimer) clearInterval(clockTimer);
+    clockTimer = null;
+    turnStartedAt = null;
   }
 
   // -------- Per-message actions: copy / edit / retry / suggestions --------
@@ -464,8 +515,17 @@
   let editingIndex = $state<number | null>(null);
   let editingText = $state('');
 
-  function copyMessage(content: string) {
-    void navigator.clipboard?.writeText(content).catch(() => {});
+  function copyMessage(content: string, index?: number) {
+    void navigator.clipboard?.writeText(content).then(
+      () => {
+        if (index === undefined) return;
+        copiedIndex = index;
+        setTimeout(() => {
+          if (copiedIndex === index) copiedIndex = null;
+        }, 1400);
+      },
+      () => {},
+    );
   }
 
   /** Regenerate the assistant message at index `i` from the turns before it. */
@@ -541,6 +601,7 @@
       await cancelAiStream(id).catch(() => {});
     }
     chatStreaming = false;
+    stopClock();
   }
 
   function clearChat() {
@@ -657,10 +718,61 @@
     );
   }
 
-  function scrollChat() {
+  function scrollChat(force = false) {
+    if (force) stickToBottom = true;
+    if (!stickToBottom) return;
     queueMicrotask(() => {
       if (chatScroller) chatScroller.scrollTop = chatScroller.scrollHeight;
     });
+  }
+
+  function onChatScroll() {
+    if (!chatScroller) return;
+    const gap = chatScroller.scrollHeight - chatScroller.scrollTop - chatScroller.clientHeight;
+    stickToBottom = gap < 48;
+  }
+
+  function jumpToBottom() {
+    stickToBottom = true;
+    chatScroller?.scrollTo({ top: chatScroller.scrollHeight, behavior: 'smooth' });
+  }
+
+  function formatSeconds(ms: number): string {
+    const s = ms / 1000;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  }
+
+  /** Rough token estimate: CJK ≈ 1 token/char, other scripts ≈ 4 chars/token. */
+  function estimateTokens(text: string): number {
+    let cjk = 0;
+    for (const ch of text) if (/[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch)) cjk++;
+    return Math.round(cjk + (text.length - cjk) / 4);
+  }
+
+  function formatCount(n: number): string {
+    return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  }
+
+  let contextTokens = $derived(
+    estimateTokens(messages.map((m) => m.content).join('\n') + attachments.map((a) => a.content).join('\n')),
+  );
+
+  function isReasoningOpen(i: number, m: DisplayMessage): boolean {
+    if (i in reasoningOpen) return reasoningOpen[i];
+    // Auto-expand while the model is still thinking, collapse once it answers.
+    return chatStreaming && i === messages.length - 1 && !m.content;
+  }
+
+  function toggleReasoning(i: number, m: DisplayMessage) {
+    reasoningOpen = { ...reasoningOpen, [i]: !isReasoningOpen(i, m) };
+  }
+
+  const STARTERS = ['continue', 'polish', 'consistency', 'brainstorm'] as const;
+
+  function useStarter(key: (typeof STARTERS)[number]) {
+    chatInput = t(`aiTalk.starter.${key}`);
+    queueMicrotask(() => document.querySelector<HTMLTextAreaElement>('[data-testid="ai-talk-input"]')?.focus());
   }
 
   // Open settings on mount if a request flag is set (used by "Configure" entry)
@@ -683,6 +795,8 @@
     if (chatStreaming) void cancelChat();
     cancelEditMessage();
     aiTalkSessions.setActive(id);
+    reasoningOpen = {};
+    scrollChat(true);
   }
 
   function handleSessionDelete(id: string) {
@@ -711,15 +825,27 @@
   }
 
   let activePresetId = $derived(aiTalkSessions.active?.presetId ?? 'none');
+  let activePresetLabel = $derived.by(() => {
+    const preset = activePresetId === 'none' ? null : promptPresets.get(activePresetId);
+    if (!preset) return t('aiTalk.noPreset');
+    return `${typeof preset.icon === 'string' && preset.icon ? `${preset.icon} ` : ''}${preset.name}`;
+  });
+  let activeModelLabel = $derived.by(() => {
+    const s = aiTalkSettings.value;
+    const profile = s.profiles.find((p) => p.id === s.activeProfileId);
+    return profile?.model || profile?.label || s.model;
+  });
 
   // Cancel any in-flight streams when the panel unmounts so the Rust task
   // exits and the Tauri listener gets cleaned up via the iterator's finally.
   onDestroy(() => {
     cancelPendingStreams([chatStreamId], cancelAiStream);
     if (selectionTimer) clearInterval(selectionTimer);
+    stopClock();
     window.removeEventListener('novelist:ai-talk:save-chat', saveChatToProject);
   });
 </script>
+
 
 <main>
   <SessionTabs
@@ -733,34 +859,50 @@
     newLabel="New chat"
   />
 
-  <header>
-    <div class="header-right">
-      <select
-        class="preset-picker"
-        data-testid="ai-talk-model-picker"
-        value={aiTalkSettings.value.activeProfileId}
-        onchange={(e) => aiTalkSettings.update({ activeProfileId: e.currentTarget.value })}
-        aria-label="Model profile"
-        title="Model profile"
-      >
-        {#each aiTalkSettings.value.profiles as p (p.id)}
-          <option value={p.id}>{p.label} · {p.model}</option>
-        {/each}
-      </select>
-      <select
-        class="preset-picker"
-        data-testid="ai-talk-preset-picker"
-        value={activePresetId}
-        onchange={(e) => handlePresetChange(e.currentTarget.value)}
-        aria-label="Apply prompt preset"
-        title="Prompt preset"
-      >
-        <option value="none">No preset</option>
-        {#each promptPresets.all as p (p.id)}
-          <option value={p.id}>{typeof p.icon === 'string' && p.icon ? `${p.icon} ` : ''}{p.name}</option>
-        {/each}
-      </select>
-      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}><IconGear size={14} /></button>
+  <header class="toolbar">
+    <div class="usage" title="{t('aiTalk.context')} ≈ {contextTokens} tokens">
+      <span class="usage-metric num" title={t('aiTalk.messageCount', { count: messages.length })}><History size={12} />{messages.length}</span>
+      <span class="usage-metric num">≈{formatCount(contextTokens)} tokens</span>
+    </div>
+    <div class="tools">
+      <button
+        class="tool"
+        onclick={compactConversation}
+        disabled={chatStreaming || messages.length < 2}
+        title={t('aiTalk.compact')}
+        aria-label={t('aiTalk.compact')}
+      ><ListChevronsDownUp size={15} /></button>
+      <button
+        class="tool"
+        onclick={saveMemory}
+        disabled={chatStreaming || messages.length === 0 || !projectStore.dirPath}
+        title={t('aiTalk.memory')}
+        aria-label={t('aiTalk.memory')}
+      ><Bookmark size={15} /></button>
+      <button
+        class="tool"
+        data-testid="ai-talk-save"
+        onclick={saveChatToProject}
+        disabled={chatStreaming || messages.length === 0}
+        title={t('aiTalk.save')}
+        aria-label={t('aiTalk.save')}
+      ><Save size={15} /></button>
+      <button
+        class="tool"
+        data-testid="ai-talk-clear"
+        onclick={clearChat}
+        disabled={chatStreaming}
+        title={t('aiTalk.clear')}
+        aria-label={t('aiTalk.clear')}
+      ><Trash2 size={15} /></button>
+      <button
+        class="tool"
+        class:active={settingsOpen}
+        title={t('aiTalk.settings')}
+        aria-label={t('aiTalk.settings')}
+        aria-pressed={settingsOpen}
+        onclick={() => (settingsOpen = !settingsOpen)}
+      ><Settings2 size={15} /></button>
     </div>
   </header>
 
@@ -770,36 +912,60 @@
     </section>
   {/if}
 
-  <div class="chat" data-testid="ai-talk-chat" bind:this={chatScroller}>
+  <div class="chat-wrap">
+    <div class="chat" data-testid="ai-talk-chat" bind:this={chatScroller} onscroll={onChatScroll}>
       {#each messages as m, i (i)}
         <div class="msg {m.role}" data-testid="ai-talk-msg-{m.role}">
-          <div class="role">{m.role === 'user' ? 'You' : m.role === 'system' ? 'Memory' : 'Assistant'}</div>
           {#if editingIndex === i}
             <div class="edit-box" data-testid="ai-talk-edit-box">
-              <textarea rows="3" bind:value={editingText} data-testid="ai-talk-edit-input"></textarea>
+              <!-- svelte-ignore a11y_autofocus -->
+              <textarea rows="3" bind:value={editingText} data-testid="ai-talk-edit-input" autofocus></textarea>
               <div class="edit-actions">
+                <button class="novelist-btn novelist-btn-quiet" onclick={cancelEditMessage}>{t('aiTalk.cancel')}</button>
                 <button
                   class="novelist-btn novelist-btn-primary"
                   data-testid="ai-talk-edit-send"
                   disabled={!editingText.trim() || chatStreaming}
                   onclick={submitEditMessage}
-                >Send</button>
-                <button class="novelist-btn novelist-btn-ghost" onclick={cancelEditMessage}>Cancel</button>
+                >{t('aiTalk.send')}</button>
               </div>
             </div>
           {:else if m.role === 'assistant'}
             {@const split = splitEditSuggestions(m.content)}
+            {@const live = chatStreaming && i === messages.length - 1}
             {#if m.reasoning}
-              <details
-                class="card reasoning"
-                data-testid="ai-talk-reasoning"
-                open={chatStreaming && i === messages.length - 1}
-              >
-                <summary>Thinking</summary>
-                <pre>{m.reasoning}</pre>
-              </details>
+              {@const open = isReasoningOpen(i, m)}
+              {@const thinking = live && !m.content}
+              <div class="step" data-testid="ai-talk-reasoning" class:open>
+                <button class="step-head" onclick={() => toggleReasoning(i, m)} aria-expanded={open}>
+                  <Brain size={14} class="step-icon" />
+                  <span class="step-title" class:shimmer={thinking} data-text={t('aiTalk.reasoning')}>{t('aiTalk.reasoning')}</span>
+                  <span class="step-meta num">
+                    {#if thinking && turnStartedAt}
+                      {formatSeconds(now - turnStartedAt)}
+                    {:else if m.reasoningMs !== undefined}
+                      {formatSeconds(m.reasoningMs)}
+                    {/if}
+                  </span>
+                  <ChevronRight size={13} class="step-chevron" />
+                </button>
+                {#if open}
+                  <div class="step-body"><pre>{m.reasoning}</pre></div>
+                {/if}
+              </div>
+            {:else if live && !m.content}
+              <div class="step">
+                <div class="step-head static">
+                  <Sparkles size={14} class="step-icon" />
+                  <span class="step-title shimmer" data-text={t('aiTalk.thinking')}>{t('aiTalk.thinking')}</span>
+                  {#if turnStartedAt}<span class="step-meta num">{formatSeconds(now - turnStartedAt)}</span>{/if}
+                </div>
+              </div>
             {/if}
-            <div class="content">{split.suggestions.length > 0 ? split.body : m.content}</div>
+            {@const body = split.suggestions.length > 0 ? split.body : m.content}
+            {#if body.trim()}
+              <div class="content md" class:streaming={live}>{@html renderChatMarkdown(body)}</div>
+            {/if}
             {#if split.suggestions.length > 0}
               <div class="suggestions">
                 {#each split.suggestions as s (s.id)}
@@ -814,107 +980,148 @@
                 {#if split.suggestions.length > 1 && split.suggestions.some((s) => !m.suggestionStatus?.[s.id])}
                   <div class="suggestions-bulk">
                     <button
-                      class="novelist-btn novelist-btn-ghost"
+                      class="novelist-btn novelist-btn-ghost novelist-btn-sm"
                       data-testid="ai-talk-accept-all-suggestions"
                       disabled={chatStreaming}
                       onclick={() => acceptAllSuggestions(i, split.suggestions)}
-                    >Accept all</button>
+                    ><Check size={12} />{t('aiTalk.acceptAll')}</button>
                   </div>
                 {/if}
               </div>
             {/if}
-            <div class="msg-actions">
-              <button onclick={() => copyMessage(m.content)} title="Copy message">Copy</button>
-              {#if i > 0 && messages[i - 1].role === 'user'}
+            {#if !live}
+              <div class="msg-actions">
                 <button
-                  data-testid="ai-talk-retry"
-                  disabled={chatStreaming}
-                  onclick={() => retryMessage(i)}
-                  title="Regenerate this reply"
-                >Retry</button>
-              {/if}
-            </div>
-          {:else}
-            <div class="content">{m.content}</div>
-            {#if m.role === 'user'}
-              <div class="msg-actions user-actions">
-                <button onclick={() => copyMessage(m.content)} title="Copy message">Copy</button>
-                <button
-                  data-testid="ai-talk-edit"
-                  disabled={chatStreaming}
-                  onclick={() => startEditMessage(i)}
-                  title="Edit and re-send (discards later messages)"
-                >Edit</button>
+                  onclick={() => copyMessage(m.content, i)}
+                  title={t('aiTalk.copy')}
+                  aria-label={t('aiTalk.copy')}
+                  class:copied={copiedIndex === i}
+                >{#if copiedIndex === i}<Check size={13} />{:else}<Copy size={13} />{/if}</button>
+                {#if i > 0 && messages[i - 1].role === 'user'}
+                  <button
+                    data-testid="ai-talk-retry"
+                    disabled={chatStreaming}
+                    onclick={() => retryMessage(i)}
+                    title={t('aiTalk.retry')}
+                    aria-label={t('aiTalk.retry')}
+                  ><RotateCcw size={13} /></button>
+                {/if}
               </div>
             {/if}
+          {:else if m.role === 'system'}
+            <details class="memory-card">
+              <summary><Bookmark size={13} />{t('aiTalk.memorySummary')}</summary>
+              <div class="content md">{@html renderChatMarkdown(m.content)}</div>
+            </details>
+          {:else}
+            <div class="content user-card">{m.content}</div>
+            <div class="msg-actions user-actions">
+              <button
+                onclick={() => copyMessage(m.content, i)}
+                title={t('aiTalk.copy')}
+                aria-label={t('aiTalk.copy')}
+                class:copied={copiedIndex === i}
+              >{#if copiedIndex === i}<Check size={13} />{:else}<Copy size={13} />{/if}</button>
+              <button
+                data-testid="ai-talk-edit"
+                disabled={chatStreaming}
+                onclick={() => startEditMessage(i)}
+                title={t('aiTalk.edit')}
+                aria-label={t('aiTalk.edit')}
+              ><Pencil size={13} /></button>
+            </div>
           {/if}
         </div>
       {/each}
       {#if messages.length === 0}
         <div class="empty">
-          <p>Start a conversation. <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> to send.</p>
+          <div class="empty-mark"><Feather size={20} /></div>
+          <p class="empty-title">{t('aiTalk.emptyTitle')}</p>
+          <p class="empty-body">{t('aiTalk.emptyBody')}</p>
+          <div class="starters">
+            {#each STARTERS as key}
+              <button class="starter" onclick={() => useStarter(key)}>{t(`aiTalk.starter.${key}`)}</button>
+            {/each}
+          </div>
         </div>
       {/if}
     </div>
-    <div data-testid="ai-talk-composer">
-      <AiComposer
-        value={chatInput}
-        placeholder="Ask anything..."
-        inputTestId="ai-talk-input"
-        attachments={attachments}
-        mentionVisible={mentionMenuVisible}
-        mentionQuery={mentionQuery}
-        mentionCandidates={mentionCandidates}
-        commandVisible={commandMenuVisible}
-        commandQuery={commandQuery}
-        suggestedSelection={suggestedSelection}
-        busy={chatStreaming}
-        canSend={Boolean(chatInput.trim())}
-        sendTestId="ai-talk-send"
-        stopTestId="ai-talk-stop"
-        onInput={(value) => (chatInput = value)}
-        onSend={sendChat}
-        onStop={cancelChat}
-        onPickMention={pickMention}
-        onPickCommand={pickCommand}
-        onRemoveAttachment={removeAttachment}
-        onClearAttachments={clearAttachments}
-        onAttachSelection={attachSelectionSuggestion}
-        onDismissSelection={dismissSelectionSuggestion}
-      >
-        {#snippet actions()}
-        {#if saveStatus}
-          <span class="save-status" data-testid="ai-talk-save-status">{saveStatus}</span>
-        {/if}
-        <button
-          class="novelist-btn novelist-btn-ghost"
-          data-testid="ai-talk-clear"
-          onclick={clearChat}
-          disabled={chatStreaming}
-          title="Clear current chat"
-        >Clear</button>
-        <button
-          class="novelist-btn novelist-btn-ghost"
-          data-testid="ai-talk-save"
-          onclick={saveChatToProject}
-          disabled={chatStreaming || messages.length === 0}
-          title="Save chat as markdown into &lt;project&gt;/.novelist/chats/"
-        >Save</button>
-        <button
-          class="novelist-btn novelist-btn-ghost"
-          onclick={saveMemory}
-          disabled={chatStreaming || messages.length === 0 || !projectStore.dirPath}
-          title="Save current chat as .novelist/ai/memory.md"
-        >Memory</button>
-        <button
-          class="novelist-btn novelist-btn-ghost"
-          onclick={compactConversation}
-          disabled={chatStreaming || messages.length < 2}
-          title="Compact current conversation"
-        >Compact</button>
-        {/snippet}
-      </AiComposer>
-    </div>
+    <button
+      class="scroll-bottom"
+      data-visible={!stickToBottom && messages.length > 0}
+      onclick={jumpToBottom}
+      title={t('aiTalk.scrollToBottom')}
+      aria-label={t('aiTalk.scrollToBottom')}
+      tabindex={stickToBottom ? -1 : 0}
+    ><ArrowDown size={15} /></button>
+  </div>
+
+  {#if saveStatus}
+    <div class="save-status" data-testid="ai-talk-save-status">{saveStatus}</div>
+  {/if}
+
+  <div data-testid="ai-talk-composer">
+    <AiComposer
+      value={chatInput}
+      placeholder={t('aiTalk.placeholder')}
+      hint={t('aiTalk.hint')}
+      inputTestId="ai-talk-input"
+      attachments={attachments}
+      mentionVisible={mentionMenuVisible}
+      mentionQuery={mentionQuery}
+      mentionCandidates={mentionCandidates}
+      commandVisible={commandMenuVisible}
+      commandQuery={commandQuery}
+      suggestedSelection={suggestedSelection}
+      busy={chatStreaming}
+      canSend={Boolean(chatInput.trim())}
+      sendLabel={t('aiTalk.send')}
+      sendTestId="ai-talk-send"
+      stopTestId="ai-talk-stop"
+      onInput={(value) => (chatInput = value)}
+      onSend={sendChat}
+      onStop={cancelChat}
+      onPickMention={pickMention}
+      onPickCommand={pickCommand}
+      onRemoveAttachment={removeAttachment}
+      onClearAttachments={clearAttachments}
+      onAttachSelection={attachSelectionSuggestion}
+      onDismissSelection={dismissSelectionSuggestion}
+    >
+      {#snippet footer()}
+        <label class="chip chip-strong" title={t('aiTalk.preset')}>
+          <span class="chip-label">{activePresetLabel}</span>
+          <select
+            data-testid="ai-talk-preset-picker"
+            value={activePresetId}
+            onchange={(e) => handlePresetChange(e.currentTarget.value)}
+            aria-label={t('aiTalk.preset')}
+          >
+            <option value="none">{t('aiTalk.noPreset')}</option>
+            {#each promptPresets.all as p (p.id)}
+              <option value={p.id}>{typeof p.icon === 'string' && p.icon ? `${p.icon} ` : ''}{p.name}</option>
+            {/each}
+          </select>
+          <ChevronDown size={11} class="chip-caret" />
+        </label>
+        <label class="chip" title={t('aiTalk.modelProfile')}>
+          <Sparkles size={12} class="chip-icon" />
+          <span class="chip-label">{activeModelLabel}</span>
+          <select
+            data-testid="ai-talk-model-picker"
+            value={aiTalkSettings.value.activeProfileId}
+            onchange={(e) => aiTalkSettings.update({ activeProfileId: e.currentTarget.value })}
+            aria-label={t('aiTalk.modelProfile')}
+          >
+            {#each aiTalkSettings.value.profiles as p (p.id)}
+              <option value={p.id}>{p.model || p.label}</option>
+            {/each}
+          </select>
+          <ChevronDown size={11} class="chip-caret" />
+        </label>
+      {/snippet}
+    </AiComposer>
+  </div>
 </main>
 
 <style>
@@ -926,73 +1133,86 @@
     overflow: hidden;
     color: var(--novelist-text);
     background: var(--novelist-bg);
-    font-size: 14px;
+    font-size: 13px;
   }
-  header {
+
+  /* ---- Toolbar: context usage + icon actions (OpenFic-style) ---- */
+  .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--novelist-border);
-    background: var(--novelist-bg-secondary);
+    gap: 8px;
+    min-height: 30px;
+    padding: 2px 6px 2px 12px;
+    border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border));
   }
-  .header-right {
+  .usage {
     display: flex;
     align-items: center;
-    gap: 6px;
-  }
-  .preset-picker {
-    background: var(--novelist-bg);
-    border: 1px solid var(--novelist-border);
-    color: var(--novelist-text);
-    padding: 2px 4px;
-    border-radius: 3px;
-    font: inherit;
-    font-size: 11px;
-    max-width: 160px;
-  }
-  .save-status {
+    gap: 10px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
     font-size: 11px;
     color: var(--novelist-text-secondary);
-    margin-right: auto;
-    align-self: center;
+  }
+  .usage-metric {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--novelist-text-tertiary);
+  }
+  .num {
     font-variant-numeric: tabular-nums;
   }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex: 0 0 auto;
+  }
+  .tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--novelist-text-secondary);
+    cursor: pointer;
+    transition: background 80ms, color 80ms;
+  }
+  .tool:not(:disabled):hover,
+  .tool.active {
+    color: var(--novelist-text);
+    background: var(--novelist-bg-secondary);
+  }
+  .tool:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
   .settings-drawer {
-    padding: 10px;
+    padding: 10px 12px;
     background: var(--novelist-bg-secondary);
     border-bottom: 1px solid var(--novelist-border);
+    max-height: 50%;
+    overflow-y: auto;
   }
-  /* Collapsible "Thinking" block for reasoning models — mirrors the
-     ai-agent panel's tool-card style. */
-  .card {
-    border: 1px solid var(--novelist-border);
-    border-radius: 4px;
-    background: var(--novelist-bg-secondary);
-    overflow: hidden;
-  }
-  .card summary {
-    cursor: pointer;
-    padding: 4px 8px;
-    font-size: 11px;
-    color: var(--novelist-text-secondary);
-    user-select: none;
-  }
-  .card pre {
-    margin: 0;
-    padding: 6px 10px;
-    background: var(--novelist-bg);
-    font-family: inherit;
-    font-size: 11px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    max-height: 280px;
-    overflow: auto;
+
+  /* ---- Transcript ---- */
+  .chat-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
   }
   .chat {
     flex: 1;
     overflow-y: auto;
-    padding: 10px;
+    padding: 14px clamp(10px, 4%, 22px) 20px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1000,72 +1220,253 @@
   .msg {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 6px;
+    animation: msg-in 0.28s ease-out;
   }
-  .msg .role {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  @keyframes msg-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  .msg.user {
+    align-items: flex-end;
+  }
+  .content {
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  .user-card {
+    max-width: 88%;
+    padding: 8px 11px;
+    border: 1px solid var(--novelist-border);
+    border-radius: 10px;
+    background: var(--novelist-bg-secondary);
+    color: var(--novelist-text);
+    white-space: pre-wrap;
+    line-height: 1.5;
+  }
+
+  /* Assistant replies render as flowing prose — no bubble. */
+  .md {
+    font-family: var(--novelist-editor-font);
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--novelist-text);
+  }
+  .md :global(p) { margin: 0 0 0.6em; }
+  .md :global(p:last-child) { margin-bottom: 0; }
+  .md :global(h1),
+  .md :global(h2),
+  .md :global(h3),
+  .md :global(h4) {
+    margin: 0.9em 0 0.4em;
+    font-size: 1.02em;
+    font-weight: 600;
+    color: var(--novelist-heading-color, var(--novelist-text));
+  }
+  .md :global(h1) { font-size: 1.15em; }
+  .md :global(:first-child) { margin-top: 0; }
+  .md :global(ul),
+  .md :global(ol) { margin: 0.2em 0 0.6em; padding-left: 1.4em; }
+  .md :global(ul) { list-style: disc; }
+  .md :global(ol) { list-style: decimal; }
+  .md :global(li::marker) { color: var(--novelist-text-tertiary); }
+  .md :global(li) { margin: 0.15em 0; }
+  .md :global(blockquote) {
+    margin: 0.4em 0 0.7em;
+    padding: 2px 0 2px 12px;
+    border-left: 2px solid var(--novelist-blockquote-border, var(--novelist-border));
     color: var(--novelist-text-secondary);
   }
-  .msg .content {
+  .md :global(code) {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 0.86em;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--novelist-code-bg, var(--novelist-bg-secondary));
+  }
+  .md :global(pre) {
+    margin: 0.4em 0 0.8em;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--novelist-code-bg, var(--novelist-bg-secondary));
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  .md :global(pre code) { padding: 0; background: none; font-size: 12px; }
+  .md :global(hr) { border: 0; border-top: 1px solid var(--novelist-border); margin: 0.8em 0; }
+  .md :global(.md-link) { color: var(--novelist-link-color, var(--novelist-accent)); text-decoration: underline; text-underline-offset: 2px; }
+  .md.streaming > :global(:last-child)::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: -0.12em;
+    border-radius: 1px;
+    background: var(--novelist-accent);
+    animation: caret-blink 1s steps(2, start) infinite;
+  }
+  @keyframes caret-blink { to { visibility: hidden; } }
+
+  /* ---- Step rows (reasoning / thinking) ---- */
+  .step {
+    display: flex;
+    flex-direction: column;
+  }
+  .step-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    color: var(--novelist-text-secondary);
+    cursor: pointer;
+    text-align: left;
+    align-self: flex-start;
+  }
+  .step-head.static { cursor: default; }
+  .step-head :global(.step-icon) { color: var(--novelist-text-tertiary); flex: 0 0 auto; }
+  .step-head :global(.step-chevron) {
+    color: var(--novelist-text-tertiary);
+    transition: transform 120ms ease;
+  }
+  .step.open .step-head :global(.step-chevron) { transform: rotate(90deg); }
+  .step-head:not(.static):hover,
+  .step-head:not(.static):hover :global(.step-icon),
+  .step-head:not(.static):hover :global(.step-chevron) {
+    color: var(--novelist-text);
+  }
+  .step-title { font-weight: 500; }
+  .step-meta {
+    color: var(--novelist-text-tertiary);
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+  }
+  .step-body {
+    position: relative;
+    margin: 6px 0 2px 6px;
+    padding-left: 14px;
+  }
+  .step-body::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--novelist-text) 18%, transparent);
+  }
+  .step-body pre {
+    margin: 0;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--novelist-text-secondary);
     white-space: pre-wrap;
     word-wrap: break-word;
-    padding: 6px 8px;
-    border-radius: 6px;
+    max-height: 320px;
+    overflow: auto;
+  }
+  /* Shimmering label while the model is working. */
+  .shimmer {
+    position: relative;
+    color: var(--novelist-text-tertiary);
+  }
+  .shimmer::after {
+    content: attr(data-text);
+    position: absolute;
+    inset: 0;
+    color: transparent;
+    background-image: linear-gradient(
+      90deg,
+      transparent 35%,
+      var(--novelist-text) 50%,
+      transparent 65%
+    );
+    background-size: 250% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    animation: shimmer 2.4s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    from { background-position: 100% 0; }
+    to { background-position: -150% 0; }
+  }
+
+  .memory-card {
+    border: 1px dashed var(--novelist-border);
+    border-radius: 10px;
+    padding: 6px 10px;
     background: var(--novelist-bg-secondary);
   }
-  .msg.user .content {
-    background: var(--novelist-accent);
-    color: #fff;
-    align-self: flex-end;
-    max-width: 85%;
+  .memory-card summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--novelist-text-secondary);
+    user-select: none;
   }
+  .memory-card[open] summary { margin-bottom: 6px; }
+
+  /* ---- Hover toolbar under each message ---- */
   .msg-actions {
     display: flex;
-    gap: 4px;
+    gap: 2px;
+    min-height: 24px;
     opacity: 0;
-    transition: opacity 100ms;
+    transition: opacity 120ms;
   }
   .msg:hover .msg-actions,
   .msg:focus-within .msg-actions {
     opacity: 1;
   }
-  .msg-actions.user-actions {
-    align-self: flex-end;
-  }
   .msg-actions button {
-    border: 1px solid var(--novelist-border);
-    background: var(--novelist-bg);
-    color: var(--novelist-text-secondary);
-    border-radius: 3px;
-    padding: 1px 6px;
-    font-size: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--novelist-text-tertiary);
     cursor: pointer;
   }
   .msg-actions button:hover:not(:disabled) {
     color: var(--novelist-text);
     background: var(--novelist-bg-secondary);
   }
+  .msg-actions button.copied { color: #2da44e; }
   .msg-actions button:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: default;
   }
+
   .edit-box {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    width: 100%;
   }
   .edit-box textarea {
     width: 100%;
     box-sizing: border-box;
     background: var(--novelist-bg);
-    border: 1px solid var(--novelist-accent);
+    border: 1px solid color-mix(in srgb, var(--novelist-text) 40%, var(--novelist-border));
     color: var(--novelist-text);
-    border-radius: 4px;
-    padding: 6px 8px;
+    border-radius: 10px;
+    padding: 8px 10px;
     font: inherit;
+    line-height: 1.5;
     resize: vertical;
+    outline: none;
   }
   .edit-actions {
     display: flex;
@@ -1075,25 +1476,161 @@
   .suggestions {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-top: 4px;
+    gap: 8px;
   }
   .suggestions-bulk {
     display: flex;
     justify-content: flex-end;
   }
+
+  /* ---- Empty state ---- */
   .empty {
-    color: var(--novelist-text-secondary);
+    margin: auto;
+    width: 90%;
+    max-width: 300px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     text-align: center;
-    margin-top: 30%;
+    padding: 24px 0;
+  }
+  .empty-mark {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    margin-bottom: 12px;
+    border-radius: 12px;
+    color: var(--novelist-accent);
+    background: var(--novelist-accent-soft, var(--novelist-bg-secondary));
+  }
+  .empty-title {
+    margin: 0 0 4px;
+    font-family: var(--novelist-editor-font);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--novelist-text);
+  }
+  .empty-body {
+    margin: 0 0 16px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--novelist-text-secondary);
+  }
+  .starters {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+  }
+  .starter {
+    padding: 8px 12px;
+    border: 1px solid var(--novelist-border);
+    border-radius: 8px;
+    background: var(--novelist-bg);
+    color: var(--novelist-text);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 120ms, background 120ms, box-shadow 120ms;
+  }
+  .starter:hover {
+    border-color: color-mix(in srgb, var(--novelist-text) 22%, var(--novelist-border));
+    background: var(--novelist-bg-secondary);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  }
+
+  /* ---- Floating scroll-to-bottom ---- */
+  .scroll-bottom {
+    position: absolute;
+    right: 14px;
+    bottom: 12px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--novelist-border);
+    border-radius: 999px;
+    background: var(--novelist-bg);
+    color: var(--novelist-text);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    cursor: pointer;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(6px);
+    transition: opacity 0.16s ease-out, transform 0.16s ease-out, visibility 0s linear 0.16s;
+  }
+  .scroll-bottom[data-visible='true'] {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition: opacity 0.16s ease-out, transform 0.16s ease-out;
+  }
+
+  .save-status {
+    margin: 0 12px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    background: var(--novelist-bg-secondary);
+    font-size: 11px;
+    color: var(--novelist-text-secondary);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ---- Composer footer chips (preset / model) ---- */
+  .chip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 26px;
+    min-width: 0;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--novelist-text-secondary);
+    cursor: pointer;
+    transition: background 80ms, color 80ms;
+  }
+  .chip:hover {
+    color: var(--novelist-text);
+    background: var(--novelist-bg-secondary);
+  }
+  .chip-strong {
+    color: var(--novelist-text);
+    font-weight: 600;
+  }
+  .chip :global(.chip-icon) { flex: 0 0 auto; }
+  .chip :global(.chip-caret) { flex: 0 0 auto; opacity: 0.55; }
+  .chip-label {
+    min-width: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 12px;
   }
-  kbd {
-    background: var(--novelist-bg-secondary);
-    border: 1px solid var(--novelist-border);
-    border-radius: 3px;
-    padding: 1px 4px;
-    font-size: 11px;
+  /* The native select stays for keyboard + a11y but is invisible and
+     stretched over the chip, so the chip width hugs the visible label. */
+  .chip select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    opacity: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 0;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
   }
-  /* Button styles live in app.css — .novelist-btn / -primary / -ghost. */
+  .chip:focus-within {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--novelist-accent) 60%, transparent);
+  }
 </style>

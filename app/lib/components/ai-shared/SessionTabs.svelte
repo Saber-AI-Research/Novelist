@@ -310,40 +310,56 @@
 </div>
 
 <style>
+  /* OpenFic-style tab strip: tinted bar, tabs sit on its bottom edge and
+     the active one opens into the panel below. */
   .session-tabs {
     position: relative;
     display: flex;
-    align-items: stretch;
+    align-items: flex-end;
+    padding: 0 4px 0 6px;
     border-bottom: 1px solid var(--novelist-border);
-    background: var(--novelist-bg-secondary);
-    min-height: 28px;
+    background: color-mix(in srgb, var(--novelist-bg-secondary) 70%, var(--novelist-bg));
+    min-height: 32px;
   }
   .scroll {
     flex: 1;
     display: flex;
+    align-items: flex-end;
+    gap: 2px;
     overflow-x: auto;
-    scrollbar-width: thin;
+    scrollbar-width: none;
+    margin-bottom: -1px;
   }
   .scroll::-webkit-scrollbar {
-    height: 4px;
+    display: none;
   }
   .tab {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 0 2px 0 8px;
-    border-right: 1px solid var(--novelist-border);
-    font-size: 11px;
+    height: 27px;
+    padding: 0 3px 0 8px;
+    min-width: 72px;
+    max-width: 160px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    border-radius: 7px 7px 0 0;
+    font-size: 11.5px;
     color: var(--novelist-text-secondary);
     background: transparent;
     transition: background 80ms, color 80ms;
-    max-width: 180px;
   }
   .tab.active {
+    height: 29px;
     background: var(--novelist-bg);
+    border-color: var(--novelist-border);
+    color: var(--novelist-text);
+    font-weight: 500;
+  }
+  .tab:not(.active):hover {
+    background: color-mix(in srgb, var(--novelist-text) 5%, transparent);
     color: var(--novelist-text);
   }
-  .tab:hover { background: var(--novelist-bg); }
   .title {
     flex: 1;
     min-width: 0;
@@ -377,7 +393,7 @@
     background: transparent;
     color: var(--novelist-text-tertiary, var(--novelist-text-secondary));
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 5px;
     font-size: 12px;
     line-height: 1;
     opacity: 0;
@@ -390,7 +406,8 @@
     color: var(--novelist-text);
   }
   .new-btn {
-    margin: 2px 4px;
+    align-self: center;
+    margin: 0 2px;
     height: 22px;
     width: 22px;
     min-height: 22px;
@@ -401,6 +418,7 @@
     position: relative;
     display: flex;
     align-items: center;
+    align-self: center;
   }
   .menu-btn {
     margin: 2px 0 2px 4px;
@@ -418,7 +436,7 @@
     min-width: 150px;
     padding: 4px;
     border: 1px solid var(--novelist-border);
-    border-radius: 4px;
+    border-radius: 8px;
     background: var(--novelist-bg);
     box-shadow: 0 8px 24px color-mix(in srgb, var(--novelist-text) 18%, transparent);
   }
