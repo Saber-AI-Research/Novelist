@@ -860,12 +860,19 @@ mod tests {
         let det = detections.clone();
         let file_for_task = file.clone();
         let processor = tokio::spawn(async move {
+            // Under heavy parallel test load FSEvents can take well over the
+            // idle window to deliver the *first* event; only start idling out
+            // once the burst has begun, or the processor quits before any
+            // event arrives and the test reports zero detections.
+            let mut seen_any = false;
             loop {
-                let first = match tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await
+                let wait = if seen_any { 1500 } else { 10_000 };
+                let first = match tokio::time::timeout(Duration::from_millis(wait), rx.recv()).await
                 {
                     Ok(Some(p)) => p,
                     _ => break, // idle past timeout → burst done
                 };
+                seen_any = true;
                 let mut paths: HashSet<PathBuf> = HashSet::new();
                 paths.insert(first);
                 let debounce = tokio::time::sleep(Duration::from_millis(200));
@@ -902,7 +909,7 @@ mod tests {
         }
 
         // Wait for the processor to drain and idle out.
-        let _ = tokio::time::timeout(Duration::from_secs(3), processor).await;
+        let _ = tokio::time::timeout(Duration::from_secs(15), processor).await;
 
         let seen = detections.lock().unwrap().clone();
         assert!(

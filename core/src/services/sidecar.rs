@@ -26,8 +26,12 @@ const KEY_HASH_SEP: &str = "~";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(all(test, unix))]
-static CONFINED_READ_SWAP_TARGET: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
-    std::sync::OnceLock::new();
+// (storage dir, symlink target). Keyed by storage dir so a concurrently
+// running test that reads from a different confined dir can't consume it.
+#[allow(clippy::type_complexity)]
+static CONFINED_READ_SWAP_TARGET: std::sync::OnceLock<
+    std::sync::Mutex<Option<(PathBuf, PathBuf)>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 static CONFINED_REMOVE_FAILURE: std::sync::OnceLock<std::sync::Mutex<Option<(PathBuf, usize)>>> =
@@ -64,21 +68,28 @@ fn run_confined_remove_failure_hook(storage_path: &Path) -> Result<(), AppError>
 }
 
 #[cfg(all(test, unix))]
-fn set_confined_read_swap_target(target: PathBuf) {
+fn set_confined_read_swap_target(storage_path: PathBuf, target: PathBuf) {
     *CONFINED_READ_SWAP_TARGET
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap() = Some(target);
+        .unwrap() = Some((storage_path, target));
 }
 
 #[cfg(all(test, unix))]
 fn run_confined_read_swap_hook(storage_path: &Path, file_name: &str) {
-    let Some(target) = CONFINED_READ_SWAP_TARGET
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take()
-    else {
+    let target = {
+        let mut hook = CONFINED_READ_SWAP_TARGET
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap();
+        match hook.as_ref() {
+            Some((expected, _)) if expected == storage_path => {
+                hook.take().map(|(_, target)| target)
+            }
+            _ => None,
+        }
+    };
+    let Some(target) = target else {
         return;
     };
     let path = storage_path.join(file_name);
@@ -1354,7 +1365,7 @@ mod tests {
             .unwrap();
         let outside_file = outside.path().join("outside.md");
         std::fs::write(&outside_file, b"external sentinel").unwrap();
-        set_confined_read_swap_target(outside_file.clone());
+        set_confined_read_swap_target(storage.absolute.clone(), outside_file.clone());
 
         let error = read_bytes_confined(&storage, "chapter.md.draft.md", 1024)
             .await
@@ -1442,7 +1453,7 @@ mod tests {
             .unwrap();
         let outside_file = outside.path().join("outside.md");
         std::fs::write(&outside_file, b"external sentinel").unwrap();
-        set_confined_read_swap_target(outside_file.clone());
+        set_confined_read_swap_target(storage.absolute.clone(), outside_file.clone());
 
         let error = read_bytes_confined(&storage, "chapter.md.draft.md", 4)
             .await
