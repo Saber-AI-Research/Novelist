@@ -125,7 +125,11 @@ test.describe('[regression] Online Publish dialog behavior', () => {
     expect(draftIndices.some((index) => index > publishIndex)).toBe(true);
 
     const convertCall = calls[convertIndex];
-    expect(convertCall.args.markdown).toBe(MOCK_FILE_CONTENTS[`${MOCK_PROJECT_DIR}/Chapter 1.md`]);
+    // Ghost renders the title field itself, so the leading `# Chapter 1` is
+    // dropped from the body before conversion (no duplicated title).
+    const savedBody = MOCK_FILE_CONTENTS[`${MOCK_PROJECT_DIR}/Chapter 1.md`];
+    expect(savedBody.startsWith('# Chapter 1\n\n')).toBe(true);
+    expect(convertCall.args.markdown).toBe(savedBody.slice('# Chapter 1\n\n'.length));
     expect(String(convertCall.args.markdown)).not.toContain('UNSAVED ONLINE MARKER');
 
     const publishCall = calls[publishIndex];
