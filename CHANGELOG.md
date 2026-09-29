@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-29
+
+### Added
+
+- Redesigned AI Talk panel: assistant replies render as Markdown prose,
+  collapsible reasoning rows with live timers, hover copy/retry/edit actions,
+  a context-usage toolbar, starter prompts, jump-to-bottom scrolling, and a
+  rounded composer with preset/model chips and a circular send button.
+- Edit-suggestion cards show added/removed character counts, and Chinese
+  suggestions now diff per character instead of as a whole paragraph.
+- Sidebar file rows show a CJK-aware word count and last-edited time (can be
+  turned off from the sort menu), plus a dot on files with unsaved changes.
+
+### Changed
+
+- `Cmd+Up` / `Cmd+Down` move one logical editor line (with `Shift` extending
+  the selection) instead of jumping to the document edges.
+
+### Fixed
+
+- Ghost and WordPress posts no longer repeat the title inside the body; the
+  leading H1 is dropped because those platforms render the title field.
+- Copying a large selection from the editor context menu keeps the selection
+  and focus in place instead of collapsing the caret to the click position.
+
 ## [0.5.1] - 2026-09-11
 
 ### Fixed
