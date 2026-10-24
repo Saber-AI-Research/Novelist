@@ -1007,32 +1007,6 @@ fn release_window_resources<R: tauri::Runtime>(app: &tauri::AppHandle<R>, owner_
 }
 
 #[cfg(test)]
-mod window_lifecycle_tests {
-    use super::*;
-    use services::file_watcher::{install_watcher_for_test, owns_watcher_resources};
-
-    #[test]
-    fn destroyed_window_stops_its_file_watcher_and_keeps_other_windows() {
-        let app = tauri::test::mock_app();
-        app.manage(FileWatcherState::new());
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("chapter.md");
-        std::fs::write(&file, "text").unwrap();
-        let state = app.state::<FileWatcherState>();
-        let mut closed = install_watcher_for_test(&state, "closed", dir.path(), &file);
-        let mut open = install_watcher_for_test(&state, "open", dir.path(), &file);
-
-        release_window_resources(app.handle(), "closed");
-
-        // The debounce task was cancelled and every resource of that label freed.
-        assert_eq!(closed.try_recv(), Ok(()));
-        assert!(!owns_watcher_resources(&state, "closed"));
-        assert!(owns_watcher_resources(&state, "open"));
-        assert!(open.try_recv().is_err());
-    }
-}
-
-#[cfg(test)]
 mod external_open_payload_tests {
     use super::*;
     use std::path::Path;

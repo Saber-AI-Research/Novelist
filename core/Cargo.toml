@@ -115,5 +115,3 @@ panic = "unwind"
 tempfile = "3"
 serial_test = "3"
 wiremock = "0.6"
-# `tauri::test::mock_app` for window-lifecycle tests; no extra crates.
-tauri = { version = "2", features = ["test"] }

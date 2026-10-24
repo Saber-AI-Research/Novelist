@@ -1016,11 +1016,32 @@ mod tests {
         let _watcher = create_watcher(&original_dir, &canonical_dir, tx).unwrap();
         let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
 
+        // A loaded machine can take seconds to start the FSEvents stream, and
+        // writes made before it is live are never reported. Touch an untracked
+        // probe until the watcher delivers something, then start the burst.
+        let probe = original_dir.join("probe.txt");
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        for attempt in 0u32.. {
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "watcher never became live"
+            );
+            fs::write(&probe, attempt.to_string()).unwrap();
+            if let Ok(batch) = tokio::time::timeout(
+                Duration::from_millis(500),
+                next_watch_batch(&mut rx, &mut cancel_rx),
+            )
+            .await
+            {
+                let batch = batch.expect("watcher channel closed");
+                process_watch_batch(batch, TEST_OWNER, &state, &emitter).await;
+                break;
+            }
+        }
+
         let writer = {
             let file = file.clone();
             tokio::spawn(async move {
-                // Let the FSEvents stream warm up before the first write.
-                tokio::time::sleep(Duration::from_millis(300)).await;
                 // 20 rapid in-place edits, faster than the debounce window, so
                 // many coalesce; only the LAST state must be detected.
                 for i in 1..=20u32 {
@@ -1031,15 +1052,32 @@ mod tests {
         };
         let key = tracking_key(&file);
         let final_hash = blake3::hash(b"v20");
-        // Under heavy parallel test load FSEvents can be slow to deliver.
+        // Under heavy parallel test load FSEvents can be slow to deliver, and a
+        // batch hashed between a write's truncate and its data can leave the
+        // last edit to the 1 s poll — production's safety net. Run the poll
+        // only after the watcher itself reported a change through the symlinked
+        // root (the regression this test guards), once the writer is done.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while state.inner.lock().unwrap().tracked_files[&key].hash != final_hash {
-            let batch =
-                tokio::time::timeout_at(deadline, next_watch_batch(&mut rx, &mut cancel_rx))
-                    .await
-                    .expect("final external content not detected — auto-reload would never fire")
-                    .expect("watcher channel closed");
-            process_watch_batch(batch, TEST_OWNER, &state, &emitter).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "final external content not detected — auto-reload would never fire"
+            );
+            match tokio::time::timeout(
+                Duration::from_secs(2),
+                next_watch_batch(&mut rx, &mut cancel_rx),
+            )
+            .await
+            {
+                Ok(batch) => {
+                    let batch = batch.expect("watcher channel closed");
+                    process_watch_batch(batch, TEST_OWNER, &state, &emitter).await;
+                }
+                Err(_) if writer.is_finished() && !emitter.files.lock().unwrap().is_empty() => {
+                    poll_external_changes_inner(&state, TEST_OWNER).unwrap();
+                }
+                Err(_) => {}
+            }
         }
         writer.await.unwrap();
 
@@ -1229,6 +1267,23 @@ mod tests {
         .expect("stopped watch loop must end");
         assert!(batch.is_none());
         assert!(!owns_watcher_resources(&state, "closed"));
+    }
+
+    #[test]
+    fn test_stopping_one_window_keeps_other_windows_watching() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("chapter.md");
+        fs::write(&file, "text").unwrap();
+        let state = FileWatcherState::new();
+        let mut closed = install_watcher_for_test(&state, "closed", dir.path(), &file);
+        let mut open = install_watcher_for_test(&state, "open", dir.path(), &file);
+
+        stop_file_watcher_inner("closed", &state).unwrap();
+
+        assert_eq!(closed.try_recv(), Ok(()));
+        assert!(!owns_watcher_resources(&state, "closed"));
+        assert!(owns_watcher_resources(&state, "open"));
+        assert!(open.try_recv().is_err());
     }
 
     fn track(state: &FileWatcherState, path: &Path) {
