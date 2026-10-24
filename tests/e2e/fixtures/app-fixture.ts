@@ -228,10 +228,9 @@ export const test = base.extend<{
      /**
       * Release blocked operations and reset updater/portable state, then fully
       * reset the mock and browser storage. Returns the residue observed after
-      * the release and before the full reset.
+      * the release (`beforeReset`) and right after the full reset (`afterReset`).
       */
-     cleanup: () => Promise<FixtureResidue>;
-     getResidue: () => Promise<FixtureResidue>;
+     cleanup: () => Promise<{ beforeReset: FixtureResidue; afterReset: FixtureResidue }>;
    };
 }>({
   allowedBrowserErrors: [[], { option: true }],
@@ -957,25 +956,22 @@ export const test = base.extend<{
            if (typeof caches !== 'undefined') {
              await Promise.all((await caches.keys()).map(key => caches.delete(key)));
            }
+           const cacheKeysAfterReset = typeof caches === 'undefined' ? [] : (await caches.keys()).sort();
            const resetAll = Reflect.get(state, 'resetAll');
            if (typeof resetAll !== 'function') throw new Error('Full Tauri mock reset unavailable');
+           // No await from here on: the app keeps running (pollers, timers), so
+           // the post-reset residue must be read in the same task as the reset.
            resetAll.call(state);
            localStorage.clear();
            sessionStorage.clear();
-           return beforeReset;
-         });
-       },
-       async getResidue() {
-         return app.evaluate(async () => {
-           const state = Reflect.get(window, '__TAURI_MOCK_STATE__') as Record<string, unknown>;
-           const residue = Reflect.get(state, 'residue');
-           if (typeof residue !== 'object' || residue === null) throw new Error('Tauri mock residue unavailable');
-           return {
+           const afterResidue = Reflect.get(state, 'residue') as Omit<FixtureResidue, 'localStorageKeys' | 'sessionStorageKeys' | 'cacheKeys'>;
+           const afterReset: FixtureResidue = {
              localStorageKeys: Object.keys(localStorage).sort(),
              sessionStorageKeys: Object.keys(sessionStorage).sort(),
-             cacheKeys: typeof caches === 'undefined' ? [] : (await caches.keys()).sort(),
-             ...(residue as Omit<FixtureResidue, 'localStorageKeys' | 'sessionStorageKeys' | 'cacheKeys'>),
+             cacheKeys: cacheKeysAfterReset,
+             ...afterResidue,
            };
+           return { beforeReset, afterReset };
          });
        },
      };
@@ -988,7 +984,7 @@ export const test = base.extend<{
      const unexpected = () => browserErrors.filter(error => !allowedBrowserErrors.some(pattern => pattern.test(error)));
      expect(unexpected(), 'browser errors during the test').toEqual([]);
      if (!testInfo.title.includes('@task23')) return;
-     const beforeReset = await mockState.cleanup();
+    const { beforeReset, afterReset } = await mockState.cleanup();
      // Read before the full reset, which would clear waiters and the
      // unhandled-command log itself: anything still pending after the fixture
      // released every blocked operation was leaked by the test or the app.
@@ -996,7 +992,7 @@ export const test = base.extend<{
        pendingWaiterCount: beforeReset.pendingWaiterCount,
        unhandledCommandCount: beforeReset.unhandledCommandCount,
      }, 'residue after releasing blocked operations').toEqual({ pendingWaiterCount: 0, unhandledCommandCount: 0 });
-     expect(await mockState.getResidue(), 'residue after the full mock reset').toEqual(EMPTY_FIXTURE_RESIDUE);
+    expect(afterReset, 'residue after the full mock reset').toEqual(EMPTY_FIXTURE_RESIDUE);
      expect(unexpected(), 'browser errors during cleanup').toEqual([]);
    }, { auto: true }],
  });

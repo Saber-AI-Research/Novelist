@@ -2163,6 +2163,9 @@ mod tests {
         assert!(!saved.common_hashes.contains_key("b.md"));
     }
 
+    // Windows cannot create control-character file names, so the case cannot
+    // occur there.
+    #[cfg(unix)]
     #[tokio::test]
     #[serial(sync_data_dir)]
     async fn unsyncable_filenames_are_skipped_without_stopping_sync() {
