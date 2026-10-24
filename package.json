@@ -1,12 +1,14 @@
 {
   "name": "novelist",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm build:plugin:literary && vite build",
+    "build": "pnpm build:plugins && vite build",
+    "build:plugins": "pnpm build:plugin:literary && pnpm build:plugin:book-translation",
     "build:plugin:literary": "vite build --config plugins/literary-commentary/vite.config.ts",
+    "build:plugin:book-translation": "vite build --config plugins/book-translation/vite.config.ts",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",

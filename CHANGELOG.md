@@ -7,6 +7,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-24
+
+### Added
+
+- Literary commentary accepts `「…」` as well as `【…】` for inline comments,
+  including IME commits and edits at an earlier caret position.
+- Book Translation projects: import an EPUB or TXT book into one `.novtrans`
+  file per chapter (one segment per paragraph line) and translate it
+  side by side in the bundled Book Translation editor, with on-demand Google
+  Cloud Translation or LLM reference translations requested through the host
+  (API keys never reach the plugin frame and are sent in request headers).
+
+### Fixed
+
+- Regenerated translation-project IPC bindings instead of masking the missing
+  command with a frontend type assertion; discard late imported-chapter reads
+  after a project generation changes.
+- Share plugin document state and per-file save queues across split panes;
+  reject expired document tokens and expose racing edits for explicit recovery.
+  Updated bundled plugins to the token-bound message protocol.
+- Preserve committed IME punctuation after composition instead of treating
+  every `insertFromComposition` event as a duplicate, restoring comment entry.
+- Scope expected-write suppression to the saving window so other windows still
+  receive changes; preserve UTF-16 BOM/endianness and symlink save targets.
+- Isolate WebDAV projects by a portable, persistent project identity. Refuse
+  ambiguous legacy name-based namespaces until the user backs up, reconciles,
+  and explicitly acknowledges migration; never delete the legacy remote data.
+  The first device to migrate a legacy folder claims it; other devices are
+  offered "Join existing sync namespace" instead of silently starting a
+  separate remote copy. The identity file is written atomically and never
+  replaced by a crashed or concurrent creation.
+- WebDAV sync propagates deletions and renames in both directions using the
+  last common version (deleted local files keep a recoverable copy in app
+  data); an edit always wins over a deletion. Unchanged remote files are no
+  longer downloaded on every sync, completed transfers keep their baselines
+  when a run fails late, and one unsyncable filename no longer stops the sync.
+- "Test Connection" works with the masked stored password, and a changed
+  WebDAV URL or username never reuses the stored password for another host.
+- Closing a window stops its file watcher; saved files are no longer re-read
+  and re-hashed every second; rename suppression entries expire and are
+  cleared when a rename fails.
+- Listing or restoring snapshots no longer waits for a WebDAV upload; a
+  damaged snapshot folder no longer breaks snapshots, and a replaced snapshot's
+  remote copy is kept when the new upload fails.
+- Removed the unused Rust rope/viewport backend (`rope_*` commands).
+- Generate usable plugin manifests and starter commands, and preserve working
+  plugin instances when a reload fails.
+- Serialize project names safely into TOML and create template files with
+  exclusive temporary files and no-clobber publication.
+- Cmd+N no longer creates files inside a different project through a
+  remembered folder; out-of-project default/last-used folders fall back to the
+  project root. The built-in `{date:…}` filename templates can be saved again.
+- Recognise scratch files on Windows paths so Cmd+S asks where to save.
+- Copy as Rich Text escapes `<`, `&` and `"` (e.g. `Vec<String>`) and only
+  turns http(s) targets into links.
+- A delayed sidebar refresh can no longer show the previous project's files;
+  a delayed sync-config read can no longer leave the old project's auto-sync
+  timer running after a project switch.
+- Word counts treat the full-width space (U+3000) as whitespace and count each
+  kana like an ideograph; Styled Copy keeps full-width paragraph indents.
+- Writing statistics updates are serialized per project and written
+  atomically, so concurrent windows cannot lose or corrupt them.
+- A manual update check during a download no longer resets the progress
+  dialog; "Upload all images" uploads an image referenced twice only once.
+- The zh-CN goal progress label shows the goal again; the image-host
+  show/hide button and the portable-mode banner are localized.
+- Conflict "Keep mine" writes the text in the editor (it wrote the last-saved
+  text and marked the tab clean, losing the new edits).
+- A file open in two split panes is saved from the pane that holds the edits
+  on quit, project switch, close-tab Save and auto-save; the other pane's copy
+  then shows the saved text. A duplicate opened later starts from the unsaved
+  text, and turning split view off keeps a dirty duplicate's edits.
+- Keys typed while a save is writing keep the tab dirty instead of being
+  marked saved; writes of one file never overlap.
+- Cmd+W on an empty split column closes the column instead of the window
+  (which skipped the unsaved-changes prompt); a close prompt can no longer
+  remove a different tab when tabs change behind it.
+- Cmd+S, rename, go-to-line and outline navigation work in Zen mode.
+- "Restart Now" after an update asks about unsaved changes first.
+- Auto-save covers every pane, never overwrites a file whose external-change
+  conflict is still open, and reports write failures. Conflicts arriving
+  together are shown one after another instead of replacing each other.
+- Documents longer than 5000 lines show an exact CJK-aware word count instead
+  of a length/4 estimate (also fixing jumps in daily writing stats).
+- Typing `$$` on a new line, or a leading `---` with no closing line, no
+  longer strips headings, images and tables from the rest of the document.
+- Dropping several images with auto-upload writes each URL into its own link;
+  pasted, dropped and context-menu uploads land on the right link even after
+  typing elsewhere meanwhile. "Upload all images" applies its URLs to the
+  current text and handles an image used twice.
+- Cmd+B right after `**word**` and turning a heading off at the start of a
+  line keep the caret on the same text (no more error at the end of the
+  document). Heading and block-type conversions keep `#hashtag`, `#话题#` and
+  `#1` text.
+- Moving between adjacent image lines no longer shows (or uploads) the other
+  image; local images no longer flash "Image not found" when a file opens.
+- Formulas render in every split pane once KaTeX finishes loading.
+- Outline clicks, Go to Line and find-next are no longer reverted after a
+  click that followed a large scroll.
+- Enter on an unmatched `/command` closes the slash menu.
+- Cmd+S and other app shortcuts work while typing in a table cell and save
+  the cell's text; clicking in and out of a table no longer reformats it.
+- The slash and image menus open at the cursor at non-100% zoom; Zen line
+  dimming follows the caret immediately; selecting all of a huge file stays
+  fast while scrolling.
+- Simplified/Traditional conversion no longer discards text typed while the
+  dictionary loads; command palette names follow a language switch.
+- Draft notes for files outside the project are keyed by a hash of the
+  file's canonical path, so same-named files in different folders no longer
+  share a note. Notes stored under the old basename key are no longer read.
+- Deleting a file or folder is confined to the open project: paths outside
+  it and the project root itself are refused, and a symlink is removed
+  itself, never its target.
+- EPUB import keeps `&amp;`, `&lt;`, numeric character references, common
+  XHTML entities (`&nbsp;`, `&mdash;`, `&hellip;`, curly quotes, accented
+  letters) and the spaces around them and after punctuation in chapter text,
+  book metadata and table-of-contents titles (`Tom &amp; Jerry` no longer
+  becomes `Tom&Jerry`). A malformed chapter fails the import with its path
+  instead of being silently cut short.
+- The recent-projects list is written atomically; an unreadable list is
+  kept as `recent-projects.json.corrupt-*.bak` instead of being replaced by
+  an empty one.
+- Pressing a shortcut twice in quick succession (e.g. AI Agent / AI Talk "new
+  session") runs the command twice; only a native-menu dispatch arriving
+  together with the same keystroke is still dropped as a duplicate.
+- The AI Agent panel is localized (labels, status badges, errors, session
+  menu and save messages).
+- Themed HTML export ("Include theme", the default) works again and no
+  longer leaves a private stylesheet copy in the temp folder.
+- Streamed AI replies no longer garble CJK characters split across network
+  chunks.
+- AI chat sessions and memory files are written atomically inside the
+  project (symlinked `.novelist/ai` folders are refused).
+- Renaming only the letter case of a file works on case-insensitive disks.
+- Styled Copy reads images only from the window's own project and open
+  documents.
+- Kanban and canvas files that fail to parse open read-only with an error
+  instead of as an empty board that overwrites the file; edits are no longer
+  lost when switching tabs within the save delay, and external changes reload.
+- Obsidian canvas connections (`fromNode`/`toNode`, sides) and unknown fields
+  survive a save.
+- A failed or stopped AI Talk compaction keeps the conversation; AI Talk
+  chats no longer leak into another project.
+- Editing a template keeps its mode, description and default filename.
+- Draft notes are flushed to their own project before a project switch; the
+  sync settings form follows the open project.
+- Enter/Escape no longer submit or rename while an input method is composing
+  (sidebar, palettes, kanban, canvas and dialogs).
+- Dialogs are labelled modals with a focus trap, and the tab close button is
+  keyboard-reachable; revealed image-host secrets are hidden again when
+  switching hosts.
+- Book Translation: imported chapters split into paragraphs, project names
+  from book titles are sanitized (`Fate/Zero` → `Fate-Zero`) and path parts
+  are refused, the import dialog cannot be closed or submitted twice while
+  working, unedited chapters are not rewritten on navigation, and typing in
+  one split pane no longer resets the other pane's plugin editor.
+- Literary commentary closes a comment only on the bracket that opened it,
+  so `【此处「风骨」妙】` stays one comment.
+- `pnpm tauri dev` builds every bundled plugin.
+
+### Security
+
+- Plugin iframes are sandboxed into opaque origins, so a plugin can no longer
+  script the app or another plugin's frame. Host and plugins now talk only
+  over a per-document `MessagePort` (`plugins/host-channel.ts`); window
+  messages are ignored and a plugin that navigates its own frame is
+  disconnected. **Third-party UI plugins must adopt the port handshake** and
+  ship a single-file entry (see `docs/references/creating-plugins.md`).
+- Bundled plugin entries ship a strict hash-based Content-Security-Policy
+  (no network, no injected handlers). The Mindmap plugin and overlay render
+  HTML in headings as text instead of executing it.
+- Document content reaches only plugins that declare `read`: panels without
+  it get no `content-update`, and QuickJS plugins without it get no document
+  accessors. The unused `check_tier` permission helper was removed.
+- A plugin's id must equal its folder name and match `[a-z0-9][a-z0-9-]*`,
+  and its `ui.entry` must stay inside the folder, so plugins cannot claim a
+  built-in's id or load code from elsewhere. "Built-in" now means shipped in
+  the app's bundled resources, never a manifest claim.
+- A plugin stuck in native code (for example a catastrophic regular
+  expression) is stopped after 2 s instead of freezing the plugin host: each
+  plugin runs on its own thread outside the host lock.
+- Global settings holding image-host and publishing credentials are written
+  with owner-only permissions (0600) on macOS and Linux.
+- The main window's script policy no longer allows scripts from the plugins
+  folder.
+- Plugin settings are written atomically under a lock, enabling a plugin that
+  fails to start no longer marks it enabled, and bundled plugin updates are
+  staged and renamed into place.
+
 ## [0.6.0] - 2026-09-29
 
 ### Added
@@ -548,8 +737,7 @@ sm.ms 或自定义 HTTP 接口），并直接发布到 Ghost / WordPress / Mediu
 ### Changed
 
 - **Filename now follows the H1 heading on every save** (was first-save
-  only). Manually renaming a file detaches the sync. See spec
-  `docs/superpowers/specs/2026-05-12-h1-filename-ongoing-sync-design.md`.
+  only). Manually renaming a file detaches the sync.
 - **`{title}` in the new-file template implicitly opts in to H1
   rename-on-save.** The dedicated *Sync filename with H1 on save*
   checkbox is gone — its intent is now expressed by whether the
@@ -771,7 +959,7 @@ skill、memory 持久化到项目目录。此外完成文档结构整理、统�
 - **AI Talk settings store** loads project preset / skill assets via
   the new prompt-asset commands
 - **Documentation reorg** — legacy `docs/architecture/`, `docs/design/`,
-  `docs/plans/`, `docs/superpowers/`, and ad-hoc top-level design
+  `docs/plans/`, and ad-hoc top-level design
   docs consolidated under `docs/{design-docs,exec-plans,product-specs,
   references,generated}/`. New top-level `ARCHITECTURE.md` and
   `docs/index.md` for navigation

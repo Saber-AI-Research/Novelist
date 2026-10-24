@@ -1,6 +1,6 @@
 [package]
 name = "novelist"
-version = "0.6.0"
+version = "0.6.1"
 description = "A desktop writing app for novelists"
 authors = ["Chivier Humber"]
 edition = "2021"
@@ -35,7 +35,6 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
 specta = { version = "=2.0.0-rc.25", features = ["function", "derive", "tokio"] }
 notify = { version = "7", features = ["macos_fsevent"] }
 blake3 = "1"
-ropey = "1"
 pulldown-cmark = "0.13"
 ammonia = "4"
 csscolorparser = "0.8"
@@ -116,3 +115,5 @@ panic = "unwind"
 tempfile = "3"
 serial_test = "3"
 wiremock = "0.6"
+# `tauri::test::mock_app` for window-lifecycle tests; no extra crates.
+tauri = { version = "2", features = ["test"] }

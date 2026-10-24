@@ -1,6 +1,6 @@
 # Release Notes
 
-Last updated: 2026-07-20
+Last updated: 2026-10-24
 
 Release notes are maintainer-facing update logs for shipped versions. They
 summarize the release band, link the specs and design docs that matter, and
@@ -13,9 +13,10 @@ For the canonical chronological change list, use
 
 | Version | Date | Theme | Primary docs |
 |---|---:|---|---|
+| [v0.6.1](2026-10-24-v0.6.1.md) | 2026-10-24 | Review hardening: save integrity, plugin sandboxing, sync deletions, Book Translation. | [`plugin-system.md`](../design-docs/plugin-system.md), [`file-lifecycle.md`](../design-docs/file-lifecycle.md) |
 | [v0.4.1](2026-07-20-v0.4.1.md) | 2026-07-20 | Inline math editing and zoom-correct Block Type submenu positioning. | [`editor.md`](../design-docs/editor.md) |
 | [v0.4.0](2026-07-20-v0.4.0.md) | 2026-07-20 | Styled Copy, update-safe publishing, editor workflow reliability, and lifecycle hardening. | [`2026-07-20-styled-copy.md`](../product-specs/2026-07-20-styled-copy.md), [`2026-05-06-publish.md`](../product-specs/2026-05-06-publish.md), [`file-lifecycle.md`](../design-docs/file-lifecycle.md) |
-| [v0.2.6](2026-05-23-v0.2.6.md) | 2026-05-23 | Reliability hardening, portable distribution groundwork, and release prep. | [`file-lifecycle.md`](../design-docs/file-lifecycle.md), [`2026-05-19-windows-portable-zip-design.md`](../superpowers/specs/2026-05-19-windows-portable-zip-design.md), [`2026-05-19-single-file-open-routing-design.md`](../superpowers/specs/2026-05-19-single-file-open-routing-design.md) |
+| [v0.2.6](2026-05-23-v0.2.6.md) | 2026-05-23 | Reliability hardening, portable distribution groundwork, and release prep. | [`file-lifecycle.md`](../design-docs/file-lifecycle.md) |
 | [v0.2.4](2026-05-14-v0.2.4.md) | 2026-05-14 | Image hosting, publishing, filename macros, and sidebar/editor polish. | [`2026-05-06-image-host.md`](../product-specs/2026-05-06-image-host.md), [`2026-05-06-publish.md`](../product-specs/2026-05-06-publish.md), [`2026-05-07-v0.2.4-rename-and-macros.md`](../product-specs/2026-05-07-v0.2.4-rename-and-macros.md) |
 
 Older releases are tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md). Add
