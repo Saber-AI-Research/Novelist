@@ -24,6 +24,12 @@ export const commands = {
 	 *  Returns the absolute path of the created file.
 	 */
 	createScratchFile: () => typedError<string, string>(__TAURI_INVOKE("create_scratch_file")),
+	/**
+	 *  Delete a scratch file made by [`create_scratch_file`] (after Save As).
+	 *  Only `novelist_scratch_<millis>.md` regular files directly inside the
+	 *  scratch cache directory can be removed.
+	 */
+	deleteScratchFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_scratch_file", { path })),
 	createDirectory: (parentDir: string, name: string) => typedError<string, string>(__TAURI_INVOKE("create_directory", { parentDir, name })),
 	/**
 	 *  Rename a file or folder in place.
@@ -48,7 +54,12 @@ export const commands = {
 	 *  ("a.md" -> "a 2.md"). Rejects moving a folder into its own descendant.
 	 */
 	moveItem: (projectDir: string, sourcePath: string, targetDir: string) => typedError<RenameItemResult, string>(__TAURI_INVOKE("move_item", { projectDir, sourcePath, targetDir })),
-	deleteItem: (path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { path })),
+	/**
+	 *  Delete a file or folder inside `project_dir`. The entry is resolved
+	 *  through its canonical parent, so a symlink is removed itself (never its
+	 *  target), and neither the project root nor anything outside it can go.
+	 */
+	deleteItem: (projectDir: string, path: string) => typedError<null, string>(__TAURI_INVOKE("delete_item", { projectDir, path })),
 	checkPandoc: () => typedError<PandocStatus_Serialize, string>(__TAURI_INVOKE("check_pandoc")),
 	/**
 	 *  Persist the user's pandoc binary override. `None` clears it (revert
@@ -56,6 +67,11 @@ export const commands = {
 	 */
 	setPandocPath: (path: string | null) => typedError<null, string>(__TAURI_INVOKE("set_pandoc_path", { path })),
 	stageExportCss: (requestId: string, css: string) => typedError<string, string>(__TAURI_INVOKE("stage_export_css", { requestId, css })),
+	/**
+	 *  Remove the stylesheet staged for `request_id` when the export is cancelled
+	 *  before `export_project` takes ownership of it. Unknown ids are a no-op.
+	 */
+	discardStagedExportCss: (requestId: string) => typedError<null, string>(__TAURI_INVOKE("discard_staged_export_css", { requestId })),
 	cancelExportProject: (requestId: string) => typedError<boolean, string>(__TAURI_INVOKE("cancel_export_project", { requestId })),
 	exportProject: (inputFiles: string[], outputPath: string, format: string, extraArgs: string[], requestId: string | null, projectDir: string | null) => typedError<ExportProjectResult_Serialize, string>(__TAURI_INVOKE("export_project", { inputFiles, outputPath, format, extraArgs, requestId, projectDir })),
 	detectProject: (dirPath: string) => typedError<{
@@ -170,8 +186,8 @@ export const commands = {
 	 *  interval regardless of watcher coverage.
 	 *
 	 *  Cheap by design: an mtime stat gates the blake3 hash, so unchanged files
-	 *  cost one `stat` each. Self-writes are suppressed only when the observed hash
-	 *  equals the exact encoded hash registered by the Rust write path.
+	 *  cost one `stat` each. Only the saving window's self-write is suppressed, and
+	 *  only when its exact encoded hash matches; other owners still receive it.
 	 */
 	pollExternalChanges: () => typedError<ExternalFileChangePayload[], string>(__TAURI_INVOKE("poll_external_changes")),
 	getRecentProjects: () => typedError<RecentProject[], string>(__TAURI_INVOKE("get_recent_projects")),
@@ -192,8 +208,8 @@ export const commands = {
 	/**  Unload (deactivate) a plugin. */
 	unloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("unload_plugin", { pluginId })),
 	/**
-	 *  Unload then re-load a plugin from disk. Used to pick up edits to
-	 *  `manifest.toml` / `index.js` without restarting the app.
+	 *  Replace a plugin from disk only after the new instance loads successfully.
+	 *  Failed edits leave the previous plugin and its commands available.
 	 */
 	reloadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("reload_plugin", { pluginId })),
 	/**  Get all commands registered by active plugins. */
@@ -204,7 +220,8 @@ export const commands = {
 	setPluginDocumentState: (content: string, selectionFrom: number, selectionTo: number, wordCount: number) => typedError<null, string>(__TAURI_INVOKE("set_plugin_document_state", { content, selectionFrom, selectionTo, wordCount })),
 	/**
 	 *  Enable or disable a plugin (persists to settings file).
-	 *  When enabling, also loads the plugin. When disabling, unloads it.
+	 *  Enabling loads the plugin's QuickJS entry first; a plugin that fails to
+	 *  start stays disabled. Disabling unloads it.
 	 */
 	setPluginEnabled: (pluginId: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("set_plugin_enabled", { pluginId, enabled })),
 	/**
@@ -215,26 +232,6 @@ export const commands = {
 	/**  Return the absolute path of ~/.novelist/plugins/, creating it if missing. */
 	getPluginsDir: () => typedError<string, string>(__TAURI_INVOKE("get_plugins_dir")),
 	isPortableMode: () => __TAURI_INVOKE<PortableModeInfo>("is_portable_mode"),
-	/**  Open a large file into a Rope. Returns metadata. */
-	ropeOpen: (path: string) => typedError<RopeDocumentMeta, string>(__TAURI_INVOKE("rope_open", { path })),
-	/**
-	 *  Get text for a range of lines. Lines are 0-indexed.
-	 *  Returns the text and actual line range (clamped to document bounds).
-	 */
-	ropeGetLines: (fileId: string, startLine: number, endLine: number) => typedError<ViewportContent, string>(__TAURI_INVOKE("rope_get_lines", { fileId, startLine, endLine })),
-	/**
-	 *  Apply an edit to the Rope at character offsets.
-	 *  `from` and `to` are character (not byte) offsets relative to the full document.
-	 *  `insert` is the replacement text (empty string = deletion).
-	 */
-	ropeApplyEdit: (fileId: string, fromChar: number, toChar: number, insert: string) => typedError<number, string>(__TAURI_INVOKE("rope_apply_edit", { fileId, fromChar, toChar, insert })),
-	/**  Save the Rope to disk atomically. */
-	ropeSave: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_save", { fileId })),
-	/**  Close a Rope document and release memory. */
-	ropeClose: (fileId: string) => typedError<null, string>(__TAURI_INVOKE("rope_close", { fileId })),
-	/**  Get the character offset for a given line number (0-indexed). */
-	ropeLineToChar: (fileId: string, line: number) => typedError<number, string>(__TAURI_INVOKE("rope_line_to_char", { fileId, line })),
-	ropeSnapshot: (fileId: string) => typedError<RopeSnapshot, string>(__TAURI_INVOKE("rope_snapshot", { fileId })),
 	readDraftNote: (projectDir: string, filePath: string) => typedError<string | null, string>(__TAURI_INVOKE("read_draft_note", { projectDir, filePath })),
 	writeDraftNote: (projectDir: string, filePath: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_draft_note", { projectDir, filePath, content })),
 	deleteDraftNote: (projectDir: string, filePath: string) => typedError<null, string>(__TAURI_INVOKE("delete_draft_note", { projectDir, filePath })),
@@ -249,6 +246,7 @@ export const commands = {
 	listTemplates: () => typedError<TemplateInfo[], string>(__TAURI_INVOKE("list_templates")),
 	createProjectFromTemplate: (templateId: string, projectName: string, parentDir: string, locale: string) => typedError<string, string>(__TAURI_INVOKE("create_project_from_template", { templateId, projectName, parentDir, locale })),
 	inspectLiterarySource: (path: string) => typedError<LiterarySourceInspection, string>(__TAURI_INVOKE("inspect_literary_source", { path })),
+	createBookTranslationProject: (request: CreateBookTranslationProjectRequest) => typedError<CreateBookTranslationProjectResult, string>(__TAURI_INVOKE("create_book_translation_project", { request })),
 	createLiteraryStudyProject: (request: CreateLiteraryStudyProjectRequest) => typedError<CreateLiteraryStudyProjectResult, string>(__TAURI_INVOKE("create_literary_study_project", { request })),
 	readLiteraryStudyOverview: (projectDir: string) => typedError<LiteraryStudyOverview, string>(__TAURI_INVOKE("read_literary_study_overview", { projectDir })),
 	replaceLiteraryStudyBook: (request: ReplaceLiteraryStudyBookRequest) => typedError<ReplaceLiteraryStudyBookResult, string>(__TAURI_INVOKE("replace_literary_study_book", { request })),
@@ -314,7 +312,12 @@ export const commands = {
 	 */
 	convertMarkdownToHtml: (markdown: string) => typedError<string, string>(__TAURI_INVOKE("convert_markdown_to_html", { markdown })),
 	convertMarkdownToStyledHtml: (markdown: string) => typedError<string, string>(__TAURI_INVOKE("convert_markdown_to_styled_html", { markdown })),
-	readStyledCopyImage: (path: string, allowedRoots: string[]) => typedError<StyledCopyImage, string>(__TAURI_INVOKE("read_styled_copy_image", { path, allowedRoots })),
+	/**
+	 *  Read a local image for styled copy. The path must lie inside the calling
+	 *  window's registered project or the folder of one of its open documents;
+	 *  the backend's per-window capabilities decide, not the frontend.
+	 */
+	readStyledCopyImage: (path: string) => typedError<StyledCopyImage, string>(__TAURI_INVOKE("read_styled_copy_image", { path })),
 	writeStyledClipboard: (html: string, plainText: string) => typedError<null, string>(__TAURI_INVOKE("write_styled_clipboard", { html, plainText })),
 	/**
 	 *  Read-only credentials check per platform. Returns a short
@@ -468,7 +471,12 @@ export const commands = {
 	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
 	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
 	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
-	testSyncConnection: (webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { webdavUrl, username, password })),
+	testSyncConnection: (projectDir: string, webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { projectDir, webdavUrl, username, password })),
+	/**
+	 *  Join the namespace another device created when it migrated this project's
+	 *  legacy WebDAV folder (`SyncStatus.adoptable_project_id`).
+	 */
+	adoptSyncIdentity: (projectDir: string, projectId: string) => typedError<null, string>(__TAURI_INVOKE("adopt_sync_identity", { projectDir, projectId })),
 };
 
 /* Types */
@@ -693,6 +701,23 @@ export type CoverRef = {
 	extension: string,
 	mime: string,
 	bytes: number,
+};
+
+export type CreateBookTranslationProjectRequest = {
+	projectName: string,
+	parentDir: string,
+	sourcePath: string,
+	title: string,
+	author: string | null,
+	sourceLanguage: string | null,
+	targetLanguage: string,
+	chapters: LiteraryChapterDraft[],
+};
+
+export type CreateBookTranslationProjectResult = {
+	projectPath: string,
+	firstChapterPath: string,
+	chapterCount: number,
 };
 
 export type CreateLiteraryStudyProjectRequest = {
@@ -2017,19 +2042,6 @@ export type ResolvedView = {
 	sidebar_font_size: number,
 };
 
-export type RopeDocumentMeta = {
-	file_id: string,
-	total_lines: number,
-	total_bytes: number,
-};
-
-export type RopeSnapshot = {
-	text: string,
-	generation: number,
-	total_lines: number,
-	total_chars: number,
-};
-
 export type RouteResult = {
 	/**
 	 *  `Some(label)` — Rust has delivered to the winner; FE caller may stop.
@@ -2090,6 +2102,8 @@ export type SyncConfig = {
 	username: string,
 	password: string,
 	interval_minutes: number,
+	/**  Explicitly leave an unidentifiable legacy `novelist/{name}` tree untouched. */
+	legacy_remote_acknowledged?: boolean,
 };
 
 export type SyncConfigMasked = {
@@ -2098,14 +2112,23 @@ export type SyncConfigMasked = {
 	username: string,
 	password: string,
 	interval_minutes: number,
+	legacy_remote_acknowledged: boolean,
 };
 
 export type SyncStatus = {
 	last_sync: string | null,
+	/**  Files whose new content or deletion was propagated to the remote. */
 	files_uploaded: number,
+	/**  Files whose new content or deletion was propagated to this project. */
 	files_downloaded: number,
 	errors: string[],
 	in_progress: boolean,
+	/**
+	 *  Set when another device already moved this project's legacy
+	 *  `novelist/{name}` tree into `novelist-sync/{id}`. Joining that namespace
+	 *  requires an explicit `adopt_sync_identity` call with this ID.
+	 */
+	adoptable_project_id: string | null,
 };
 
 export type TemplateFile = {
@@ -2350,17 +2373,6 @@ export type ViewConfig_Serialize = {
 	show_hidden_files?: boolean | null,
 	wrap_file_names?: boolean | null,
 	sidebar_font_size?: number | null,
-};
-
-export type ViewportContent = {
-	/**  The text content for the requested line range */
-	text: string,
-	/**  Actual start line (0-indexed) */
-	start_line: number,
-	/**  Actual end line (exclusive, 0-indexed) */
-	end_line: number,
-	/**  Total lines in document (can change after edits) */
-	total_lines: number,
 };
 
 export type WriteFileIfUnchangedResult = "written" | "conflict";

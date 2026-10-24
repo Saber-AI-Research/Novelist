@@ -80,10 +80,34 @@ export function markdownToHtml(md: string): string {
   return htmlLines.join('\n');
 }
 
+const STASH_RE = /\u0000(\d+)\u0000/g;
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/\u0000/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 /** Convert inline markdown syntax to HTML. */
 function convertInline(text: string): string {
+  // Escape first so literal `<`, `&` and `"` in prose (`Vec<String>`, `a<b`)
+  // stay text instead of becoming markup in the pasted HTML.
+  text = escapeHtml(text);
+  // Code spans and link targets are parked behind NUL-delimited placeholders
+  // so the emphasis rules below can't rewrite their contents.
+  const stash: string[] = [];
+  const hold = (html: string) => `\u0000${stash.push(html) - 1}\u0000`;
   // Inline code (must be first to prevent inner processing)
-  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/`([^`]+)`/g, (_m, code: string) => hold(`<code>${code}</code>`));
+  // Links [text](url "optional title"). Only web links survive the copy;
+  // `javascript:` and other schemes keep just their text.
+  text = text.replace(
+    /\[([^\]]+)\]\(\s*([^\s)]+)(?:\s+[^)]*)?\)/g,
+    (_m, label: string, url: string) => (/^https?:\/\//i.test(url) ? `<a href="${hold(url)}">${label}</a>` : label),
+  );
   // Bold+italic (***text***)
   text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
   // Bold (**text** or __text__)
@@ -94,9 +118,7 @@ function convertInline(text: string): string {
   text = text.replace(/(?<!\w)_(.+?)_(?!\w)/g, '<em>$1</em>');
   // Strikethrough (~~text~~)
   text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
-  // Links [text](url)
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-  return text;
+  return text.replace(STASH_RE, (_m, index: string) => stash[Number(index)]);
 }
 
 /** Strip markdown syntax to produce plain text. */

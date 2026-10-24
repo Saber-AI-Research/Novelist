@@ -43,6 +43,20 @@ describe('newFileSettings shim', () => {
     spy.mockRestore();
   });
 
+  it.each(['{date:YYMMDD}-{N}', '{date:YYYYMMDD}-{title}'])(
+    'setTemplate accepts the built-in date-macro template %s and stores it unexpanded',
+    (template) => {
+      const spy = vi.spyOn(settingsStore, 'writeNewFile').mockResolvedValue();
+      expect(() => newFileSettings.setTemplate(template)).not.toThrow();
+      expect(spy).toHaveBeenCalledWith({ template });
+      spy.mockRestore();
+    },
+  );
+
+  it('setTemplate still rejects a macro-only template with no number or title slot', () => {
+    expect(() => newFileSettings.setTemplate('{date:YYMMDD}')).toThrow();
+  });
+
   it('setDetectFromFolder routes through writeNewFile', () => {
     const spy = vi.spyOn(settingsStore, 'writeNewFile').mockResolvedValue();
     newFileSettings.setDetectFromFolder(false);

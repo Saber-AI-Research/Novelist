@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { EditorView } from '@codemirror/view';
+import { EditorView } from '@codemirror/view';
+import { EditorState } from '@codemirror/state';
+import { i18n } from '$lib/i18n';
+import type * as CommandsModule from '$lib/stores/commands.svelte';
 
 /**
  * [contract] registerAppCommands — central command registration site. We
@@ -79,7 +82,7 @@ vi.mock('$lib/stores/extensions.svelte', () => ({
 }));
 
 vi.mock('$lib/components/ai-talk/sessions.svelte', () => ({
-  aiTalkSessions: { create: aiTalkCreate },
+  aiTalkSessions: { requestNewSession: aiTalkCreate },
 }));
 
 vi.mock('$lib/components/ai-agent/sessions.svelte', () => ({
@@ -579,6 +582,8 @@ describe('[contract] copy-rich-text / copy-plain-text', () => {
     const v = viewWith('hello', 0, 0);
     registerAppCommands(ctx({ getActiveEditorView: () => v as unknown as EditorView }));
     await (handlerFor('copy-rich-text')() as unknown as Promise<void>);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith('hello');
   });
 
   it('copy-plain-text writes the markdown-stripped text', async () => {
@@ -682,5 +687,91 @@ describe('[contract] high-level handlers delegate to ctx', () => {
     registerAppCommands(ctx({ [key]: fn } as any));
     handlerFor(id)();
     expect(fn).toHaveBeenCalled();
+  });
+});
+
+describe('[regression] async editor commands apply to the live document', () => {
+  function realView(doc: string) {
+    const parent = document.createElement('div');
+    document.body.appendChild(parent);
+    return new EditorView({ state: EditorState.create({ doc }), parent });
+  }
+
+  it('upload-all writes URLs at the links\' current positions after typing during the upload', async () => {
+    tabsState.activeTab = { id: 'a', fileName: 'a.md', filePath: '/p/a.md' };
+    const view = realView('![a](img/a.png)\n![b](img/b.png)\n');
+    uploadAllInDocument.mockImplementationOnce((async () => {
+      view.dispatch({ changes: { from: 0, insert: 'typed meanwhile\n' } });
+      return {
+        successes: [
+          { original: 'img/a.png', url: 'https://cdn/a.png' },
+          { original: 'img/b.png', url: 'https://cdn/b.png' },
+        ],
+        failures: [],
+      };
+    }) as never);
+    registerAppCommands(ctx({ getActiveEditorView: () => view }));
+
+    await (handlerFor('image-host.upload-all')() as unknown as Promise<void>);
+    await vi.waitFor(() => expect(view.state.doc.toString()).toContain('https://cdn/b.png'));
+
+    expect(view.state.doc.toString()).toBe('typed meanwhile\n![a](https://cdn/a.png)\n![b](https://cdn/b.png)\n');
+    view.destroy();
+  });
+
+  it('upload-all replaces an image referenced twice once per occurrence', async () => {
+    tabsState.activeTab = { id: 'a', fileName: 'a.md', filePath: '/p/a.md' };
+    const view = realView('![x](img/x.png) and ![y](img/x.png)');
+    uploadAllInDocument.mockImplementationOnce((async () => ({
+      successes: [
+        { original: 'img/x.png', url: 'https://cdn/x.png' },
+        { original: 'img/x.png', url: 'https://cdn/x.png' },
+      ],
+      failures: [],
+    })) as never);
+    registerAppCommands(ctx({ getActiveEditorView: () => view }));
+
+    await (handlerFor('image-host.upload-all')() as unknown as Promise<void>);
+    await vi.waitFor(() => expect(view.state.doc.toString()).toContain('https://cdn/x.png'));
+
+    expect(view.state.doc.toString()).toBe('![x](https://cdn/x.png) and ![y](https://cdn/x.png)');
+    view.destroy();
+  });
+
+  it('chinese-s2t does not overwrite text typed while the dictionary loads', async () => {
+    const view = realView('简体');
+    simplifiedToTraditional.mockImplementationOnce(async (s: string) => {
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '新字' } });
+      return `T:${s}`;
+    });
+    registerAppCommands(ctx({ getActiveEditorView: () => view }));
+
+    await (handlerFor('chinese-s2t')() as unknown as Promise<void>);
+
+    expect(view.state.doc.toString()).toBe('简体新字');
+    view.destroy();
+  });
+});
+
+describe('[regression] palette labels follow the active language', () => {
+  it('re-resolves label and secondary label after switching locale', async () => {
+    // The registry module is mocked above; this test needs its real resolver.
+    const { getSecondaryLabel } = await vi.importActual<typeof CommandsModule>('$lib/stores/commands.svelte');
+    await i18n.setLocale('en');
+    await i18n.preloadAll();
+    registerAppCommands(ctx());
+    const cmd = registered().find((r) => r.id === 'toggle-sidebar')! as unknown as CommandsModule.Command;
+    const english = i18n.tIn('en', 'command.toggleSidebar');
+    const chinese = i18n.tIn('zh-CN', 'command.toggleSidebar');
+    expect(english).not.toBe(chinese);
+
+    expect(cmd.label).toBe(english);
+    expect(getSecondaryLabel(cmd)).toBe(chinese);
+
+    await i18n.setLocale('zh-CN');
+    expect(cmd.label).toBe(chinese);
+    expect(getSecondaryLabel(cmd)).toBe(english);
+
+    await i18n.setLocale('en');
   });
 });

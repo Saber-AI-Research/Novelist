@@ -119,9 +119,10 @@ async function clearNativeEvents(page: TauriPage): Promise<void> {
   await page.evaluate(`(() => { window.__NOVELIST_NATIVE_E2E_EVENTS__ = []; return true; })()`);
 }
 
-async function waitForNativeEvent(page: TauriPage, kind: string, filePath: string): Promise<void> {
+async function waitForNativeEvent(page: TauriPage, kind: string | string[], filePath: string): Promise<void> {
+  const kinds = Array.isArray(kind) ? kind : [kind];
   await page.waitForFunction(
-    `Array.isArray(window.__NOVELIST_NATIVE_E2E_EVENTS__) && window.__NOVELIST_NATIVE_E2E_EVENTS__.some((event) => event.kind === ${JSON.stringify(kind)} && event.path === ${JSON.stringify(filePath)})`,
+    `Array.isArray(window.__NOVELIST_NATIVE_E2E_EVENTS__) && window.__NOVELIST_NATIVE_E2E_EVENTS__.some((event) => ${JSON.stringify(kinds)}.includes(event.kind) && event.path === ${JSON.stringify(filePath)})`,
     20_000,
   );
 }
@@ -535,7 +536,9 @@ test('real WKWebView native clipboard, watcher, conflict, and rename lifecycle',
         })
         .toBe(true);
       await externalAtomicWrite(A_PATH, imeExternal);
-      await waitForNativeEvent(page, 'notify', A_PATH);
+      // FSEvents latency can let the 1 s poll observe the write first; the
+      // watcher then sees an already-committed hash and stays silent.
+      await waitForNativeEvent(page, ['notify', 'poll'], A_PATH);
       await waitForNativeEvent(page, 'ime-deferred', A_PATH);
       expect((await editorSnapshot(page)).content).toBe(initialContent);
       await page.evaluate(`(async () => {

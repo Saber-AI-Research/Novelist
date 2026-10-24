@@ -99,10 +99,16 @@ jobs:
           retention-days: 14
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps webkit
+        run: pnpm exec playwright install --with-deps webkit chromium
 
-      - name: Run E2E tests (browser mode)
-        run: pnpm test:e2e:browser
+      - name: Run E2E tests (browser mode, WebKit and Chromium)
+        run: pnpm test:e2e:all-browsers
+
+      - name: Production build (plugins + Vite)
+        run: pnpm build
+
+      - name: Bundle size benchmark
+        run: pnpm test:bench
 
       - name: Cargo format check
         working-directory: core
@@ -116,15 +122,32 @@ jobs:
         working-directory: core
         run: cargo test --locked
 
+      - name: Cargo test (macOS e2e-testing commands)
+        working-directory: core
+        run: cargo test --locked --features e2e-testing --lib commands::e2e
+
       - name: Real Pandoc 3.10 CJK and styled-copy matrices
         run: pnpm test:rust:pandoc
 
   check-windows-pandoc:
     runs-on: windows-latest
+    env:
+      PANDOC_VERSION: "3.10"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -132,9 +155,36 @@ jobs:
           toolchain: 1.93.1
           components: clippy,rustfmt
 
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Pandoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveName = "pandoc-$env:PANDOC_VERSION-windows-x86_64.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $installDir = Join-Path $env:RUNNER_TEMP "pandoc-$env:PANDOC_VERSION"
+          Invoke-WebRequest -Uri "https://github.com/jgm/pandoc/releases/download/$env:PANDOC_VERSION/$archiveName" -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          $expected = 'bb808d00fd58762299d64582a9b4c3e4b106cd929e62c5f19bcdcb496f1e54ae'
+          if ($actual -ne $expected) { throw "Pandoc archive checksum mismatch: $actual" }
+          Expand-Archive -Path $archivePath -DestinationPath $installDir -Force
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $installDir "pandoc-$env:PANDOC_VERSION")
+
+      - name: Svelte type check
+        run: pnpm check
+
+      - name: Vitest
+        run: pnpm test
+
       - name: Verify full Windows Rust suite
         working-directory: core
         run: cargo test --locked
+
+      - name: Real Pandoc 3.10 CJK and styled-copy matrices
+        working-directory: core
+        run: cargo test --locked --lib real_pandoc -- --ignored --nocapture
 
       - name: Windows strict Clippy
         working-directory: core
@@ -142,6 +192,8 @@ jobs:
 
   check-linux:
     runs-on: ubuntu-latest
+    env:
+      PANDOC_VERSION: "3.10"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -157,6 +209,17 @@ jobs:
             librsvg2-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -175,10 +238,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Cargo check
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Pandoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_name="pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz"
+          archive_sha256="e0f8af62d0f267d22baa5bcefe6d5dda3a097ccc60de794b759fe03159923244"
+          archive_path="${RUNNER_TEMP}/${archive_name}"
+          curl -fsSL \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/${archive_name}" \
+            -o "${archive_path}"
+          printf '%s  %s\n' "${archive_sha256}" "${archive_path}" | sha256sum -c -
+          tar -xzf "${archive_path}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}/bin" >> "${GITHUB_PATH}"
+
+      - name: Svelte type check
+        run: pnpm check
+
+      - name: Vitest
+        run: pnpm test
+
+      - name: Linux strict Clippy
         working-directory: core
-        run: cargo check --locked --all-targets
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Cargo test
         working-directory: core
         run: cargo test --locked
+
+      - name: Real Pandoc 3.10 CJK and styled-copy matrices
+        working-directory: core
+        run: cargo test --locked --lib real_pandoc -- --ignored --nocapture

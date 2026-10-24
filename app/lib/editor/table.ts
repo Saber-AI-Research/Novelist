@@ -5,9 +5,9 @@
  * the table is ALWAYS rendered as a styled <table> widget. Cells are
  * `contenteditable` and edited in place; the rendered table never drops to a
  * raw plain-text view. Edits are serialized back to the markdown source —
- * committed on blur and on every structural change (add/remove row or column,
- * alignment). Hover-anchored toolbars and a right-click context menu provide
- * the structural operations.
+ * committed on blur after a cell edit, before app shortcuts (Cmd+S), and on
+ * every structural change (add/remove row or column, alignment). Hover-anchored
+ * toolbars and a right-click context menu provide the structural operations.
  *
  * Architecture: block decorations (Decoration.replace with block: true) MUST
  * be provided via a StateField, not a ViewPlugin — CM6 enforces this so it can
@@ -22,6 +22,8 @@ import {
 import { syntaxTree } from '@codemirror/language';
 import { StateField, type EditorState, type Range } from '@codemirror/state';
 import { imeComposingField } from './ime-guard';
+import { rootScale } from './root-scale';
+import { isBlockContainer } from './markdown-extensions';
 
 /* ── Model ────────────────────────────────────────────────── */
 
@@ -214,10 +216,9 @@ function getTableRanges(state: EditorState): BlockRange[] {
   const ranges: BlockRange[] = [];
   syntaxTree(state).iterate({
     enter(node) {
-      if (node.name === 'Table') {
-        ranges.push({ from: node.from, to: node.to });
-        return false;
-      }
+      if (node.name !== 'Table') return isBlockContainer(node.name);
+      ranges.push({ from: node.from, to: node.to });
+      return false;
     },
   });
   return ranges;
@@ -231,6 +232,19 @@ interface PendingFocus { from: number; row: number; col: number; }
 const tableOwners = new WeakMap<HTMLElement, TableWidget>();
 
 /* ── Table widget ─────────────────────────────────────────── */
+
+/**
+ * Mod+key combinations the cell keeps for its native editing (select all,
+ * clipboard, undo/redo), plus bare modifier presses. Every other Mod+key is
+ * an app shortcut (save, zoom, new window, …).
+ */
+const CELL_NATIVE_MOD_KEYS: Record<string, true> = {
+  a: true, c: true, v: true, x: true, z: true, y: true,
+  meta: true, control: true, shift: true, alt: true,
+};
+function isAppShortcut(e: KeyboardEvent): boolean {
+  return (e.metaKey || e.ctrlKey) && !CELL_NATIVE_MOD_KEYS[e.key.toLowerCase()];
+}
 
 function applyAlign(cell: HTMLElement, align: Align | undefined) {
   cell.style.textAlign = align && align !== 'default' ? align : '';
@@ -273,13 +287,18 @@ function commitFromDom(view: EditorView, tableEl: HTMLElement): boolean {
   return true;
 }
 
-/** Commit and leave a blank, editable paragraph outside the replaced block. */
-function exitTable(view: EditorView, tableEl: HTMLElement): void {
+/**
+ * Leave a blank, editable paragraph outside the replaced block. The table
+ * source is re-serialized only when a cell was edited, so leaving an
+ * untouched hand-aligned table keeps its formatting.
+ */
+function exitTable(view: EditorView, tableEl: HTMLElement, edited: boolean): void {
   const range = currentTableRange(view, tableEl);
   if (!range) return;
-  const parsed = parseMarkdownTable(view.state.doc.sliceString(range.from, range.to));
+  const src = view.state.doc.sliceString(range.from, range.to);
+  const parsed = parseMarkdownTable(src);
   if (!parsed) return;
-  const md = serializeTable({ ...readDomText(tableEl), alignments: parsed.alignments });
+  const md = edited ? serializeTable({ ...readDomText(tableEl), alignments: parsed.alignments }) : src;
   const doc = view.state.doc;
   let after = range.to;
   while (after < doc.length && doc.sliceString(after, after + 1) === '\n') after++;
@@ -381,6 +400,8 @@ class TableWidget extends WidgetType {
   private menu: HTMLElement | null = null;
   private composing = false;
   private commitOnComposeEnd = false;
+  /** A cell received `input` since the last commit; focus changes alone never rewrite the source. */
+  private edited = false;
   private compositionTimer: number | undefined;
   private composingCell: HTMLElement | null = null;
   private controls: HTMLElement | null = null;
@@ -483,7 +504,7 @@ class TableWidget extends WidgetType {
         this.refreshToolbars();
         if (this.commitOnComposeEnd) {
           this.commitOnComposeEnd = false;
-          if (!wrapper.contains(view.root.activeElement)) commitFromDom(view, tableEl);
+          if (!wrapper.contains(view.root.activeElement)) this.commitEdits(view, tableEl);
         }
       }, 0);
     });
@@ -507,8 +528,12 @@ class TableWidget extends WidgetType {
       // reconciled DOM, then commit only a still-connected editing island.
       queueMicrotask(() => {
         if (this.composing) { this.commitOnComposeEnd = true; return; }
-        if (!wrapper.contains(view.root.activeElement)) commitFromDom(view, tableEl);
+        if (!wrapper.contains(view.root.activeElement)) this.commitEdits(view, tableEl);
       });
+    });
+
+    wrapper.addEventListener('input', (e) => {
+      if (cellOf(e.target)) this.edited = true;
     });
 
     // Isolate the cell's editing context from CM6: keyboard/input events that
@@ -516,9 +541,18 @@ class TableWidget extends WidgetType {
     // (otherwise Mod-A select-all, Mod-B bold, typing, etc. hijack the main
     // editor and steal focus from the cell). The cell behaves as its own
     // contenteditable island; we only intercept Tab/Enter/Escape ourselves.
+    // Exception: app shortcuts (Cmd+S, zoom, …) must still reach the window
+    // handler, which treats a cell as a non-editor input and so skips editor
+    // formatting commands. Fold pending cell text into the document first so
+    // a save includes it.
     for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'paste', 'cut', 'copy', 'compositionupdate']) {
       wrapper.addEventListener(type, (e) => {
-        if (cellOf(e.target)) e.stopPropagation();
+        if (!cellOf(e.target)) return;
+        if (type === 'keydown' && isAppShortcut(e as KeyboardEvent) && !this.composing) {
+          this.commitEdits(view, tableEl);
+          return;
+        }
+        e.stopPropagation();
       });
     }
 
@@ -646,7 +680,8 @@ class TableWidget extends WidgetType {
 
     if (e.key === 'Escape') {
       e.preventDefault();
-      exitTable(view, tableEl);
+      exitTable(view, tableEl, this.edited);
+      this.edited = false;
       return;
     }
   }
@@ -733,7 +768,7 @@ class TableWidget extends WidgetType {
     const menu = document.createElement('div');
     menu.className = 'context-menu cm-novelist-table-menu';
     menu.contentEditable = 'false';
-    const scale = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
+    const scale = rootScale();
     menu.style.left = `${e.clientX / scale}px`;
     menu.style.top = `${e.clientY / scale}px`;
 
@@ -819,6 +854,12 @@ class TableWidget extends WidgetType {
     this.menuCleanup = null;
     this.menu.remove();
     this.menu = null;
+  }
+
+  private commitEdits(view: EditorView, tableEl: HTMLElement) {
+    if (!this.edited) return;
+    this.edited = false;
+    commitFromDom(view, tableEl);
   }
 
   /* — CM6 lifecycle — */

@@ -30,4 +30,14 @@ describe('[contract] serializeFinalDomToPlainText', () => {
       'Expected a final sanitized DOM root',
     );
   });
+
+  it('keeps the U+3000 paragraph indent while collapsing ASCII whitespace', () => {
+    const template = document.createElement('template');
+    template.innerHTML = '<p>\u3000\u3000落霞与孤鹜齐飞，\n  秋水共长天一色。 </p><ul><li>\u3000列表</li></ul>';
+    const finalDom = createFinalSanitizedDom(template.content);
+
+    expect(serializeFinalDomToPlainText(finalDom)).toBe(
+      '\u3000\u3000落霞与孤鹜齐飞， 秋水共长天一色。\n\n- \u3000列表\n',
+    );
+  });
 });

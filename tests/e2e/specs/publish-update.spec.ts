@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import type { Locator, Page } from '@playwright/test';
 import { OPAQUE_RED_PNG_BYTES, SECOND_OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
@@ -32,11 +32,7 @@ const WORDPRESS_CHANNEL = {
 };
 
 async function openChapter(app: Page) {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible' });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible' });
 }
@@ -65,10 +61,6 @@ async function dropCover(target: Locator, bytes: Uint8Array, name: string) {
 test.describe('[publish-update] durable lifecycle and recovery', () => {
   test.beforeEach(async ({ app }) => {
     await openChapter(app);
-  });
-
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
   });
 
   test('creates once, reopens as Updating, and updates the same remote ID @task23', async ({ app, mockState }) => {

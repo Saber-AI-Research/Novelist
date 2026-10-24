@@ -1,15 +1,24 @@
 use crate::error::AppError;
+use crate::services::atomic_file::atomic_write_sync;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
+
+/// Serializes the read-modify-write of each project's `daily.json`, so two
+/// windows flushing at once can't drop one update.
+static STATS_WRITE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Extensions counted as narrative content for project-level word stats.
 const COUNTED_EXTS: &[&str] = &["md", "txt", "json", "jsonl", "csv"];
 
 /// CJK-aware word count. Mirrors `app/lib/utils/wordcount.ts`:
-/// - each CJK scalar counts as 1 word
+/// - each CJK scalar (ideographs, kana, CJK punctuation) counts as 1 word
 /// - runs of non-whitespace, non-CJK chars count as 1 Latin word
+/// - the ideographic space U+3000 (Chinese paragraph indent) is whitespace
 ///
 /// Rust `chars()` yields Unicode scalars, so supplementary-plane CJK works
 /// without surrogate-pair handling.
@@ -20,7 +29,7 @@ pub fn count_words_cjk(text: &str) -> usize {
     let mut count: usize = 0;
     let mut in_latin_word = false;
     for ch in text.chars() {
-        if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+        if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\u{3000}' {
             if in_latin_word {
                 count += 1;
                 in_latin_word = false;
@@ -43,11 +52,13 @@ pub fn count_words_cjk(text: &str) -> usize {
     count
 }
 
-fn is_cjk(code: u32) -> bool {
+pub(crate) fn is_cjk(code: u32) -> bool {
     (0x4E00..=0x9FFF).contains(&code)        // CJK Unified Ideographs
         || (0x3400..=0x4DBF).contains(&code) // Extension A
         || (0xF900..=0xFAFF).contains(&code) // Compatibility Ideographs
-        || (0x3000..=0x303F).contains(&code) // CJK Symbols and Punctuation
+        || (0x3001..=0x303F).contains(&code) // CJK Symbols and Punctuation (U+3000 is whitespace)
+        || (0x3040..=0x30FF).contains(&code) // Hiragana + Katakana
+        || (0x31F0..=0x31FF).contains(&code) // Katakana Phonetic Extensions
         || (0xFF00..=0xFFEF).contains(&code) // Fullwidth Forms
         || (0x20000..=0x2A6DF).contains(&code) // Extension B
         || (0x2A700..=0x2B73F).contains(&code) // Extension C
@@ -159,14 +170,10 @@ async fn read_stats(project_dir: &str) -> Result<StatsMap, AppError> {
 
 async fn write_stats(project_dir: &str, map: &StatsMap) -> Result<(), AppError> {
     let path = stats_file(project_dir);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let json = serde_json::to_string_pretty(map)?;
-    let temp = format!("{}.tmp", path.display());
-    tokio::fs::write(&temp, &json).await?;
-    tokio::fs::rename(&temp, &path).await?;
-    Ok(())
+    let json = serde_json::to_vec_pretty(map)?;
+    tokio::task::spawn_blocking(move || atomic_write_sync(&path, &json))
+        .await
+        .map_err(|e| AppError::Custom(format!("spawn_blocking join: {e}")))?
 }
 
 pub async fn record_words(
@@ -174,6 +181,13 @@ pub async fn record_words(
     word_delta: i64,
     minutes: u64,
 ) -> Result<(), AppError> {
+    let lock = STATS_WRITE_LOCKS
+        .lock()
+        .expect("stats lock registry poisoned")
+        .entry(stats_file(project_dir))
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
     let mut map = read_stats(project_dir).await?;
     let today = today_str();
     let entry = map.entry(today).or_default();
@@ -397,6 +411,41 @@ mod tests {
 
     #[tokio::test]
     #[serial(stats_data_dir)]
+    async fn concurrent_record_words_keeps_every_update_and_leaves_no_temp() {
+        let data_tmp = TempDir::new().unwrap();
+        let old = set_data_dir(data_tmp.path());
+
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let writers: Vec<_> = (0..16)
+            .map(|_| {
+                let project = project.clone();
+                tokio::spawn(async move { record_words(&project, 10, 1).await })
+            })
+            .collect();
+        for writer in writers {
+            writer.await.unwrap().unwrap();
+        }
+
+        let overview = get_stats_overview(&project).await.unwrap();
+        assert_eq!(overview.today_words, 160);
+        assert_eq!(overview.today_minutes, 16);
+        let leftovers: Vec<_> = std::fs::read_dir(stats_dir(&project))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name != "daily.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+
+        restore_data_dir(old);
+    }
+
+    #[tokio::test]
+    #[serial(stats_data_dir)]
     async fn test_chapter_stats_reads_files() {
         let data_tmp = TempDir::new().unwrap();
         let old = set_data_dir(data_tmp.path());
@@ -472,5 +521,25 @@ mod tests {
     fn test_count_words_cjk_supplementary_plane() {
         // U+20000 is Extension B — Rust `chars()` yields it as one scalar.
         assert_eq!(count_words_cjk("\u{20000}\u{20001}"), 2);
+    }
+
+    #[test]
+    fn test_count_words_cjk_ideographic_space_is_whitespace() {
+        // Two U+3000 paragraph-indent spaces add nothing.
+        assert_eq!(count_words_cjk("\u{3000}\u{3000}你好"), 2);
+        assert_eq!(count_words_cjk("\u{3000}\u{3000}"), 0);
+        // U+3000 also ends a Latin word.
+        assert_eq!(count_words_cjk("hello\u{3000}world"), 2);
+        // CJK punctuation right after it still counts.
+        assert_eq!(count_words_cjk("\u{3000}「你」"), 3);
+    }
+
+    #[test]
+    fn test_count_words_cjk_kana() {
+        // Each kana counts like an ideograph instead of merging into one word.
+        assert_eq!(count_words_cjk("ひらがな"), 4);
+        assert_eq!(count_words_cjk("カタカナ"), 4);
+        assert_eq!(count_words_cjk("日本語のテキスト"), 8);
+        assert_eq!(count_words_cjk("ㇰㇱ"), 2);
     }
 }

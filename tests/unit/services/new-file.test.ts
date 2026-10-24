@@ -226,6 +226,23 @@ describe('[contract] createNewFileInProject', () => {
     expect(h.cmd.createFile).toHaveBeenCalledWith('/proj/固定目录', 'Chapter 1.md');
   });
 
+  it('ignores a pinned default recorded for another project when a literary-study chapter is active', async () => {
+    h.projectState.dirPath = '/proj';
+    h.tabsState.activeTab = {
+      filePath: '/proj/学习内容/第一卷/0001 第一章.litstudy',
+      fileName: '0001 第一章.litstudy',
+    };
+    h.settingsState.defaultDir = '/other-project/固定目录';
+    h.settingsState.resolveNewFileDir.mockReturnValue('/proj');
+    h.cmd.listDirectory.mockResolvedValue({ status: 'ok', data: [] });
+    h.cmd.createFile.mockResolvedValue({ status: 'ok', data: '/proj/学习内容/第一卷/Chapter 1.md' });
+    h.cmd.readFile.mockResolvedValue({ status: 'ok', data: '' });
+
+    await createNewFileInProject();
+
+    expect(h.cmd.createFile).toHaveBeenCalledWith('/proj/学习内容/第一卷', 'Chapter 1.md');
+  });
+
   it('never redirects project creation beside an external literary-study file', async () => {
     h.projectState.dirPath = '/proj';
     h.tabsState.activeTab = {

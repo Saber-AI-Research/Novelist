@@ -35,11 +35,12 @@ pub struct PluginMeta {
     pub version: String,
     /// Free-form permission tokens declared by the plugin manifest.
     ///
-    /// QuickJS sandbox tiers use `read` / `write` / `fs` / `net`
-    /// (see `services::plugin_host::permissions::check_tier`). The
-    /// IPC plugin bridge gates `ai.*` and `claude.*` methods on
-    /// `ai:http` and `ai:claude-cli` respectively (see
-    /// `app/lib/services/plugin-panel-bridge.ts`).
+    /// The QuickJS sandbox exposes the document accessors only with `read`
+    /// and the replacement API only with `write` (`write` implies `read`);
+    /// it offers no filesystem or network API at all. UI iframe plugins
+    /// receive document content only with `read`, and the host gates its
+    /// privileged translation-reference bridge on `ai:http` for bundled
+    /// plugins (see `app/lib/components/PluginFileEditor.svelte`).
     #[serde(default)]
     pub permissions: Vec<String>,
     #[serde(default)]

@@ -25,6 +25,7 @@ fn prepare_bundled_plugins() {
         ("mindmap", true),
         ("kanban", true),
         ("literary-commentary", true),
+        ("book-translation", true),
     ];
     let bundled_dir = Path::new("bundled-plugins");
     std::fs::create_dir_all(bundled_dir).ok();
@@ -68,6 +69,8 @@ fn prepare_bundled_plugins() {
     println!("cargo:rerun-if-changed=../plugins/kanban/dist/");
     println!("cargo:rerun-if-changed=../plugins/literary-commentary/manifest.toml");
     println!("cargo:rerun-if-changed=../plugins/literary-commentary/dist/");
+    println!("cargo:rerun-if-changed=../plugins/book-translation/manifest.toml");
+    println!("cargo:rerun-if-changed=../plugins/book-translation/dist/");
 }
 
 fn prepare_bundled_templates() {

@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/app-fixture';
+import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 /**
  * Verifies the Welcome-screen recent-project list supports pinning (keeps the
@@ -23,35 +24,27 @@ test.describe('Recent projects: pin and reorder', () => {
     await expect(app.getByTestId('recent-project-0')).not.toContainText('Third Draft');
   });
 
-  test('reorder command fires with the dropped order', async ({ app }) => {
-    await app.waitForSelector('[data-testid="welcome-screen"]', { timeout: 5000 });
+  test('dropping a row reorders the list and persists the dropped order', async ({ app, mockState }) => {
+    await expect(app.getByTestId('recent-project-2')).toContainText('Third Draft');
+    await mockState.reset();
 
-    // Capture the reorderRecentProjects IPC invocations so we can verify the
-    // order payload without depending on internal drag timing.
-    await app.evaluate(() => {
-      (window as any).__reorderCalls = [];
-      const original = (window as any).__TAURI_INTERNALS__.invoke;
-      (window as any).__TAURI_INTERNALS__.invoke = (cmd: string, args: unknown) => {
-        if (cmd === 'reorder_recent_projects') {
-          (window as any).__reorderCalls.push(args);
-        }
-        return original.call((window as any).__TAURI_INTERNALS__, cmd, args);
-      };
-    });
+    // Dispatch the HTML5 drag sequence the row handlers listen to; mouse-driven
+    // dragTo does not reliably start a native drag on every engine.
+    const row0 = app.getByTestId('recent-project-0').locator('..');
+    const row2 = app.getByTestId('recent-project-2').locator('..');
+    const dataTransfer = await app.evaluateHandle(() => new DataTransfer());
+    await row0.dispatchEvent('dragstart', { dataTransfer });
+    await row2.dispatchEvent('dragover', { dataTransfer });
+    await row2.dispatchEvent('drop', { dataTransfer });
+    await row0.dispatchEvent('dragend', { dataTransfer });
 
-    // Simulate dragging row 0 onto row 2 by calling the Welcome component's
-    // drop path directly — dispatch the HTML5 drag events. Playwright's
-    // locator.dragTo is not reliable across the custom dragHandle here.
-    const row0 = app.locator('[data-testid="recent-project-0"]').locator('..');
-    const row2 = app.locator('[data-testid="recent-project-2"]').locator('..');
-    await row0.dragTo(row2);
-
-    // Either the drag succeeded and reorder_recent_projects ran with a 3-path
-    // payload, or the environment did not simulate drag — in which case skip
-    // rather than fail (drag simulation is environment-sensitive).
-    const calls = await app.evaluate(() => (window as any).__reorderCalls);
-    if (calls.length === 0) test.skip();
-    expect(Array.isArray(calls[0].orderedPaths)).toBe(true);
-    expect(calls[0].orderedPaths).toHaveLength(3);
+    await expect(app.getByTestId('recent-project-0')).toContainText('Another Story');
+    await expect(app.getByTestId('recent-project-1')).toContainText('Third Draft');
+    await expect(app.getByTestId('recent-project-2')).toContainText('Test Novel');
+    await expect.poll(async () => (await mockState.getInvokeCalls())
+      .filter(call => call.command === 'reorder_recent_projects')
+      .map(call => call.args.orderedPaths)).toEqual([
+      ['/tmp/another-project', '/tmp/third-project', MOCK_PROJECT_DIR],
+    ]);
   });
 });

@@ -12,10 +12,8 @@ Last updated: 2026-05-27
 ## Completed Plan Archive
 
 Completed implementation drafts are archived in
-[exec-plans/completed/](exec-plans/completed/). Workflow-generated
-Superpowers specs and plans can remain under `docs/superpowers/`; when they
-ship, link them from a release note and copy lasting decisions into product
-specs or design docs.
+[exec-plans/completed/](exec-plans/completed/). Keep lasting decisions in product
+specs or design docs and link those documents from release notes.
 
 Use those files as historical evidence only. For new work, start with:
 

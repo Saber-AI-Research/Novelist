@@ -347,6 +347,21 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             requires_app_reload: false,
           },
         },
+        {
+          id: 'book-translation', name: 'Book Translation', version: '0.1.0',
+          description: 'Translate imported books with aligned references',
+          author: 'Novelist Team', enabled: false, builtin: true,
+          path: '/mock/home/.novelist/plugins/book-translation',
+          permissions: ['read', 'write', 'ui', 'ai:http'],
+          ui: {
+            type: 'file-handler',
+            entry: 'index.html',
+            label: 'Book Translation',
+            file_extensions: ['.novtrans'],
+            creatable: false,
+            requires_app_reload: false,
+          },
+        },
       ];
       const builtinScaffoldedPluginCount = scaffoldedPlugins.length;
 
@@ -789,6 +804,12 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             persistMockContents();
             return null;
           }
+          case 'delete_scratch_file': {
+            deletedFiles.push(args.path);
+            delete fileContents[args.path];
+            persistMockContents();
+            return null;
+          }
           case 'duplicate_file': return args.path.replace('.md', ' copy.md');
         case 'detect_project': {
           const projectDir = args.path || args.dirPath;
@@ -846,6 +867,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
                return new Promise(resolve => exportCssWriteWaiters.push(() => resolve(finish())));
              }
              return finish();
+           }
+           case 'discard_staged_export_css': {
+             delete writtenFiles['/mock/tmp/novelist-export-theme-' + args.requestId + '.html'];
+             return null;
            }
             case 'cancel_export_project': {
               if (cancelExportProjectResponse.error) throw new Error(cancelExportProjectResponse.error);
@@ -1077,7 +1102,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               id: chapter.id,
               volume: chapter.volume,
               title: chapter.title,
-              text: index === 0 ? '天地玄黄宇宙' : '洪荒日月盈昃',
+              text: index === 0 ? 'Hello\\n\\n世界' : 'Another chapter',
             })),
           };
           case 'create_literary_study_project': {
@@ -1086,6 +1111,15 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             return {
               projectPath: target,
               firstChapterPath: target + '/学习内容/第一章.litstudy',
+              chapterCount: args.request.chapters.length,
+            };
+          }
+          case 'create_book_translation_project': {
+            const target = args.request.parentDir.replace(/[\\\\/]$/, '')
+              + '/' + args.request.projectName;
+            return {
+              projectPath: target,
+              firstChapterPath: target + '/翻译内容/0001.novtrans',
               chapterCount: args.request.chapters.length,
             };
           }
@@ -1101,20 +1135,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               preservedChapterCount: 0,
             };
           }
-          case 'rope_open': return { file_id: 'mock-rope-id', total_lines: 100, total_bytes: 5000 };
-          case 'rope_get_lines': return {
-            text: 'Mock content\\n',
-            start_line: args.startLine,
-            end_line: args.endLine,
-            total_lines: 100,
-          };
-          case 'rope_snapshot': return {
-            text: 'Mock Rope snapshot\\n',
-            generation: 7,
-            total_lines: 2,
-            total_chars: 19,
-          };
-          case 'rope_close': case 'rope_save': return null;
           case 'read_draft_note': return null;
           case 'write_draft_note': case 'delete_draft_note': return null;
           case 'has_draft_note': return false;
@@ -1309,9 +1329,11 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             persistMockFiles(); persistMockContents();
             return path;
           }
-           case 'get_sync_config': return { enabled: false, webdav_url: '', username: '', has_password: false, interval_minutes: 30 };
-          case 'save_sync_config': case 'sync_now': return null;
+          case 'get_sync_config': return { enabled: false, webdav_url: '', username: '', password: '****', interval_minutes: 30, legacy_remote_acknowledged: false };
+          case 'save_sync_config': return null;
+          case 'sync_now': return { last_sync: null, files_uploaded: 0, files_downloaded: 0, errors: [], in_progress: false, adoptable_project_id: null };
           case 'test_sync_connection': return true;
+          case 'adopt_sync_identity': return null;
           case 'reveal_in_file_manager': return null;
            case 'log_startup_phase': return null;
            case 'plugin:window|set_title':
@@ -1696,6 +1718,8 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             if (literaryPlugin) literaryPlugin.enabled = false;
             const kanbanPlugin = scaffoldedPlugins.find(plugin => plugin.id === 'kanban');
             if (kanbanPlugin) kanbanPlugin.enabled = true;
+            const bookTranslationPlugin = scaffoldedPlugins.find(plugin => plugin.id === 'book-translation');
+            if (bookTranslationPlugin) bookTranslationPlugin.enabled = false;
 
              publishChannels = [];
              deferredPublishSettingsReadCount = 0;
@@ -2066,10 +2090,22 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           currentWebview: { label: mockWindowLabel, windowLabel: mockWindowLabel },
         },
         convertFileSrc(filePath) {
-          return 'asset://localhost/' + encodeURIComponent(filePath);
+          // A plain browser has no asset: scheme, and WebKit logs an error when a
+          // sandboxed plugin iframe navigates to an unregistered one. about:blank
+          // loads silently; specs that serve a real plugin override this.
+          return 'about:blank#asset=' + encodeURIComponent(filePath);
         },
       };
 
+      // @tauri-apps/api's unlisten() first drops the callback through the event
+      // plugin's internals, then invokes plugin:event|unlisten.
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener(event, eventId) {
+          if (eventListeners[event]) {
+            eventListeners[event] = eventListeners[event].filter(entry => entry.eventId !== eventId);
+          }
+        },
+      };
       // Wrap invoke to also handle event system commands
       const originalInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
       window.__TAURI_INTERNALS__.invoke = function(cmd, args) {

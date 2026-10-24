@@ -23,8 +23,8 @@ vi.mock('@tauri-apps/api/path', () => ({
   homeDir: vi.fn().mockResolvedValue('/home/test'),
 }));
 
-import { extensionStore } from '$lib/stores/extensions.svelte';
-import { commands } from '$lib/ipc/commands';
+import { extensionStore, hasPluginPermission } from '$lib/stores/extensions.svelte';
+import { commands, type PluginInfo } from '$lib/ipc/commands';
 
 function resetStore() {
   // Re-seed the built-ins so each test starts from the published contract.
@@ -350,5 +350,51 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     extensionStore.recordPluginEnabledChange('literary-commentary', true);
     expect(extensionStore.appReloadRequired).toBe(false);
+  });
+
+  it('carries the host-computed builtin flag, never inferring it from the id', async () => {
+    const handler = (id: string, builtin: boolean): PluginInfo => ({
+      id,
+      name: id,
+      version: '1.0.0',
+      permissions: ['read', 'write', 'ai:http'],
+      active: true,
+      description: null,
+      author: null,
+      icon: null,
+      builtin,
+      enabled: true,
+      ui: {
+        type: 'file-handler',
+        entry: 'index.html',
+        width: null,
+        label: id,
+        file_extensions: [`.${id}`],
+        creatable: null,
+        requires_app_reload: false,
+      },
+    });
+    vi.mocked(commands.listPlugins).mockResolvedValue({
+      status: 'ok',
+      data: [handler('book-translation', false), handler('canvas', true)],
+    });
+    vi.mocked(commands.getPluginsDir).mockResolvedValue({ status: 'ok', data: '/plugins' });
+
+    await extensionStore.loadFromPlugins();
+
+    const builtin = Object.fromEntries(extensionStore.fileHandlers.map((h) => [h.pluginId, h.builtin]));
+    expect(builtin).toEqual({ 'book-translation': false, canvas: true });
+  });
+});
+
+describe('[contract] hasPluginPermission', () => {
+  it('mirrors the Rust rule: write implies read, nothing else is implied', () => {
+    expect(hasPluginPermission(['read'], 'read')).toBe(true);
+    expect(hasPluginPermission(['write'], 'read')).toBe(true);
+    expect(hasPluginPermission(['read'], 'write')).toBe(false);
+    expect(hasPluginPermission(['ui'], 'read')).toBe(false);
+    expect(hasPluginPermission([], 'read')).toBe(false);
+    expect(hasPluginPermission(undefined, 'read')).toBe(false);
+    expect(hasPluginPermission(['write'], 'ai:http')).toBe(false);
   });
 });

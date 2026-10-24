@@ -13,8 +13,7 @@ Four modes, picked by file size and line count:
   sizes — prevents CM6 height-map drift that causes click-after-scroll jump
   bugs.
 - **Large** (1-3.5MB): Stripped editable extensions, reduced stat frequency.
-- **Huge** (≥ 3.5MB): Stripped read-only CodeMirror state. Rust-backed
-  viewport editing is a future design and is not wired into `Editor.svelte`.
+- **Huge** (≥ 3.5MB): Stripped read-only CodeMirror state.
 
 **Why tall-doc mode exists**: CM6 estimates heights for off-screen lines.
 WYSIWYG decorations (heading font-size changes, blockquote styling, etc.)
@@ -70,10 +69,28 @@ Image rendering uses `Decoration.replace({block: true, widget})` via a
   CM6's line number gutter automatically generates a line number for the
   replaced range. Do NOT add a `lineNumberWidgetMarker` — it creates
   duplicate line numbers.
+- **No `updateDOM` on `ImageWidget`**: CM6's widget cache hands a cached DOM
+  to any widget of the same class whose `updateDOM` returns true. Image DOM
+  (loaded data, caption, context-menu closure) is specific to src/alt/dir, so
+  a different image must always get fresh DOM.
+- **Document directory at state creation**: `createEditorExtensions` takes
+  `imageDocumentDir`, which initialises `imageDocumentDirField`. Widgets with
+  no directory yet render nothing (never a false "Image not found") and never
+  dispatch from `toDOM`.
+- **Async results land on tracked positions**: paste, drop and "Upload to
+  host" await file writes and network uploads. The drop point and every
+  inserted link's source span are tracked in `trackedRangesField`, mapped
+  through every change, and settled by id; a link deleted meanwhile is left
+  alone. Never carry a raw offset (or a running sum of inserted lengths)
+  across an `await`. Upload-all (`app-commands.ts`) recomputes its matches on
+  the live document after the uploads.
+- **Menus at app zoom**: the image context menu and the slash menu are
+  `position: fixed` inside the scaled root; client coordinates are divided by
+  `rootScale()` (`root-scale.ts`) before being written to `left`/`top`.
 
-Regression coverage: 21 tests in
-`tests/unit/editor/image-block-deco.test.ts` covering decoration strategy,
-height map, coordinate mapping, zoom impact.
+Regression coverage: `tests/integration/editor/image-rendering.test.ts`
+(widget DOM per image, document directory, multi-image drop with
+auto-upload, typing during writes/uploads, context-menu upload and zoom).
 
 ## Inline math editing
 
@@ -93,9 +110,15 @@ rules:
 - `.cm-novelist-math-source` must not have horizontal padding. CodeMirror can
   split a mark decoration around nested delimiter marks and visual line wraps;
   padding on every split fragment creates gaps and selection artifacts.
+- KaTeX loads lazily, so the first document shows `$…$` placeholders. Widget
+  `eq` includes whether KaTeX was loaded, and the load dispatches
+  `katexLoadedEffect` to every view with the math extension (all split
+  panes), which rebuilds both the block field and the inline plugin.
+- A KaTeX failure renders the formula via `textContent`, never `innerHTML`.
 
 Runtime coverage lives in
-`tests/integration/editor/wysiwyg-runtime.test.ts`; WebKit keyboard and computed
+`tests/integration/editor/wysiwyg-runtime.test.ts` and
+`tests/integration/editor/math-runtime.test.ts`; WebKit keyboard and computed
 style coverage lives in `tests/e2e/specs/editor.spec.ts`.
 
 ## Editable tables (Typora-style)
@@ -113,9 +136,17 @@ the cursor entering the table does **not** reveal raw markdown: cells are
   never fires. **`Mod+A` must be handled manually** (select the cell's
   contents): WebKit's native select-all otherwise targets the outer
   `.cm-content` editing host, selecting the whole document and stealing focus.
+  **App shortcuts escape the island**: a Mod+key other than the cell's native
+  editing keys (A/C/V/X/Z/Y) first commits pending cell text, then bubbles to
+  the window handler (Cmd+S saves what was typed). That handler treats a cell
+  (a `contenteditable` host other than `.cm-content`) as a non-editor input,
+  so editor formatting commands never act on the main selection.
 - **Commit timing.** Edits commit back to the markdown source on `focusout`
-  that leaves the table (and on `Escape`), and immediately on any structural
-  change. `commitFromDom` reads cell text via `cellDomToMarkdown`, keeps
+  that leaves the table (and on `Escape`), before app shortcuts, and
+  immediately on any structural change — but focus/Escape commits happen
+  **only after an `input` event in a cell**. Clicking into a hand-aligned
+  table and out again must not reformat it, dirty the file or add an undo
+  step. `commitFromDom` reads cell text via `cellDomToMarkdown`, keeps
   alignments from the current source, and dispatches one replace transaction.
   Blur commits run after DOM reconciliation; composition commits wait until
   the final native input following `compositionend` has settled. Enter, Tab,
@@ -151,9 +182,11 @@ the cursor entering the table does **not** reveal raw markdown: cells are
   inline-size containment prevents expansion of CodeMirror's flex content.
 
 Coverage: pure logic in `tests/unit/editor/table.test.ts` (parse, serialize,
-DOM→markdown, model ops); browser interaction in `table-edit.spec.ts` covers
-commit, composition ordering/DOM reuse, separated CJK prose, repeated row and
-column edits, focus restoration, and compact-window/zoom geometry.
+DOM→markdown, model ops); commit rules and shortcut propagation in
+`tests/integration/editor/table-runtime.test.ts`; browser interaction in
+`table-edit.spec.ts` covers commit, composition ordering/DOM reuse, separated
+CJK prose, repeated row and column edits, focus restoration, and
+compact-window/zoom geometry.
 
 ## Slash command menu
 
@@ -163,7 +196,9 @@ Notion-style `/` block-insertion menu, implemented in
 - `slashMenuField` (`StateField<SlashMenuState | null>`) — source of truth.
   Mutated only via the `showSlashMenu` `StateEffect`. Doc-change path
   re-maps `pos` and drops the field if the `/` is deleted or the preceding
-  context is no longer line-start-only-whitespace.
+  context is no longer line-start-only-whitespace. Every doc or selection
+  change also drops it once the caret leaves the slash line (e.g. Enter on
+  `/xyz` with no match), and with no matches ArrowUp/Down are not consumed.
 - `slashTriggerHandler` (`EditorView.inputHandler`) — fast path. When text
   is `/` or full-width `／` (U+FF0F) and the prefix on the current line
   trims to empty, it dispatches a single transaction that inserts `/`,
@@ -205,7 +240,8 @@ Notion-style `/` block-insertion menu, implemented in
   viewport clamp. All decisions made before `visibility: visible` is
   flipped so there's no one-frame flash at the wrong position.
   `updateQuery` re-runs positioning because filtering the item list
-  changes `menuH`.
+  changes `menuH`. Geometry is computed in scaled viewport coordinates and
+  divided by `rootScale()` when written (app zoom is a root transform).
 
 Trigger rule is intentionally restrictive — `/` only fires when everything
 before it on the line is whitespace. If a looser (Notion-style mid-line)
@@ -546,4 +582,9 @@ Pure functions of `EditorView` in `app/lib/editor/formatting.ts`:
 code/strikethrough keyboard shortcuts and palette commands. `toggleWrap`
 handles three cases (marker inside selection → strip; marker just outside
 selection → strip; otherwise wrap), with a special-case for single `*` to
-avoid splitting `**bold**` runs.
+avoid splitting `**bold**` runs. The new selection is always the old one
+mapped through the built `ChangeSet` (`changes.mapPos`), never offset
+arithmetic: a caret right after `**x**` or at column 0 of a heading must stay
+on the same text. Only `#{1,6}` followed by a space/tab or line end is a
+heading marker; `#hashtag`, `#话题#` and `#1` are content (same rule in
+`block-transform.ts`).

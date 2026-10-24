@@ -1,15 +1,12 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
+import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('File Operations', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
   });
 
-  test('open file, edit content, and save', async ({ app, mockState }) => {
+  test('open file, edit content, and save', async ({ app, appKeys, mockState }) => {
     const fileItem = app.getByTestId('sidebar-file-Chapter 1.md');
     await fileItem.click();
     await app.getByTestId('editor-container').waitFor({ state: 'visible' });
@@ -19,17 +16,14 @@ test.describe('File Operations', () => {
     await cmEditor.click();
 
     await app.keyboard.type('Hello World');
+    await expect(app.locator('.dirty-dot')).toBeVisible();
 
-    // Use the exposed save function (browser intercepts Meta+S)
-    await app.evaluate(() => {
-      const saveFn = (window as any).__novelist_save;
-      if (saveFn) saveFn();
-    });
-    await app.waitForTimeout(500);
+    // The browser intercepts a real Meta+S, so dispatch it to the app directly.
+    await appKeys.press('s', { metaKey: true });
 
-    const written = await mockState.getWrittenFiles();
-    const savedContent = Object.values(written).find((c) => (c as string).includes('Hello World'));
-    expect(savedContent).toBeTruthy();
+    await expect.poll(async () => (await mockState.getWrittenFiles())[`${MOCK_PROJECT_DIR}/Chapter 1.md`] ?? '')
+      .toContain('Hello World');
+    await expect(app.locator('.dirty-dot')).toHaveCount(0);
   });
 
   test('Cmd+N creates a new file', async ({ app }) => {
@@ -41,12 +35,15 @@ test.describe('File Operations', () => {
     await expect(tabBar).toBeVisible();
   });
 
-  test('Cmd+W closes the current tab', async ({ app }) => {
+  test('Cmd+W closes the current tab', async ({ app, appKeys }) => {
     const fileItem = app.getByTestId('sidebar-file-Chapter 1.md');
     await fileItem.click();
     await app.getByTestId('editor-container').waitFor({ state: 'visible' });
+    await expect(app.getByTestId('tab-Chapter 1.md')).toBeVisible();
 
-    await app.keyboard.press('Meta+w');
+    await appKeys.press('w', { metaKey: true });
+
+    await expect(app.getByTestId('tab-Chapter 1.md')).toHaveCount(0);
   });
 
   test('editing content marks tab as dirty', async ({ app }) => {

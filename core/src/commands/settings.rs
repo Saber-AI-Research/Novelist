@@ -15,7 +15,7 @@ use crate::models::settings::{
     resolve, EffectiveSettings, GlobalSettings, NewFileConfig, PluginsConfig, ResolvedSnapshot,
     SnapshotConfig, ViewConfig,
 };
-use crate::services::sidecar::{atomic_write_bytes, atomic_write_json, read_json};
+use crate::services::sidecar::{atomic_write_bytes, atomic_write_json_private, read_json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -137,7 +137,8 @@ where
             .await?
             .unwrap_or_default();
         update(&mut current)?;
-        atomic_write_json(&path, &current).await
+        // Holds image-host and publishing credentials: owner-only file mode.
+        atomic_write_json_private(&path, &current).await
     })
     .await
     .map_err(|error| AppError::Custom(format!("Settings transaction failed: {error}")))?
@@ -573,7 +574,7 @@ auto_save_minutes = 7
         std::fs::write(&path, original).unwrap();
 
         assert!(matches!(
-            atomic_write_json(&path, &Unserializable).await,
+            atomic_write_json_private(&path, &Unserializable).await,
             Err(AppError::Json(_))
         ));
         assert_eq!(std::fs::read(path).unwrap(), original);
@@ -606,6 +607,31 @@ auto_save_minutes = 7
         std::fs::rename(&retained_home, &home).unwrap();
         assert!(result.is_err());
         assert_eq!(std::fs::read(home.join("settings.json")).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(settings_data_dir)]
+    async fn global_settings_holding_secrets_become_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let _settings_dir = SettingsDataDirGuard::set(&home);
+        let path = home.join("settings.json");
+        // A settings file created before secrets were written owner-only.
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        update_global_settings(|current| {
+            current.pandoc_path = Some("/opt/pandoc".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]

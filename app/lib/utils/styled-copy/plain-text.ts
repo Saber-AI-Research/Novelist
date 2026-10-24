@@ -51,12 +51,20 @@ export function serializeFinalDomToPlainText(finalDom: FinalSanitizedDom): strin
   return serialized ? `${serialized}\n` : '';
 }
 
+/**
+ * `String#trim` also strips the ideographic space U+3000 that Chinese prose
+ * uses as a paragraph indent; only HTML (ASCII) whitespace is insignificant.
+ */
+function trimHtmlWhitespace(value: string): string {
+  return value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
+}
+
 function serializeBlockContainer(parent: Node): string {
   const blocks: string[] = [];
   let inline = '';
 
   const flushInline = () => {
-    const value = inline.trim();
+    const value = trimHtmlWhitespace(inline);
     if (value) blocks.push(value);
     inline = '';
   };
@@ -84,7 +92,7 @@ function serializeBlock(element: Element): string {
     case 'H5':
     case 'H6':
     case 'P':
-      return serializeInlineChildren(element).trim();
+      return trimHtmlWhitespace(serializeInlineChildren(element));
     case 'BLOCKQUOTE':
       return serializeBlockquote(element);
     case 'UL':
@@ -109,7 +117,7 @@ function serializeInlineChildren(parent: Node): string {
 
 function serializeInline(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
-    return normalizeLineEndings((node as Text).data).replace(/\s+/g, ' ');
+    return normalizeLineEndings((node as Text).data).replace(/[ \t\n\f\r]+/g, ' ');
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
@@ -153,7 +161,7 @@ function serializeListItem(element: Element, marker: string, depth: number): str
   let inline = '';
 
   const flushInline = () => {
-    const value = inline.trim();
+    const value = trimHtmlWhitespace(inline);
     if (value) content.push(value);
     inline = '';
   };
@@ -192,7 +200,7 @@ function serializeTable(element: Element): string {
   return tableRows(element).map((row) => (
     Array.from(row.children)
       .filter((cell) => cell.tagName === 'TH' || cell.tagName === 'TD')
-      .map((cell) => serializeBlockContainer(cell).replace(/\s*\n+\s*/g, ' ').trim())
+      .map((cell) => trimHtmlWhitespace(serializeBlockContainer(cell).replace(/[ \t\f\r]*\n+[ \t\f\r]*/g, ' ')))
       .join('\t')
   )).join('\n');
 }

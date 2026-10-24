@@ -14,21 +14,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-static SNAPSHOT_LOCKS: LazyLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
+type ProjectLocks = LazyLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>>;
+
+static SNAPSHOT_LOCKS: ProjectLocks = LazyLock::new(|| StdMutex::new(HashMap::new()));
+/// Orders each project's mutations together with their WebDAV mirroring. Lock
+/// order is mirror, then snapshot: uploads and remote deletions never
+/// interleave, while list/restore (snapshot lock only) never wait for WebDAV.
+static MIRROR_LOCKS: ProjectLocks = LazyLock::new(|| StdMutex::new(HashMap::new()));
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn project_lock(locks: &ProjectLocks, canonical: &Path) -> Arc<Mutex<()>> {
+    locks
+        .lock()
+        .expect("snapshot lock registry poisoned")
+        .entry(canonical.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 async fn acquire_snapshot_guard(
     project_dir: &Path,
 ) -> Result<(PathBuf, OwnedMutexGuard<()>), AppError> {
     let canonical = snapshot_project_identity(project_dir)?;
-    let mutex = SNAPSHOT_LOCKS
-        .lock()
-        .expect("snapshot lock registry poisoned")
-        .entry(canonical.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    Ok((canonical, mutex.lock_owned().await))
+    let guard = project_lock(&SNAPSHOT_LOCKS, &canonical).lock_owned().await;
+    Ok((canonical, guard))
+}
+
+/// Guards for a mutation followed by remote mirroring: `(canonical, mirror, snapshot)`.
+async fn acquire_mutation_guards(
+    project_dir: &Path,
+) -> Result<(PathBuf, OwnedMutexGuard<()>, OwnedMutexGuard<()>), AppError> {
+    let canonical = snapshot_project_identity(project_dir)?;
+    let mirror = project_lock(&MIRROR_LOCKS, &canonical).lock_owned().await;
+    let snapshot = project_lock(&SNAPSHOT_LOCKS, &canonical).lock_owned().await;
+    Ok((canonical, mirror, snapshot))
 }
 
 fn snapshot_project_identity(project_dir: &Path) -> Result<PathBuf, AppError> {
@@ -255,7 +274,11 @@ fn collect_content(dir: &Dir, relative: &Path, paths: &mut Vec<PathBuf>) -> Resu
             if relative.as_os_str().is_empty() && name == ".novelist" {
                 let metadata_dir = open_child_dir(dir, &name, false)?;
                 // Never enumerate credentials, caches, or other hidden metadata.
-                for name in ["project.toml", "literary-study.json"] {
+                for name in [
+                    "project.toml",
+                    "literary-study.json",
+                    "book-translation.json",
+                ] {
                     match metadata_dir.symlink_metadata(name) {
                         Ok(_) => {
                             check_regular_file(&metadata_dir, OsStr::new(name), false)?;
@@ -388,6 +411,8 @@ fn cleanup_pending_dirs(base: &Dir) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A damaged `snap-*` folder (e.g. a partially removed retired snapshot) is
+/// logged and skipped so it cannot break listing, creation or retention.
 fn list_snapshots_locked(base: &Dir) -> Result<Vec<SnapshotMeta>, AppError> {
     let mut snapshots = Vec::new();
     for entry in base.entries()? {
@@ -397,15 +422,20 @@ fn list_snapshots_locked(base: &Dir) -> Result<Vec<SnapshotMeta>, AppError> {
         if validate_snapshot_id(id).is_err() {
             continue;
         }
-        let snapshot = open_child_dir(base, &name, false)?;
-        let meta: SnapshotMeta =
-            serde_json::from_reader(open_source(&snapshot, OsStr::new("metadata.json"))?)?;
-        if meta.id != id {
-            return Err(AppError::InvalidInput(format!(
-                "Snapshot metadata ID does not match directory: {id}"
-            )));
+        let meta = open_child_dir(base, &name, false).and_then(|snapshot| {
+            let meta: SnapshotMeta =
+                serde_json::from_reader(open_source(&snapshot, OsStr::new("metadata.json"))?)?;
+            if meta.id != id {
+                return Err(AppError::InvalidInput(format!(
+                    "Snapshot metadata ID does not match directory: {id}"
+                )));
+            }
+            Ok(meta)
+        });
+        match meta {
+            Ok(meta) => snapshots.push(meta),
+            Err(error) => tracing::warn!("Skipping unreadable snapshot {id}: {error}"),
         }
-        snapshots.push(meta);
     }
     snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
     Ok(snapshots)
@@ -444,7 +474,11 @@ fn create_snapshot_locked(
 ) -> Result<(SnapshotMeta, Vec<String>), AppError> {
     let base = open_base(project_dir, true)?
         .ok_or_else(|| AppError::Custom("Missing snapshot directory".into()))?;
-    cleanup_pending_dirs(&base)?;
+    // Crash debris must not block new snapshots; a stage that cannot be removed
+    // now is retried on the next creation.
+    if let Err(error) = cleanup_pending_dirs(&base) {
+        tracing::warn!("snapshot stage sweep failed: {error}");
+    }
     let existing = list_snapshots_locked(&base)?;
     let victim = existing.first().filter(|newest| {
         min_interval_secs > 0 && now.saturating_sub(newest.timestamp) < min_interval_secs
@@ -491,35 +525,44 @@ fn create_snapshot_locked(
     };
 
     // No existing snapshot is retired until the replacement is complete.
-    let retired: Vec<String> = if let Some(victim) = victim {
-        vec![victim.id.clone()]
+    let candidates: Vec<&str> = if let Some(victim) = victim {
+        vec![victim.id.as_str()]
     } else {
         existing
             .iter()
             .rev()
             .take((existing.len() + 1).saturating_sub(max_count))
-            .map(|old| old.id.clone())
+            .map(|old| old.id.as_str())
             .collect()
     };
-    for id in &retired {
-        delete_local(&base, id)?;
+    // The new snapshot is already published, so a failed retirement is logged
+    // rather than reported as a failed creation (which would skip mirroring).
+    // Only fully removed snapshots are retired remotely.
+    let mut retired = Vec::with_capacity(candidates.len());
+    for id in candidates {
+        match delete_local(&base, id) {
+            Ok(()) => retired.push(id.to_owned()),
+            Err(error) => tracing::warn!("snapshot retirement of {id} failed: {error}"),
+        }
     }
     Ok((meta, retired))
 }
 
 /// Serialize creation, crash cleanup, retention and mirroring for this project.
-/// The detached worker retains its guard if the command's caller is cancelled.
+/// The detached worker retains its guards if the command's caller is cancelled.
 pub async fn create_snapshot(project_dir: &str, name: &str) -> Result<SnapshotMeta, AppError> {
-    let (canonical, guard) = acquire_snapshot_guard(Path::new(project_dir)).await?;
+    let (canonical, mirror_guard, snapshot_guard) =
+        acquire_mutation_guards(Path::new(project_dir)).await?;
     let now = now_secs();
     let project_dir = project_dir.to_owned();
     let name = name.to_owned();
     tokio::spawn(async move {
+        let _mirror_guard = mirror_guard;
         let settings_guard = acquire_project_settings_guard(&canonical).await?;
-        let _guard = guard;
         let cfg = get_resolved_snapshot_config(&project_dir).await;
         let local_project = project_dir.clone();
         let (meta, retired) = tokio::task::spawn_blocking(move || {
+            let _snapshot_guard = snapshot_guard;
             let _settings_guard = settings_guard;
             create_snapshot_locked(
                 &local_project,
@@ -532,11 +575,11 @@ pub async fn create_snapshot(project_dir: &str, name: &str) -> Result<SnapshotMe
         })
         .await
         .map_err(|error| AppError::Custom(format!("snapshot worker: {error}")))??;
-        // The snapshot stays immutable and present throughout the complete upload.
-        // Remote deletion follows publication, before another create can retire it.
+        // The snapshot lock is released; the mirror lock keeps every later
+        // create/delete from retiring this snapshot until its upload is done.
+        // Retired remote copies go only once their replacement is mirrored.
         #[cfg(feature = "sync")]
-        {
-            try_upload_snapshot(&project_dir, &meta).await;
+        if try_upload_snapshot(&project_dir, &meta).await {
             for id in &retired {
                 try_delete_snapshot_remote(&project_dir, id).await;
             }
@@ -685,14 +728,15 @@ pub async fn restore_snapshot(project_dir: &str, snapshot_id: &str) -> Result<()
 
 pub async fn delete_snapshot(project_dir: &str, snapshot_id: &str) -> Result<(), AppError> {
     validate_snapshot_id(snapshot_id)?;
-    let (_, guard) = acquire_snapshot_guard(Path::new(project_dir)).await?;
+    let (_, mirror_guard, snapshot_guard) = acquire_mutation_guards(Path::new(project_dir)).await?;
     let project_dir = project_dir.to_owned();
     let snapshot_id = snapshot_id.to_owned();
     tokio::spawn(async move {
-        let _guard = guard;
+        let _mirror_guard = mirror_guard;
         let local_project = project_dir.clone();
         let local_id = snapshot_id.clone();
         tokio::task::spawn_blocking(move || {
+            let _snapshot_guard = snapshot_guard;
             if let Some(base) = open_base(&local_project, false)? {
                 delete_local(&base, &local_id)?;
             }
@@ -1569,6 +1613,209 @@ mod tests {
         delete_snapshot(project, &snapshot.id).await.unwrap();
         assert!(list_snapshots(project).await.unwrap().is_empty());
         assert!(!root.exists(), "list/delete must not recreate the project");
+        release(saved);
+    }
+
+    #[cfg(feature = "sync")]
+    fn snapshot_dirs(project: &str) -> Vec<String> {
+        std::fs::read_dir(snapshots_dir(project))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with("snap-") && !name.ends_with(".pending"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    #[serial(snapshots_data_dir, settings_data_dir, sync_data_dir)]
+    async fn damaged_snapshot_folder_does_not_break_list_or_create() {
+        let data = TempDir::new().unwrap();
+        let saved = isolate(data.path());
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        std::fs::write(dir.path().join("ch1.md"), "v1").unwrap();
+        set_test_clock(1_000);
+        let intact = create_snapshot(&project, "intact").await.unwrap();
+        set_test_clock(100_000);
+        let damaged = create_snapshot(&project, "damaged").await.unwrap();
+        // E.g. a retired snapshot whose removal stopped half-way.
+        std::fs::remove_file(
+            snapshots_dir(&project)
+                .join(&damaged.id)
+                .join("metadata.json"),
+        )
+        .unwrap();
+
+        let listed = list_snapshots(&project).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|meta| meta.id.as_str())
+                .collect::<Vec<_>>(),
+            [intact.id.as_str()]
+        );
+        set_test_clock(200_000);
+        let next = create_snapshot(&project, "next").await.unwrap();
+        let listed = list_snapshots(&project).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|meta| meta.id.as_str())
+                .collect::<Vec<_>>(),
+            [next.id.as_str(), intact.id.as_str()]
+        );
+        release(saved);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(snapshots_data_dir, settings_data_dir, sync_data_dir)]
+    async fn failed_retirement_does_not_fail_the_new_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = TempDir::new().unwrap();
+        let saved = isolate(data.path());
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        std::fs::write(dir.path().join("ch1.md"), "v1").unwrap();
+        set_test_clock(1_000);
+        let victim = create_snapshot(&project, "victim").await.unwrap();
+        let locked = snapshots_dir(&project).join(&victim.id).join("files");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // Inside the replace window: the victim cannot be fully removed.
+        set_test_clock(1_001);
+        let result = create_snapshot(&project, "replacement").await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let replacement = result.unwrap();
+        assert!(list_snapshots(&project)
+            .await
+            .unwrap()
+            .iter()
+            .any(|meta| meta.id == replacement.id));
+        release(saved);
+    }
+
+    #[cfg(feature = "sync")]
+    fn mirror_to(server: &crate::services::webdav::test_server::DavServer, project: &str) {
+        crate::services::sync::save_sync_config_to_disk(
+            project,
+            &crate::services::sync::SyncConfig {
+                enabled: true,
+                webdav_url: server.url.clone(),
+                username: "test".into(),
+                password: "not-a-credential".into(),
+                interval_minutes: 30,
+                legacy_remote_acknowledged: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "sync")]
+    fn remote_path(
+        server: &crate::services::webdav::test_server::DavServer,
+        remote: &str,
+    ) -> String {
+        crate::services::webdav::remote_url(&server.url, remote)
+            .unwrap()
+            .path()
+            .to_string()
+    }
+
+    #[cfg(feature = "sync")]
+    #[tokio::test]
+    #[serial(snapshots_data_dir, settings_data_dir, sync_data_dir)]
+    async fn listing_does_not_wait_for_a_slow_webdav_upload() {
+        use crate::services::snapshot_webdav::remote_project_dir;
+        let data = TempDir::new().unwrap();
+        let saved = isolate(data.path());
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        std::fs::write(dir.path().join("ch1.md"), "v1").unwrap();
+        let server = crate::services::webdav::test_server::DavServer::start();
+        mirror_to(&server, &project);
+        let identity = remote_path(
+            &server,
+            &format!("{}/project.json", remote_project_dir(&project)),
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .stall
+            .insert(("GET".into(), identity));
+
+        let creating = tokio::spawn({
+            let project = project.clone();
+            async move { create_snapshot(&project, "mirrored").await }
+        });
+        // Wait until the snapshot is published locally and its upload has begun.
+        let published = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while snapshot_dirs(&project).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        published.await.expect("snapshot was never published");
+        let listed = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            list_snapshots(&project),
+        )
+        .await
+        .expect("listing waited for the WebDAV upload")
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        server.state.lock().unwrap().stall.clear();
+        creating.await.unwrap().unwrap();
+        release(saved);
+    }
+
+    #[cfg(feature = "sync")]
+    #[tokio::test]
+    #[serial(snapshots_data_dir, settings_data_dir, sync_data_dir)]
+    async fn replaced_snapshot_stays_remote_when_its_replacement_fails_to_upload() {
+        use crate::services::snapshot_webdav::{remote_project_dir, remote_snap_dir};
+        let data = TempDir::new().unwrap();
+        let saved = isolate(data.path());
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        std::fs::write(dir.path().join("ch1.md"), "v1").unwrap();
+        let server = crate::services::webdav::test_server::DavServer::start();
+        mirror_to(&server, &project);
+        set_test_clock(1_000);
+        let first = create_snapshot(&project, "first").await.unwrap();
+        let first_marker = remote_path(
+            &server,
+            &format!("{}/metadata.json", remote_snap_dir(&project, &first.id)),
+        );
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .files
+            .contains_key(&first_marker));
+
+        let identity = remote_path(
+            &server,
+            &format!("{}/project.json", remote_project_dir(&project)),
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail
+            .insert(("GET".into(), identity));
+        set_test_clock(1_001);
+        let second = create_snapshot(&project, "second").await.unwrap();
+        assert_eq!(list_snapshots(&project).await.unwrap()[0].id, second.id);
+        // The only complete remote copy is not deleted for a failed replacement.
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .files
+            .contains_key(&first_marker));
         release(saved);
     }
 }

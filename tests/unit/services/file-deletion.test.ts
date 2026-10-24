@@ -91,7 +91,7 @@ describe('[contract] deleteEntries', () => {
     ], t);
     expect(result).toEqual({ status: 'completed', deletedPaths: ['/project/第一章.md'], failedPaths: [] });
     expect(h.tabs.allTabs).toEqual([{ id: 'other', filePath: '/project/第二章.md' }]);
-    expect(h.deleteItem.mock.calls).toEqual([['/project/第一章.md']]);
+    expect(h.deleteItem.mock.calls).toEqual([['/project', '/project/第一章.md']]);
   });
 
   it('keeps the file when the second pane refuses to close', async () => {
@@ -133,10 +133,22 @@ describe('[contract] deleteEntries', () => {
     });
     expect(h.tabs.closeTab).toHaveBeenCalledTimes(2);
     expect(h.tabs.allTabs).toEqual([{ id: 'unrelated', filePath: '/project/保留.md' }]);
-    expect(h.deleteItem.mock.calls.map(call => call[0])).toEqual(['/project/章节', '/project/旁白.md']);
+    expect(h.deleteItem.mock.calls).toEqual([
+      ['/project', '/project/章节'],
+      ['/project', '/project/旁白.md'],
+    ]);
     expect(h.project.removeWorkspacePath).toHaveBeenCalledWith('/project/章节');
     expect(h.project.removeWorkspacePath).toHaveBeenCalledTimes(1);
     expect(h.project.refreshFolder).toHaveBeenCalledWith('/project');
     expect(h.project.refreshFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it('confines a standalone file delete to its own folder when no project contains it', async () => {
+    h.project.dirPath = null;
+    const result = await deleteEntries([
+      { path: '/notes/随笔.md', name: '随笔.md', is_dir: false },
+    ], t);
+    expect(result.deletedPaths).toEqual(['/notes/随笔.md']);
+    expect(h.deleteItem.mock.calls).toEqual([['/notes', '/notes/随笔.md']]);
   });
 });

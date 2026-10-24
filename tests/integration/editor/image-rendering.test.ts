@@ -1,421 +1,239 @@
-import { describe, it, expect } from 'vitest';
-import { EditorState } from '@codemirror/state';
-import { detectDesktopPlatform, fileManagerLabel } from '$lib/utils/platform-labels';
-import { imageDocumentDirEffect, imageDocumentDirField } from '$lib/editor/wysiwyg';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EditorState, type Extension } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
+import { markdown } from '@codemirror/lang-markdown';
+
+/**
+ * Behaviour tests for image handling in the real editor extensions
+ * (`wysiwyg.ts`): block image widgets, paste/drop insertion with
+ * auto-upload, and the image context menu. Only the IPC / network edges
+ * (Tauri invoke, image-host service, settings command) are mocked.
+ */
+
+const { invoke, readLocalImageDataUri, uploadInlineBytes, uploadImage, getImageHostSettings } = vi.hoisted(() => ({
+  invoke: vi.fn(async (_cmd: string, _args?: unknown) => null as unknown),
+  readLocalImageDataUri: vi.fn(async (src: string) => `data:image/png;base64,${src}`),
+  uploadInlineBytes: vi.fn(async (_bytes: Uint8Array, filename: string, _mime: string) => ({
+    url: `https://cdn.example/${filename.replace(/^\d+-/, '')}`,
+  })),
+  uploadImage: vi.fn(async (src: string, _scope: unknown) => ({ url: `https://cdn.example/${src}` })),
+  getImageHostSettings: vi.fn(async () => ({
+    status: 'ok' as const,
+    data: { auto_on_paste: true, active_host_id: 'host-1' },
+  })),
+}));
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }));
+vi.mock('$lib/services/image-host', () => ({ readLocalImageDataUri, uploadInlineBytes, uploadImage }));
+vi.mock('$lib/ipc/commands', () => ({ commands: { getImageHostSettings } }));
+
+import {
+  imageDocumentDirEffect,
+  imageDocumentDirField,
+  imagePastePlugin,
+  setWysiwygProjectDir,
+  wysiwygImageDocumentDir,
+  wysiwygPlugin,
+} from '$lib/editor/wysiwyg';
+
+function deferred<T = void>() {
+  return Promise.withResolvers<T>();
+}
+
+let view: EditorView | null = null;
+
+function mount(doc: string, extensions: Extension[] = []): EditorView {
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+  view = new EditorView({
+    state: EditorState.create({ doc, extensions: [markdown(), wysiwygPlugin, imagePastePlugin, ...extensions] }),
+    parent,
+  });
+  return view;
+}
+
+function drop(target: EditorView, pos: number, files: File[]) {
+  vi.spyOn(target, 'posAtCoords').mockReturnValue(pos);
+  const event = new Event('drop', { bubbles: true, cancelable: true });
+  Object.assign(event, { dataTransfer: { files }, clientX: 1, clientY: 1 });
+  target.contentDOM.dispatchEvent(event);
+}
+
+const png = (name: string) => new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' });
+
+beforeEach(() => {
+  setWysiwygProjectDir('/project');
+  invoke.mockClear();
+  uploadInlineBytes.mockClear();
+  uploadImage.mockClear();
+  readLocalImageDataUri.mockClear();
+});
+
+afterEach(() => {
+  view?.destroy();
+  view = null;
+  document.body.innerHTML = '';
+  vi.restoreAllMocks();
+});
 
 describe('[regression] image document scope ownership', () => {
   it('keeps different nested document directories isolated per editor state', () => {
-    const first = EditorState.create({
-      extensions: [imageDocumentDirField],
-    });
-    const second = EditorState.create({
-      extensions: [imageDocumentDirField],
-    });
-    const firstUpdated = first.update({
-      effects: imageDocumentDirEffect.of('/project/第一卷'),
-    }).state;
-    const secondUpdated = second.update({
-      effects: imageDocumentDirEffect.of('/project/第二卷'),
-    }).state;
+    const first = EditorState.create({ extensions: [imageDocumentDirField] });
+    const second = EditorState.create({ extensions: [imageDocumentDirField] });
+    const firstUpdated = first.update({ effects: imageDocumentDirEffect.of('/project/第一卷') }).state;
+    const secondUpdated = second.update({ effects: imageDocumentDirEffect.of('/project/第二卷') }).state;
 
     expect(firstUpdated.field(imageDocumentDirField)).toBe('/project/第一卷');
     expect(secondUpdated.field(imageDocumentDirField)).toBe('/project/第二卷');
   });
-});
 
-/**
- * Image rendering feature tests.
- *
- * Tests the pure logic for image handling:
- * - Markdown image syntax parsing
- * - Image path resolution (relative vs absolute vs URL)
- * - LRU cache behavior
- * - Paste/drop filename generation
- *
- * The actual ImageWidget rendering (DOM, Tauri IPC) is browser-only
- * and covered by E2E tests.
- */
+  it('resolves local images against the directory given at state creation', () => {
+    const errors = vi.spyOn(console, 'error');
+    mount('intro\n\n![图](插图/a.png)\n', [wysiwygImageDocumentDir('/project/第一卷')]);
 
-// ── Image syntax parsing ──
-
-/** Extract image info from markdown image syntax: ![alt](src) */
-function parseImageSyntax(text: string): { alt: string; src: string } | null {
-  const match = text.match(/^!\[([^\]]*)\]\(([^)]*)\)$/);
-  if (!match) return null;
-  return { alt: match[1], src: match[2] };
-}
-
-describe('image syntax parsing', () => {
-  it('parses basic image', () => {
-    const result = parseImageSyntax('![photo](image.png)');
-    expect(result).toEqual({ alt: 'photo', src: 'image.png' });
+    expect(readLocalImageDataUri).toHaveBeenCalledWith('插图/a.png', { baseDir: '/project/第一卷' });
+    expect(view!.dom.querySelector('.cm-novelist-image-error')).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
   });
 
-  it('parses image with empty alt', () => {
-    const result = parseImageSyntax('![](image.png)');
-    expect(result).toEqual({ alt: '', src: 'image.png' });
-  });
+  it('[regression] shows no "Image not found" while the document directory is still unknown', () => {
+    mount('intro\n\n![图](插图/a.png)\n');
 
-  it('parses image with URL source', () => {
-    const result = parseImageSyntax('![logo](https://example.com/logo.png)');
-    expect(result).toEqual({ alt: 'logo', src: 'https://example.com/logo.png' });
-  });
-
-  it('parses image with relative path', () => {
-    const result = parseImageSyntax('![](./assets/img.jpg)');
-    expect(result).toEqual({ alt: '', src: './assets/img.jpg' });
-  });
-
-  it('parses image with data URI', () => {
-    const result = parseImageSyntax('![](data:image/png;base64,abc123)');
-    expect(result).toEqual({ alt: '', src: 'data:image/png;base64,abc123' });
-  });
-
-  it('parses image with CJK alt text', () => {
-    const result = parseImageSyntax('![第一章插图](ch1.png)');
-    expect(result).toEqual({ alt: '第一章插图', src: 'ch1.png' });
-  });
-
-  it('parses image with spaces in alt', () => {
-    const result = parseImageSyntax('![a nice photo](img.png)');
-    expect(result).toEqual({ alt: 'a nice photo', src: 'img.png' });
-  });
-
-  it('returns null for non-image syntax', () => {
-    expect(parseImageSyntax('not an image')).toBeNull();
-    expect(parseImageSyntax('[link](url)')).toBeNull();  // no !
-    expect(parseImageSyntax('![alt only]')).toBeNull();
-  });
-
-  it('parses image with empty source', () => {
-    const result = parseImageSyntax('![alt]()');
-    expect(result).toEqual({ alt: 'alt', src: '' });
+    expect(view!.dom.querySelector('.cm-novelist-image-widget')).not.toBeNull();
+    expect(view!.dom.querySelector('.cm-novelist-image-error')).toBeNull();
+    expect(readLocalImageDataUri).not.toHaveBeenCalled();
   });
 });
 
-// ── Image source classification ──
+describe('[regression] image widgets never reuse another image\'s DOM', () => {
+  it('shows the right image after moving the caret between adjacent image lines', () => {
+    const doc = '![one](https://img.example/1.png)\n![two](https://img.example/2.png)\nend';
+    mount(doc);
+    const shown = () => Array.from(view!.dom.querySelectorAll<HTMLImageElement>('.cm-novelist-image-widget img'), (img) => img.getAttribute('src'));
 
-type ImageSourceType = 'http' | 'data' | 'local';
-
-function classifyImageSource(src: string): ImageSourceType {
-  if (src.startsWith('http://') || src.startsWith('https://')) return 'http';
-  if (src.startsWith('data:')) return 'data';
-  return 'local';
-}
-
-describe('image source classification', () => {
-  it('classifies HTTP URLs', () => {
-    expect(classifyImageSource('http://example.com/img.png')).toBe('http');
-    expect(classifyImageSource('https://example.com/img.png')).toBe('http');
-  });
-
-  it('classifies data URIs', () => {
-    expect(classifyImageSource('data:image/png;base64,abc')).toBe('data');
-  });
-
-  it('classifies local paths', () => {
-    expect(classifyImageSource('./img.png')).toBe('local');
-    expect(classifyImageSource('assets/photo.jpg')).toBe('local');
-    expect(classifyImageSource('/absolute/path.png')).toBe('local');
-    expect(classifyImageSource('.novelist/images/paste.png')).toBe('local');
+    const line2 = view!.state.doc.line(2).from + 1;
+    view!.dispatch({ selection: { anchor: 1 } }); // keyboard onto line 1: its source shows
+    expect(shown()).toEqual(['https://img.example/2.png']);
+    view!.dispatch({ selection: { anchor: line2 } }); // ArrowDown
+    expect(shown()).toEqual(['https://img.example/1.png']);
+    view!.dispatch({ selection: { anchor: 1 } }); // ArrowUp
+    expect(shown()).toEqual(['https://img.example/2.png']);
+    view!.dispatch({ selection: { anchor: line2 } });
+    expect(shown()).toEqual(['https://img.example/1.png']);
   });
 });
 
-// ── Image path resolution ──
+describe('[regression] dropped images with auto-upload', () => {
+  it('rewrites every dropped image link to its own URL', async () => {
+    mount('before\n\nafter');
+    drop(view!, 'before\n\n'.length, [png('a.png'), png('b.png'), png('c.png')]);
 
-function resolveImagePath(src: string, projectDir: string): string {
-  if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:')) {
-    return src;
-  }
-  // Resolve relative path against project directory
-  if (src.startsWith('/')) return src;  // absolute path
-  return `${projectDir}/${src}`;
-}
-
-describe('image path resolution', () => {
-  const projectDir = '/Users/test/my-novel';
-
-  it('passes HTTP URLs through unchanged', () => {
-    expect(resolveImagePath('https://example.com/img.png', projectDir))
-      .toBe('https://example.com/img.png');
+    await vi.waitFor(() => expect(uploadInlineBytes).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(view!.state.doc.toString()).toContain('https://cdn.example/c.png'));
+    expect(view!.state.doc.toString()).toBe(
+      'before\n\n![a.png](https://cdn.example/a.png)\n![b.png](https://cdn.example/b.png)\n![c.png](https://cdn.example/c.png)\nafter',
+    );
   });
 
-  it('passes data URIs through unchanged', () => {
-    expect(resolveImagePath('data:image/png;base64,abc', projectDir))
-      .toBe('data:image/png;base64,abc');
+  it('inserts at the drop point even when text is typed above it during the file writes', async () => {
+    const write = deferred();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'write_binary_file') await write.promise;
+      return null;
+    });
+    mount('before\n\nafter');
+    drop(view!, 'before\n\n'.length, [png('a.png')]);
+
+    view!.dispatch({ changes: { from: 0, insert: '新的一行\n' } });
+    write.resolve();
+
+    await vi.waitFor(() => expect(view!.state.doc.toString()).toContain('https://cdn.example/a.png'));
+    expect(view!.state.doc.toString()).toBe('新的一行\nbefore\n\n![a.png](https://cdn.example/a.png)\nafter');
+    invoke.mockReset();
+    invoke.mockImplementation(async () => null);
   });
 
-  it('resolves relative path against project dir', () => {
-    expect(resolveImagePath('assets/img.png', projectDir))
-      .toBe('/Users/test/my-novel/assets/img.png');
+  it('writes the URL into the link even when text is typed above it during the upload', async () => {
+    const upload = deferred<{ url: string }>();
+    uploadInlineBytes.mockImplementationOnce(() => upload.promise);
+    mount('before\n\nafter');
+    drop(view!, 'before\n\n'.length, [png('a.png')]);
+    await vi.waitFor(() => expect(uploadInlineBytes).toHaveBeenCalledTimes(1));
+
+    view!.dispatch({ changes: { from: 0, insert: 'typed ' } });
+    upload.resolve({ url: 'https://cdn.example/a.png' });
+
+    await vi.waitFor(() => expect(view!.state.doc.toString()).toContain('https://cdn.example/a.png'));
+    expect(view!.state.doc.toString()).toBe('typed before\n\n![a.png](https://cdn.example/a.png)\nafter');
   });
 
-  it('resolves ./ relative path', () => {
-    expect(resolveImagePath('./img.png', projectDir))
-      .toBe('/Users/test/my-novel/./img.png');
-  });
+  it('leaves the document alone when the link was deleted before the upload finished', async () => {
+    const upload = deferred<{ url: string }>();
+    uploadInlineBytes.mockImplementationOnce(() => upload.promise);
+    mount('before\n');
+    drop(view!, 'before\n'.length, [png('a.png')]);
+    await vi.waitFor(() => expect(uploadInlineBytes).toHaveBeenCalledTimes(1));
 
-  it('passes absolute paths through', () => {
-    expect(resolveImagePath('/absolute/path.png', projectDir))
-      .toBe('/absolute/path.png');
-  });
+    view!.dispatch({ changes: { from: 'before\n'.length, to: view!.state.doc.length } });
+    const toast = deferred();
+    window.addEventListener('image-host-toast', () => toast.resolve(), { once: true });
+    upload.resolve({ url: 'https://cdn.example/a.png' });
+    await toast.promise; // the success toast follows the (skipped) rewrite
 
-  it('resolves .novelist/ path for pasted images', () => {
-    expect(resolveImagePath('.novelist/images/paste_123.png', projectDir))
-      .toBe('/Users/test/my-novel/.novelist/images/paste_123.png');
+    expect(view!.state.doc.toString()).toBe('before\n');
   });
 });
 
-// ── LRU cache model ──
-
-class LRUCache<K, V> {
-  private map = new Map<K, V>();
-  constructor(private maxSize: number) {}
-
-  get(key: K): V | undefined {
-    return this.map.get(key);
+describe('image context menu', () => {
+  function openMenu(lineNumber: number): HTMLElement {
+    const widgets = view!.dom.querySelectorAll<HTMLElement>('.cm-novelist-image-widget');
+    const widget = Array.from(widgets).find((w) => view!.state.doc.lineAt(view!.posAtDOM(w)).number === lineNumber)!;
+    widget.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 30 }));
+    return document.querySelector<HTMLElement>('.cm-image-context-menu')!;
   }
 
-  set(key: K, value: V): void {
-    if (this.map.size >= this.maxSize) {
-      const first = this.map.keys().next().value!;
-      this.map.delete(first);
-    }
-    this.map.set(key, value);
+  function itemLabels(menu: HTMLElement): string[] {
+    return Array.from(menu.querySelectorAll('.cm-image-context-menu-item'), (el) => el.textContent ?? '');
   }
 
-  get size(): number {
-    return this.map.size;
-  }
-}
+  it('offers upload for local images and browser opening for remote ones', () => {
+    mount('![local](img/a.png)\n![remote](https://img.example/b.png)\nend', [wysiwygImageDocumentDir('/project')]);
 
-describe('image LRU cache', () => {
-  it('stores and retrieves values', () => {
-    const cache = new LRUCache<string, string>(64);
-    cache.set('img1.png', 'data:image/png;base64,abc');
-    expect(cache.get('img1.png')).toBe('data:image/png;base64,abc');
+    const local = itemLabels(openMenu(1));
+    expect(local).toContain('Upload to host');
+    expect(local).not.toContain('Open in Browser');
+
+    const remote = itemLabels(openMenu(2));
+    expect(remote).toContain('Open in Browser');
+    expect(remote).not.toContain('Upload to host');
   });
 
-  it('evicts oldest entry when full', () => {
-    const cache = new LRUCache<string, string>(3);
-    cache.set('a', '1');
-    cache.set('b', '2');
-    cache.set('c', '3');
-    // Cache is full (3/3), adding one more should evict 'a'
-    cache.set('d', '4');
-    expect(cache.get('a')).toBeUndefined();
-    expect(cache.get('b')).toBe('2');
-    expect(cache.get('d')).toBe('4');
-    expect(cache.size).toBe(3);
-  });
-
-  it('handles max size of 1', () => {
-    const cache = new LRUCache<string, string>(1);
-    cache.set('a', '1');
-    cache.set('b', '2');
-    expect(cache.get('a')).toBeUndefined();
-    expect(cache.get('b')).toBe('2');
-  });
-
-  it('does not exceed max size under repeated sets', () => {
-    const cache = new LRUCache<string, string>(64);
-    for (let i = 0; i < 100; i++) {
-      cache.set(`img_${i}.png`, `data_${i}`);
-    }
-    expect(cache.size).toBe(64);
-  });
-});
-
-// ── Paste/drop filename generation ──
-
-function generatePasteFilename(timestamp: number, index: number): string {
-  const ts = timestamp;
-  return index === 0
-    ? `paste_${ts}.png`
-    : `paste_${ts}_${index}.png`;
-}
-
-function generateDropFilename(originalName: string, timestamp: number): string {
-  return `${timestamp}_${originalName}`;
-}
-
-describe('image paste filename generation', () => {
-  it('generates filename with timestamp', () => {
-    const name = generatePasteFilename(1700000000000, 0);
-    expect(name).toBe('paste_1700000000000.png');
-  });
-
-  it('appends index for multiple pastes', () => {
-    const name = generatePasteFilename(1700000000000, 2);
-    expect(name).toBe('paste_1700000000000_2.png');
-  });
-});
-
-describe('image drop filename generation', () => {
-  it('prepends timestamp to original filename', () => {
-    const name = generateDropFilename('photo.jpg', 1700000000000);
-    expect(name).toBe('1700000000000_photo.jpg');
-  });
-
-  it('handles filenames with spaces', () => {
-    const name = generateDropFilename('my photo.png', 1700000000000);
-    expect(name).toBe('1700000000000_my photo.png');
-  });
-});
-
-// ── Image context menu logic ──
-
-describe('image context menu: source classification for menu items', () => {
-  function getContextMenuItems(
-    src: string,
-    projectDir: string,
-    userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-  ): string[] {
-    const isLocal = !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:');
-    const items: string[] = ['Copy Image Path'];
-    if (isLocal && projectDir) items.push(fileManagerLabel(detectDesktopPlatform(userAgent)));
-    if (src.startsWith('http://') || src.startsWith('https://')) items.push('Open in Browser');
-    items.push('Edit Caption', 'Delete Image');
-    return items;
-  }
-
-  it('local image shows Reveal in Finder', () => {
-    const items = getContextMenuItems('./assets/photo.png', '/project');
-    expect(items).toContain('Reveal in Finder');
-    expect(items).not.toContain('Open in Browser');
-  });
-
-  it('local image shows Show in Explorer on Windows', () => {
-    const items = getContextMenuItems('./assets/photo.png', '/project', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
-    expect(items).toContain('Show in Explorer');
-    expect(items).not.toContain('Reveal in Finder');
-  });
-
-  it('HTTP image shows Open in Browser', () => {
-    const items = getContextMenuItems('https://example.com/img.png', '/project');
-    expect(items).toContain('Open in Browser');
-    expect(items).not.toContain('Reveal in Finder');
-  });
-
-  it('data URI image shows neither Reveal nor Open in Browser', () => {
-    const items = getContextMenuItems('data:image/png;base64,abc', '/project');
-    expect(items).not.toContain('Reveal in Finder');
-    expect(items).not.toContain('Open in Browser');
-  });
-
-  it('local image without project dir omits Reveal in Finder', () => {
-    const items = getContextMenuItems('./img.png', '');
-    expect(items).not.toContain('Reveal in Finder');
-  });
-
-  it('always includes Copy Image Path, Edit Caption, Delete Image', () => {
-    for (const src of ['./local.png', 'https://remote.com/img.png', 'data:image/png;base64,abc']) {
-      const items = getContextMenuItems(src, '/project');
-      expect(items).toContain('Copy Image Path');
-      expect(items).toContain('Edit Caption');
-      expect(items).toContain('Delete Image');
+  it('positions the menu in layout coordinates at non-100% zoom', () => {
+    document.documentElement.style.transform = 'scale(1.5)';
+    try {
+      mount('![local](img/a.png)\nend', [wysiwygImageDocumentDir('/project')]);
+      const menu = openMenu(1);
+      expect(parseFloat(menu.style.left)).toBeCloseTo(40 / 1.5);
+      expect(parseFloat(menu.style.top)).toBeCloseTo(30 / 1.5);
+    } finally {
+      document.documentElement.style.transform = '';
     }
   });
-});
 
-describe('image context menu: edit caption position', () => {
-  function findAltTextRange(lineText: string, lineFrom: number): { from: number; to: number } | null {
-    const altStart = lineText.indexOf('![');
-    if (altStart < 0) return null;
-    const from = lineFrom + altStart + 2;
-    const closeBracket = lineText.indexOf(']', altStart);
-    const to = closeBracket >= 0 ? lineFrom + closeBracket : from;
-    return { from, to };
-  }
+  it('[regression] "Upload to host" rewrites the link even after typing above it during the upload', async () => {
+    const upload = deferred<{ url: string }>();
+    uploadImage.mockImplementationOnce(() => upload.promise);
+    mount('![local](img/a.png)\nend', [wysiwygImageDocumentDir('/project')]);
 
-  it('finds alt text range in standard image', () => {
-    const result = findAltTextRange('![my photo](image.png)', 0);
-    expect(result).toEqual({ from: 2, to: 10 });
-  });
+    const item = Array.from(openMenu(1).querySelectorAll<HTMLElement>('.cm-image-context-menu-item'))
+      .find((el) => el.textContent === 'Upload to host')!;
+    item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(uploadImage).toHaveBeenCalledWith('img/a.png', { baseDir: '/project' }));
 
-  it('finds alt text range with empty alt', () => {
-    const result = findAltTextRange('![](image.png)', 0);
-    expect(result).toEqual({ from: 2, to: 2 });
-  });
+    view!.dispatch({ changes: { from: 0, insert: '第一章\n\n' } });
+    upload.resolve({ url: 'https://cdn.example/a.png' });
 
-  it('respects line offset', () => {
-    const result = findAltTextRange('![alt](url)', 100);
-    expect(result).toEqual({ from: 102, to: 105 });
-  });
-
-  it('handles CJK alt text', () => {
-    const text = '![第一章插图](ch1.png)';
-    const result = findAltTextRange(text, 0);
-    expect(result).not.toBeNull();
-    expect(text.slice(result!.from, result!.to)).toBe('第一章插图');
-  });
-
-  it('returns null for non-image line', () => {
-    expect(findAltTextRange('just text', 0)).toBeNull();
-  });
-});
-
-describe('image context menu: delete image line', () => {
-  function computeDeleteRange(lineFrom: number, lineTo: number, docLength: number): { from: number; to: number } {
-    const deleteTo = Math.min(lineTo + 1, docLength);
-    return { from: lineFrom, to: deleteTo };
-  }
-
-  it('deletes line including trailing newline', () => {
-    const doc = '![img](a.png)\nnext line';
-    const result = computeDeleteRange(0, 13, doc.length);
-    expect(result).toEqual({ from: 0, to: 14 });
-    expect(doc.slice(result.to)).toBe('next line');
-  });
-
-  it('deletes last line without exceeding doc length', () => {
-    const doc = 'first\n![img](a.png)';
-    const lineFrom = 6;
-    const lineTo = doc.length;
-    const result = computeDeleteRange(lineFrom, lineTo, doc.length);
-    expect(result.to).toBe(doc.length);
-  });
-
-  it('handles single-line document', () => {
-    const doc = '![img](a.png)';
-    const result = computeDeleteRange(0, doc.length, doc.length);
-    expect(result).toEqual({ from: 0, to: doc.length });
-  });
-});
-
-describe('image context menu: reveal path resolution', () => {
-  it('constructs full path for local images', () => {
-    const projectDir = '/Users/test/novel';
-    const imgSrc = '.novelist/images/paste.png';
-    const fullPath = `${projectDir}/${imgSrc}`;
-    expect(fullPath).toBe('/Users/test/novel/.novelist/images/paste.png');
-  });
-
-  it('handles relative path with subdirectory', () => {
-    const projectDir = '/Users/test/novel';
-    const imgSrc = 'assets/chapter1/hero.jpg';
-    const fullPath = `${projectDir}/${imgSrc}`;
-    expect(fullPath).toBe('/Users/test/novel/assets/chapter1/hero.jpg');
-  });
-});
-
-// ── Markdown image insertion from paste ──
-
-function generatePasteMarkdown(filename: string): string {
-  return `![pasted image](.novelist/images/${filename})`;
-}
-
-describe('paste image markdown generation', () => {
-  it('generates correct markdown with .novelist path', () => {
-    const md = generatePasteMarkdown('paste_1700000000000.png');
-    expect(md).toBe('![pasted image](.novelist/images/paste_1700000000000.png)');
-  });
-
-  it('generated markdown is parseable', () => {
-    const md = generatePasteMarkdown('paste_123.png');
-    const parsed = parseImageSyntax(md);
-    expect(parsed).not.toBeNull();
-    expect(parsed!.alt).toBe('pasted image');
-    expect(parsed!.src).toBe('.novelist/images/paste_123.png');
+    await vi.waitFor(() => expect(view!.state.doc.toString()).toBe('第一章\n\n![local](https://cdn.example/a.png)\nend'));
   });
 });

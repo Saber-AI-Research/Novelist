@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { EditorView } from '@codemirror/view';
-  import type { Extension, ChangeSet } from '@codemirror/state';
+  import type { Extension, EditorState } from '@codemirror/state';
   import { createEditorExtensions, createEditorState, highlightMatchCompartment, reconfigureEditorState } from '$lib/editor/setup';
   import { highlightSelectionMatches } from '@codemirror/search';
   import { tabsStore, registerEditorView, unregisterEditorView, saveEditorState, getSavedEditorState, getEditorView } from '$lib/stores/tabs.svelte';
@@ -14,7 +14,7 @@
   import { isScratchFile } from '$lib/utils/scratch';
   import { invoke } from '@tauri-apps/api/core';
   import { t } from '$lib/i18n';
-  import { countWords } from '$lib/utils/wordcount';
+  import { countDocWords, countWordDelta } from '$lib/utils/doc-wordcount';
   import { extractHeadings, type HeadingItem } from '$lib/editor/outline';
 import {
   setWysiwygImageDocumentDir,
@@ -58,9 +58,9 @@ import {
   let readOnlyFileSize = $state(0);
   let statsTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingLoadAfterComposition = false;
-  // Re-entrancy guard for saveCurrentFile. Prevents two racing writers from
-  // both using the `{path}.novelist-tmp` atomic-write name (the first rename
-  // would consume the temp and the second would fail with ENOENT).
+  // Re-entrancy guard for saveCurrentFile, so a repeated Cmd+S doesn't open a
+  // second Save As picker or error dialog. Writes of one file are serialized
+  // by `tabsStore.saveTab`.
   let isSaving = false;
 
   // Recovery banner state (replaces modal dialog for better UX)
@@ -78,6 +78,9 @@ import {
   let sessionWordsAdded = 0;
   let sessionLastSampled = 0;
   let lastKnownWordCount = 0;
+  // Exact word count of the live document, kept current per edit by
+  // recounting only the touched lines (cheap even for very long documents).
+  let liveWordCount = 0;
 
   /** Fold a fresh wordCount sample into the active session, if one is open. */
   function sampleSessionWords(currentCount: number) {
@@ -146,7 +149,7 @@ import {
         changes: { from: 0, to: view.state.doc.length, insert: recoveryContent },
       });
       tabsStore.markDirty(currentTabId);
-      wordCount = countWords(recoveryContent);
+      wordCount = liveWordCount;
       lastKnownWordCount = wordCount;
       headings = extractHeadings(view.state);
     }
@@ -206,13 +209,14 @@ import {
    * Uses requestIdleCallback when available so stats computation
    * never blocks typing or scroll. Falls back to setTimeout.
    *
-   * MiaoYan-style performance tiers:
-   * - < 2K lines: full stats (word count + headings) after 500ms idle
-   * - 2K-5K lines: full stats after 1s idle
-   * - > 5K lines: estimate word count, skip headings
+   * The word count itself is maintained per edit (`liveWordCount`); this
+   * only publishes it, plus headings:
+   * - < 2K lines: after 500ms idle
+   * - 2K-5K lines: after 1s idle
+   * - > 5K lines: after 2s idle, skipping the headings parse
    */
   let statsScheduled = false;
-  function scheduleStatsUpdate(state: import('@codemirror/state').EditorState) {
+  function scheduleStatsUpdate(state: EditorState) {
     if (statsScheduled) return; // Don't reset — let the pending callback fire
     statsScheduled = true;
 
@@ -225,10 +229,8 @@ import {
       // Re-read the current view state (may have changed since scheduling)
       if (!view) return;
       const currentState = view.state;
-      if (currentState.doc.lines > LARGE_DOC_LINES) {
-        wordCount = Math.round(currentState.doc.length / 4);
-      } else {
-        wordCount = countWords(currentState.doc.toString());
+      wordCount = liveWordCount;
+      if (currentState.doc.lines <= LARGE_DOC_LINES) {
         headings = extractHeadings(currentState);
       }
       lastKnownWordCount = wordCount;
@@ -251,12 +253,8 @@ import {
     // Take one final sample so additions made since the last debounced update
     // (e.g. typing then immediately Cmd+S within 500ms) aren't lost.
     if (view) {
-      const st = view.state;
-      const currentCount = st.doc.lines > LARGE_DOC_LINES
-        ? Math.round(st.doc.length / 4)
-        : countWords(st.doc.toString());
-      lastKnownWordCount = currentCount;
-      sampleSessionWords(currentCount);
+      lastKnownWordCount = liveWordCount;
+      sampleSessionWords(liveWordCount);
     }
     const minutes = Math.max(1, Math.round((Date.now() - sessionStartTime) / 60000));
     const wordsAdded = sessionWordsAdded;
@@ -277,7 +275,7 @@ import {
     }).catch(e => console.warn('[Stats] Failed to record:', e));
   }
 
-  function buildExtensions(fileSize: number, lineCount: number): Extension[] {
+  function buildExtensions(fileSize: number, lineCount: number, filePath: string): Extension[] {
     const readOnly = fileSize >= FILE_SIZE_READONLY;
     const largeFile = fileSize >= FILE_SIZE_LARGE;
     const tallDoc = lineCount > LARGE_DOC_LINES;
@@ -290,6 +288,7 @@ import {
       readOnly,
       indentStyle: uiStore.editorSettings.indentStyle,
       highlightMatches: uiStore.editorSettings.highlightMatches,
+      imageDocumentDir: pathDirname(filePath),
     });
   }
 
@@ -300,6 +299,7 @@ import {
         queueMicrotask(loadTab);
       }
       if (update.docChanged) {
+        liveWordCount += countWordDelta(update.startState.doc, update.state.doc, update.changes);
         const t = getActiveTab();
         if (t) {
           tabsStore.markDirty(t.id);
@@ -344,8 +344,6 @@ import {
     const tab = getActiveTab();
     if (!tab || !view) return;
 
-    const content = view.state.doc.toString();
-
     // Cmd+S on a clean tab: nothing to write, but the user may have just
     // typed an H1 then triggered autosave (or come back to a placeholder
     // file from disk). Still run the H1-driven rename check so the
@@ -353,7 +351,7 @@ import {
     // 2026-05-07-v0.2.4-rename-and-macros.md.
     if (!tab.isDirty) {
       if (!isScratchFile(tab.filePath)) {
-        await tabsStore.tryRenameAfterSave(tab.filePath, content);
+        await tabsStore.tryRenameAfterSave(tab.filePath, view.state.doc.toString());
       }
       return;
     }
@@ -364,21 +362,17 @@ import {
       // live in a hidden cache dir, so writing back to that path is never
       // what the user wants on Cmd+S.
       if (isScratchFile(tab.filePath)) {
-        await saveAsRename(tab, content);
+        await saveAsRename(tab);
         return;
       }
 
-      await commands.registerWriteIgnore(tab.filePath);
-      const result = await commands.writeFile(tab.filePath, content);
-      if (result.status === 'ok') {
-        tabsStore.updateContent(tab.id, content);
-        const finalPath = await tabsStore.tryRenameAfterSave(tab.filePath, content);
-        tabsStore.markSavedByPath(finalPath);
-        clearRecoveryDraft(tab.filePath);
+      const savedPath = tab.filePath;
+      const result = await tabsStore.saveTab(tab.id);
+      if (result.status === 'saved') {
+        clearRecoveryDraft(savedPath);
         flushWritingStats();
-      } else {
-        console.error('[Save] Failed:', result.error);
-        const errStr = String(result.error ?? '');
+      } else if (result.status === 'error') {
+        const errStr = result.error;
         // "Parent directory does not exist" is the explicit pre-check error
         // raised by write_file_inner when the folder really is gone. Bare
         // "No such file or directory" / "os error 2" is ambiguous — e.g. a
@@ -387,10 +381,11 @@ import {
         // recovery prompt. Everything else becomes a non-blocking error
         // toast so the user can retry without being pushed into a file
         // picker they never asked for.
+        console.error('[Save] Failed:', errStr);
         const parentMissing = errStr.includes('Parent directory does not exist');
         if (parentMissing) {
           const wantSaveAs = await ask(
-            t('dialog.saveParentMissing', { path: tab.filePath }),
+            t('dialog.saveParentMissing', { path: savedPath }),
             {
               title: t('dialog.saveFailed'),
               kind: 'warning',
@@ -398,7 +393,7 @@ import {
               cancelLabel: t('dialog.cancel'),
             }
           );
-          if (wantSaveAs) await saveAsRename(tab, content);
+          if (wantSaveAs) await saveAsRename(tab);
         } else {
           await message(errStr || t('dialog.saveFailedGeneric'), {
             title: t('dialog.saveFailed'),
@@ -412,7 +407,7 @@ import {
   }
 
   /** Save As / Rename: prompt user for a new file name and location. */
-  async function saveAsRename(tab: { id: string; filePath: string; fileName: string }, content: string) {
+  async function saveAsRename(tab: { id: string; filePath: string; content: string }) {
     // Default to project dir if available, otherwise the file's own dir
     const defaultDir = projectStore.dirPath || pathDirname(tab.filePath);
     const savePath = await saveDialog({
@@ -421,31 +416,40 @@ import {
     });
     if (!savePath) return;
 
+    // Read the tab's own editor now: typing may have continued while the
+    // picker was open.
+    tabsStore.syncFromView(tab.id);
+    const content = tab.content;
+    const oldPath = tab.filePath;
     await commands.registerWriteIgnore(savePath);
     const result = await commands.writeFile(savePath, content);
-    if (result.status === 'ok') {
-      // Delete old scratch file if it was in the project dir
-      if (isScratchFile(tab.filePath)) {
-        commands.deleteItem(tab.filePath).catch(() => {});
-      }
-      await tabsStore.retargetTabPath(tab.id, savePath);
-      tabsStore.updateContent(tab.id, content);
-      tabsStore.markSavedByPath(savePath);
-      // Refresh sidebar if in project mode
-      if (projectStore.dirPath) {
-        const filesResult = await commands.listDirectory(projectStore.dirPath, null);
-        if (filesResult.status === 'ok') projectStore.updateFiles(filesResult.data);
-      }
-      flushWritingStats();
+    if (result.status !== 'ok') {
+      console.error('[Save As] Failed:', result.error);
+      await message(String(result.error ?? '') || t('dialog.saveFailedGeneric'), {
+        title: t('dialog.saveFailed'),
+        kind: 'error',
+      });
+      return;
     }
+    // The scratch file in the app cache is superseded by the saved copy.
+    if (isScratchFile(oldPath)) {
+      commands.deleteScratchFile(oldPath).catch(() => {});
+    }
+    await tabsStore.retargetTabPath(tab.id, savePath);
+    tabsStore.markWritten(savePath, content);
+    // Refresh sidebar if in project mode
+    if (projectStore.dirPath) {
+      const filesResult = await commands.listDirectory(projectStore.dirPath, null);
+      if (filesResult.status === 'ok') projectStore.updateFiles(filesResult.data);
+    }
+    flushWritingStats();
   }
 
   /** Rename current file (Cmd+Shift+R) — always shows Save As dialog. */
   export async function renameCurrentFile() {
     const tab = getActiveTab();
     if (!tab || !view) return;
-    const content = view.state.doc.toString();
-    await saveAsRename(tab, content);
+    await saveAsRename(tab);
   }
 
   /** Split a large read-only file into chapters based on H1 headings */
@@ -519,7 +523,8 @@ import {
   function cleanupCurrentView(discardState = false) {
     flushWritingStats();
     if (view && currentTabId) {
-      if (!discardState) saveEditorState(currentTabId, view.state);
+      // A closed tab keeps no state: storing it would only leak.
+      if (!discardState && tabsStore.findTab(currentTabId)) saveEditorState(currentTabId, view.state);
       if (!discardState && !isReadOnly) {
         // syncFromView now compares content before marking dirty,
         // so scroll-only sessions won't trigger false dirty flags.
@@ -564,6 +569,8 @@ import {
     currentTabId = tab.id;
     currentTabVersion = tab.version;
     currentZenMode = uiStore.zenMode;
+    // The same file may be live in another pane with edits this tab missed.
+    tabsStore.adoptLiveSiblingContent(tab.id);
 
     const fileEntry = projectStore.files.find(f => f.path === tab.filePath);
     const fileSize = fileEntry?.size ?? tab.content.length;
@@ -577,7 +584,7 @@ import {
     readOnlyFileSize = fileSize;
 
     const extensions = [
-      ...buildExtensions(fileSize, lineCount),
+      ...buildExtensions(fileSize, lineCount, tab.filePath),
       buildUpdateListener(),
       // Cmd+S and Cmd+W are intentionally NOT bound here — both are owned by
       // the window-level handler in App.svelte. Binding them a second time in
@@ -608,13 +615,10 @@ import {
     (window as any).__novelist_view = view;
     (window as any).__novelist_save = saveCurrentFile;
 
-    if (view.state.doc.lines > LARGE_DOC_LINES) {
-      wordCount = Math.round(view.state.doc.length / 4);
-      headings = [];  // Skip full-tree parse for large files
-    } else {
-      wordCount = countWords(tab.content);
-      headings = extractHeadings(view.state);
-    }
+    liveWordCount = countDocWords(view.state.doc);
+    wordCount = liveWordCount;
+    // Skip the full-tree heading parse for very long documents.
+    headings = view.state.doc.lines > LARGE_DOC_LINES ? [] : extractHeadings(view.state);
     lastKnownWordCount = wordCount;
     updateCursorInfo(view);
 
@@ -669,37 +673,6 @@ import {
 
     loadTab();
 
-    let autoSaveIntervalId: ReturnType<typeof setInterval> | null = null;
-
-    function updateAutoSaveInterval() {
-      if (autoSaveIntervalId) { clearInterval(autoSaveIntervalId); autoSaveIntervalId = null; }
-      const autoSaveMinutes = uiStore.editorSettings.autoSaveMinutes;
-      if (autoSaveMinutes <= 0) return;
-      autoSaveIntervalId = setInterval(async () => {
-        const paneTabs = tabsStore.getPaneTabs(effectivePaneId);
-        for (const tab of paneTabs) {
-          if (!tab.isDirty) continue;
-          tabsStore.syncFromView(tab.id);
-          const freshTab = tabsStore.findByPath(tab.filePath);
-          if (freshTab?.isDirty) {
-            await commands.registerWriteIgnore(freshTab.filePath);
-            const result = await commands.writeFile(freshTab.filePath, freshTab.content);
-            if (result.status === 'ok') {
-              await tabsStore.tryRenameAfterSave(freshTab.filePath, freshTab.content);
-              tabsStore.markSaved(freshTab.id);
-            }
-          }
-        }
-      }, autoSaveMinutes * 60 * 1000);
-    }
-
-    updateAutoSaveInterval();
-
-    $effect(() => {
-      const _minutes = uiStore.editorSettings.autoSaveMinutes;
-      updateAutoSaveInterval();
-    });
-
     // Crash-recovery draft: saves content to a recovery draft periodically
     // when the document is dirty, so edits survive crashes/force-quits.
     const recoveryDraftIntervalId = setInterval(() => {
@@ -714,7 +687,6 @@ import {
     return () => {
       unregisterRenameFlush();
       clearInterval(recoveryDraftIntervalId);
-      if (autoSaveIntervalId) clearInterval(autoSaveIntervalId);
       if (statsTimer) clearTimeout(statsTimer);
       cleanupCurrentView();
     };

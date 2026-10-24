@@ -451,8 +451,10 @@ function transformText(sourceText: Text): TextNode | null {
 }
 
 function normalizedTextValue(sourceText: Text): string | null {
-  const value = normalizeLineEndings(sourceText.data).replace(/\s+/g, ' ');
-  if (value.trim().length > 0) return value;
+  // Collapse only HTML (ASCII) whitespace: the ideographic space U+3000 is a
+  // Chinese paragraph indent and NBSP is deliberate, so both must survive.
+  const value = normalizeLineEndings(sourceText.data).replace(/[ \t\n\f\r]+/g, ' ');
+  if (/[^ \t\n\f\r]/.test(value)) return value;
   const parentTag = sourceText.parentElement?.tagName;
   return parentTag && INLINE_WHITESPACE_PARENTS.has(parentTag) ? ' ' : null;
 }

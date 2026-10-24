@@ -1,13 +1,9 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('Command Palette', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
   });
 
   test('Cmd+Shift+P opens command palette', async ({ app }) => {
@@ -67,12 +63,10 @@ test.describe('Command Palette', () => {
     const input = app.getByTestId('palette-input');
     await input.fill('zen');
 
-    const firstResult = app.locator('[data-testid="palette-result-0"]');
-    if (await firstResult.isVisible()) {
-      await firstResult.click();
-      await expect(app.getByTestId('zen-mode')).toBeVisible({ timeout: 3000 });
-      await app.keyboard.press('Escape');
-    }
+    const firstResult = app.getByTestId('palette-result-0');
+    await firstResult.click();
+    await expect(app.getByTestId('zen-mode')).toBeVisible({ timeout: 3000 });
+    await app.keyboard.press('Escape');
   });
 
   test('Convert to Task List matches the context command without duplicate dispatch @task23', async ({ app, appKeys }) => {

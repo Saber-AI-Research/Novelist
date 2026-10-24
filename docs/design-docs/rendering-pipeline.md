@@ -58,15 +58,25 @@ loadTab()
  ├─ 1. setWysiwygProjectDir(projectDir)     // image path resolution
  ├─ 2. cleanupCurrentView()                 // destroy old EditorView
  │     ├─ saveEditorState(tabId, state)     // preserve undo history
- │     ├─ syncFromView(tabId)               // sync content to store
+ │     ├─ syncFromView(tabId)               // sync content to store; same-file
+ │     │                                    // tabs without an editor get the text
  │     └─ unregisterEditorView(tabId)       // remove from registry
- ├─ 3. Compute file size & line count → determine file tier
- ├─ 4. buildExtensions(fileSize, lineCount) // build CM6 extension set
- ├─ 5. new EditorView({ state, parent })    // create new editor
- ├─ 6. registerEditorView(tabId, view)      // register in global map
- ├─ 7. countWords() + extractHeadings()     // initial stats
- └─ 8. checkRecoveryDraft()                 // crash recovery check
+ ├─ 3. adoptLiveSiblingContent(tabId)       // same file live in another pane? take its text
+ ├─ 4. Compute file size & line count → determine file tier
+ ├─ 5. buildExtensions(fileSize, lineCount) // build CM6 extension set
+ ├─ 6. new EditorView({ state, parent })    // create new editor
+ ├─ 7. registerEditorView(tabId, view)      // register in global map
+ ├─ 8. countDocWords() + extractHeadings()  // initial stats (headings skipped >5K lines)
+ └─ 9. checkRecoveryDraft()                 // crash recovery check
 ```
+
+Saving (Cmd+S, close-tab Save, quit/project switch, conflict "Keep mine",
+auto-save) always goes through `tabsStore.saveTab(tabId)`: it reads that tab's
+own editor by id, writes, runs the H1 rename, then `markWritten(path, text)`
+updates every tab of the file. A tab is marked clean only if its live text
+still equals what was written, so keys typed during the write stay dirty.
+Writes of one path are serialized. Auto-save is one app-wide timer
+(`services/autosave.ts`) that skips files with an open conflict dialog.
 
 ## 5. File Size Tiers
 
@@ -165,10 +175,11 @@ EditorView.updateListener:
   docChanged →
   ├─ tabsStore.markDirty(tabId)           // mark unsaved
   ├─ Cross-pane sync (remoteChangeAnnotation) // same file in split view
-  ├─ scheduleStatsUpdate()                 // debounced stats
-  │   ├─ <2K lines: 500ms → countWords + extractHeadings
-  │   ├─ 2K–5K lines: 1s → full stats
-  │   └─ >5K lines: 2s → estimate (doc.length / 4)
+  ├─ liveWordCount += countWordDelta()     // exact CJK-aware count, recounting only touched lines
+  ├─ scheduleStatsUpdate()                 // debounced publish of the count + headings
+  │   ├─ <2K lines: 500ms → wordCount + extractHeadings
+  │   ├─ 2K–5K lines: 1s → wordCount + extractHeadings
+  │   └─ >5K lines: 2s → wordCount only
   └─ Writing session tracking (sessionStartWordCount)
 
   selectionSet → updateCursorInfo → cursorLine / cursorCol → StatusBar
@@ -198,7 +209,6 @@ The frontend communicates with the Rust backend via Tauri IPC. TypeScript bindin
 | Service | Role |
 |---------|------|
 | `file_watcher.rs` | FSEvent file monitoring → BLAKE3 hash change detection + self-write suppression → emits `file-changed` event → frontend reload or conflict dialog |
-| `rope_document.rs` | Ropey rope data structure for huge file editing (`rope_open` / `rope_get_lines` / `rope_apply_edit`) |
 | `plugin_host/sandbox.rs` | QuickJS plugin host with permission tiers: read / write / execute |
 
 ### 9.3 Pandoc export process contract

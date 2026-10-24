@@ -1,6 +1,6 @@
 # Test Hierarchy & Coverage — Phase 1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stand up the test-hierarchy + coverage governance infrastructure defined in `docs/exec-plans/completed/2026-04-21-test-hierarchy-and-coverage-design.md` — directory split, vitest multi-env config, policy docs, baseline coverage, CI gate. No new test content beyond re-tagging existing tests.
 

@@ -2,6 +2,7 @@ import { type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { t } from '$lib/i18n';
+import { tabsStore } from '$lib/stores/tabs.svelte';
 import { updaterState } from '$lib/stores/updater-state.svelte';
 import {
   runUpdateCheck,
@@ -76,6 +77,10 @@ export function dismissPendingVersion(): void {
 }
 
 async function promptAndInstall(): Promise<void> {
+  // A manual check while an update is downloading/installed must not offer
+  // (and start) a second download; the progress modal already owns the flow.
+  const phase = updaterState.phase;
+  if (phase === 'downloading' || phase === 'installing' || phase === 'ready') return;
   const update = _cachedUpdate;
   if (!update) return;
 
@@ -125,7 +130,12 @@ async function downloadAndInstall(update: Update): Promise<void> {
   updaterState.setReady();
 }
 
+/**
+ * "Restart Now". `relaunch()` exits without the window's close-requested
+ * handler, so unsaved tabs get the same Save / Don't Save / Cancel prompt here.
+ */
 export async function restartForUpdate(): Promise<void> {
+  if (!await tabsStore.promptUnsavedBeforeExit()) return;
   try {
     await relaunch();
   } catch (e) {

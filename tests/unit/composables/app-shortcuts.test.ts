@@ -11,6 +11,7 @@ function keyEvent(opts: {
   ctrlKey?: boolean;
   shiftKey?: boolean;
   altKey?: boolean;
+  target?: EventTarget | null;
 }): KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> } {
   return {
     key: opts.key,
@@ -19,8 +20,24 @@ function keyEvent(opts: {
     ctrlKey: opts.ctrlKey ?? false,
     shiftKey: opts.shiftKey ?? false,
     altKey: opts.altKey ?? false,
+    target: opts.target ?? null,
     preventDefault: vi.fn(),
   } as unknown as KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> };
+}
+
+/** `.cm-editor > .cm-content > table widget > td[contenteditable]`, returning both editable hosts. */
+function editorWithTableCell(): { content: HTMLElement; cell: HTMLElement } {
+  const editor = document.createElement('div');
+  editor.className = 'cm-editor';
+  const content = document.createElement('div');
+  content.className = 'cm-content';
+  content.setAttribute('contenteditable', 'true');
+  const widget = document.createElement('div');
+  widget.setAttribute('contenteditable', 'false');
+  widget.innerHTML = '<table><tbody><tr><td class="cm-novelist-table-cell" contenteditable="true">单元格</td></tr></tbody></table>';
+  content.appendChild(widget);
+  editor.appendChild(content);
+  return { content, cell: widget.querySelector('td')! };
 }
 
 /** Build a handler with spy-able context functions. */
@@ -135,6 +152,29 @@ describe('createKeydownHandler — customizable shortcuts via command registry',
     const { handler } = makeHandler();
     handler(keyEvent({ key: 'b' }));
     expect(boldHandler).not.toHaveBeenCalled();
+  });
+
+  it('Cmd+B from the CodeMirror content still dispatches the editor command', () => {
+    const { handler } = makeHandler();
+    const { content } = editorWithTableCell();
+    handler(keyEvent({ key: 'b', metaKey: true, target: content }));
+    expect(boldHandler).toHaveBeenCalledOnce();
+  });
+
+  it('Cmd+B typed in an editable table cell inside the editor does not fire editor commands', () => {
+    const { handler } = makeHandler();
+    const { cell } = editorWithTableCell();
+    const e = keyEvent({ key: 'b', metaKey: true, target: cell });
+    handler(e);
+    expect(boldHandler).not.toHaveBeenCalled();
+    expect(e.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('Cmd+S typed in an editable table cell still saves', () => {
+    const { handler, ctx } = makeHandler();
+    const { cell } = editorWithTableCell();
+    handler(keyEvent({ key: 's', metaKey: true, target: cell }));
+    expect(ctx.saveActiveFile).toHaveBeenCalledOnce();
   });
 });
 

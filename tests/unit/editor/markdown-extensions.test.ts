@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { parser as baseParser } from '@lezer/markdown';
+import { EditorState } from '@codemirror/state';
+import { ensureSyntaxTree } from '@codemirror/language';
+import { markdown } from '@codemirror/lang-markdown';
 import { Highlight, Footnote, InlineMath, DisplayMath, FrontMatter } from '$lib/editor/markdown-extensions';
 import type { Tree, SyntaxNodeRef } from '@lezer/common';
 
@@ -21,6 +24,27 @@ function collectNodeNames(tree: Tree, doc: string): string[] {
   });
   void doc;
   return names;
+}
+
+/** Parse through CodeMirror (DocInput, line chunks) — the editor's real path. */
+function parseInEditor(doc: string): Tree {
+  const state = EditorState.create({
+    doc,
+    extensions: [markdown({ extensions: [DisplayMath, FrontMatter] })],
+  });
+  const tree = ensureSyntaxTree(state, state.doc.length, 5000);
+  if (!tree) throw new Error('parse did not finish');
+  return tree;
+}
+
+function nodesNamed(tree: Tree, name: string): Array<{ from: number; to: number }> {
+  const out: Array<{ from: number; to: number }> = [];
+  tree.iterate({
+    enter: (node) => {
+      if (node.name === name) out.push({ from: node.from, to: node.to });
+    },
+  });
+  return out;
 }
 
 describe('[contract] Highlight (==...==)', () => {
@@ -104,6 +128,31 @@ describe('[contract] DisplayMath ($$ ... $$)', () => {
     const tree = parseWith([DisplayMath], doc);
     expect(collectNodeNames(tree, doc)).not.toContain('DisplayMath');
   });
+
+  it('[regression] an unclosed $$ leaves the rest of the document parsed', () => {
+    const doc = 'intro\n\n$$\nx = 1\n\n# Heading\n\n![img](a.png)\n';
+    for (const tree of [parseWith([DisplayMath], doc), parseInEditor(doc)]) {
+      expect(nodesNamed(tree, 'DisplayMath')).toEqual([]);
+      const headings = nodesNamed(tree, 'ATXHeading1');
+      expect(headings).toEqual([{ from: doc.indexOf('# Heading'), to: doc.indexOf('# Heading') + 9 }]);
+      expect(nodesNamed(tree, 'Image')).toHaveLength(1);
+    }
+  });
+
+  it('pairs an opener with the next $$ line', () => {
+    const doc = '$$\n# Heading\n\n$$\nx\n$$\n';
+    const tree = parseInEditor(doc);
+    // First $$ pairs with the second; the trailing $$ is then unclosed text.
+    expect(nodesNamed(tree, 'DisplayMath')).toEqual([{ from: 0, to: doc.indexOf('\nx') }]);
+    expect(nodesNamed(tree, 'Paragraph').length).toBeGreaterThan(0);
+  });
+
+  it('parses display math inside a blockquote', () => {
+    const doc = '> $$\n> x\n> $$\n\n# After\n';
+    const tree = parseInEditor(doc);
+    expect(nodesNamed(tree, 'DisplayMath')).toHaveLength(1);
+    expect(nodesNamed(tree, 'ATXHeading1')).toHaveLength(1);
+  });
 });
 
 describe('[contract] FrontMatter (--- ... ---)', () => {
@@ -123,5 +172,14 @@ describe('[contract] FrontMatter (--- ... ---)', () => {
     const doc = '---\nkey: value\nno closer\n';
     const tree = parseWith([FrontMatter], doc);
     expect(collectNodeNames(tree, doc)).not.toContain('FrontMatter');
+  });
+
+  it('[regression] a leading --- rule without a closer leaves the document parsed', () => {
+    const doc = '---\n\n# Title\n\nbody text\n';
+    for (const tree of [parseWith([FrontMatter], doc), parseInEditor(doc)]) {
+      expect(nodesNamed(tree, 'FrontMatter')).toEqual([]);
+      expect(nodesNamed(tree, 'HorizontalRule')).toEqual([{ from: 0, to: 3 }]);
+      expect(nodesNamed(tree, 'ATXHeading1')).toHaveLength(1);
+    }
   });
 });

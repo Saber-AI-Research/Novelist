@@ -241,9 +241,9 @@ pub async fn ai_fetch_stream_start(
             return;
         }
 
-        // SSE path: accumulate chunks, split on blank lines, extract `data:` payloads.
+        // SSE path: split complete events on raw bytes, then decode each.
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut decoder = SseDecoder::default();
         loop {
             let next = tokio::select! {
                 _ = cancel.notified() => {
@@ -261,39 +261,26 @@ pub async fn ai_fetch_stream_start(
                     });
                     return;
                 }
-                Some(Ok(bytes)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
-                    // Bound a single un-delimited event: a server that streams
-                    // forever without a blank-line separator can't OOM us.
-                    if buffer.len() > MAX_RESPONSE_BYTES {
+                Some(Ok(bytes)) => match decoder.push(&bytes) {
+                    Err(message) => {
                         emit(AiStreamEvent::Error {
-                            message: format!(
-                                "SSE event exceeded {MAX_RESPONSE_BYTES} bytes without a delimiter"
-                            ),
+                            message,
                             status: None,
                         });
                         return;
                     }
-                    while let Some(idx) = buffer.find("\n\n") {
-                        let event_block = buffer[..idx].to_string();
-                        buffer.drain(..idx + 2);
-                        for line in event_block.lines() {
-                            let line = line.trim_end_matches('\r');
-                            if let Some(data) = line.strip_prefix("data:") {
-                                let data = data.trim_start();
-                                if data == "[DONE]" {
+                    Ok(items) => {
+                        for item in items {
+                            match item {
+                                SseItem::Done => {
                                     emit(AiStreamEvent::Done);
                                     return;
                                 }
-                                emit(AiStreamEvent::Chunk {
-                                    data: data.to_string(),
-                                });
+                                SseItem::Data(data) => emit(AiStreamEvent::Chunk { data }),
                             }
-                            // Other fields (event:, id:, retry:, comments) are
-                            // ignored — plugins don't use them.
                         }
                     }
-                }
+                },
             }
         }
         emit(AiStreamEvent::Done);
@@ -307,6 +294,80 @@ pub async fn ai_fetch_stream_start(
     });
 
     Ok(stream_id)
+}
+
+#[derive(Debug, PartialEq)]
+enum SseItem {
+    Data(String),
+    Done,
+}
+
+/// Incremental SSE parser over raw bytes. Events are split on blank lines
+/// before UTF-8 decoding, so a multi-byte (e.g. CJK) character split across
+/// network chunks is decoded whole instead of becoming U+FFFD.
+#[derive(Default)]
+struct SseDecoder {
+    buffer: Vec<u8>,
+    /// Prefix of `buffer` already searched without finding a delimiter.
+    scanned: usize,
+}
+
+impl SseDecoder {
+    /// Feed one network chunk; returns the `data:` payloads of every event it
+    /// completed. Other fields (event:, id:, retry:, comments) are ignored —
+    /// plugins don't use them. Stops at `[DONE]`.
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseItem>, String> {
+        self.buffer.extend_from_slice(bytes);
+        let mut items = Vec::new();
+        let mut consumed = 0;
+        // Back up so a delimiter split across chunks is still found.
+        let mut search_from = self.scanned.saturating_sub(3);
+        while let Some((end, delimiter_len)) = find_event_end(&self.buffer[search_from..]) {
+            let event_end = search_from + end;
+            let block = String::from_utf8_lossy(&self.buffer[consumed..event_end]);
+            for line in block.lines() {
+                let line = line.trim_end_matches('\r');
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim_start();
+                    if data == "[DONE]" {
+                        items.push(SseItem::Done);
+                        self.buffer.clear();
+                        self.scanned = 0;
+                        return Ok(items);
+                    }
+                    items.push(SseItem::Data(data.to_string()));
+                }
+            }
+            consumed = event_end + delimiter_len;
+            search_from = consumed;
+        }
+        self.buffer.drain(..consumed);
+        self.scanned = self.buffer.len();
+        // Bound a single un-delimited event: a server that streams forever
+        // without a blank-line separator can't OOM us.
+        if self.buffer.len() > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "SSE event exceeded {MAX_RESPONSE_BYTES} bytes without a delimiter"
+            ));
+        }
+        Ok(items)
+    }
+}
+
+/// Offset and length of the first blank line (`\n\n`, or `\r\n\r\n` from
+/// CRLF servers).
+fn find_event_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    let find = |needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    match (find(b"\n\n"), find(b"\r\n\r\n")) {
+        (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
+        (Some(lf), _) => Some((lf, 2)),
+        (None, Some(crlf)) => Some((crlf, 4)),
+        (None, None) => None,
+    }
 }
 
 #[tauri::command]
@@ -366,5 +427,58 @@ mod tests {
         let b = spawn_uuid();
         assert!(!a.is_empty());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sse_decoder_keeps_cjk_split_across_chunks_intact() {
+        let payload = "data: {\"delta\":\"落霞与孤鹜齐飞\"}\n\n".as_bytes();
+        // Split inside the 3-byte encoding of "霞".
+        let split = payload
+            .iter()
+            .position(|byte| *byte == "霞".as_bytes()[0])
+            .unwrap()
+            + 1;
+        let mut decoder = SseDecoder::default();
+        assert!(decoder.push(&payload[..split]).unwrap().is_empty());
+        assert_eq!(
+            decoder.push(&payload[split..]).unwrap(),
+            vec![SseItem::Data("{\"delta\":\"落霞与孤鹜齐飞\"}".to_string())]
+        );
+    }
+
+    #[test]
+    fn sse_decoder_feeds_byte_by_byte_and_handles_crlf_and_done() {
+        let stream =
+            "data: 第一\r\n\r\nevent: ping\n\ndata:第二\n\ndata: [DONE]\n\ndata: ignored\n\n";
+        let mut decoder = SseDecoder::default();
+        let mut items = Vec::new();
+        for byte in stream.as_bytes() {
+            items.extend(decoder.push(std::slice::from_ref(byte)).unwrap());
+            if items.last() == Some(&SseItem::Done) {
+                break;
+            }
+        }
+        assert_eq!(
+            items,
+            vec![
+                SseItem::Data("第一".to_string()),
+                SseItem::Data("第二".to_string()),
+                SseItem::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_decoder_bounds_an_undelimited_event() {
+        let mut decoder = SseDecoder::default();
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut result = Ok(Vec::new());
+        for _ in 0..=(MAX_RESPONSE_BYTES / chunk.len()) {
+            result = decoder.push(&chunk);
+            if result.is_err() {
+                break;
+            }
+        }
+        assert!(result.unwrap_err().contains("without a delimiter"));
     }
 }

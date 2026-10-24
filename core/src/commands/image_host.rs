@@ -47,6 +47,13 @@ struct AuthorizedImageScope {
     base_dir: PathBuf,
 }
 
+/// A file inside one of a window's registered image roots, as a retained
+/// directory handle plus the path relative to it.
+pub(crate) struct CapabilityFile {
+    pub(crate) directory: Dir,
+    pub(crate) relative: PathBuf,
+}
+
 impl WindowImageCapabilities {
     pub fn new() -> Self {
         Self {
@@ -159,6 +166,40 @@ impl WindowImageCapabilities {
             });
         }
         Err(unsafe_image("outside_registered_scope"))
+    }
+
+    /// Authorize an already-canonical file path against the roots the backend
+    /// registered for `owner`: its open project, or the folder of one of its
+    /// open documents. Frontend-supplied roots are never trusted.
+    pub(crate) fn authorize_file(
+        &self,
+        owner: &str,
+        canonical_file: &Path,
+    ) -> Result<CapabilityFile, AppError> {
+        let scopes = self
+            .inner
+            .lock()
+            .map_err(|_| unsafe_image("scope_unavailable"))?;
+        let scope = scopes
+            .get(owner)
+            .ok_or_else(|| unsafe_image("scope_not_registered"))?;
+        let root = scope
+            .project
+            .iter()
+            .chain(scope.documents.values().map(|document| &document.root))
+            .find(|root| {
+                canonical_file.starts_with(&root.input_path) && canonical_file != root.input_path
+            })
+            .ok_or_else(|| unsafe_image("outside_registered_scope"))?;
+        let relative = canonical_file
+            .strip_prefix(&root.input_path)
+            .map_err(|_| unsafe_image("outside_registered_scope"))?
+            .to_path_buf();
+        let root = clone_attached_image_root(root)?;
+        Ok(CapabilityFile {
+            directory: root.directory,
+            relative,
+        })
     }
 }
 

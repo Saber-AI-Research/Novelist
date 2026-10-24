@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "book": {
+    "title": "Fate/Zero",
+    "author": null,
+    "sourceLanguage": "ja",
+    "targetLanguage": "zh-CN"
+  },
+  "chapter": {
+    "id": "chapter-0002",
+    "title": "第二章 「聖杯」",
+    "volume": "第一卷",
+    "index": 2,
+    "total": 3,
+    "previousPath": "翻译内容/0001.novtrans",
+    "nextPath": "翻译内容/0003.novtrans"
+  },
+  "segments": [
+    {
+      "id": "segment-0001",
+      "source": "「聖杯」と呼ばれる \"器\"。",
+      "translation": "被称为\"圣杯\"的器\n第二行",
+      "googleReference": null,
+      "llmReference": "Tab\there \\ back"
+    },
+    {
+      "id": "segment-0002",
+      "source": "Second line.",
+      "translation": "",
+      "googleReference": "第二句。",
+      "llmReference": null
+    }
+  ]
+}

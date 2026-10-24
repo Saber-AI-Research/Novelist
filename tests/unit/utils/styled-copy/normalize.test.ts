@@ -36,6 +36,24 @@ describe('[contract] normalizePandocHtml supported semantics', () => {
   });
 });
 
+describe('[contract] normalizePandocHtml whitespace', () => {
+  it('keeps the U+3000 paragraph indent and collapses only ASCII whitespace', () => {
+    const result = normalizePandocHtml('<p>\u3000\u3000落霞与孤鹜齐飞，\n  秋水共长天一色。</p><p>\u3000\u3000</p>');
+
+    expect(result).toEqual({
+      kind: 'ok',
+      value: {
+        type: 'document',
+        children: [
+          { type: 'paragraph', children: [{ type: 'text', value: '\u3000\u3000落霞与孤鹜齐飞， 秋水共长天一色。' }] },
+          { type: 'paragraph', children: [{ type: 'text', value: '\u3000\u3000' }] },
+        ],
+      },
+      warnings: [],
+    });
+  });
+});
+
 describe('[contract] normalizePandocHtml untrusted markup', () => {
   it('unwraps unsafe links, drops dangerous subtrees, and deduplicates warnings', () => {
     const expected = JSON.parse(normalizeLineEndings(maliciousAstRaw));

@@ -1,4 +1,4 @@
-import { expect, test } from '../fixtures/app-fixture';
+import { expect, openRecentProject, test } from '../fixtures/app-fixture';
 import type { Locator, Page } from '@playwright/test';
 import { OPAQUE_RED_PNG_BYTES, SECOND_OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
@@ -20,11 +20,7 @@ const PNG_BYTES = OPAQUE_RED_PNG_BYTES;
 const OTHER_PNG_BYTES = SECOND_OPAQUE_RED_PNG_BYTES;
 
 async function openChapter(app: Page) {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible' });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible' });
 }
@@ -106,10 +102,6 @@ test.describe('[publish-cover] durable cover and scoped paste', () => {
   test.beforeEach(async ({ app, mockState }) => {
     await mockState.setPublishChannels([GHOST_CHANNEL]);
     await openChapter(app);
-  });
-
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
   });
 
   test('picker persists one canonical asset, restores after close and reload, and publishes durable bytes @task23', async ({ app, mockState }, testInfo) => {

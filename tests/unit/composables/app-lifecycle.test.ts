@@ -28,8 +28,6 @@ const { hoisted } = vi.hoisted(() => {
     markSaved: vi.fn(),
   };
 
-  const projectState = { dirPath: null as null | string };
-
   return {
     hoisted: {
       invoke,
@@ -38,7 +36,6 @@ const { hoisted } = vi.hoisted(() => {
       getCurrentWindow,
       destroy,
       tabsState,
-      projectState,
       getCloseHandler: () => closeRequestedHandler,
       resetCloseHandler: () => { closeRequestedHandler = null; },
     },
@@ -59,13 +56,17 @@ vi.mock('$lib/stores/tabs.svelte', () => ({
   },
 }));
 
-vi.mock('$lib/stores/project.svelte', () => ({
-  projectStore: {
-    get dirPath() { return hoisted.projectState.dirPath; },
-  },
-}));
+vi.mock('$lib/stores/project.svelte', async () => {
+  const { projectState } = await import('./project-state.svelte');
+  return {
+    projectStore: {
+      get dirPath() { return projectState.dirPath; },
+    },
+  };
+});
 
 import { useAppLifecycle } from '$lib/composables/app-lifecycle.svelte';
+import { projectState } from './project-state.svelte';
 
 function ctx(isClosingTab = false) {
   return {
@@ -84,7 +85,7 @@ beforeEach(() => {
   hoisted.tabsState.dirtyTabs = [];
   hoisted.tabsState.saveAllDirty.mockClear();
   hoisted.tabsState.markSaved.mockClear();
-  hoisted.projectState.dirPath = null;
+  projectState.dirPath = null;
   hoisted.resetCloseHandler();
 });
 
@@ -108,7 +109,7 @@ describe('[contract] useAppLifecycle — sync timer', () => {
   });
 
   it('starts a timer when sync config is enabled', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     hoisted.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'get_sync_config') return { enabled: true, interval_minutes: 5 };
       return undefined;
@@ -124,7 +125,7 @@ describe('[contract] useAppLifecycle — sync timer', () => {
   });
 
   it('skips the timer when config.enabled is false', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     hoisted.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'get_sync_config') return { enabled: false, interval_minutes: 5 };
       return undefined;
@@ -138,7 +139,7 @@ describe('[contract] useAppLifecycle — sync timer', () => {
   });
 
   it('swallows errors from get_sync_config', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     hoisted.invoke.mockRejectedValueOnce(new Error('no config'));
     // Must not throw.
     const teardown = useAppLifecycle(ctx());
@@ -147,7 +148,7 @@ describe('[contract] useAppLifecycle — sync timer', () => {
   });
 
   it('swallows sync_now failures and keeps the timer running', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     const err = new Error('sync failed');
     hoisted.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'get_sync_config') return { enabled: true, interval_minutes: 1 };
@@ -162,6 +163,54 @@ describe('[contract] useAppLifecycle — sync timer', () => {
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
     teardown();
+  });
+
+  it('ignores a sync config that resolves after a newer project switch', async () => {
+    projectState.dirPath = '/projA';
+    const configA = Promise.withResolvers<{ enabled: boolean; interval_minutes: number }>();
+    const configB = Promise.withResolvers<{ enabled: boolean; interval_minutes: number }>();
+    hoisted.invoke.mockImplementation(async (cmd: string, args: { projectDir: string }) => {
+      if (cmd === 'get_sync_config') return args.projectDir === '/projA' ? configA.promise : configB.promise;
+      return undefined;
+    });
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    expect(hoisted.invoke).toHaveBeenCalledWith('get_sync_config', { projectDir: '/projA' });
+
+    projectState.dirPath = '/projB';
+    await flushListeners();
+    expect(hoisted.invoke).toHaveBeenCalledWith('get_sync_config', { projectDir: '/projB' });
+
+    configB.resolve({ enabled: true, interval_minutes: 30 });
+    configA.resolve({ enabled: true, interval_minutes: 1 });
+    await flushListeners();
+    hoisted.invoke.mockClear();
+
+    // Project A's 1-minute schedule must not survive the switch.
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(hoisted.invoke).not.toHaveBeenCalledWith('sync_now', expect.anything());
+    await vi.advanceTimersByTimeAsync(29 * 60 * 1000);
+    expect(hoisted.invoke).toHaveBeenCalledTimes(1);
+    expect(hoisted.invoke).toHaveBeenCalledWith('sync_now', { projectDir: '/projB' });
+    teardown();
+  });
+
+  it('does not start a timer when teardown happens before the sync config resolves', async () => {
+    projectState.dirPath = '/proj';
+    const config = Promise.withResolvers<{ enabled: boolean; interval_minutes: number }>();
+    hoisted.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_sync_config') return config.promise;
+      return undefined;
+    });
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    teardown();
+
+    config.resolve({ enabled: true, interval_minutes: 1 });
+    await flushListeners();
+    hoisted.invoke.mockClear();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(hoisted.invoke).not.toHaveBeenCalledWith('sync_now', expect.anything());
   });
 });
 
@@ -308,7 +357,7 @@ describe('[contract] useAppLifecycle — onCloseRequested', () => {
 
 describe('[contract] useAppLifecycle — beforeunload', () => {
   it('fires sync_now when a project is open', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     const teardown = useAppLifecycle(ctx());
     await flushListeners();
     hoisted.invoke.mockClear();
@@ -319,7 +368,7 @@ describe('[contract] useAppLifecycle — beforeunload', () => {
   });
 
   it('does nothing when no project is open', async () => {
-    hoisted.projectState.dirPath = null;
+    projectState.dirPath = null;
     const teardown = useAppLifecycle(ctx());
     await flushListeners();
     hoisted.invoke.mockClear();
@@ -331,7 +380,7 @@ describe('[contract] useAppLifecycle — beforeunload', () => {
 
 describe('[contract] useAppLifecycle — teardown', () => {
   it('unlistens close-requested, clears the sync interval, and removes beforeunload', async () => {
-    hoisted.projectState.dirPath = '/proj';
+    projectState.dirPath = '/proj';
     hoisted.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'get_sync_config') return { enabled: true, interval_minutes: 1 };
       return undefined;

@@ -71,6 +71,16 @@ const EMPTY_FIXTURE_RESIDUE: FixtureResidue = {
 };
 
 /**
+ * Open a project from the Welcome screen's recent list. The list loads
+ * asynchronously after the app shell mounts, so this waits for the entry
+ * instead of probing it with a non-waiting visibility check.
+ */
+export async function openRecentProject(page: Page, index = 0): Promise<void> {
+  await page.getByTestId(`recent-project-${index}`).click();
+  await page.getByTestId('sidebar').waitFor({ state: 'visible' });
+}
+
+/**
  * Dispatch a synthetic keyboard event directly to the DOM,
  * bypassing browser shortcut interception.
  * Use this for shortcuts that browsers intercept (Meta+B, Meta+S, F11, etc.)
@@ -107,6 +117,12 @@ async function dispatchKey(page: Page, key: string, opts: {
 export const test = base.extend<{
   app: Page;
   browserErrors: string[];
+  /**
+   * Console/page errors and unhandled-IPC warnings fail every test by default.
+   * A test that deliberately provokes one opts in with
+   * `test.use({ allowedBrowserErrors: [/exact message/] })`.
+   */
+  allowedBrowserErrors: RegExp[];
   clipboardCapture: {
     start: () => Promise<void>;
     startDeferred: () => Promise<void>;
@@ -114,7 +130,7 @@ export const test = base.extend<{
     releaseNext: () => Promise<void>;
     getWrites: () => Promise<string[]>;
   };
-  _task23Isolation: void;
+  _isolation: void;
   /** Dispatch keyboard shortcut directly to DOM (bypasses browser interception) */
    appKeys: {
      press: (key: string, opts?: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }) => Promise<void>;
@@ -209,10 +225,17 @@ export const test = base.extend<{
     getCodexCliTurnCount: () => Promise<number>;
      getCodexCliKillCount: () => Promise<number>;
      reset: () => Promise<void>;
-     cleanup: () => Promise<void>;
+     /**
+      * Release blocked operations and reset updater/portable state, then fully
+      * reset the mock and browser storage. Returns the residue observed after
+      * the release and before the full reset.
+      */
+     cleanup: () => Promise<FixtureResidue>;
      getResidue: () => Promise<FixtureResidue>;
    };
 }>({
+  allowedBrowserErrors: [[], { option: true }],
+
   browserErrors: async ({ page }, use) => {
     const errors: string[] = [];
     page.on('console', (message) => {
@@ -882,7 +905,7 @@ export const test = base.extend<{
          await app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.reset());
        },
        async cleanup() {
-         await app.evaluate(async () => {
+         return app.evaluate(async () => {
            const state = Reflect.get(window, '__TAURI_MOCK_STATE__') as Record<string, unknown>;
             for (const [name, value] of [
              ['setAiSessionWritesBlocked', false],
@@ -923,6 +946,14 @@ export const test = base.extend<{
            updaterState.reset();
            await Promise.resolve();
            await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+           const residue = Reflect.get(state, 'residue');
+           if (typeof residue !== 'object' || residue === null) throw new Error('Tauri mock residue unavailable');
+           const beforeReset = {
+             localStorageKeys: Object.keys(localStorage).sort(),
+             sessionStorageKeys: Object.keys(sessionStorage).sort(),
+             cacheKeys: typeof caches === 'undefined' ? [] : (await caches.keys()).sort(),
+             ...(residue as Omit<FixtureResidue, 'localStorageKeys' | 'sessionStorageKeys' | 'cacheKeys'>),
+           };
            if (typeof caches !== 'undefined') {
              await Promise.all((await caches.keys()).map(key => caches.delete(key)));
            }
@@ -931,6 +962,7 @@ export const test = base.extend<{
            resetAll.call(state);
            localStorage.clear();
            sessionStorage.clear();
+           return beforeReset;
          });
        },
        async getResidue() {
@@ -950,14 +982,22 @@ export const test = base.extend<{
      await use(helpers);
    },
 
-   _task23Isolation: [async ({ browserErrors, mockState }, use, testInfo) => {
+   _isolation: [async ({ browserErrors, allowedBrowserErrors, mockState }, use, testInfo) => {
      await use();
+     if (testInfo.status !== testInfo.expectedStatus) return;
+     const unexpected = () => browserErrors.filter(error => !allowedBrowserErrors.some(pattern => pattern.test(error)));
+     expect(unexpected(), 'browser errors during the test').toEqual([]);
      if (!testInfo.title.includes('@task23')) return;
-     const errorsBeforeCleanup = [...browserErrors];
-     await mockState.cleanup();
-     expect(errorsBeforeCleanup).toEqual([]);
-     expect(await mockState.getResidue()).toEqual(EMPTY_FIXTURE_RESIDUE);
-     expect(browserErrors).toEqual([]);
+     const beforeReset = await mockState.cleanup();
+     // Read before the full reset, which would clear waiters and the
+     // unhandled-command log itself: anything still pending after the fixture
+     // released every blocked operation was leaked by the test or the app.
+     expect({
+       pendingWaiterCount: beforeReset.pendingWaiterCount,
+       unhandledCommandCount: beforeReset.unhandledCommandCount,
+     }, 'residue after releasing blocked operations').toEqual({ pendingWaiterCount: 0, unhandledCommandCount: 0 });
+     expect(await mockState.getResidue(), 'residue after the full mock reset').toEqual(EMPTY_FIXTURE_RESIDUE);
+     expect(unexpected(), 'browser errors during cleanup').toEqual([]);
    }, { auto: true }],
  });
 

@@ -1,5 +1,6 @@
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { StateField, StateEffect, Prec } from '@codemirror/state';
+import { rootScale } from './root-scale';
 
 /**
  * Slash command menu — Notion-style "/" block insertion.
@@ -207,25 +208,24 @@ const slashMenuField = StateField.define<SlashMenuState | null>({
         return effect.value ? { ...effect.value, active: true } : null;
       }
     }
-    if (value && tr.docChanged) {
+    if (!value || (!tr.docChanged && !tr.selection)) return value;
+    let pos = value.pos;
+    if (tr.docChanged) {
       // If the doc changed, check if the slash context is still valid
-      const mapped = tr.changes.mapPos(value.pos, -1);
-      if (mapped < 0) return null;
+      pos = tr.changes.mapPos(value.pos, -1);
       // Check if the "/" is still there
-      const line = tr.state.doc.lineAt(mapped);
-      const textBeforeSlash = tr.state.doc.sliceString(line.from, mapped);
+      const line = tr.state.doc.lineAt(pos);
+      const textBeforeSlash = tr.state.doc.sliceString(line.from, pos);
       if (textBeforeSlash.trim() !== '') return null;
-      const charAtPos = tr.state.doc.sliceString(mapped, mapped + 1);
+      const charAtPos = tr.state.doc.sliceString(pos, pos + 1);
       if (charAtPos !== '/' && charAtPos !== '\uFF0F') return null;
-      return { ...value, pos: mapped, lineStart: line.from };
     }
-    if (value && tr.selection) {
-      // Close menu if cursor moves away from the slash line
-      const head = tr.state.selection.main.head;
-      const line = tr.state.doc.lineAt(value.pos);
-      if (head < value.pos || head > line.to) return null;
-    }
-    return value;
+    // Close the menu once the cursor leaves the slash line — by navigation
+    // or by an edit such as Enter with no matching item.
+    const head = tr.state.selection.main.head;
+    const line = tr.state.doc.lineAt(pos);
+    if (head <= pos || head > line.to) return null;
+    return pos === value.pos && line.from === value.lineStart ? value : { ...value, pos, lineStart: line.from };
   },
 });
 
@@ -343,14 +343,18 @@ class SlashMenuWidget {
   private applyPosition(coords: { left: number; top: number; bottom: number; right: number }) {
     if (!this.dom) return;
 
+    // Everything below is in scaled viewport coordinates (coords, rects,
+    // window size); the menu is position: fixed inside the zoomed root, so
+    // the final left/top are divided by the root scale.
+    const scale = rootScale();
     // Measure the hidden menu (layout runs on-demand for getBoundingClientRect).
     // Fallback to CSS caps (max-height 320 / width 280) when happy-dom / pre-
     // layout paths return zero-sized rects.
     const rect = this.dom.getBoundingClientRect();
-    const menuH = rect.height || 320;
-    const menuW = rect.width || 280;
-    const gap = 6;
-    const margin = 8;
+    const menuH = rect.height || 320 * scale;
+    const menuW = rect.width || 280 * scale;
+    const gap = 6 * scale;
+    const margin = 8 * scale;
 
     const spaceBelow = window.innerHeight - coords.bottom - margin;
     const spaceAbove = coords.top - margin;
@@ -378,8 +382,8 @@ class SlashMenuWidget {
     }
     left = Math.max(margin, left);
 
-    this.dom.style.top = `${top}px`;
-    this.dom.style.left = `${left}px`;
+    this.dom.style.top = `${top / scale}px`;
+    this.dom.style.left = `${left / scale}px`;
     this.dom.style.visibility = 'visible';
   }
 
@@ -394,13 +398,15 @@ class SlashMenuWidget {
   }
 
   handleKey(key: string): boolean {
+    // With no matches the menu only shows "No results"; arrows move the caret.
+    if ((key === 'ArrowDown' || key === 'ArrowUp') && this.filteredItems.length === 0) return false;
     if (key === 'ArrowDown') {
-      this.selectedIndex = (this.selectedIndex + 1) % Math.max(1, this.filteredItems.length);
+      this.selectedIndex = (this.selectedIndex + 1) % this.filteredItems.length;
       this.render();
       return true;
     }
     if (key === 'ArrowUp') {
-      this.selectedIndex = (this.selectedIndex - 1 + this.filteredItems.length) % Math.max(1, this.filteredItems.length);
+      this.selectedIndex = (this.selectedIndex - 1 + this.filteredItems.length) % this.filteredItems.length;
       this.render();
       return true;
     }

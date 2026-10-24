@@ -54,6 +54,28 @@ describe('settingsStore.resolveNewFileDir', () => {
     seedEffective({ default_dir: '', last_used_dir: '/proj/chapters' });
     expect(settingsStore.resolveNewFileDir('/proj')).toBe('/proj/chapters');
   });
+
+  it('ignores a last_used_dir recorded in another project (global fallback)', () => {
+    seedEffective({ last_used_dir: '/projA/chapters' });
+    expect(settingsStore.resolveNewFileDir('/projB')).toBe('/projB');
+  });
+
+  it('ignores a sibling folder that merely shares the project root prefix', () => {
+    seedEffective({ last_used_dir: '/proj-old/chapters' });
+    expect(settingsStore.resolveNewFileDir('/proj')).toBe('/proj');
+  });
+
+  it('ignores a pinned default_dir outside the project but keeps an in-project last_used_dir', () => {
+    seedEffective({ default_dir: '/projA/pinned', last_used_dir: '/projB/卷一' });
+    expect(settingsStore.resolveNewFileDir('/projB')).toBe('/projB/卷一');
+  });
+
+  it('accepts the project root itself and Windows paths case-insensitively', () => {
+    seedEffective({ last_used_dir: '/proj' });
+    expect(settingsStore.resolveNewFileDir('/proj')).toBe('/proj');
+    seedEffective({ default_dir: 'c:\\作品\\章节' });
+    expect(settingsStore.resolveNewFileDir('C:\\作品')).toBe('c:\\作品\\章节');
+  });
 });
 
 describe('settingsStore.recordLastUsedDir', () => {

@@ -309,12 +309,52 @@ export function applyInput(
   return finishMutation(next, now);
 }
 
+export type CommentOpener = '【' | '「';
+
+/**
+ * Brackets still open inside the current comment, outermost first. The first
+ * entry is the delimiter that opened the comment, or `null` when the keyboard
+ * shortcut opened it. Empty in copy mode. Carried across committed batches so
+ * an IME commit of `」` knows whether it closes the comment or an inner quote.
+ */
+export type CommentBrackets = readonly (CommentOpener | null)[];
+
+const OPENER_FOR_CLOSER: Readonly<Record<string, CommentOpener>> = {
+  '】': '【',
+  '」': '「',
+};
+
+function isCommentOpener(character: string): character is CommentOpener {
+  return character === '【' || character === '「';
+}
+
+/**
+ * Track bracket nesting for one character typed in comment mode. Returns the
+ * brackets still open afterwards, or `null` when the character closes the
+ * comment. Only the closer matching the comment's own opener ends it (either
+ * closer ends a shortcut comment); brackets opened inside the comment, and
+ * stray closers, stay literal text — so 【此处「风骨」妙】 is one comment.
+ */
+function stepCommentBrackets(brackets: CommentBrackets, character: string): CommentBrackets | null {
+  const open: CommentBrackets = brackets.length > 0 ? brackets : [null];
+  if (isCommentOpener(character)) return [...open, character];
+  const opener: CommentOpener | undefined = OPENER_FOR_CLOSER[character];
+  if (!opener) return open;
+  const index = open.lastIndexOf(opener);
+  if (index > 0) return open.slice(0, index);
+  if (index === 0 || open[0] === null) return null;
+  return open;
+}
+
 /**
  * Apply normal transcription plus inline comments from one committed input
- * batch. Full-width brackets are control characters unless the source itself
- * expects an opening bracket at the current cursor:
+ * batch. Full-width and corner brackets are control characters unless the
+ * source itself expects an opening bracket at the current cursor:
  *
- *   source text【inline comment】more source text
+ *   source text【inline comment】more source text「another comment」
+ *
+ * A comment closes only on the closer matching its opener; see
+ * `stepCommentBrackets`.
  *
  * This function only receives committed text. IME composition guarding lives
  * in App.svelte so pinyin/pre-edit updates never reach the document model.
@@ -323,11 +363,13 @@ export function applyDelimitedInput(
   file: LiteraryStudyFile,
   input: string,
   initialMode: LiteraryMode,
+  initialBrackets: CommentBrackets = [],
   pasted = false,
   now = new Date().toISOString(),
-): { file: LiteraryStudyFile; mode: LiteraryMode } {
+): { file: LiteraryStudyFile; mode: LiteraryMode; brackets: CommentBrackets } {
   let next = file;
   let mode = initialMode;
+  let brackets: CommentBrackets = mode === 'comment' ? initialBrackets : [];
   let buffer = '';
 
   const flush = () => {
@@ -337,24 +379,30 @@ export function applyDelimitedInput(
   };
 
   for (const character of input) {
-    if (mode === 'copy' && character === '【') {
-      flush();
+    if (mode === 'copy') {
       // A real opening bracket in the source must remain transcribable. The
       // keyboard shortcut can still force comment mode at this position.
-      if (!next.source.startsWith(character, next.sourceCursor)) {
+      if (isCommentOpener(character) && !next.source.startsWith(character, next.sourceCursor)) {
+        flush();
         mode = 'comment';
+        brackets = [character];
         continue;
       }
-    } else if (mode === 'comment' && character === '】') {
-      flush();
-      mode = 'copy';
-      continue;
+    } else {
+      const remaining = stepCommentBrackets(brackets, character);
+      if (remaining === null) {
+        flush();
+        mode = 'copy';
+        brackets = [];
+        continue;
+      }
+      brackets = remaining;
     }
     buffer += character;
   }
   flush();
 
-  return { file: next, mode };
+  return { file: next, mode, brackets };
 }
 
 export function applyBackspace(
@@ -595,21 +643,24 @@ export function insertAtCaret(
  * At the frontier this is the existing transcribe-or-mark behaviour. Rewound,
  * there is no pending source character to match, so every typed character
  * becomes an insertion — commentary in comment mode, a mistake mark otherwise
- * — and the full-width brackets keep working as the comment delimiters.
+ * — and both bracket pairs keep working as the comment delimiters, closing
+ * only on the closer that matches the comment's opener.
  */
 export function applyDelimitedInputAtCaret(
   file: LiteraryStudyFile,
   caretIndex: number,
   input: string,
   initialMode: LiteraryMode,
+  initialBrackets: CommentBrackets = [],
   pasted = false,
   now = new Date().toISOString(),
-): { file: LiteraryStudyFile; mode: LiteraryMode; caretIndex: number } {
+): { file: LiteraryStudyFile; mode: LiteraryMode; brackets: CommentBrackets; caretIndex: number } {
   if (resolveCaret(file, caretIndex).atFrontier) {
-    const result = applyDelimitedInput(file, input, initialMode, pasted, now);
+    const result = applyDelimitedInput(file, input, initialMode, initialBrackets, pasted, now);
     return {
       file: result.file,
       mode: result.mode,
+      brackets: result.brackets,
       caretIndex: renderedLength(result.file),
     };
   }
@@ -617,6 +668,7 @@ export function applyDelimitedInputAtCaret(
   let next = file;
   let index = clampCaret(file, caretIndex);
   let mode = initialMode;
+  let brackets: CommentBrackets = mode === 'comment' ? initialBrackets : [];
   let buffer = '';
 
   const flush = () => {
@@ -633,21 +685,28 @@ export function applyDelimitedInputAtCaret(
   };
 
   for (const character of input) {
-    if (mode === 'copy' && character === '【') {
-      flush();
-      mode = 'comment';
-      continue;
-    }
-    if (mode === 'comment' && character === '】') {
-      flush();
-      mode = 'copy';
-      continue;
+    if (mode === 'copy') {
+      if (isCommentOpener(character)) {
+        flush();
+        mode = 'comment';
+        brackets = [character];
+        continue;
+      }
+    } else {
+      const remaining = stepCommentBrackets(brackets, character);
+      if (remaining === null) {
+        flush();
+        mode = 'copy';
+        brackets = [];
+        continue;
+      }
+      brackets = remaining;
     }
     buffer += character;
   }
   flush();
 
-  return { file: next, mode, caretIndex: index };
+  return { file: next, mode, brackets, caretIndex: index };
 }
 
 /**

@@ -1,12 +1,8 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 test.describe('Mindmap overlay', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
     await app.getByTestId('sidebar-file-Chapter 1.md').click();
     await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
 
@@ -82,7 +78,6 @@ test.describe('Mindmap overlay', () => {
     await openOverlay(app, appKeys);
     for (const level of ['1', '2', '3', '∞']) {
       await app.getByTestId(`mindmap-level-${level}`).click();
-      await app.waitForTimeout(120);
       await expect(app.getByTestId(`mindmap-level-${level}`)).toHaveClass(/active/);
     }
     await expect(app.getByTestId('mindmap-overlay')).toBeVisible();

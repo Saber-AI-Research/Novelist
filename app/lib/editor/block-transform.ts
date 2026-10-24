@@ -139,7 +139,9 @@ function parseLine(text: string): ParsedLine {
     rest = rest.slice(quote[0].length);
   }
 
-  const heading = /^(#{1,6})[ \t]*/.exec(rest);
+  // ATX heading only: hashes followed by space/tab or end of line.
+  // `#hashtag`, `#话题#` and `#1` are paragraph content.
+  const heading = /^(#{1,6})(?:[ \t]+|$)/.exec(rest);
   if (heading) {
     headingLevel = heading[1].length;
     kind = 'heading';

@@ -24,6 +24,7 @@
   const loadProjectSearch = () => import('$lib/components/ProjectSearch.svelte');
   const loadNewProjectDialog = () => import('$lib/components/NewProjectDialog.svelte');
   const loadLiteraryImportDialog = () => import('$lib/components/LiteraryImportDialog.svelte');
+  const loadTranslationImportDialog = () => import('$lib/components/TranslationImportDialog.svelte');
   const loadMindmapOverlay = () => import('$lib/components/MindmapOverlay.svelte');
   const loadOutline = () => import('$lib/components/Outline.svelte');
   const loadDraftNote = () => import('$lib/components/DraftNote.svelte');
@@ -42,6 +43,10 @@
     ensureLiteraryPluginReady,
     isLiteraryStudyProject,
   } from '$lib/services/literary-study';
+  import {
+    ensureBookTranslationPluginReady,
+    isBookTranslationProject,
+  } from '$lib/services/book-translation';
   import { ProjectOpenOwner } from '$lib/services/project-open-owner';
   import { ProjectWatcherOwner } from '$lib/services/project-watcher-owner';
   import type { TemplateFileSummary } from '$lib/ipc/commands';
@@ -54,6 +59,7 @@
   import { startupMark, startupReport } from '$lib/utils/startup-timing';
   import { moveSection } from '$lib/editor/section-move';
   import { createEditorContextMenu } from '$lib/composables/editor-context-menu.svelte';
+  import { rootScale } from '$lib/editor/root-scale';
   import * as fmt from '$lib/editor/formatting';
   import { makeResizeHandler } from '$lib/utils/resize-drag';
   import { handleTitlebarDrag } from '$lib/utils/window-drag';
@@ -70,6 +76,7 @@
   import { initScrollAutoHide } from '$lib/actions/auto-hide-scroll';
   import { unsavedPromptState, resolveUnsavedPrompt } from '$lib/composables/unsaved-prompt.svelte';
   import { handleKeepMine, handleLoadTheirs } from '$lib/conflict-handlers';
+  import { createAutoSave } from '$lib/services/autosave';
   import { createKeydownHandler } from '$lib/composables/app-shortcuts.svelte';
   import { createCloseTab } from '$lib/composables/close-tab.svelte';
   import { createScratchFile, createNewFileInProject, executeTemplate, requestSaveCurrentAsTemplate } from '$lib/services/new-file';
@@ -106,6 +113,9 @@
 
   // Zen mode renders a single (pane-1) editor; keep its word count locally.
   let zenWordCount = $state(0);
+  // ...and its ref: the pane editors are unmounted while Zen is on, so save,
+  // rename and go-to-line must target this one.
+  let zenEditorRef = $state<PaneMetrics['editorRef']>(undefined);
 
   // Status bar reflects the active pane.
   let activeMetrics = $derived(paneMetrics[tabsStore.activePaneId]);
@@ -113,7 +123,7 @@
   let cursorLine = $derived(activeMetrics?.cursorLine ?? 1);
   let cursorCol = $derived(activeMetrics?.cursorCol ?? 1);
   let headings = $derived(activeMetrics?.headings ?? []);
-  let activeEditorRef = $derived(activeMetrics?.editorRef);
+  let activeEditorRef = $derived(uiStore.zenMode ? zenEditorRef : activeMetrics?.editorRef);
 
 let paletteOpen = $state(false);
   let movePaletteOpen = $state(false);
@@ -121,6 +131,7 @@ let paletteOpen = $state(false);
   let mindmapOverlayOpen = $state(false);
   let projectSearchOpen = $state(false);
   let newProjectDialogOpen = $state(false);
+  let translationImportDialogOpen = $state(false);
   let literaryImportDialogOpen = $state(false);
   let literaryImportMode = $state<'create' | 'replace'>('create');
   let operationError = $state<string | null>(null);
@@ -231,8 +242,26 @@ let paletteOpen = $state(false);
   // locale and recent-projects list. See menu-sync.svelte.ts.
   useMenuSync(() => recentProjects);
 
-  // Conflict dialog state
-  let conflictFilePath = $state<string | null>(null);
+  // External-change conflicts awaiting the user's choice, one dialog at a time.
+  let conflictQueue = $state<string[]>([]);
+  let conflictFilePath = $derived(conflictQueue[0] ?? null);
+  // Files whose Keep mine / Load theirs is still running after the dialog closed.
+  const resolvingConflicts = new Set<string>();
+  function resolveConflict(path: string, choice: (path: string) => Promise<void>) {
+    resolvingConflicts.add(path);
+    void choice(path).finally(() => resolvingConflicts.delete(path));
+  }
+
+  // Auto-save every dirty tab on the configured interval, but never a file
+  // whose conflict is unresolved: that would overwrite the external edit
+  // before the user chooses.
+  const autoSave = createAutoSave({
+    isBlocked: (path) => conflictQueue.includes(path) || resolvingConflicts.has(path),
+  });
+  $effect(() => {
+    autoSave.setInterval(uiStore.editorSettings.autoSaveMinutes);
+    return () => autoSave.stop();
+  });
 
   async function refreshRecentProjects() {
     const result = await commands.getRecentProjects();
@@ -298,6 +327,14 @@ let paletteOpen = $state(false);
         const config = configResult.data;
         if (isLiteraryStudyProject(config)) {
           const pluginError = await ensureLiteraryPluginReady();
+          if (!isCurrent()) return;
+          if (pluginError) {
+            showOperationError(pluginError);
+            return;
+          }
+        }
+        if (isBookTranslationProject(config)) {
+          const pluginError = await ensureBookTranslationPluginReady();
           if (!isCurrent()) return;
           if (pluginError) {
             showOperationError(pluginError);
@@ -408,21 +445,35 @@ let paletteOpen = $state(false);
     });
   }
 
-  async function handleLiteraryProjectCreated(projectPath: string, firstChapterPath: string) {
+  async function openImportedChapter(projectPath: string, firstChapterPath: string): Promise<boolean> {
     await openProjectFromPath(projectPath);
-    if (projectStore.dirPath !== projectPath) return;
+    if (projectStore.dirPath !== projectPath) return false;
+    const generation = projectStore.generation;
+    const isCurrent = () => projectStore.dirPath === projectPath && projectStore.generation === generation;
     const result = await commands.readFile(firstChapterPath);
+    if (!isCurrent()) return false;
     if (result.status !== 'ok') {
       showOperationError(result.error);
-      return;
+      return false;
     }
     tabsStore.openTab(firstChapterPath, result.data);
     const registered = await commands.registerOpenFile(firstChapterPath);
+    if (!isCurrent()) return false;
     if (registered.status === 'error') {
       showOperationError(registered.error);
-      return;
+      return false;
     }
-    uiStore.activeRightPanel = 'literary';
+    return true;
+  }
+
+  async function handleLiteraryProjectCreated(projectPath: string, firstChapterPath: string) {
+    if (await openImportedChapter(projectPath, firstChapterPath)) {
+      uiStore.activeRightPanel = 'literary';
+    }
+  }
+
+  async function handleBookTranslationProjectCreated(projectPath: string, firstChapterPath: string) {
+    await openImportedChapter(projectPath, firstChapterPath);
   }
 
   async function openLiteraryChapter(relativePath: string) {
@@ -523,7 +574,7 @@ let paletteOpen = $state(false);
   async function handleOpenFile() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban', 'litstudy'] }],
+      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban', 'litstudy', 'novtrans'] }],
     });
     if (!selected) return;
     await openSingleFile(selected as string);
@@ -582,10 +633,6 @@ let paletteOpen = $state(false);
   let blockTypeSubmenuPosition = $state<{ left: number; top: number } | null>(null);
   const CONTEXT_SUBMENU_GAP = 4;
   const CONTEXT_VIEWPORT_MARGIN = 8;
-  function getRootScale(): number {
-    const scaleMatch = document.documentElement.style.transform.match(/scale\(([^)]+)\)/);
-    return scaleMatch ? parseFloat(scaleMatch[1]) || 1 : 1;
-  }
   // Read-alias so markup expressions like `editorCtxMenu.x` stay byte-identical.
   // Writes (oncontextmenu handler below) go through `editorCtx.state = ...`.
   const editorCtxMenu = $derived(editorCtx.state);
@@ -602,7 +649,7 @@ let paletteOpen = $state(false);
     if (!blockTypeTrigger || !blockTypeSubmenu) return;
     const triggerRect = blockTypeTrigger.getBoundingClientRect();
     const submenuRect = blockTypeSubmenu.getBoundingClientRect();
-    const scale = getRootScale();
+    const scale = rootScale();
     const visualViewport = window.visualViewport;
     const viewportLeft = (visualViewport?.offsetLeft ?? 0) / scale;
     const viewportTop = (visualViewport?.offsetTop ?? 0) / scale;
@@ -838,7 +885,9 @@ let paletteOpen = $state(false);
 
       // Async event listeners — consolidated in $lib/composables/app-events.
       unlistenAppEvents = wireAppEvents({
-        onConflict: (path) => { conflictFilePath = path; },
+        onConflict: (path) => {
+          if (!conflictQueue.includes(path)) conflictQueue = [...conflictQueue, path];
+        },
         onRecentProjectsUpdated: (list) => { recentProjects = list; },
         onGotoLine: (line) => {
           const ref = activeEditorRef;
@@ -898,7 +947,7 @@ let paletteOpen = $state(false);
       const view = getActiveEditorView();
       if (!view) { editorCtx.state = null; return; }
       const { from, to } = view.state.selection.main;
-      const zoom = getRootScale();
+      const zoom = rootScale();
       editorCtx.state = {
         x: e.clientX / zoom,
         y: e.clientY / zoom,
@@ -1006,7 +1055,7 @@ let paletteOpen = $state(false);
       <div class="flex-1 min-h-0 overflow-hidden w-full">
         {#if tabsStore.getPaneActiveTab('pane-1')}
           {#await loadEditor() then { default: Editor }}
-            <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={zenWordCount} /></ErrorBoundary>
+            <ErrorBoundary><Editor paneId="pane-1" bind:wordCount={zenWordCount} bind:this={zenEditorRef} /></ErrorBoundary>
           {/await}
         {:else}
           <div class="flex items-center justify-center h-full" style="color: var(--novelist-text-secondary);">
@@ -1240,7 +1289,7 @@ let paletteOpen = $state(false);
               uiStore.activeRightPanel = null;
               extensionStore.togglePanel(panel.pluginId);
             }}
-            title="Toggle {panel.label}"
+            title={t('command.togglePanel', { name: panel.label })}
           >
             {panel.label}
           </button>
@@ -1254,21 +1303,9 @@ let paletteOpen = $state(false);
   {#await loadConflictDialog() then { default: ConflictDialog }}
     <ConflictDialog
       filePath={conflictFilePath}
-      onKeepMine={() => handleKeepMine(conflictFilePath!)}
-      onLoadTheirs={() => handleLoadTheirs(conflictFilePath!)}
-      onClose={() => { conflictFilePath = null; }}
-    />
-  {/await}
-{/if}
-
-{#if unsavedPromptState.pending}
-  {#await loadUnsavedChangesDialog() then { default: UnsavedChangesDialog }}
-    <UnsavedChangesDialog
-      fileNames={unsavedPromptState.pending.fileNames}
-      saveLabel={unsavedPromptState.pending.saveLabel}
-      onSave={() => resolveUnsavedPrompt('save')}
-      onDontSave={() => resolveUnsavedPrompt('discard')}
-      onCancel={() => resolveUnsavedPrompt('cancel')}
+      onKeepMine={() => resolveConflict(conflictFilePath!, handleKeepMine)}
+      onLoadTheirs={() => resolveConflict(conflictFilePath!, handleLoadTheirs)}
+      onClose={() => { conflictQueue = conflictQueue.slice(1); }}
     />
   {/await}
 {/if}
@@ -1328,6 +1365,10 @@ let paletteOpen = $state(false);
         literaryImportMode = 'create';
         literaryImportDialogOpen = true;
       }}
+      onBookTranslationImport={() => {
+        newProjectDialogOpen = false;
+        translationImportDialogOpen = true;
+      }}
     />
   {/await}
 {/if}
@@ -1345,6 +1386,15 @@ let paletteOpen = $state(false);
   {/await}
 {/if}
 
+{#if translationImportDialogOpen}
+  {#await loadTranslationImportDialog() then { default: TranslationImportDialog }}
+    <TranslationImportDialog
+      onClose={() => { translationImportDialogOpen = false; }}
+      onProjectCreated={handleBookTranslationProjectCreated}
+    />
+  {/await}
+{/if}
+
 {#if updaterState.phase === 'available'}
   {#await loadUpdateAvailableBanner() then { default: UpdateAvailableBanner }}
     <UpdateAvailableBanner />
@@ -1354,6 +1404,20 @@ let paletteOpen = $state(false);
 {#if updaterState.phase === 'downloading' || updaterState.phase === 'installing' || updaterState.phase === 'ready' || updaterState.phase === 'error'}
   {#await loadUpdateProgressModal() then { default: UpdateProgressModal }}
     <UpdateProgressModal />
+  {/await}
+{/if}
+
+<!-- Last so it stacks above any dialog that triggered it (close-tab inside
+     an import dialog, "Restart Now" in the update modal). -->
+{#if unsavedPromptState.pending}
+  {#await loadUnsavedChangesDialog() then { default: UnsavedChangesDialog }}
+    <UnsavedChangesDialog
+      fileNames={unsavedPromptState.pending.fileNames}
+      saveLabel={unsavedPromptState.pending.saveLabel}
+      onSave={() => resolveUnsavedPrompt('save')}
+      onDontSave={() => resolveUnsavedPrompt('discard')}
+      onCancel={() => resolveUnsavedPrompt('cancel')}
+    />
   {/await}
 {/if}
 

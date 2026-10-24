@@ -1,6 +1,6 @@
 # Coverage Campaign Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the gap between Phase-1 coverage baseline (~20 %) and the honest achievable ceiling by writing precision/contract tests for every testable file in `app/lib/**`, waiving the genuinely untestable ones, and locking the new baseline as a CI hard threshold.
 

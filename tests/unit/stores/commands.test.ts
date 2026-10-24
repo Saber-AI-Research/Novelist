@@ -124,8 +124,9 @@ describe('[contract] commandRegistry', () => {
 /**
  * [contract][regression] commandRegistry execute-dedupe — prevents
  * double-fire when the OS menu accelerator and the JS keydown handler
- * both dispatch the same command. A second execute within 50 ms is
- * silently dropped.
+ * both dispatch the same command. A dispatch from the other source within
+ * 50 ms is silently dropped; repeated dispatches from one source (two quick
+ * presses of a shortcut) all run.
  *
  * Uses vi.useFakeTimers so the window can be advanced deterministically.
  * IDs are namespaced (`dedupe.*`) so they don't collide with the
@@ -157,7 +158,7 @@ describe('[contract][regression] commandRegistry.execute dedupe window', () => {
     expect(calls).toBe(1);
   });
 
-  it('silently drops a second execute within 50 ms', () => {
+  it('silently drops a menu dispatch within 50 ms of the keyboard dispatch', () => {
     let calls = 0;
     commandRegistry.register({
       id: 'dedupe.rapid',
@@ -166,11 +167,39 @@ describe('[contract][regression] commandRegistry.execute dedupe window', () => {
     });
     commandRegistry.execute('dedupe.rapid');
     vi.advanceTimersByTime(20);
-    commandRegistry.execute('dedupe.rapid');
+    commandRegistry.execute('dedupe.rapid', 'menu');
     expect(calls).toBe(1);
   });
 
-  it('allows the second execute once the 50 ms window has elapsed', () => {
+  it('silently drops a keyboard dispatch within 50 ms of the menu dispatch', () => {
+    let calls = 0;
+    commandRegistry.register({
+      id: 'dedupe.menu-first',
+      label: 'Menu first',
+      handler: () => { calls++; },
+    });
+    commandRegistry.execute('dedupe.menu-first', 'menu');
+    vi.advanceTimersByTime(20);
+    commandRegistry.execute('dedupe.menu-first');
+    expect(calls).toBe(1);
+  });
+
+  it('runs every same-source dispatch, however quick (two shortcut presses)', () => {
+    let calls = 0;
+    commandRegistry.register({
+      id: 'dedupe.same-source',
+      label: 'Same source',
+      handler: () => { calls++; },
+    });
+    commandRegistry.execute('dedupe.same-source');
+    commandRegistry.execute('dedupe.same-source');
+    vi.advanceTimersByTime(5);
+    commandRegistry.execute('dedupe.same-source', 'menu');
+    commandRegistry.execute('dedupe.same-source', 'menu');
+    expect(calls).toBe(2);
+  });
+
+  it('allows the other source once the 50 ms window has elapsed', () => {
     let calls = 0;
     commandRegistry.register({
       id: 'dedupe.window',
@@ -179,7 +208,7 @@ describe('[contract][regression] commandRegistry.execute dedupe window', () => {
     });
     commandRegistry.execute('dedupe.window');
     vi.advanceTimersByTime(60);
-    commandRegistry.execute('dedupe.window');
+    commandRegistry.execute('dedupe.window', 'menu');
     expect(calls).toBe(2);
   });
 

@@ -18,7 +18,9 @@
   let miniMm: Markmap | null = null;
   let miniMapVisible = $state(true);
   let expandLevel = $state<number | null>(null); // null = expand all
+  // Manuscript HTML must stay text: markmap-view renders node content via innerHTML.
   const transformer = new Transformer();
+  transformer.md.set({ html: false });
 
   function render(text: string) {
     if (!svgEl || !mm) return;

@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
-  import { commands } from '$lib/ipc/commands';
+  import { commands, type SyncConfig } from '$lib/ipc/commands';
   import { shortcutsStore, editorCommandIds, formatShortcut, buildShortcutString, matchesShortcutQuery } from '$lib/stores/shortcuts.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
@@ -19,6 +20,8 @@
   import SettingsSwitch from './SettingsSwitch.svelte';
   import MacroHint from './MacroHint.svelte';
   import PortableModeBanner from '$lib/components/PortableModeBanner.svelte';
+  import { isImeComposing } from '$lib/utils/ime';
+  import { focusTrap } from './focus-trap';
   import {
     SETTINGS_SEARCH_INDEX,
     filterSettingsIndex,
@@ -297,6 +300,7 @@
   import HelpTooltip from '$lib/components/HelpTooltip.svelte';
   import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-settings.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
+  import { tabsStore } from '$lib/stores/tabs.svelte';
   import { IconGear } from './icons';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
@@ -398,6 +402,12 @@
     }
   }
 
+  /** Plugin "Reload app": relaunch() skips the window close prompt, so ask here. */
+  async function reloadApp() {
+    if (!await tabsStore.promptUnsavedBeforeExit()) return;
+    await relaunch();
+  }
+
   function openScaffoldDialog() {
     pluginAddMenuOpen = false;
     scaffoldDialogOpen = true;
@@ -420,78 +430,114 @@
   }
 
   // Sync settings
-  type SyncConfig = {
-    enabled: boolean;
-    webdav_url: string;
-    username: string;
-    password: string;
-    interval_minutes: number;
-  };
-  let syncConfig = $state<SyncConfig>({
-    enabled: false,
-    webdav_url: '',
-    username: '',
-    password: '',
-    interval_minutes: 30,
-  });
-  let syncLoaded = $state(false);
+  function emptySyncConfig(): SyncConfig {
+    return {
+      enabled: false,
+      webdav_url: '',
+      username: '',
+      password: '',
+      interval_minutes: 30,
+      legacy_remote_acknowledged: false,
+    };
+  }
+  let syncConfig = $state<SyncConfig>(emptySyncConfig());
+  /** Project whose config is in `syncConfig`; edits only ever save there. */
+  let syncLoadedFor = $state<string | null>(null);
+  let syncLoaded = $derived(syncLoadedFor !== null && syncLoadedFor === projectStore.dirPath);
+  let syncLoadingFor: string | null = null;
   let syncTestResult = $state<'idle' | 'testing' | 'success' | 'fail'>('idle');
   let syncInProgress = $state(false);
   let lastSyncTime = $state<string | null>(null);
   let syncErrors = $state<string[]>([]);
+  /** Set when another device already migrated this project's legacy sync folder. */
+  let adoptableProjectId = $state<string | null>(null);
 
-  async function loadSyncConfig() {
-    if (!projectStore.dirPath) return;
+  async function loadSyncConfig(projectDir: string) {
+    syncLoadingFor = projectDir;
+    syncLoadedFor = null;
+    syncTestResult = 'idle';
+    lastSyncTime = null;
+    syncErrors = [];
+    adoptableProjectId = null;
+    let config = emptySyncConfig();
     try {
-      const config = await invoke('get_sync_config', { projectDir: projectStore.dirPath }) as SyncConfig;
-      syncConfig = config;
+      const loaded = await invoke('get_sync_config', { projectDir }) as SyncConfig;
+      config = { ...loaded, legacy_remote_acknowledged: loaded.legacy_remote_acknowledged ?? false };
     } catch (e) {
       console.error('Failed to load sync config:', e);
     }
-    syncLoaded = true;
+    // A newer switch owns the form now.
+    if (syncLoadingFor !== projectDir) return;
+    syncLoadingFor = null;
+    syncConfig = config;
+    syncLoadedFor = projectDir;
   }
 
   async function saveSyncConfig() {
-    if (!projectStore.dirPath) return;
+    const projectDir = syncLoadedFor;
+    if (!projectDir) return;
     try {
-      await invoke('save_sync_config', { projectDir: projectStore.dirPath, config: syncConfig });
+      await invoke('save_sync_config', { projectDir, config: syncConfig });
     } catch (e) {
       console.error('Failed to save sync config:', e);
     }
   }
 
   async function testConnection() {
+    const projectDir = syncLoadedFor;
+    if (!projectDir) return;
     syncTestResult = 'testing';
     try {
+      // The backend swaps the masked password for the stored one.
       const ok = await invoke('test_sync_connection', {
+        projectDir,
         webdavUrl: syncConfig.webdav_url,
         username: syncConfig.username,
         password: syncConfig.password,
       }) as boolean;
-      syncTestResult = ok ? 'success' : 'fail';
+      if (syncLoadedFor === projectDir) syncTestResult = ok ? 'success' : 'fail';
     } catch (e) {
-      syncTestResult = 'fail';
+      if (syncLoadedFor === projectDir) syncTestResult = 'fail';
     }
   }
 
   async function syncNow() {
-    if (!projectStore.dirPath) return;
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) return;
     syncInProgress = true;
     syncErrors = [];
+    adoptableProjectId = null;
     try {
-      const status = await invoke('sync_now', { projectDir: projectStore.dirPath }) as {
+      const status = await invoke('sync_now', { projectDir }) as {
         last_sync: string | null;
         files_uploaded: number;
         files_downloaded: number;
         errors: string[];
         in_progress: boolean;
+        adoptable_project_id: string | null;
       };
-      lastSyncTime = status.last_sync;
-      syncErrors = status.errors;
+      if (projectStore.dirPath === projectDir) {
+        lastSyncTime = status.last_sync;
+        syncErrors = status.errors;
+        adoptableProjectId = status.adoptable_project_id ?? null;
+      }
     } catch (e) {
-      syncErrors = [String(e)];
+      if (projectStore.dirPath === projectDir) syncErrors = [String(e)];
     }
     syncInProgress = false;
+  }
+
+  async function adoptSyncIdentity() {
+    const projectDir = projectStore.dirPath;
+    const projectId = adoptableProjectId;
+    if (!projectDir || !projectId) return;
+    try {
+      await invoke('adopt_sync_identity', { projectDir, projectId });
+      adoptableProjectId = null;
+      await syncNow();
+    } catch (e) {
+      syncErrors = [...syncErrors, String(e)];
+    }
   }
 
   function setSyncEnabled(checked: boolean) {
@@ -547,6 +593,7 @@
       }
       return;
     }
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') { e.preventDefault(); onClose(); }
   }
 
@@ -562,10 +609,13 @@
     }
   });
 
+  // Reload the sync form for whichever project is open: Settings can stay
+  // open across a project switch, and A's URL/username must not save into B.
   $effect(() => {
-    if (activeSection === 'sync' && !syncLoaded) {
-      loadSyncConfig();
-    }
+    const projectDir = projectStore.dirPath;
+    if (activeSection !== 'sync' || !projectDir) return;
+    if (untrack(() => syncLoadedFor) === projectDir || syncLoadingFor === projectDir) return;
+    void loadSyncConfig(projectDir);
   });
 </script>
 
@@ -629,10 +679,15 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="fixed inset-0 z-50 flex items-center justify-center" data-testid="settings-overlay" style="background: rgba(0,0,0,0.4);" onclick={onClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="rounded-lg shadow-xl w-full flex flex-col overflow-hidden"
     data-testid="settings-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label={t('settings.dialogLabel')}
+    tabindex="-1"
+    use:focusTrap
     style="max-width: 680px; background: var(--novelist-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border); height: 520px;"
     onclick={(e) => e.stopPropagation()}
   >
@@ -649,6 +704,7 @@
           class="w-full px-2 py-1 text-xs rounded"
           style="background: var(--novelist-input-bg, var(--novelist-bg)); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
           onkeydown={(e) => {
+            if (isImeComposing(e)) return;
             if (e.key === 'Enter' && searchResults.length > 0) {
               e.preventDefault();
               jumpToResult(searchResults[0]);
@@ -1283,7 +1339,7 @@
               type="button"
               class="shrink-0 rounded px-2.5 py-1 text-xs font-medium cursor-pointer"
               style="background: var(--novelist-accent); color: white; border: none;"
-              onclick={() => relaunch()}
+              onclick={reloadApp}
             >{t('settings.plugins.reloadApp')}</button>
           </div>
         {/if}
@@ -1429,6 +1485,19 @@
             </select>
           </div>
 
+          <label class="flex items-start gap-2 mb-3 text-xs" for="sync-legacy-acknowledged">
+            <input
+              id="sync-legacy-acknowledged"
+              type="checkbox"
+              checked={syncConfig.legacy_remote_acknowledged}
+              onchange={(event) => {
+                syncConfig.legacy_remote_acknowledged = event.currentTarget.checked;
+                void saveSyncConfig();
+              }}
+            />
+            <span>{t('settings.sync.legacyAcknowledged')}</span>
+          </label>
+
           <div class="flex gap-2 mb-3">
             <button
               class="text-xs px-3 py-1.5 rounded cursor-pointer"
@@ -1462,8 +1531,22 @@
             </div>
           {/if}
 
+          {#if adoptableProjectId}
+            <div class="rounded p-2 mb-2 text-xs flex items-center justify-between gap-3" data-testid="sync-adopt-notice" style="background: color-mix(in srgb, var(--novelist-accent) 10%, var(--novelist-bg)); border: 1px solid color-mix(in srgb, var(--novelist-accent) 40%, var(--novelist-border));">
+              <span>{t('settings.sync.adoptPrompt')}</span>
+              <button
+                type="button"
+                class="shrink-0 rounded px-2.5 py-1 text-xs font-medium cursor-pointer"
+                style="background: var(--novelist-accent); color: white; border: none;"
+                data-testid="sync-adopt-button"
+                disabled={syncInProgress}
+                onclick={adoptSyncIdentity}
+              >{t('settings.sync.adoptButton')}</button>
+            </div>
+          {/if}
+
           <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
-            {t('settings.sync.syncPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist/<project-name>/"}</code>
+            {t('settings.sync.syncPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist-sync/<project-id>/"}</code>
           </div>
         {/if}
 

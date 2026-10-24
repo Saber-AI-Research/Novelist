@@ -173,13 +173,17 @@ fn ensure_confined_directory_component(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            project.create_dir(relative).map_err(|create_error| {
-                AppError::PathNotAllowed(format!(
+            match project.create_dir(relative) {
+                Ok(()) => Ok(true),
+                // A concurrent writer created it first; validate what exists now.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    ensure_confined_directory_component(project, relative, false)
+                }
+                Err(create_error) => Err(AppError::PathNotAllowed(format!(
                     "Cannot create metadata directory {}: {create_error}",
                     relative.display()
-                ))
-            })?;
-            Ok(true)
+                ))),
+            }
         }
         Err(error) => Err(AppError::Io(error)),
     }
@@ -936,8 +940,32 @@ where
     atomic_write_bytes(path, &bytes).await
 }
 
+/// [`atomic_write_json`] for files holding credentials (S3/OSS/Qiniu keys,
+/// WordPress/Ghost secrets): the file is created readable and writable by
+/// its owner only (mode 0600 on Unix), and every write replaces an older
+/// broader-permission file with that mode. Windows profile ACLs are already
+/// per-user.
+pub async fn atomic_write_json_private<T>(path: &Path, value: &T) -> Result<(), AppError>
+where
+    T: Serialize + ?Sized,
+{
+    let bytes = serde_json::to_vec_pretty(value)?;
+    write_atomically(path, &bytes, FileAccess::OwnerOnly).await
+}
+
+#[derive(Clone, Copy)]
+enum FileAccess {
+    /// Default mode, subject to the process umask.
+    Default,
+    OwnerOnly,
+}
+
 /// Atomically write arbitrary bytes via a `create_new`-guarded sibling temp + rename.
 pub async fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    write_atomically(path, bytes, FileAccess::Default).await
+}
+
+async fn write_atomically(path: &Path, bytes: &[u8], access: FileAccess) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -960,7 +988,7 @@ pub async fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), AppErro
 
     tokio::task::spawn_blocking(move || -> Result<(), AppError> {
         let pid = std::process::id();
-        let (mut file, temp_path) = allocate_temp(&parent, &file_name, pid)?;
+        let (mut file, temp_path) = allocate_temp(&parent, &file_name, pid, access)?;
 
         let write_result = (|| -> Result<(), AppError> {
             file.write_all(&bytes).map_err(AppError::Io)?;
@@ -996,17 +1024,23 @@ fn allocate_temp(
     parent: &Path,
     file_name: &str,
     pid: u32,
+    access: FileAccess,
 ) -> Result<(std::fs::File, PathBuf), AppError> {
     let mut last_err: Option<std::io::Error> = None;
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!(".{}.{}.{}{}", file_name, pid, counter, TEMP_SUFFIX);
         let candidate = parent.join(&name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if matches!(access, FileAccess::OwnerOnly) {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = access;
+        match options.open(&candidate) {
             Ok(file) => return Ok((file, candidate)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_err = Some(e);
@@ -1995,5 +2029,28 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_json_is_owner_only_and_tightens_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        atomic_write_json_private(&path, &serde_json::json!({"secret_key": "first"}))
+            .await
+            .unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        // A settings file written before secrets were stored privately.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        atomic_write_json_private(&path, &serde_json::json!({"secret_key": "秘密"}))
+            .await
+            .unwrap();
+        assert_eq!(mode(&path), 0o600);
+        let back: Option<serde_json::Value> = read_json(&path).await.unwrap();
+        assert_eq!(back.unwrap()["secret_key"], "秘密");
     }
 }

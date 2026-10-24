@@ -14,7 +14,7 @@ import {
 } from '$lib/services/managed-name-persistence';
 import { hasCanonicalTitleToken } from '$lib/utils/managed-name';
 import { extractFirstH1 } from '$lib/utils/h1';
-import { pathDirname, pathStartsWithChild, pathsEqual } from '$lib/utils/path';
+import { pathDirname, pathIsWithin } from '$lib/utils/path';
 
 type T = (key: string, params?: Record<string, string | number>) => string;
 export type ManagedNameEnrollmentOutcome = 'enrolled' | 'not-applicable' | 'failed';
@@ -92,24 +92,24 @@ export function currentFilenameTemplateRaw(): string {
 /**
  * Resolve the destination for the generic New File command.
  *
- * A pinned default remains authoritative. Otherwise, while a literary-study
- * chapter is active, create beside that chapter so Cmd+N and the sidebar
- * header `+` do not escape into a stale last-used folder or the project root.
- * The containment check is deliberate: an externally-opened `.litstudy` file
- * must never redirect project file creation outside the active project.
+ * A pinned default inside the project remains authoritative. Otherwise, while
+ * a literary-study chapter is active, create beside that chapter so Cmd+N and
+ * the sidebar header `+` do not escape into a stale last-used folder or the
+ * project root. The containment checks are deliberate: neither a pin recorded
+ * for another project nor an externally-opened `.litstudy` file may redirect
+ * project file creation outside the active project.
  */
 export function resolveContextualNewFileDir(
   projectDir: string,
   activeFilePath: string | null,
 ): string {
   const configuredDir = settingsStore.resolveNewFileDir(projectDir);
-  if (settingsStore.effective.new_file.default_dir) return configuredDir;
+  const pinnedDir = settingsStore.effective.new_file.default_dir;
+  if (pinnedDir && pathIsWithin(pinnedDir, projectDir)) return configuredDir;
   if (!activeFilePath?.toLowerCase().endsWith('.litstudy')) return configuredDir;
 
   const chapterDir = pathDirname(activeFilePath);
-  if (pathsEqual(chapterDir, projectDir) || pathStartsWithChild(chapterDir, projectDir)) {
-    return chapterDir;
-  }
+  if (pathIsWithin(chapterDir, projectDir)) return chapterDir;
   return configuredDir;
 }
 

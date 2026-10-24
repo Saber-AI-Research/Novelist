@@ -6,6 +6,7 @@
  * once. All reads/writes go through the unified settings store.
  */
 import { parseTemplate } from '$lib/utils/placeholder';
+import { makeTemplateContext, resolveBody } from '$lib/utils/template-tokens';
 import { settingsStore } from '$lib/stores/settings.svelte';
 
 class NewFileSettingsShim {
@@ -20,7 +21,9 @@ class NewFileSettingsShim {
   }
 
   setTemplate(template: string): void {
-    if (!parseTemplate(template)) {
+    // Date/time macros (`{date:YYMMDD}`) are expanded before numbering, exactly
+    // as Cmd+N and the Settings preview do, so validate the expanded form.
+    if (!parseTemplate(resolveBody(template, makeTemplateContext()))) {
       throw new Error(`Invalid template: ${template}`);
     }
     void settingsStore.writeNewFile({ template });

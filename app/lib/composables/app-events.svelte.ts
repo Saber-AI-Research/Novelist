@@ -26,7 +26,7 @@ export type AppEventContext = {
   onOpenProjectInThisWindow: (dirPath: string) => Promise<void> | void;
 };
 
-const TEXT_EXTENSIONS = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
+const TEXT_EXTENSIONS = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv', '.novtrans'];
 const EXTERNAL_CHANGE_DEBOUNCE_MS = 1_050;
 
 type ExternalChangePayload =

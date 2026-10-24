@@ -7,7 +7,7 @@ import type {
 
 const { ipc } = vi.hoisted(() => ({
   ipc: {
-    reads: [] as Array<{ path: string; allowedRoots: string[] }>,
+    reads: [] as Array<{ path: string }>,
     uploads: [] as Array<{
       provider: string;
       bytes: number[];
@@ -65,8 +65,8 @@ vi.mock('$lib/ipc/commands', () => {
 
   return {
     commands: {
-      readStyledCopyImage: (path: string, allowedRoots: string[]) => {
-        ipc.reads.push({ path, allowedRoots });
+      readStyledCopyImage: (path: string) => {
+        ipc.reads.push({ path });
         return Promise.resolve(ipc.readResults.get(path) ?? {
           status: 'error' as const,
           error: `missing fixture: ${path}`,
@@ -127,7 +127,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -158,7 +157,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets,
       documentDir: '/文档/章节',
-      projectDir: '/文档',
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -171,10 +169,7 @@ describe('[contract] styled-copy asset session', () => {
       },
       warnings: [],
     });
-    expect(ipc.reads).toEqual([{
-      path: resolvedPath,
-      allowedRoots: ['/文档/章节', '/文档'],
-    }]);
+    expect(ipc.reads).toEqual([{ path: resolvedPath }]);
     expect(ipc.settingsCalls).toBe(0);
     expect(ipc.uploads).toEqual([]);
     expect(JSON.stringify(assets)).toBe(frozenAssets);
@@ -187,7 +182,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', source)],
       documentDir: '/documents',
-      projectDir: null,
       target: 'zhihu',
       wechatTheme: 'technical',
     });
@@ -210,7 +204,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', source)],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -238,7 +231,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', 'image.bin')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -262,7 +254,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', 'large.png')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'zhihu',
       wechatTheme: 'minimal',
     });
@@ -292,7 +283,6 @@ describe('[contract] styled-copy asset session', () => {
         image('missing', './missing.png'),
       ],
       documentDir: '/documents',
-      projectDir: '/project',
       target: 'wechat',
       wechatTheme: 'magazine',
     });
@@ -323,10 +313,7 @@ describe('[contract] styled-copy asset session', () => {
         ],
       },
     });
-    expect(ipc.reads).toEqual([{
-      path: '/documents/missing.png',
-      allowedRoots: ['/documents', '/project'],
-    }]);
+    expect(ipc.reads).toEqual([{ path: '/documents/missing.png' }]);
     expect(ipc.settingsCalls).toBe(0);
     expect(ipc.uploads).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -342,7 +329,6 @@ describe('[contract] styled-copy asset session', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', './vector.svg')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -400,7 +386,6 @@ describe('[contract] styled-copy final asset transaction', () => {
         mermaid('mermaid-2', 'graph TD;章节-->完成'),
       ],
       documentDir: '/documents',
-      projectDir: '/project',
       target: 'wechat',
       wechatTheme: 'minimal',
     }, { rasterizeMermaid });
@@ -460,7 +445,6 @@ describe('[contract] styled-copy final asset transaction', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', 'local.png')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'zhihu',
       wechatTheme: 'minimal',
     });
@@ -500,7 +484,6 @@ describe('[contract] styled-copy final asset transaction', () => {
     const session = createStyledCopyAssetSession({
       assets,
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'technical',
     });
@@ -530,7 +513,6 @@ describe('[contract] styled-copy final asset transaction', () => {
         image('image-3', '3.png'),
       ],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -602,7 +584,6 @@ describe('[contract] styled-copy final asset transaction', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', 'local.png')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'zhihu',
       wechatTheme: 'minimal',
     });
@@ -647,7 +628,6 @@ describe('[contract] styled-copy final asset transaction', () => {
     const session = createStyledCopyAssetSession({
       assets: invalidUrls.map((_, index) => image(`image-${index + 1}`, `${index + 1}.png`)),
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -683,7 +663,6 @@ describe('[contract] styled-copy final asset transaction', () => {
     const session = createStyledCopyAssetSession({
       assets: [image('image-1', 'local.png')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'minimal',
     });
@@ -966,7 +945,6 @@ describe('[contract] styled-copy Mermaid raster boundary', () => {
     const session = createStyledCopyAssetSession({
       assets: [mermaid('mermaid-1', 'graph TD;章节-->完成')],
       documentDir: '/documents',
-      projectDir: null,
       target: 'wechat',
       wechatTheme: 'magazine',
       mermaidScale: 2,
@@ -994,7 +972,6 @@ describe('[contract] styled-copy Mermaid raster boundary', () => {
     const session = createStyledCopyAssetSession({
       assets: [mermaid('mermaid-1', 'graph TD;A-->B')],
       documentDir: '/secret/document/path',
-      projectDir: null,
       target: 'zhihu',
       wechatTheme: 'minimal',
     }, {

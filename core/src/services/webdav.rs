@@ -26,6 +26,13 @@ pub struct DavEntry {
     pub last_modified: Option<String>,
     pub content_length: Option<u64>,
     pub is_collection: bool,
+    /// Strong `getetag` only; weak validators cannot prove byte equality.
+    pub etag: Option<String>,
+}
+
+fn strong_etag(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && !value.starts_with("W/")).then(|| value.to_owned())
 }
 
 fn invalid_path() -> AppError {
@@ -180,8 +187,7 @@ pub(crate) async fn get_file(
         .headers()
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.starts_with("W/"))
-        .map(str::to_owned);
+        .and_then(strong_etag);
     let bytes = response
         .bytes()
         .await
@@ -196,6 +202,7 @@ pub(crate) enum PutCondition<'a> {
     Matches(&'a str),
 }
 
+/// Returns the strong ETag the server assigned to the stored bytes, if any.
 pub(crate) async fn put_bytes(
     client: &Client,
     base_url: &str,
@@ -203,7 +210,7 @@ pub(crate) async fn put_bytes(
     bytes: Vec<u8>,
     auth: &WebDavAuth,
     condition: PutCondition<'_>,
-) -> Result<(), AppError> {
+) -> Result<Option<String>, AppError> {
     let mut request = client
         .put(remote_url(base_url, remote_path)?)
         .timeout(REQUEST_TIMEOUT)
@@ -224,7 +231,11 @@ pub(crate) async fn put_bytes(
             response.status()
         )));
     }
-    Ok(())
+    Ok(response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .and_then(strong_etag))
 }
 
 /// Open a relative parent chain without following a symlink at any component.
@@ -281,7 +292,7 @@ pub async fn list_remote(
         .timeout(REQUEST_TIMEOUT)
         .basic_auth(&auth.username, Some(&auth.password))
         .header("Depth", "1").header("Content-Type", "application/xml")
-        .body(r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/><d:getcontentlength/><d:resourcetype/></d:prop></d:propfind>"#)
+        .body(r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/><d:getcontentlength/><d:getetag/><d:resourcetype/></d:prop></d:propfind>"#)
         .send().await.map_err(|error| request_error("PROPFIND", error))?;
     if !response.status().is_success() {
         return Err(AppError::Custom(format!(
@@ -294,6 +305,35 @@ pub async fn list_remote(
         .await
         .map_err(|error| request_error("PROPFIND body", error))?;
     parse_propfind_response(&xml)
+}
+
+/// List a collection that may not exist yet; a missing collection is empty.
+pub(crate) async fn list_remote_if_exists(
+    client: &Client,
+    base_url: &str,
+    remote_path: &str,
+    auth: &WebDavAuth,
+) -> Result<Option<Vec<DavEntry>>, AppError> {
+    let response = client.request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), remote_url(base_url, remote_path)?)
+        .timeout(REQUEST_TIMEOUT)
+        .basic_auth(&auth.username, Some(&auth.password))
+        .header("Depth", "1").header("Content-Type", "application/xml")
+        .body(r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#)
+        .send().await.map_err(|error| request_error("PROPFIND", error))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(AppError::Custom(format!(
+            "WebDAV PROPFIND returned {}",
+            response.status()
+        )));
+    }
+    let xml = response
+        .text()
+        .await
+        .map_err(|error| request_error("PROPFIND body", error))?;
+    parse_propfind_response(&xml).map(Some)
 }
 
 pub async fn create_collection(
@@ -343,6 +383,32 @@ pub async fn delete_remote(
     Ok(())
 }
 
+/// Delete one file only while it still carries the validator the caller saw.
+/// A missing file already satisfies the deletion; a changed one is a conflict.
+pub(crate) async fn delete_file_if_match(
+    client: &Client,
+    base_url: &str,
+    remote_path: &str,
+    auth: &WebDavAuth,
+    etag: &str,
+) -> Result<(), AppError> {
+    let response = client
+        .delete(remote_url(base_url, remote_path)?)
+        .timeout(REQUEST_TIMEOUT)
+        .basic_auth(&auth.username, Some(&auth.password))
+        .header(reqwest::header::IF_MATCH, etag)
+        .send()
+        .await
+        .map_err(|error| request_error("DELETE", error))?;
+    match response.status() {
+        status if status.is_success() || status == reqwest::StatusCode::NOT_FOUND => Ok(()),
+        reqwest::StatusCode::PRECONDITION_FAILED => Err(AppError::Custom(
+            "Conflict: remote file changed after it was last synced; it was not deleted".into(),
+        )),
+        status => Err(AppError::Custom(format!("WebDAV DELETE returned {status}"))),
+    }
+}
+
 pub async fn test_connection(
     client: &Client,
     base_url: &str,
@@ -380,9 +446,10 @@ fn parse_propfind_response(xml: &str) -> Result<Vec<DavEntry>, AppError> {
                         last_modified: None,
                         content_length: None,
                         is_collection: false,
+                        etag: None,
                     });
                 }
-                b"href" | b"getlastmodified" | b"getcontentlength" | b"status"
+                b"href" | b"getlastmodified" | b"getcontentlength" | b"getetag" | b"status"
                     if current.is_some() =>
                 {
                     let text = reader.read_text(tag.name()).map_err(|_| invalid_path())?;
@@ -392,6 +459,7 @@ fn parse_propfind_response(xml: &str) -> Result<Vec<DavEntry>, AppError> {
                         b"href" => entry.href = text.into_owned(),
                         b"getlastmodified" => entry.last_modified = Some(text.into_owned()),
                         b"getcontentlength" => entry.content_length = text.parse().ok(),
+                        b"getetag" => entry.etag = strong_etag(&text),
                         b"status" => {
                             let code = text
                                 .split_whitespace()
@@ -459,6 +527,8 @@ pub(crate) mod test_server {
         pub collections: BTreeSet<String>,
         pub requests: Vec<Request>,
         pub fail: HashSet<(String, String)>,
+        /// Let this many matching requests succeed, then fail every later one.
+        pub fail_after: BTreeMap<(String, String), usize>,
         pub stall: HashSet<(String, String)>,
         pub edit_local: Option<(String, String, PathBuf, Vec<u8>)>,
     }
@@ -604,11 +674,15 @@ pub(crate) mod test_server {
                 std::fs::write(local, bytes).unwrap();
             }
         }
-        if state
-            .fail
-            .contains(&(request.method.clone(), request.path.clone()))
-        {
+        let key = (request.method.clone(), request.path.clone());
+        if state.fail.contains(&key) {
             return (500, Vec::new(), None);
+        }
+        if let Some(remaining) = state.fail_after.get_mut(&key) {
+            if *remaining == 0 {
+                return (500, Vec::new(), None);
+            }
+            *remaining -= 1;
         }
         let path = request.path.trim_end_matches('/');
         match request.method.as_str() {
@@ -645,7 +719,20 @@ pub(crate) mod test_server {
                 None => (404, Vec::new(), None),
             },
             "DELETE" => {
-                state.files.remove(path);
+                if let Some(expected) = request.headers.get("if-match") {
+                    match state.files.get(path) {
+                        None => return (404, Vec::new(), None),
+                        Some(bytes) if &etag(bytes) != expected => return (412, Vec::new(), None),
+                        Some(_) => {}
+                    }
+                }
+                let subtree = format!("{path}/");
+                state
+                    .files
+                    .retain(|file, _| file != path && !file.starts_with(&subtree));
+                state
+                    .collections
+                    .retain(|collection| collection != path && !collection.starts_with(&subtree));
                 (204, Vec::new(), None)
             }
             "PROPFIND" => {
@@ -654,26 +741,35 @@ pub(crate) mod test_server {
                 }
                 let prefix = format!("{path}/");
                 let mut xml = String::from("<x:multistatus xmlns:x=\"DAV:\">");
-                let mut entry = |href: &str, collection: bool| {
+                let mut entry = |href: &str, etag: Option<String>| {
+                    let collection = etag.is_none();
                     let href = quick_xml::escape::escape(href);
-                    xml.push_str(&format!("<x:response><x:href>{href}</x:href><x:propstat><x:prop><x:resourcetype>{}</x:resourcetype></x:prop><x:status>HTTP/1.1 200 OK</x:status></x:propstat></x:response>", if collection { "<x:collection/>" } else { "" }));
+                    let etag = etag
+                        .map(|value| {
+                            format!(
+                                "<x:getetag>{}</x:getetag>",
+                                quick_xml::escape::escape(&value)
+                            )
+                        })
+                        .unwrap_or_default();
+                    xml.push_str(&format!("<x:response><x:href>{href}</x:href><x:propstat><x:prop>{etag}<x:resourcetype>{}</x:resourcetype></x:prop><x:status>HTTP/1.1 200 OK</x:status></x:propstat></x:response>", if collection { "<x:collection/>" } else { "" }));
                 };
-                entry(&prefix, true);
+                entry(&prefix, None);
                 if request.headers.get("depth").map(String::as_str) != Some("0") {
                     for directory in &state.collections {
                         if directory
                             .strip_prefix(&prefix)
                             .is_some_and(|child| !child.is_empty() && !child.contains('/'))
                         {
-                            entry(&format!("{directory}/"), true);
+                            entry(&format!("{directory}/"), None);
                         }
                     }
-                    for file in state.files.keys() {
+                    for (file, bytes) in &state.files {
                         if file
                             .strip_prefix(&prefix)
                             .is_some_and(|child| !child.contains('/'))
                         {
-                            entry(file, false);
+                            entry(file, Some(etag(bytes)));
                         }
                     }
                 }

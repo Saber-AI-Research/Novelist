@@ -1,32 +1,33 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EditorState } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
 
 /**
- * [contract] createCloseTab — close-tab pipeline with a guard against
- * double-fire from Cmd+W and the native onCloseRequested listener.
+ * [regression] createCloseTab (Cmd+W) against the real tabs store: the
+ * Save branch writes the live editor text, an empty split column closes the
+ * column (never the window), and the double-fire guard holds while the
+ * unsaved-changes prompt is open.
  */
 
-const { destroy, closeTab, tabsState, projectState, projectClose } = vi.hoisted(() => {
-  const destroy = vi.fn();
-  const closeTab = vi.fn();
-  const tabsState = {
-    activeTab: null as null | { id: string; fileName: string; isDirty: boolean },
+const { destroy, writeFile, projectState, projectClose } = vi.hoisted(() => {
+  const projectState = { singleFileMode: false, dirPath: null as string | null };
+  return {
+    destroy: vi.fn(),
+    writeFile: vi.fn(),
+    projectState,
+    projectClose: vi.fn(async () => { projectState.singleFileMode = false; }),
   };
-  const projectState = {
-    singleFileMode: false,
-    dirPath: null as null | string,
-  };
-  const projectClose = vi.fn(() => { projectState.singleFileMode = false; });
-  return { destroy, closeTab, tabsState, projectState, projectClose };
 });
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ destroy }),
 }));
 
-vi.mock('$lib/stores/tabs.svelte', () => ({
-  tabsStore: {
-    get activeTab() { return tabsState.activeTab; },
-    closeTab,
+vi.mock('$lib/ipc/commands', () => ({
+  commands: {
+    writeFile,
+    registerWriteIgnore: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
+    unregisterOpenFile: vi.fn().mockResolvedValue({ status: 'ok', data: null }),
   },
 }));
 
@@ -35,106 +36,146 @@ vi.mock('$lib/stores/project.svelte', () => ({
     get singleFileMode() { return projectState.singleFileMode; },
     get dirPath() { return projectState.dirPath; },
     close: projectClose,
+    rememberLastOpenFile: () => {},
   },
 }));
 
+vi.mock('$lib/i18n', () => ({ t: (key: string) => key }));
+
 import { createCloseTab } from '$lib/composables/close-tab.svelte';
+import { registerEditorView, tabsStore, unregisterEditorView } from '$lib/stores/tabs.svelte';
+import { resolveUnsavedPrompt, unsavedPromptState } from '$lib/composables/unsaved-prompt.svelte';
+
+const views: Array<{ tabId: string; view: EditorView }> = [];
+
+function mountView(tabId: string): EditorView {
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+  const doc = tabsStore.findTab(tabId)!.content;
+  const view = new EditorView({ state: EditorState.create({ doc }), parent });
+  registerEditorView(tabId, view);
+  views.push({ tabId, view });
+  return view;
+}
 
 beforeEach(() => {
-  destroy.mockClear();
-  closeTab.mockReset();
-  projectClose.mockClear();
-  tabsState.activeTab = null;
-  projectState.singleFileMode = false;
-  projectState.dirPath = null;
+  writeFile.mockResolvedValue({ status: 'ok', data: null });
 });
 
-describe('[contract] createCloseTab', () => {
-  it('destroys the window when there is no active tab', async () => {
-    const api = createCloseTab();
-    await api.handleCloseTab();
-    expect(destroy).toHaveBeenCalledTimes(1);
-    expect(closeTab).not.toHaveBeenCalled();
-  });
+afterEach(() => {
+  while (unsavedPromptState.pending) resolveUnsavedPrompt('cancel');
+  for (const { tabId, view } of views) {
+    unregisterEditorView(tabId);
+    view.destroy();
+  }
+  views.length = 0;
+  tabsStore.closeAll();
+  projectState.singleFileMode = false;
+  projectState.dirPath = null;
+  document.body.innerHTML = '';
+  vi.clearAllMocks();
+});
 
-  it('closes the active tab without destroying the window when other tabs remain', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    projectState.dirPath = '/proj';
-    closeTab.mockImplementation(async () => {
-      // After close, a second tab becomes active — stay non-null.
-      tabsState.activeTab = { id: 't2', fileName: 'b.md', isDirty: false };
-    });
-    const api = createCloseTab();
-    await api.handleCloseTab();
-    expect(closeTab).toHaveBeenCalledWith('t1');
+describe('[regression] createCloseTab', () => {
+  it('Save writes the live editor text before closing the tab', async () => {
+    projectState.dirPath = '/p';
+    tabsStore.openTab('/p/a.md', 'saved');
+    const tab = tabsStore.activeTab!;
+    const view = mountView(tab.id);
+    view.dispatch({ changes: { from: 5, insert: ' 新增' } });
+    tabsStore.markDirty(tab.id);
+
+    const closing = createCloseTab().handleCloseTab();
+    await vi.waitFor(() => expect(unsavedPromptState.pending).not.toBeNull());
+    resolveUnsavedPrompt('save');
+    await closing;
+
+    expect(writeFile).toHaveBeenCalledWith('/p/a.md', 'saved 新增');
+    expect(tabsStore.allTabs).toHaveLength(0);
     expect(destroy).not.toHaveBeenCalled();
   });
 
+  it('closes an empty split column instead of the window, keeping dirty tabs elsewhere', async () => {
+    tabsStore.openTab('/p/a.md', 'a');
+    tabsStore.markDirty(tabsStore.activeTab!.id);
+    tabsStore.toggleSplit();
+    tabsStore.setActivePane('pane-2');
+
+    await createCloseTab().handleCloseTab();
+
+    expect(destroy).not.toHaveBeenCalled();
+    expect(tabsStore.panes.map(p => p.id)).toEqual(['pane-1']);
+    expect(tabsStore.dirtyTabs).toHaveLength(1);
+  });
+
+  it('does not destroy the window when the active column empties but another holds tabs', async () => {
+    tabsStore.openTab('/p/a.md', 'a');
+    tabsStore.toggleSplit();
+    tabsStore.openTabInPane('pane-2', '/p/b.md', 'b');
+    tabsStore.setActivePane('pane-2');
+
+    await createCloseTab().handleCloseTab();
+
+    expect(destroy).not.toHaveBeenCalled();
+    expect(tabsStore.allTabs.map(t => t.filePath)).toEqual(['/p/a.md']);
+  });
+
+  it('destroys the window when there is no tab at all', async () => {
+    await createCloseTab().handleCloseTab();
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys the window when the last tab closes and no project is open', async () => {
+    tabsStore.openTab('/p/a.md', 'a');
+    await createCloseTab().handleCloseTab();
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
   it('exits single-file mode when the last tab closes', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
     projectState.singleFileMode = true;
-    closeTab.mockImplementation(async () => { tabsState.activeTab = null; });
-    const api = createCloseTab();
-    await api.handleCloseTab();
+    tabsStore.openTab('/p/a.md', 'a');
+    await createCloseTab().handleCloseTab();
     expect(projectClose).toHaveBeenCalledTimes(1);
     expect(destroy).not.toHaveBeenCalled();
   });
 
-  it('destroys the window when the last tab closes and no project is open', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    // dirPath stays null and singleFileMode stays false.
-    closeTab.mockImplementation(async () => { tabsState.activeTab = null; });
-    const api = createCloseTab();
-    await api.handleCloseTab();
-    expect(destroy).toHaveBeenCalledTimes(1);
-    expect(projectClose).not.toHaveBeenCalled();
-  });
-
   it('keeps the window open when the last tab closes but a project is open', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    projectState.dirPath = '/proj';
-    closeTab.mockImplementation(async () => { tabsState.activeTab = null; });
-    const api = createCloseTab();
-    await api.handleCloseTab();
+    projectState.dirPath = '/p';
+    tabsStore.openTab('/p/a.md', 'a');
+    await createCloseTab().handleCloseTab();
     expect(destroy).not.toHaveBeenCalled();
     expect(projectClose).not.toHaveBeenCalled();
   });
 
-  it('isClosing is true during the close, false before and after', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    projectState.dirPath = '/proj';
-    let isClosingDuring: boolean | null = null;
-    closeTab.mockImplementation(async () => {
-      isClosingDuring = api.isClosing();
-    });
-    const api = createCloseTab();
-    expect(api.isClosing()).toBe(false);
-    await api.handleCloseTab();
-    expect(isClosingDuring).toBe(true);
-    expect(api.isClosing()).toBe(false);
+  it('Cancel keeps the tab and the window', async () => {
+    tabsStore.openTab('/p/a.md', 'a');
+    tabsStore.markDirty(tabsStore.activeTab!.id);
+
+    const closing = createCloseTab().handleCloseTab();
+    await vi.waitFor(() => expect(unsavedPromptState.pending).not.toBeNull());
+    resolveUnsavedPrompt('cancel');
+    await closing;
+
+    expect(tabsStore.allTabs).toHaveLength(1);
+    expect(destroy).not.toHaveBeenCalled();
   });
 
-  it('guards against re-entry while a close is in flight', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    projectState.dirPath = '/proj';
-    let secondCall: Promise<void> | null = null;
-    closeTab.mockImplementation(async () => {
-      // Re-enter while we're holding closingTab=true.
-      secondCall = api.handleCloseTab();
-    });
+  it('ignores a second Cmd+W while the prompt is open and reports isClosing', async () => {
+    projectState.dirPath = '/p';
+    tabsStore.openTab('/p/a.md', 'a');
+    tabsStore.markDirty(tabsStore.activeTab!.id);
     const api = createCloseTab();
-    await api.handleCloseTab();
-    // Drain the re-entrant call (guaranteed non-null by mockImplementation above).
-    await (secondCall as unknown as Promise<void>);
-    // Only the first entry called closeTab.
-    expect(closeTab).toHaveBeenCalledTimes(1);
-  });
+    expect(api.isClosing()).toBe(false);
 
-  it('clears the closing flag even when closeTab throws', async () => {
-    tabsState.activeTab = { id: 't1', fileName: 'a.md', isDirty: false };
-    closeTab.mockRejectedValue(new Error('boom'));
-    const api = createCloseTab();
-    await expect(api.handleCloseTab()).rejects.toThrow('boom');
+    const first = api.handleCloseTab();
+    await vi.waitFor(() => expect(unsavedPromptState.pending).not.toBeNull());
+    expect(api.isClosing()).toBe(true);
+    await api.handleCloseTab();
+    resolveUnsavedPrompt('discard');
+    await first;
+
+    expect(unsavedPromptState.pending).toBeNull();
+    expect(tabsStore.allTabs).toHaveLength(0);
     expect(api.isClosing()).toBe(false);
   });
 });

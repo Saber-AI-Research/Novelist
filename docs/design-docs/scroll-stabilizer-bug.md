@@ -135,12 +135,21 @@ line height) is imperceptible; the cascade it triggered was not.
 
 Strip `scrollIntoView` from `select.pointer` transactions using `EditorState.transactionFilter`. This lets CM6 handle the click normally but prevents the stale-height-map scroll. Key issue: the scrollIntoView flag in CM6 is stored as an **effect** in `tr.effects`, not just as a boolean. Must omit effects when rebuilding the transaction, not just set `scrollIntoView: false`.
 
+## Guard lifetime
+
+The mousedown guard is armed only for the click that set it: it is disarmed
+two animation frames later (the click's own dispatch, then CM6's measure).
+A guard left armed by a click that caused no scroll would otherwise revert
+the next legitimate jump larger than one screen (outline click, Go to Line,
+find-next, Cmd+End) and move the caret back to the stale click position. The
+restored click position is clamped to the current document length.
+
 ## Test File
 
-See `app/lib/editor/scroll-stabilizer.test.ts` for state-machine tests covering:
-- Guard activation/deactivation
-- Boolean flag (no timeout race)
-- dispatching flag blocks async scroll re-triggering
-- Scrollbar clicks don't consume the guard
-- Multiple scroll-click cycles
-- Regression cases from actual user sessions
+`tests/unit/editor/scroll-stabilizer.test.ts` drives the production
+`scrollStabilizer` extension on a real `EditorView` (synthetic `scroll` /
+`mousedown` events, stubbed `clientHeight` / `posAtCoords`):
+- native jump during the guarded click is reverted and the click position restored
+- small scrolls are left alone; right-clicks never arm the guard
+- a click that caused no scroll does not revert a later outline / Go to Line jump
+- the restored position is clamped to the document length

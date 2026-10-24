@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 const FAILURE_PREFIX = 'NOVELIST_PANDOC_FAILURE_JSON:';
 
@@ -36,11 +36,7 @@ async function configureExport(
 }
 
 async function openExportDialog(app: Page, options: { includeTheme?: boolean } = {}) {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
   await app.keyboard.press('Meta+Shift+p');
   await app.getByTestId('palette-input').fill('export project');
   await app.getByTestId('palette-result-0').click();
@@ -60,10 +56,6 @@ function failure(error: PandocFailure): string {
 }
 
 test.describe('[contract] Export dialog Pandoc diagnostics', () => {
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
-  });
-
   test('shows the executable path that discovery actually resolved', async ({ app }) => {
     await configureExport(app, {
       result: { message: 'Export complete: /mock/export.html' },

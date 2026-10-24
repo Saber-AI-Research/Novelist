@@ -24,8 +24,8 @@ function docFrom(text: string): Text {
   return EditorState.create({ doc: text }).doc;
 }
 
-function summarize(doc: Text, selection: EditorSelection): DecoSummary[] {
-  const set = buildSelectionDecorations(doc, selection);
+function summarize(doc: Text, selection: EditorSelection, visible?: { from: number; to: number }[]): DecoSummary[] {
+  const set = buildSelectionDecorations(doc, selection, visible);
   const out: DecoSummary[] = [];
   const cursor = set.iter();
   while (cursor.value) {
@@ -198,5 +198,24 @@ describe('[precision][regression] buildSelectionDecorations', () => {
     const decos = summarize(doc, sel);
     expect(decos).toHaveLength(1);
     expect(decos[0]).toMatchObject({ from: 0, klass: 'cm-novelist-selected-line' });
+  });
+
+  it('[regression] decorates only lines inside the visible ranges (Cmd+A on a huge file)', () => {
+    const doc = docFrom(Array.from({ length: 10_000 }, (_, i) => `line ${i}`).join('\n'));
+    const visibleFrom = doc.line(5000).from;
+    const visibleTo = doc.line(5009).to;
+    const decos = summarize(doc, EditorSelection.single(0, doc.length), [{ from: visibleFrom, to: visibleTo }]);
+    expect(decos.map((d) => d.from)).toEqual(
+      Array.from({ length: 10 }, (_, i) => doc.line(5000 + i).from),
+    );
+  });
+
+  it('still judges coverage against the whole selection when it starts off screen', () => {
+    const doc = docFrom('aaa\nbbb\nccc\nddd');
+    // Selection from mid-line 1 to mid-line 4; only lines 2-3 are visible.
+    const decos = summarize(doc, EditorSelection.single(1, doc.line(4).from + 1), [
+      { from: doc.line(2).from, to: doc.line(3).to },
+    ]);
+    expect(decos.map((d) => d.from)).toEqual([doc.line(2).from, doc.line(3).from]);
   });
 });

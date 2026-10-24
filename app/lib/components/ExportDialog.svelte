@@ -103,7 +103,7 @@
     if (format === 'html' && includeTheme) {
       const cssStage = await stageThemeCssForExport(uiStore.currentTheme, {
         stageCss: commands.stageExportCss,
-        deleteItem: commands.deleteItem,
+        discardStagedCss: commands.discardStagedExportCss,
         requestId,
         isCancelled: () => activeExportRequestId !== requestId || cancelRequested,
         warn: (warning) => console.warn(warning),
@@ -126,6 +126,7 @@
     }
 
     if (activeExportRequestId !== requestId || cancelRequested) {
+      if (extraArgs.length > 0) void commands.discardStagedExportCss(requestId);
       activeExportRequestId = null;
       cancelRequested = false;
       status = 'idle';

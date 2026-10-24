@@ -28,6 +28,11 @@ describe('isScratchFile', () => {
     expect(isScratchFile('/novelist_scratch_fake/chapter1.md')).toBe(false);
     expect(isScratchFile('/path/to/novelist_scratch_42.md')).toBe(true);
   });
+
+  it('recognises scratch files under a Windows cache folder', () => {
+    expect(isScratchFile('C:\\Users\\作者\\AppData\\Local\\novelist\\novelist_scratch_1700000000000.md')).toBe(true);
+    expect(isScratchFile('C:\\Users\\作者\\Documents\\chapter1.md')).toBe(false);
+  });
 });
 
 describe('nextScratchDisplayName', () => {

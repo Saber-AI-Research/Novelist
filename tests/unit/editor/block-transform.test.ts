@@ -77,6 +77,20 @@ describe('[precision] blockTransformSpec', () => {
     expect(result.doc).toBe('#### Title\n#### quote\n#### bullet\n#### ordered\n#### done\n#### plain');
   });
 
+  it.each([
+    ['#hashtag line'],
+    ['#话题# 讨论'],
+    ['#1 priority'],
+  ] as const)('[regression] keeps a leading # that is not a heading marker: %s', (doc) => {
+    expect(apply(doc, 'quote').doc).toBe(`> ${doc}`);
+    expect(apply(doc, 'heading-2').doc).toBe(`## ${doc}`);
+    expect(apply(doc, 'unordered-list').doc).toBe(`- ${doc}`);
+  });
+
+  it('treats a bare # line as an empty heading', () => {
+    expect(apply('#', 'quote').doc).toBe('> ');
+  });
+
   it('keeps blank lines unprefixed for non-code transforms', () => {
     const result = apply('alpha\n\nbravo', 'unordered-list');
 

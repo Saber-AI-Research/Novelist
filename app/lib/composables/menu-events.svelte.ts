@@ -36,7 +36,7 @@ export function wireMenuEvents(ctx: MenuEventContext): () => void {
           if (path && path !== '__none__') ctx.onOpenRecent(path);
           return;
         }
-        commandRegistry.execute(id);
+        commandRegistry.execute(id, 'menu');
       } catch (e) {
         console.error('[menu-events] handler failed:', e);
       }

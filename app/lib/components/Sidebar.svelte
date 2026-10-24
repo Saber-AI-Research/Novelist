@@ -37,6 +37,7 @@
   import { deleteEntries } from '$lib/services/file-deletion';
   import { fileManagerLabelKey } from '$lib/utils/platform-labels';
   import { pathBasename, pathDirname, pathStartsWithChild, pathsEqual } from '$lib/utils/path';
+  import { isImeComposing } from '$lib/utils/ime';
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
@@ -158,7 +159,7 @@
     await onOpenProjectFromPath(dirPath);
   }
 
-  const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
+  const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv', '.novtrans'];
 
   function isTextFile(name: string): boolean {
     return textExtensions.some(ext => name.toLowerCase().endsWith(ext))
@@ -352,24 +353,28 @@
   }
 
   async function confirmCreate() {
-    if (!newItemName.trim() || !projectStore.dirPath) {
-      cancelCreate();
-      return;
-    }
-    if (creatingFile) {
-      const targetDir = creatingTargetDir ?? projectStore.dirPath;
+    const name = newItemName.trim();
+    const projectDir = projectStore.dirPath;
+    const isFile = creatingFile;
+    const isFolder = creatingFolder;
+    const targetDir = creatingTargetDir ?? projectDir;
+    // Clear before any await: Enter and the blur of the input it removes both
+    // land here, and the second call must be a no-op.
+    cancelCreate();
+    if (!name || !projectDir || !targetDir || (!isFile && !isFolder)) return;
+    if (isFile) {
       const templateRaw = currentFilenameTemplateRaw();
-      const result = await commands.createFile(targetDir, newItemName.trim());
+      const result = await commands.createFile(targetDir, name);
       if (result.status === 'ok') {
         void settingsStore.recordLastUsedDir(targetDir);
         await persistManagedNameEnrollment(
-          projectStore.dirPath,
+          projectDir,
           result.data,
           templateRaw,
           '',
           'Managed-name enrollment failed during sidebar header new-file creation',
         );
-        if (pathsEqual(targetDir, projectStore.dirPath)) {
+        if (pathsEqual(targetDir, projectDir)) {
           await refreshFiles();
         } else {
           await projectStore.expandFolder(targetDir);
@@ -384,15 +389,14 @@
       } else {
         console.error('Failed to create file:', result.error);
       }
-    } else if (creatingFolder) {
-      const result = await commands.createDirectory(projectStore.dirPath, newItemName.trim());
+    } else {
+      const result = await commands.createDirectory(projectDir, name);
       if (result.status === 'ok') {
         await refreshFiles();
       } else {
         console.error('Failed to create folder:', result.error);
       }
     }
-    cancelCreate();
   }
 
   function cancelCreate() {
@@ -494,6 +498,7 @@
   }
 
   function handleCreateKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       confirmCreate();
@@ -607,13 +612,16 @@
   }
 
   async function confirmRename() {
-    if (!renaming || !renameValue.trim() || renameValue === renaming.name) {
-      cancelRename();
-      return;
-    }
-    const oldPath = renaming.path;
+    const entry = renaming;
+    const name = renameValue.trim();
+    if (!entry) return;
+    // Clear before the await: Enter and the blur of the input it removes both
+    // land here, and the second call must not rename the old path again.
+    cancelRename();
+    if (!name || name === entry.name) return;
+    const oldPath = entry.path;
     const oldParent = pathDirname(oldPath);
-    const result = await renameItemAfterSidecarFlush(projectStore.dirPath, renaming.path, renameValue.trim(), null);
+    const result = await renameItemAfterSidecarFlush(projectStore.dirPath, oldPath, name, null);
     if (result.status === 'ok') {
       const newPath = result.data.new_path;
       await tabsStore.retargetOpenPathTree(oldPath, newPath, { broadcast: false });
@@ -623,7 +631,6 @@
     } else {
       console.error('Failed to rename:', result.error);
     }
-    cancelRename();
   }
 
   function cancelRename() {
@@ -632,6 +639,7 @@
   }
 
   function handleRenameKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       confirmRename();

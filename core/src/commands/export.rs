@@ -1,4 +1,4 @@
-use crate::commands::file::{decode_file_bytes, EncodingState};
+use crate::commands::file::{decode_file_bytes_detached, EncodingState, FileEncodingRecord};
 use crate::error::AppError;
 use crate::services::pandoc;
 use base64::Engine;
@@ -9,6 +9,7 @@ use pulldown_cmark::{Event, LinkType, Parser, Tag};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,6 +135,22 @@ pub async fn stage_export_css(request_id: String, css: String) -> Result<String,
         return Err(error);
     }
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Remove the stylesheet staged for `request_id` when the export is cancelled
+/// before `export_project` takes ownership of it. Unknown ids are a no-op.
+#[tauri::command]
+#[specta::specta]
+pub async fn discard_staged_export_css(request_id: String) -> Result<(), AppError> {
+    let request_id = validate_export_request_id(&request_id)?;
+    let expected = std::env::temp_dir().join(format!("novelist-export-theme-{request_id}.html"));
+    let Some(staged) = take_staged_export_css(request_id, &expected)? else {
+        return Ok(());
+    };
+    match cleanup_css_resources(&[staged.path], None).await {
+        Some(failure) => Err(AppError::Custom(failure.message)),
+        None => Ok(()),
+    }
 }
 
 fn register_staged_export_css(
@@ -319,18 +336,60 @@ pub async fn export_project(
     input_files: Vec<String>,
     output_path: String,
     format: String,
-    mut extra_args: Vec<String>,
+    extra_args: Vec<String>,
     request_id: Option<String>,
     project_dir: Option<String>,
     encoding_state: tauri::State<'_, EncodingState>,
     export_state: tauri::State<'_, ExportState>,
 ) -> Result<ExportProjectResult, AppError> {
+    let discovery_format = format.clone();
+    run_export_project(
+        ExportProjectRequest {
+            input_files,
+            output_path,
+            format,
+            extra_args,
+            request_id,
+            project_dir,
+        },
+        &encoding_state,
+        &export_state,
+        async move { resolve_pandoc_for_export(&discovery_format, None).await },
+    )
+    .await
+}
+
+struct ExportProjectRequest {
+    input_files: Vec<String>,
+    output_path: String,
+    format: String,
+    extra_args: Vec<String>,
+    request_id: Option<String>,
+    project_dir: Option<String>,
+}
+
+/// The whole `export_project` flow; `resolve_pandoc` is awaited only after the
+/// inputs are collected, so cancellation and cleanup order match the command.
+async fn run_export_project(
+    request: ExportProjectRequest,
+    encoding_state: &EncodingState,
+    export_state: &ExportState,
+    resolve_pandoc: impl Future<Output = Result<String, AppError>>,
+) -> Result<ExportProjectResult, AppError> {
+    let ExportProjectRequest {
+        input_files,
+        output_path,
+        format,
+        mut extra_args,
+        request_id,
+        project_dir,
+    } = request;
     let css_temp_paths =
         validate_export_extra_args_with_cleanup(&format, &mut extra_args, request_id.as_deref())
             .await?;
     let cancel_guard = match request_id
         .as_deref()
-        .map(|id| ExportCancelGuard::register(id, &export_state))
+        .map(|id| ExportCancelGuard::register(id, export_state))
         .transpose()
     {
         Ok(guard) => guard,
@@ -364,7 +423,14 @@ pub async fn export_project(
                 .iter()
                 .map(|source| source.absolute.to_string_lossy().to_string())
                 .collect::<Vec<_>>();
-            let prepared = match assemble_project_source_batch(&batch, &encoding_state) {
+            let canonical_root = batch.canonical_root.clone();
+            let prepared = match assemble_project_source_batch(batch).await.and_then(
+                |(prepared, encodings)| {
+                    store_encodings(encodings, encoding_state)
+                        .map_err(|error| (canonical_root.to_string_lossy().to_string(), error))?;
+                    Ok(prepared)
+                },
+            ) {
                 Ok(prepared) => prepared,
                 Err((source, error)) => {
                     cleanup_preflight_css(&css_temp_paths, "project source decode failure").await;
@@ -377,7 +443,7 @@ pub async fn export_project(
                     return Err(failure.into_app_error());
                 }
             };
-            (input_files, Some(prepared), Some(batch.canonical_root))
+            (input_files, Some(prepared), Some(canonical_root))
         }
         None => {
             let input_files = resolve_export_input_files(input_files, &css_temp_paths).await?;
@@ -388,7 +454,7 @@ pub async fn export_project(
         cleanup_preflight_css(&css_temp_paths, "cancelled project source scan").await;
         return Err(cancelled_preflight_failure(&format, &input_files));
     }
-    let bin = match resolve_pandoc_for_export(&format, None).await {
+    let bin = match resolve_pandoc.await {
         Ok(bin) => bin,
         Err(error) => {
             let cleanup_error = cleanup_css_resources(&css_temp_paths, None)
@@ -404,12 +470,13 @@ pub async fn export_project(
         cleanup_preflight_css(&css_temp_paths, "cancelled Pandoc discovery").await;
         return Err(cancelled_preflight_failure(&format, &input_files));
     }
-    export_project_with_pandoc(
+    export_project_with_pandoc_inner(
         input_files,
         output_path,
         format,
         extra_args,
-        &encoding_state,
+        css_temp_paths,
+        encoding_state,
         ExportRunOptions {
             pandoc_bin: &bin,
             timeout: pandoc::DEFAULT_PANDOC_TIMEOUT,
@@ -419,6 +486,7 @@ pub async fn export_project(
             prepared_input: prepared_input.as_deref(),
             commit_gate: cancel_guard.as_ref().map(ExportCancelGuard::commit_gate),
         },
+        None,
     )
     .await
 }
@@ -604,6 +672,9 @@ async fn resolve_pandoc_for_export(
     })
 }
 
+/// Test entry point mirroring a direct Pandoc run: validates the stylesheet
+/// argument shape, then runs the same pipeline `export_project` uses.
+#[cfg(test)]
 async fn export_project_with_pandoc(
     input_files: Vec<String>,
     output_path: String,
@@ -612,11 +683,13 @@ async fn export_project_with_pandoc(
     encoding_state: &EncodingState,
     options: ExportRunOptions<'_>,
 ) -> Result<ExportProjectResult, AppError> {
+    let css_temp_paths = validate_export_extra_args_shape(&format, &extra_args)?;
     export_project_with_pandoc_inner(
         input_files,
         output_path,
         format,
         extra_args,
+        css_temp_paths,
         encoding_state,
         options,
         None,
@@ -635,11 +708,13 @@ async fn export_project_with_pandoc_and_cleanup_hook(
     options: ExportRunOptions<'_>,
     cleanup_failure_hook: &CleanupFailureHook<'_>,
 ) -> Result<ExportProjectResult, AppError> {
+    let css_temp_paths = validate_export_extra_args_shape(&format, &extra_args)?;
     export_project_with_pandoc_inner(
         input_files,
         output_path,
         format,
         extra_args,
+        css_temp_paths,
         encoding_state,
         options,
         Some(cleanup_failure_hook),
@@ -647,16 +722,20 @@ async fn export_project_with_pandoc_and_cleanup_hook(
     .await
 }
 
+/// `css_temp_paths` are the already-validated private stylesheet copies named
+/// in `extra_args`; this function owns them and removes them on every path.
+// The run inputs, its owned temp resources and the test cleanup hook.
+#[allow(clippy::too_many_arguments)]
 async fn export_project_with_pandoc_inner(
     input_files: Vec<String>,
     output_path: String,
     format: String,
     extra_args: Vec<String>,
+    css_temp_paths: Vec<PathBuf>,
     encoding_state: &EncodingState,
     options: ExportRunOptions<'_>,
     cleanup_failure_hook: Option<&CleanupFailureHook<'_>>,
 ) -> Result<ExportProjectResult, AppError> {
-    let css_temp_paths = validate_export_extra_args_shape(&format, &extra_args)?;
     let allowed_formats = ["html", "pdf", "docx", "epub"];
     if !allowed_formats.contains(&format.as_str()) {
         cleanup_preflight_css(&css_temp_paths, "unsupported export format").await;
@@ -1065,39 +1144,45 @@ async fn read_export_source(
     source_root: Option<&Path>,
     byte_limit: usize,
 ) -> Result<String, AppError> {
-    let Some(source_root) = source_root else {
-        let source = PathBuf::from(path);
-        let read_path = source.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            read_standalone_source_bounded(&read_path, byte_limit)
-        })
-        .await
-        .map_err(|error| AppError::Custom(format!("export source read task failed: {error}")))??;
-        let decoded = decode_file_bytes(&source, &bytes, encoding_state)?;
-        let parent = source.parent().ok_or_else(|| {
-            AppError::PathNotAllowed("export source has no parent directory".to_string())
-        })?;
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| AppError::PathNotAllowed("export source path is invalid".to_string()))?;
-        let root = Dir::open_ambient_dir(parent, ambient_authority())?;
-        let mut image_bytes = 0;
-        return embed_confined_image_destinations(
-            &decoded,
-            Path::new(file_name),
-            &root,
-            &mut image_bytes,
-        );
-    };
-
-    let root = source_root.to_path_buf();
     let source = PathBuf::from(path);
-    let bytes = tokio::task::spawn_blocking(move || {
-        read_project_source_confined(&root, &source, byte_limit)
+    let root = source_root.map(Path::to_path_buf);
+    // Reading, decoding and image embedding (up to 100 MiB each) all block.
+    let (content, encoding) = tokio::task::spawn_blocking(move || {
+        let Some(root) = root else {
+            let bytes = read_standalone_source_bounded(&source, byte_limit)?;
+            let (decoded, encoding) = decode_file_bytes_detached(&source, &bytes);
+            let parent = source.parent().ok_or_else(|| {
+                AppError::PathNotAllowed("export source has no parent directory".to_string())
+            })?;
+            let file_name = source.file_name().ok_or_else(|| {
+                AppError::PathNotAllowed("export source path is invalid".to_string())
+            })?;
+            let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
+            let mut image_bytes = 0;
+            let embedded = embed_confined_image_destinations(
+                &decoded,
+                Path::new(file_name),
+                &directory,
+                &mut image_bytes,
+            )?;
+            return Ok((embedded, encoding));
+        };
+        let bytes = read_project_source_confined(&root, &source, byte_limit)?;
+        Ok::<_, AppError>(decode_file_bytes_detached(&source, &bytes))
     })
     .await
     .map_err(|error| AppError::Custom(format!("export source read task failed: {error}")))??;
-    decode_file_bytes(Path::new(path), &bytes, encoding_state)
+    encoding.store(encoding_state)?;
+    Ok(content)
+}
+
+fn store_encodings(
+    encodings: Vec<FileEncodingRecord>,
+    encoding_state: &EncodingState,
+) -> Result<(), AppError> {
+    encodings
+        .into_iter()
+        .try_for_each(|encoding| encoding.store(encoding_state))
 }
 
 fn read_standalone_source_bounded(path: &Path, byte_limit: usize) -> Result<Vec<u8>, AppError> {
@@ -1340,34 +1425,46 @@ fn charge_project_entry_budget(
     Ok(())
 }
 
-fn assemble_project_source_batch(
-    batch: &ProjectExportBatch,
-    encoding_state: &EncodingState,
-) -> Result<String, (String, AppError)> {
-    let mut combined = String::new();
-    let mut image_bytes = 0;
-    for source in &batch.sources {
-        let path = source.absolute.to_string_lossy().to_string();
-        let content = decode_file_bytes(&source.absolute, &source.bytes, encoding_state)
+/// Decode every source and inline its images on a blocking thread; the
+/// detected encodings are returned for the caller to record.
+async fn assemble_project_source_batch(
+    batch: ProjectExportBatch,
+) -> Result<(String, Vec<FileEncodingRecord>), (String, AppError)> {
+    let root_label = batch.canonical_root.to_string_lossy().to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut combined = String::new();
+        let mut image_bytes = 0;
+        let mut encodings = Vec::with_capacity(batch.sources.len());
+        for source in &batch.sources {
+            let path = source.absolute.to_string_lossy().to_string();
+            let (content, encoding) = decode_file_bytes_detached(&source.absolute, &source.bytes);
+            encodings.push(encoding);
+            let content = embed_confined_image_destinations(
+                &content,
+                &source.relative,
+                &batch.root,
+                &mut image_bytes,
+            )
             .map_err(|error| (path.clone(), error))?;
-        let content = embed_confined_image_destinations(
-            &content,
-            &source.relative,
-            &batch.root,
-            &mut image_bytes,
-        )
-        .map_err(|error| (path.clone(), error))?;
-        let remaining = MAX_EXPORT_INPUT_BYTES.saturating_sub(combined.len());
-        if content.len().saturating_add(2) > remaining {
-            return Err((
-                path,
-                AppError::InvalidInput("export input exceeds the 100 MiB limit".to_string()),
-            ));
+            let remaining = MAX_EXPORT_INPUT_BYTES.saturating_sub(combined.len());
+            if content.len().saturating_add(2) > remaining {
+                return Err((
+                    path,
+                    AppError::InvalidInput("export input exceeds the 100 MiB limit".to_string()),
+                ));
+            }
+            combined.push_str(&content);
+            combined.push_str("\n\n");
         }
-        combined.push_str(&content);
-        combined.push_str("\n\n");
-    }
-    Ok(combined)
+        Ok((combined, encodings))
+    })
+    .await
+    .map_err(|error| {
+        (
+            root_label,
+            AppError::Custom(format!("project export assembly failed: {error}")),
+        )
+    })?
 }
 
 fn embed_confined_image_destinations(
@@ -2900,6 +2997,175 @@ mod tests {
         );
     }
 
+    /// Fake Pandoc that records argv and writes `input + header` to `-o`, so a
+    /// test can see the stylesheet bytes Pandoc would have embedded.
+    #[cfg(unix)]
+    fn make_header_embedding_fake_pandoc(dir: &TempDir) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.path().join("fake-pandoc-header.sh");
+        let argv = dir.path().join("pandoc-header-argv.txt");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "in=\"$1\"").unwrap();
+        writeln!(f, "shift").unwrap();
+        writeln!(f, "out=''").unwrap();
+        writeln!(f, "header=/dev/null").unwrap();
+        writeln!(f, "printf '%s\\n' \"$@\" > '{}'", argv.display()).unwrap();
+        writeln!(f, "while [ \"$#\" -gt 0 ]; do").unwrap();
+        writeln!(f, "  if [ \"$1\" = '-o' ]; then shift; out=$1; fi").unwrap();
+        writeln!(
+            f,
+            "  if [ \"$1\" = '--include-in-header' ]; then shift; header=$1; fi"
+        )
+        .unwrap();
+        writeln!(f, "  shift || true").unwrap();
+        writeln!(f, "done").unwrap();
+        writeln!(f, "/bin/cat \"$in\" \"$header\" > \"$out\"").unwrap();
+        writeln!(f, "exit 0").unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        (script, argv)
+    }
+
+    #[cfg(unix)]
+    fn unique_request_id(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            EXPORT_SEQ.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn themed_html_export_succeeds_end_to_end_through_export_project() {
+        let dir = TempDir::new().unwrap();
+        let (fake, argv_path) = make_header_embedding_fake_pandoc(&dir);
+        let input = dir.path().join("第一章.md");
+        std::fs::write(&input, "# 第一章\n\n正文\n").unwrap();
+        let output = dir.path().join("导出.html");
+        let request_id = unique_request_id("themed-e2e");
+        let staged = stage_export_css(
+            request_id.clone(),
+            ":root {\n  --novelist-bg: #ffffff;\n  --novelist-text: #123456;\n}".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let fake_bin = fake.to_string_lossy().to_string();
+        let result = run_export_project(
+            ExportProjectRequest {
+                input_files: vec![input.to_string_lossy().to_string()],
+                output_path: output.to_string_lossy().to_string(),
+                format: "html".to_string(),
+                extra_args: vec!["--include-in-header".to_string(), staged.clone()],
+                request_id: Some(request_id),
+                project_dir: None,
+            },
+            &EncodingState::new(),
+            &ExportState::new(),
+            async move { Ok(fake_bin) },
+        )
+        .await
+        .expect("themed HTML export must succeed");
+
+        assert!(result.warning.is_none(), "{result:?}");
+        let html = std::fs::read_to_string(&output).unwrap();
+        assert!(html.contains("第一章"), "{html}");
+        assert!(html.contains("--novelist-text: #123456;"), "{html}");
+        let argv = std::fs::read_to_string(argv_path).unwrap();
+        let header = argv
+            .lines()
+            .skip_while(|line| *line != "--include-in-header")
+            .nth(1)
+            .expect("stylesheet argument reached Pandoc");
+        assert_ne!(header, staged, "Pandoc must read the private copy");
+        assert!(!Path::new(&staged).exists(), "staged stylesheet leaked");
+        assert!(!Path::new(header).exists(), "private stylesheet leaked");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discarding_a_staged_stylesheet_removes_it_and_blocks_reuse() {
+        let request_id = unique_request_id("discard");
+        let staged = stage_export_css(
+            request_id.clone(),
+            ":root {\n  --novelist-bg: #000000;\n}".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(Path::new(&staged).exists());
+
+        discard_staged_export_css(request_id.clone()).await.unwrap();
+        assert!(!Path::new(&staged).exists());
+        // Unknown or already-discarded ids are a no-op.
+        discard_staged_export_css(request_id.clone()).await.unwrap();
+
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("a.md");
+        std::fs::write(&input, "# a\n").unwrap();
+        let error = run_export_project(
+            ExportProjectRequest {
+                input_files: vec![input.to_string_lossy().to_string()],
+                output_path: dir.path().join("a.html").to_string_lossy().to_string(),
+                format: "html".to_string(),
+                extra_args: vec!["--include-in-header".to_string(), staged],
+                request_id: Some(request_id),
+                project_dir: None,
+            },
+            &EncodingState::new(),
+            &ExportState::new(),
+            async { Ok("/nonexistent/pandoc".to_string()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("Unsupported export options"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_export_decodes_sources_and_records_their_encodings() {
+        let workspace = TempDir::new().unwrap();
+        let (fake, _) = make_header_embedding_fake_pandoc(&workspace);
+        let project = workspace.path().join("项目");
+        std::fs::create_dir(&project).unwrap();
+        let gbk = project.join("第一章.md");
+        write_encoded(&gbk, encoding_rs::GBK, "# 第一章\n简体正文。\n");
+        let output = workspace.path().join("out.html");
+        let enc = EncodingState::new();
+
+        let fake_bin = fake.to_string_lossy().to_string();
+        run_export_project(
+            ExportProjectRequest {
+                input_files: vec![],
+                output_path: output.to_string_lossy().to_string(),
+                format: "html".to_string(),
+                extra_args: vec![],
+                request_id: None,
+                project_dir: Some(project.to_string_lossy().to_string()),
+            },
+            &enc,
+            &ExportState::new(),
+            async move { Ok(fake_bin) },
+        )
+        .await
+        .unwrap();
+
+        assert!(std::fs::read_to_string(&output)
+            .unwrap()
+            .contains("简体正文"));
+        let canonical = gbk.canonicalize().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            enc.encodings.lock().unwrap().get(&canonical).copied(),
+            Some("GBK")
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires the pinned Pandoc 3.10 used by test:rust:pandoc"]
     async fn real_pandoc_3_10_exports_cjk_html_docx_and_epub() {
@@ -3607,12 +3873,10 @@ mod tests {
         std::os::unix::fs::symlink(&project, &alias).unwrap();
 
         let batch = collect_project_export_sources(&alias).await.unwrap();
-        let combined = assemble_project_source_batch(&batch, &EncodingState::new()).unwrap();
+        let canonical_root = batch.canonical_root.clone();
+        let (combined, _) = assemble_project_source_batch(batch).await.unwrap();
 
-        assert_eq!(
-            batch.canonical_root,
-            std::fs::canonicalize(&project).unwrap()
-        );
+        assert_eq!(canonical_root, std::fs::canonicalize(&project).unwrap());
         assert!(combined.contains("别名路径正文"));
     }
 
@@ -3801,8 +4065,8 @@ mod tests {
         assert!(!*guard.subscribe().borrow());
     }
 
-    #[test]
-    fn project_batch_rebases_same_relative_image_per_source_directory() {
+    #[tokio::test]
+    async fn project_batch_rebases_same_relative_image_per_source_directory() {
         let project = TempDir::new().unwrap();
         for directory in ["Part One/images", "卷二/images", "卷三", "素材"] {
             std::fs::create_dir_all(project.path().join(directory)).unwrap();
@@ -3854,7 +4118,7 @@ mod tests {
             ],
         };
 
-        let combined = assemble_project_source_batch(&batch, &EncodingState::new()).unwrap();
+        let (combined, _) = assemble_project_source_batch(batch).await.unwrap();
 
         let destinations = Parser::new(&combined)
             .filter_map(|event| match event {

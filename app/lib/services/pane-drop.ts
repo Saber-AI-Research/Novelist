@@ -1,7 +1,7 @@
 import { commands } from '$lib/ipc/commands';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 
-const OPENABLE_EXTENSIONS = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv'];
+const OPENABLE_EXTENSIONS = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv', '.novtrans'];
 
 export const SIDEBAR_PATH_MIME = 'application/x-novelist-path';
 

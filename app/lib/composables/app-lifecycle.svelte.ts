@@ -21,29 +21,35 @@ export type AppLifecycleContext = {
 export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
   let unlistenCloseRequested: (() => void) | null = null;
   let syncIntervalId: ReturnType<typeof setInterval> | null = null;
+  // Bumped by every clear so a `get_sync_config` that resolves after a newer
+  // project switch (or teardown) can't install a stale, leaked interval.
+  let syncTimerGeneration = 0;
 
   function clearSyncTimer() {
+    syncTimerGeneration++;
     if (syncIntervalId) { clearInterval(syncIntervalId); syncIntervalId = null; }
   }
 
   async function configureSyncTimer(dirPath: string) {
     clearSyncTimer();
+    const generation = syncTimerGeneration;
     try {
       const config = await invoke('get_sync_config', { projectDir: dirPath }) as {
         enabled: boolean;
         interval_minutes: number;
       };
+      if (generation !== syncTimerGeneration) return;
       if (config.enabled && config.interval_minutes > 0) {
         syncIntervalId = setInterval(async () => {
-          if (!projectStore.dirPath) return;
+          if (projectStore.dirPath !== dirPath) return;
           try {
-            await invoke('sync_now', { projectDir: projectStore.dirPath });
+            await invoke('sync_now', { projectDir: dirPath });
           } catch (e) {
             console.error('Auto-sync failed:', e);
           }
         }, config.interval_minutes * 60 * 1000);
       }
-    } catch (_) {
+    } catch {
       // Sync not configured — that's fine.
     }
   }

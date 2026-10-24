@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { connectToHost, type HostMessage } from '../../host-channel';
   import BookOpen from '@lucide/svelte/icons/book-open';
   import Check from '@lucide/svelte/icons/check';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
@@ -16,6 +17,7 @@
     renderedLength,
     resolveCaret,
     type CaretMove,
+    type CommentBrackets,
     type DeleteUnit,
     type LiteraryMode,
     type LiteraryStudyFile,
@@ -24,6 +26,7 @@
   interface EditorSnapshot {
     file: LiteraryStudyFile;
     mode: LiteraryMode;
+    commentBrackets: CommentBrackets;
     caretIndex: number;
   }
 
@@ -32,6 +35,9 @@
   let documentId = $state('');
   let revision = $state(0);
   let mode = $state<LiteraryMode>('copy');
+  // Brackets open in the current comment (see engine.ts CommentBrackets); a
+  // comment only closes on the closer matching the bracket that opened it.
+  let commentBrackets = $state.raw<CommentBrackets>([]);
   let error = $state('');
   let capture = $state<HTMLTextAreaElement | null>(null);
   let caret = $state<HTMLSpanElement | null>(null);
@@ -49,7 +55,9 @@
   let preeditLeft = $state(0);
   let preeditTop = $state(0);
   let locale = $state<'en' | 'zh-CN'>('zh-CN');
-  const saveTimers = new Map<string, number>();
+  // At most one debounced save exists: a new `file-open` flushes it with the
+  // token it was scheduled for, so the host decides whether it still applies.
+  let pendingSave: { timer: number; documentId: string; revision: number; content: string } | null = null;
   const undoStack: EditorSnapshot[] = [];
   const redoStack: EditorSnapshot[] = [];
   let pastePending = false;
@@ -61,9 +69,10 @@
   const messages = {
     en: {
       commentShortcut: 'Comment mode (Cmd/Ctrl + Shift + Enter)',
-      commentHint: 'Type 【 to add a comment',
+      commentHint: 'Type 【 or 「 to add a comment',
       commentActive: 'Writing comment',
-      commentEndHint: 'Type 】 to finish',
+      commentEndHint: 'Type 】 or 」 to finish',
+      commentEndHintBracket: 'Type {closer} to finish',
       autoTypeShortcut: 'Tab types the next source character · Shift+Tab finishes the sentence',
       autoTypeHint: 'Tab next character',
       rewound: 'Editing earlier text — Esc returns to the end',
@@ -82,9 +91,10 @@
     },
     'zh-CN': {
       commentShortcut: '评注模式（Cmd/Ctrl + Shift + Enter）',
-      commentHint: '输入【开始评注',
+      commentHint: '输入【或「开始评注',
       commentActive: '正在评注',
-      commentEndHint: '输入】结束',
+      commentEndHint: '输入】或」结束',
+      commentEndHintBracket: '输入{closer}结束',
       autoTypeShortcut: 'Tab 自动录入下一字 · Shift+Tab 补完整句',
       autoTypeHint: 'Tab 跟打下一字',
       rewound: '正在回改前文 · Esc 回到末尾',
@@ -117,6 +127,11 @@
   let progress = $derived(file && totalCharacters > 0
     ? Math.min(100, (copiedCharacters / totalCharacters) * 100)
     : 0);
+  let commentEndHint = $derived(
+    commentBrackets[0]
+      ? text('commentEndHintBracket').replace('{closer}', commentBrackets[0] === '【' ? '】' : '」')
+      : text('commentEndHint'),
+  );
 
   function text(key: keyof typeof messages.en): string {
     return messages[locale][key];
@@ -237,47 +252,68 @@
     return file ? `${JSON.stringify(file, null, 2)}\n` : '';
   }
 
+  // Connected during the synchronous mount in main.ts, before the iframe's load
+  // event delivers the host's MessagePort. Posts before then are queued.
+  const host = connectToHost(handleMessage);
+
+  // The host waits for this handshake before sending the initial document.
+  // It also lets the host distinguish a working plugin from a blank iframe whose
+  // entry HTML loaded but whose JavaScript was blocked or missing. `file-sync`
+  // tells it sibling-pane edits can be applied in place.
+  onMount(() => host.post({ type: 'plugin-ready', capabilities: ['file-sync'] }));
+
+  function postSave(targetDocumentId: string, targetRevision: number, content: string) {
+    host.post({
+      type: 'file-save',
+      documentId: targetDocumentId,
+      revision: targetRevision,
+      content,
+    });
+  }
+
+  function cancelPendingSave() {
+    if (pendingSave) window.clearTimeout(pendingSave.timer);
+    pendingSave = null;
+  }
+
+  function flushPendingSave() {
+    const pending = pendingSave;
+    if (!pending) return;
+    cancelPendingSave();
+    postSave(pending.documentId, pending.revision, pending.content);
+  }
+
   function publishState(saveImmediately = false) {
     if (!file || !documentId) return;
     const content = serialize();
     const targetDocumentId = documentId;
     const targetRevision = revision;
-    window.parent.postMessage({
+    host.post({
       type: 'file-state',
       documentId: targetDocumentId,
       revision: targetRevision,
       content,
-    }, '*');
+    });
     saveState = 'dirty';
-    const pendingTimer = saveTimers.get(targetDocumentId);
-    if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+    cancelPendingSave();
     if (saveImmediately) {
       saveState = 'saving';
-      window.parent.postMessage({
-        type: 'file-save',
-        documentId: targetDocumentId,
-        revision: targetRevision,
-        content,
-      }, '*');
-      saveTimers.delete(targetDocumentId);
+      postSave(targetDocumentId, targetRevision, content);
     } else {
       const timer = window.setTimeout(() => {
+        pendingSave = null;
         saveState = 'saving';
-        window.parent.postMessage({
-          type: 'file-save',
-          documentId: targetDocumentId,
-          revision: targetRevision,
-          content,
-        }, '*');
-        saveTimers.delete(targetDocumentId);
+        postSave(targetDocumentId, targetRevision, content);
       }, 700);
-      saveTimers.set(targetDocumentId, timer);
+      pendingSave = { timer, documentId: targetDocumentId, revision: targetRevision, content };
     }
     void revealCaret();
   }
 
   function setMode(next: LiteraryMode) {
     mode = next;
+    // A shortcut-opened comment has no bracket of its own: either closer ends it.
+    commentBrackets = next === 'comment' ? [null] : [];
     focusCapture();
   }
 
@@ -286,7 +322,7 @@
   }
 
   function snapshot(): EditorSnapshot | null {
-    return file ? { file: cloneFile(file), mode, caretIndex } : null;
+    return file ? { file: cloneFile(file), mode, commentBrackets, caretIndex } : null;
   }
 
   function filesEqual(left: LiteraryStudyFile, right: LiteraryStudyFile): boolean {
@@ -312,6 +348,7 @@
     const changed = !filesEqual(file, next);
     if (!changed) {
       mode = nextMode;
+      if (nextMode === 'copy') commentBrackets = [];
       setCaret(nextCaret);
       focusCapture();
       return;
@@ -324,6 +361,7 @@
     }
     file = next;
     mode = nextMode;
+    if (nextMode === 'copy') commentBrackets = [];
     caretIndex = clampCaret(next, nextCaret);
     preferredColumnX = null;
     revision += 1;
@@ -339,6 +377,7 @@
     resetComposition();
     file = cloneFile(target.file);
     mode = target.mode;
+    commentBrackets = target.commentBrackets;
     caretIndex = clampCaret(file, target.caretIndex);
     preferredColumnX = null;
     revision += 1;
@@ -348,8 +387,9 @@
   function commitText(input: string, pasted = false) {
     if (!file) return;
     if (!input) return;
-    const result = applyDelimitedInputAtCaret(file, caretIndex, input, mode, pasted);
+    const result = applyDelimitedInputAtCaret(file, caretIndex, input, mode, commentBrackets, pasted);
     mutate(result.file, result.mode, result.caretIndex);
+    commentBrackets = result.brackets;
   }
 
   function commitCapture(element: HTMLTextAreaElement) {
@@ -370,8 +410,7 @@
     if (suppressedCompositionValue !== null) {
       const value = element.value || event.data || '';
       const duplicate = value === suppressedCompositionValue
-        || event.data === suppressedCompositionValue
-        || event.inputType === 'insertFromComposition';
+        || event.data === suppressedCompositionValue;
       suppressedCompositionValue = null;
       if (suppressionTimer !== null) window.clearTimeout(suppressionTimer);
       suppressionTimer = null;
@@ -586,8 +625,10 @@
 
   function openRelative(relativePath: string | null) {
     if (!relativePath) return;
-    publishState(true);
-    window.parent.postMessage({ type: 'open-project-file', relativePath }, '*');
+    // Only local edits not yet saved are written before leaving; an untouched
+    // chapter must not be rewritten (or marked dirty) by navigation.
+    if (saveState === 'dirty' || saveState === 'error') publishState(true);
+    host.post({ type: 'open-project-file', documentId, relativePath });
   }
 
   function applyTheme(theme: Record<string, string>) {
@@ -596,18 +637,16 @@
     }
   }
 
-  function handleMessage(event: MessageEvent) {
-    if (event.source !== window.parent) return;
-    const data = event.data;
-    if (data?.type === 'theme-update' && data.theme) {
-      applyTheme(data.theme);
+  function handleMessage(data: HostMessage) {
+    if (data.type === 'theme-update' && data.theme && typeof data.theme === 'object') {
+      applyTheme(data.theme as Record<string, string>);
       return;
     }
-    if (data?.type === 'locale-update') {
+    if (data.type === 'locale-update') {
       setLocale(data.locale);
       return;
     }
-    if (data?.type === 'file-save-result') {
+    if (data.type === 'file-save-result') {
       if (data.documentId !== documentId || data.revision !== revision) return;
       if (!data.ok) {
         saveState = 'error';
@@ -618,21 +657,34 @@
       }
       return;
     }
-    if (data?.type !== 'file-open' || typeof data.content !== 'string') return;
+    if (typeof data.content !== 'string') return;
+    if (data.type === 'file-sync') applyFileSync(data, data.content);
+    else if (data.type === 'file-open') openDocument(data, data.content);
+  }
+
+  function adoptDocumentToken(data: Record<string, unknown>) {
+    filePath = typeof data.filePath === 'string' ? data.filePath : '';
+    documentId = typeof data.documentId === 'string' ? data.documentId : '';
+    revision = typeof data.revision === 'number' && Number.isInteger(data.revision) && data.revision >= 0
+      ? data.revision
+      : 0;
+    setLocale(data.locale);
+    error = '';
+    saveState = 'idle';
+  }
+
+  function openDocument(data: Record<string, unknown>, content: string) {
+    flushPendingSave();
     try {
-      file = normalizeStudyFile(JSON.parse(data.content));
-      filePath = data.filePath ?? '';
-      documentId = data.documentId ?? data.filePath ?? '';
-      revision = Number.isInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
-      setLocale(data.locale);
+      file = normalizeStudyFile(JSON.parse(content));
+      adoptDocumentToken(data);
       mode = 'copy';
+      commentBrackets = [];
       caretIndex = renderedLength(file);
       preferredColumnX = null;
       resetComposition();
       undoStack.length = 0;
       redoStack.length = 0;
-      error = '';
-      saveState = 'idle';
       void tick().then(() => {
         focusCapture();
         return revealCaret();
@@ -642,9 +694,32 @@
       error = cause instanceof Error ? cause.message : String(cause);
     }
   }
+
+  /**
+   * A sibling pane changed this same chapter. Swap the content in place and
+   * keep mode, open brackets, caret, scroll and focus — never steal focus
+   * from the pane the user is typing in.
+   */
+  function applyFileSync(data: Record<string, unknown>, content: string) {
+    let synced: LiteraryStudyFile;
+    try {
+      synced = normalizeStudyFile(JSON.parse(content));
+    } catch {
+      openDocument(data, content);
+      return;
+    }
+    flushPendingSave();
+    const followFrontier = atFrontier;
+    file = synced;
+    adoptDocumentToken(data);
+    caretIndex = followFrontier ? renderedLength(synced) : clampCaret(synced, caretIndex);
+    // Snapshots predate the sibling's edit; restoring one would silently revert it.
+    undoStack.length = 0;
+    redoStack.length = 0;
+  }
 </script>
 
-<svelte:window onmessage={handleMessage} onresize={syncCapturePosition} />
+<svelte:window onresize={syncCapturePosition} />
 
 <div class="app-shell">
   {#if file}
@@ -670,7 +745,7 @@
           <MessageSquareText size={14} />
           {#if mode === 'comment'}
             <strong>{text('commentActive')}</strong>
-            <span>{text('commentEndHint')}</span>
+            <span>{commentEndHint}</span>
           {:else}
             <span>{text('commentHint')}</span>
           {/if}

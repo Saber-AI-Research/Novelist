@@ -106,6 +106,25 @@ describe('[contract] runUpdateCheck — startup available', () => {
     expect(pluginCheck).toHaveBeenCalledTimes(1);
     expect(store.setAvailable).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['downloading', 'installing', 'ready'])(
+    'a manual check during the %s phase does not reset the progress modal',
+    async (phase) => {
+      store.phase = phase;
+      const handle = { downloadAndInstall: vi.fn() };
+      __setUpdateCheckerHooksForTests({
+        isPortable: async () => false,
+        getSkippedVersion: () => null,
+        loadPluginCheck: async () => (async () => ({ version: '0.6.1', body: null, handle })) as unknown as UpdaterPluginCheck,
+      });
+
+      const outcome = await runUpdateCheck({ startup: false });
+
+      expect(outcome.kind).toBe('available');
+      expect(store.setAvailable).not.toHaveBeenCalled();
+      expect(store.phase).toBe(phase);
+    },
+  );
 });
 
 describe('[contract] runUpdateCheck — portable', () => {

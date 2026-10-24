@@ -19,17 +19,24 @@ export function createCloseTab() {
       const tab = tabsStore.activeTab;
 
       if (!tab) {
-        getCurrentWindow().destroy();
+        // An empty split column: close the column. Destroying the window here
+        // would skip the unsaved-changes prompt for tabs in other panes.
+        if (tabsStore.panes.length > 1) {
+          tabsStore.removePane(tabsStore.activePaneId);
+        } else {
+          getCurrentWindow().destroy();
+        }
         return;
       }
 
       await tabsStore.closeTab(tab.id);
 
-      const remainingTabs = tabsStore.activeTab;
-
-      if (!remainingTabs && projectStore.singleFileMode) {
+      // Only leave the project / window once no pane holds a tab: the active
+      // pane may be an empty column while another one still has dirty tabs.
+      if (tabsStore.allTabs.length > 0) return;
+      if (projectStore.singleFileMode) {
         await projectStore.close();
-      } else if (!remainingTabs && !projectStore.dirPath) {
+      } else if (!projectStore.dirPath) {
         getCurrentWindow().destroy();
       }
     } finally {

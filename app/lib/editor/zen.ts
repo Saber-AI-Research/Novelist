@@ -40,6 +40,10 @@ const dimLine = Decoration.line({ class: 'cm-novelist-zen-dim' });
 /**
  * Line focus — dims every logical line except the cursor's current line.
  *
+ * Built synchronously in `update`: CodeMirror reads plugin decorations only
+ * during an update, so a set assigned later (e.g. in an animation frame)
+ * would show one step behind.
+ *
  * Optimizations:
  * - Caches the focused line number; skips rebuild if the cursor is still on it
  * - Does NOT call view.requestMeasure() (let CM6 schedule its own layout)
@@ -48,7 +52,6 @@ const dimLine = Decoration.line({ class: 'cm-novelist-zen-dim' });
 export const lineFocusPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
-    private pending: number | null = null;
     private lastFocusedLine = -1;
 
     constructor(view: EditorView) {
@@ -57,25 +60,15 @@ export const lineFocusPlugin = ViewPlugin.fromClass(
 
     update(update: ViewUpdate) {
       if (update.docChanged || update.viewportChanged) {
-        this.lastFocusedLine = -1;
-        this.scheduleBuild(update.view);
+        this.decorations = this.buildDim(update.view);
         return;
       }
 
       if (update.selectionSet) {
         const { state } = update.view;
         const cursorLine = state.doc.lineAt(state.selection.main.head).number;
-        if (cursorLine === this.lastFocusedLine) return;
-        this.scheduleBuild(update.view);
+        if (cursorLine !== this.lastFocusedLine) this.decorations = this.buildDim(update.view);
       }
-    }
-
-    private scheduleBuild(view: EditorView) {
-      if (this.pending !== null) cancelAnimationFrame(this.pending);
-      this.pending = requestAnimationFrame(() => {
-        this.pending = null;
-        this.decorations = this.buildDim(view);
-      });
     }
 
     buildDim(view: EditorView): DecorationSet {
@@ -95,10 +88,6 @@ export const lineFocusPlugin = ViewPlugin.fromClass(
       }
 
       return Decoration.set(decos, true);
-    }
-
-    destroy() {
-      if (this.pending !== null) cancelAnimationFrame(this.pending);
     }
   },
   { decorations: (v) => v.decorations }

@@ -1,20 +1,45 @@
 <script lang="ts">
-  import type { UIExtension } from '$lib/stores/extensions.svelte';
+  import { onDestroy } from 'svelte';
+  import { hasPluginPermission, type UIExtension } from '$lib/stores/extensions.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { collectPluginThemeVars } from '$lib/utils/plugin-theme';
+  import {
+    PLUGIN_IFRAME_SANDBOX,
+    PluginFrameConnection,
+    type PluginMessage,
+  } from '$lib/services/plugin-host-channel';
 
   let { extension, onNavigate }: { extension: UIExtension; onNavigate?: (from: number) => void } = $props();
 
   let iframeEl = $state<HTMLIFrameElement | undefined>(undefined);
+  let connected = $state(false);
 
-  // Send content updates to the plugin iframe
+  const connection = new PluginFrameConnection(handleMessage);
+
+  // A new entry document is host-initiated: its load gets a fresh port, and
+  // the previous document's port is closed.
+  $effect(() => {
+    extension.entryUrl;
+    connection.expectLoad();
+    connected = false;
+  });
+
+  onDestroy(() => connection.close());
+
+  function handleLoad() {
+    // `navigated`: the plugin replaced its own document. Nothing loaded that
+    // way is trusted, so it never receives a port.
+    connected = connection.handleLoad(iframeEl) === 'connected';
+  }
+
+  // Document text is only shared with panels holding the `read` permission.
   $effect(() => {
     const tab = tabsStore.activeTab;
-    if (!tab || !iframeEl?.contentWindow) return;
+    if (!connected || !tab || !hasPluginPermission(extension.permissions, 'read')) return;
     const view = getEditorView(tab.id);
     const content = view?.state.doc.toString() ?? tab.content ?? '';
-    iframeEl.contentWindow.postMessage({ type: 'content-update', content }, '*');
+    connection.post({ type: 'content-update', content });
   });
 
   // Send theme updates
@@ -22,35 +47,30 @@
     // Track theme changes
     const _theme = uiStore.themeId;
     const _typography = uiStore.editorSettings;
-    if (!iframeEl?.contentWindow) return;
-    iframeEl.contentWindow.postMessage(
-      { type: 'theme-update', theme: collectPluginThemeVars() },
-      '*',
-    );
+    if (!connected) return;
+    connection.post({ type: 'theme-update', theme: collectPluginThemeVars() });
   });
 
-  function handleMessage(event: MessageEvent) {
-    if (event.source !== iframeEl?.contentWindow) return;
-    const data = event.data;
-    if (data?.type === 'navigate' && typeof data.position === 'number') {
+  function handleMessage(data: PluginMessage) {
+    if (data.type === 'navigate' && typeof data.position === 'number') {
       onNavigate?.(data.position);
     }
   }
 </script>
 
-<svelte:window onmessage={handleMessage} />
-
 <div class="plugin-panel">
-  <!--
-    No `sandbox` attribute: WKWebView blocks custom-protocol main-resource loads
-    from sandboxed iframes, which breaks plugins whose `entry` is served from
-    Tauri's asset protocol. Plugins are trusted (local install or marketplace-vetted).
-  -->
-  <iframe
-    bind:this={iframeEl}
-    src={extension.entryUrl}
-    title={extension.label}
-  ></iframe>
+  <!-- Sandboxed without allow-same-origin: every plugin document gets an
+       opaque origin, so it can script neither the host nor sibling plugins.
+       Messaging uses the per-document MessagePort from PluginFrameConnection. -->
+  {#key extension.entryUrl}
+    <iframe
+      bind:this={iframeEl}
+      src={extension.entryUrl}
+      title={extension.label}
+      sandbox={PLUGIN_IFRAME_SANDBOX}
+      onload={handleLoad}
+    ></iframe>
+  {/key}
 </div>
 
 <style>

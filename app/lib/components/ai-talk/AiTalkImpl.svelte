@@ -11,6 +11,7 @@
   } from './host';
   import { buildChatRequest, parseChatChunk, type ChatMessage } from './openai';
   import { cancelPendingStreams } from './cleanup';
+  import { collectCompactionSummary, type CompactionResult } from './compact';
   import AiTalkSettings from './AiTalkSettings.svelte';
   import SessionTabs from '$lib/components/ai-shared/SessionTabs.svelte';
   import AiComposer from '$lib/components/ai-shared/AiComposer.svelte';
@@ -52,7 +53,8 @@
     type AiPromptAsset,
   } from '$lib/components/ai-shared/persistence';
   import { aiChatBasename, saveAiChat } from '$lib/services/ai-chat';
-  import { aiTalkSessions, type DisplayMessage } from './sessions.svelte';
+  import { aiTalkSessions, type DisplayMessage, type TalkSession } from './sessions.svelte';
+  import { AiAgentProjectLifecycle, type AiAgentProjectToken } from '$lib/components/ai-agent/lifecycle';
   import { promptPresets } from './presets.svelte';
   import { commands } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
@@ -79,7 +81,13 @@
   let saveStatus = $state<string | null>(null); // brief toast after saving
   let attachments = $state<AiContextAttachment[]>([]);
   let promptAssets = $state<AiPromptAsset[]>([...BUILTIN_SKILLS]);
-  let projectSessionsLoaded = $state(false);
+  /** False while the project's chats are loading; nothing may send or persist then. */
+  let sessionsReady = $state(false);
+  let destroyed = false;
+  /** No-project chats offered to the next project if it has none of its own. */
+  let carryOver: TalkSession[] = [];
+  let preferredActiveId: string | null = aiTalkSessions.activeId;
+  const detachSessions = aiTalkSessions.attach();
   const SUPPORTED_CONTEXT_EXTENSIONS = new Set(['.md', '.txt', '.canvas', '.kanban']);
 
   // -------- Live editor selection (poll 300ms) --------
@@ -323,20 +331,34 @@
     return false;
   }
 
+  function compactFailureMessage(result: Exclude<CompactionResult, { ok: true }>): string {
+    if (result.reason === 'error') {
+      const reason = result.status ? `${result.message} (HTTP ${result.status})` : result.message;
+      return t('aiTalk.compactFailed', { reason });
+    }
+    return t('aiTalk.compactFailed', {
+      reason: t(result.reason === 'empty' ? 'aiTalk.compactEmpty' : 'aiTalk.compactIncomplete'),
+    });
+  }
+
   async function compactConversation() {
+    if (!sessionsReady || chatStreaming) return;
+    // Compact the session that was active when the user asked, even if they
+    // switch sessions before the reply arrives.
     const sessionId = aiTalkSessions.ensureOne();
-    if (messages.length < 2) {
-      saveStatus = 'Need a longer conversation to compact.';
+    const history = aiTalkSessions.sessions.find((s) => s.id === sessionId)?.messages ?? [];
+    if (history.length < 2) {
+      saveStatus = t('aiTalk.compactNeedsLonger');
       setTimeout(() => (saveStatus = null), 2500);
       return;
     }
     if (!aiTalkSettings.value.apiKey) {
-      saveStatus = 'Set an API key before compacting.';
+      saveStatus = t('aiTalk.compactNeedsKey');
       setTimeout(() => (saveStatus = null), 2500);
       return;
     }
     chatStreaming = true;
-    let summary = '';
+    let failure: string | null = null;
     try {
       const cfg = activeConfig();
       const req = buildChatRequest({
@@ -350,32 +372,30 @@
             content:
               'Compact this conversation into a concise memory summary for future writing context. Preserve names, decisions, unresolved questions, and user preferences.',
           },
-          { role: 'user', content: messages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n') },
+          { role: 'user', content: history.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n') },
         ],
       });
       chatStreamId = await startAiStream(req);
-      for await (const ev of aiStream(chatStreamId)) {
-        if (ev.kind === 'chunk') {
-          const delta = parseChatChunk(ev.data);
-          if (delta?.content) summary += delta.content;
-        }
-      }
-      aiTalkSessions.compactActive(summary || 'Conversation compacted.');
-      await persistProjectSessions();
+      const result = await collectCompactionSummary(aiStream(chatStreamId));
+      // An error (401/429, Stop, panel closed) or empty reply keeps the history.
+      if (result.ok) aiTalkSessions.compact(sessionId, result.summary);
+      else failure = compactFailureMessage(result);
     } catch (e) {
-      aiTalkSessions.updateMessages(sessionId, [
-        ...messages,
-        { role: 'assistant', content: `Compact failed: ${e instanceof Error ? e.message : String(e)}` },
-      ]);
+      failure = t('aiTalk.compactFailed', { reason: e instanceof Error ? e.message : String(e) });
     } finally {
       chatStreaming = false;
       chatStreamId = null;
     }
+    if (failure !== null) {
+      const current = aiTalkSessions.sessions.find((s) => s.id === sessionId)?.messages;
+      if (current) aiTalkSessions.updateMessages(sessionId, [...current, { role: 'assistant', content: failure }]);
+    }
+    await persistProjectSessions();
   }
 
   async function sendChat() {
     const text = chatInput.trim();
-    if (!text || chatStreaming) return;
+    if (!text || chatStreaming || !sessionsReady) return;
     // Make sure we have a session to write into.
     const sessionId = aiTalkSessions.ensureOne();
     const slash = parseSlashCommand(text);
@@ -674,12 +694,43 @@
     setTimeout(() => (saveStatus = null), 3000);
   }
 
-  async function loadProjectSessions() {
+  const projectLifecycle = new AiAgentProjectLifecycle({
+    async teardownProject(ctx) {
+      await cancelChat();
+      await persistSessionsFor(ctx.projectDir);
+    },
+    clearVolatileContext() {
+      sessionsReady = false;
+      chatInput = '';
+      attachments = [];
+      promptAssets = [...BUILTIN_SKILLS];
+      cancelEditMessage();
+      reasoningOpen = {};
+      preferredActiveId = aiTalkSessions.activeId ?? preferredActiveId;
+      carryOver = aiTalkSessions.releaseScope();
+    },
+    loadProject: loadProjectSessions,
+  });
+
+  // Chats belong to one project: reload them whenever the project changes,
+  // even while the panel stays open (e.g. Cmd+1…9).
+  $effect(() => {
     const projectDir = projectStore.dirPath;
-    if (!projectDir || projectSessionsLoaded) return;
-    projectSessionsLoaded = true;
+    projectStore.generation;
+    sessionsReady = false;
+    void projectLifecycle
+      .switchTo(projectDir, true)
+      .catch((e) => console.warn('[ai-talk] project switch failed', e))
+      .finally(() => {
+        sessionsReady = !destroyed && projectLifecycle.status.kind === 'ready';
+      });
+  });
+
+  async function readProjectSessions(ctx: AiAgentProjectToken, projectDir: string): Promise<TalkSession[] | null> {
+    const sessions: TalkSession[] = [];
     try {
       const assets = await listAiPromptAssets(projectDir);
+      if (!projectLifecycle.isCurrent(ctx)) return null;
       promptAssets = [...BUILTIN_SKILLS, ...assets.skills];
       if (assets.memory?.content) {
         addAttachments([
@@ -693,29 +744,51 @@
         ]);
       }
       const files = await listAiSessions(projectDir, 'talk');
-      if (files.length > 0) {
-        const sessions = [];
-        for (const file of files) {
-          const raw = await readAiSession(projectDir, 'talk', file.id);
-          if (raw) sessions.push(JSON.parse(raw));
+      for (const file of files) {
+        const raw = await readAiSession(projectDir, 'talk', file.id);
+        if (!projectLifecycle.isCurrent(ctx)) return null;
+        if (!raw) continue;
+        try {
+          sessions.push(JSON.parse(raw) as TalkSession);
+        } catch (e) {
+          console.warn('[ai-talk] skipping unreadable chat', file.id, e);
         }
-        if (sessions.length > 0) aiTalkSessions.replaceAll(sessions, aiTalkSessions.activeId);
-      } else if (aiTalkSessions.sessions.length > 0) {
-        await persistProjectSessions();
       }
     } catch (e) {
       console.warn('[ai-talk] failed to load project AI assets', e);
     }
+    return projectLifecycle.isCurrent(ctx) ? sessions : null;
   }
 
-  async function persistProjectSessions() {
-    const projectDir = projectStore.dirPath;
-    if (!projectDir) return;
+  async function loadProjectSessions(ctx: AiAgentProjectToken) {
+    const projectDir = ctx.projectDir;
+    const adoptable = carryOver;
+    carryOver = [];
+    if (!projectDir) {
+      aiTalkSessions.enterScope(null, adoptable, preferredActiveId);
+      return;
+    }
+    const sessions = await readProjectSessions(ctx, projectDir);
+    if (sessions === null) return;
+    // A project without saved chats starts fresh; only chats begun with no
+    // project open are adopted — never another project's.
+    const adopt = sessions.length === 0 && adoptable.length > 0;
+    aiTalkSessions.enterScope(projectDir, adopt ? adoptable : sessions, preferredActiveId);
+    if (adopt) await persistSessionsFor(projectDir);
+  }
+
+  async function persistSessionsFor(projectDir: string | null) {
+    // Never write one project's chats into another (or mid-switch).
+    if (!projectDir || !aiTalkSessions.ownsProject(projectDir)) return;
     await Promise.all(
       aiTalkSessions.sessions.map((session) =>
         writeAiSession(projectDir, 'talk', session.id, session).catch(() => {}),
       ),
     );
+  }
+
+  async function persistProjectSessions() {
+    await persistSessionsFor(projectLifecycle.loadedProjectDir);
   }
 
   function scrollChat(force = false) {
@@ -781,8 +854,6 @@
       sessionStorage.removeItem('novelist:ai-talk:open-settings');
       settingsOpen = true;
     }
-    aiTalkSessions.ensureOne();
-    void loadProjectSessions();
     refreshLiveSnapshot();
     selectionTimer = setInterval(refreshLiveSnapshot, 300);
     window.addEventListener('novelist:ai-talk:save-chat', saveChatToProject);
@@ -839,6 +910,9 @@
   // Cancel any in-flight streams when the panel unmounts so the Rust task
   // exits and the Tauri listener gets cleaned up via the iterator's finally.
   onDestroy(() => {
+    destroyed = true;
+    sessionsReady = false;
+    detachSessions();
     cancelPendingStreams([chatStreamId], cancelAiStream);
     if (selectionTimer) clearInterval(selectionTimer);
     stopClock();

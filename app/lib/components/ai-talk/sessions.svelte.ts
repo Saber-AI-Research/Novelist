@@ -120,6 +120,17 @@ function persistActive(id: string | null) {
 class AiTalkSessionStore {
   sessions = $state<TalkSession[]>(loadSessions());
   activeId = $state<string | null>(null);
+  /**
+   * Which project the in-memory sessions belong to: a project dir, `null`
+   * for "no project open", or `undefined` while none is loaded (the
+   * localStorage cache at startup, or mid-switch). Only the owner project
+   * may receive these sessions on disk.
+   */
+  #owner: string | null | undefined = undefined;
+  /** Mounted AI Talk panels; sessions are only usable while one is. */
+  #attached = 0;
+  /** A "new chat" request that arrived before the panel finished loading. */
+  #pendingNewSession = false;
 
   constructor() {
     const stored = localStorage.getItem(ACTIVE_KEY);
@@ -208,26 +219,71 @@ class AiTalkSessionStore {
     persist(this.sessions);
   }
 
-  replaceAll(sessions: TalkSession[], activeId?: string | null) {
-    this.sessions = sessions;
-    this.activeId = activeId && sessions.some((s) => s.id === activeId)
-      ? activeId
-      : sessions[0]?.id ?? null;
-    persist(this.sessions);
-    persistActive(this.activeId);
-  }
-
-  snapshot(): { sessions: TalkSession[]; activeId: string | null } {
-    return {
-      sessions: this.sessions,
-      activeId: this.activeId,
+  /** Called by the panel on mount; the returned function detaches it. */
+  attach(): () => void {
+    this.#attached += 1;
+    let attached = true;
+    return () => {
+      if (!attached) return;
+      attached = false;
+      this.#attached -= 1;
     };
   }
 
-  compactActive(summary: string): void {
-    if (!this.activeId) return;
+  /**
+   * "New chat" from a command. If the panel is closed or still loading the
+   * project's chats, the session is created once loading finishes, so the
+   * load does not throw it away.
+   */
+  requestNewSession(): void {
+    if (this.#attached > 0 && this.#owner !== undefined) {
+      this.create();
+      return;
+    }
+    this.#pendingNewSession = true;
+  }
+
+  /** True when the in-memory sessions belong to `projectDir`. */
+  ownsProject(projectDir: string | null): boolean {
+    return projectDir !== null && this.#owner === projectDir;
+  }
+
+  /**
+   * Drop the sessions before switching project. Returns the chats started
+   * with no project open, so the next project can adopt them if it has none
+   * of its own; another project's chats are never carried over.
+   */
+  releaseScope(): TalkSession[] {
+    const carryOver = this.#owner === null ? this.sessions.filter((s) => s.messages.length > 0) : [];
+    this.#owner = undefined;
+    this.sessions = [];
+    this.activeId = null;
+    persist(this.sessions);
+    return carryOver;
+  }
+
+  /** Install the sessions of `projectDir` (null = no project) and make it the owner. */
+  enterScope(projectDir: string | null, sessions: TalkSession[], preferredActiveId: string | null) {
+    this.#owner = projectDir;
+    this.sessions = sessions.slice(0, MAX_SESSIONS);
+    this.activeId = preferredActiveId && this.sessions.some((s) => s.id === preferredActiveId)
+      ? preferredActiveId
+      : this.sessions[0]?.id ?? null;
+    persist(this.sessions);
+    persistActive(this.activeId);
+    if (this.#pendingNewSession) {
+      this.#pendingNewSession = false;
+      this.create();
+    } else {
+      this.ensureOne();
+    }
+  }
+
+  /** Replace one session's history with a summary. No-op if the session is gone. */
+  compact(id: string, summary: string): void {
+    if (!this.sessions.some((s) => s.id === id)) return;
     this.sessions = this.sessions.map((s) =>
-      s.id === this.activeId
+      s.id === id
         ? {
             ...s,
             messages: [{ role: 'system', content: summary }],

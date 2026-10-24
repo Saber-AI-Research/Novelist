@@ -1,40 +1,41 @@
 import { test, expect } from '@playwright/test';
+import { connectPluginHost, postToPlugin } from '../fixtures/plugin-host';
+import { PLUGIN_CONNECT_TYPE } from '../../../app/lib/services/plugin-host-channel';
 
 test('literary plugin renders CJK source text after the host opens a document', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
   await expect(page.getByText('正在打开文学评注章节...')).toBeVisible();
 
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'render-test',
-      revision: 0,
-      filePath: '/mock/第一章.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '试读本', author: '作者', language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-1',
-          title: '第一章 雪夜',
-          volume: '卷一',
-          index: 1,
-          total: 2,
-          previousPath: null,
-          nextPath: '学习内容/第二章.litstudy',
-        },
-        source: '庭前有一株梅树。\n夜雪初停。',
-        sourceCursor: 0,
-        insertions: [],
-        stats: {
-          correct: 0,
-          mistakes: 0,
-          pasted: 0,
-          startedAt: null,
-          completedAt: null,
-        },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'render-test',
+    revision: 0,
+    filePath: '/mock/第一章.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '试读本', author: '作者', language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-1',
+        title: '第一章 雪夜',
+        volume: '卷一',
+        index: 1,
+        total: 2,
+        previousPath: null,
+        nextPath: '学习内容/第二章.litstudy',
+      },
+      source: '庭前有一株梅树。\n夜雪初停。',
+      sourceCursor: 0,
+      insertions: [],
+      stats: {
+        correct: 0,
+        mistakes: 0,
+        pasted: 0,
+        startedAt: null,
+        completedAt: null,
+      },
+    }),
   });
 
   await expect(page.getByRole('heading', { name: '第一章 雪夜' })).toBeVisible();
@@ -53,28 +54,27 @@ test('literary plugin renders CJK source text after the host opens a document', 
  */
 test('literary plugin keeps the transcript still while IME pre-edit text is showing', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'caret-spacing-test',
-      revision: 0,
-      filePath: '/mock/光标间距.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '光标间距测试', author: null, language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-spacing', title: '光标间距', volume: null, index: 1, total: 1,
-          previousPath: null, nextPath: null,
-        },
-        source: '北凉王府龙盘虎踞',
-        sourceCursor: '北凉王府'.length,
-        insertions: [],
-        stats: {
-          correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null,
-        },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'caret-spacing-test',
+    revision: 0,
+    filePath: '/mock/光标间距.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '光标间距测试', author: null, language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-spacing', title: '光标间距', volume: null, index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '北凉王府龙盘虎踞',
+      sourceCursor: '北凉王府'.length,
+      insertions: [],
+      stats: {
+        correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null,
+      },
+    }),
   });
 
   const article = page.locator('article');
@@ -133,28 +133,27 @@ test('literary plugin keeps the transcript still while IME pre-edit text is show
 test('literary plugin commits IME text once and uses brackets for comments', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
   await expect(page.getByText('正在打开文学评注章节...')).toBeVisible();
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'ime-test',
-      revision: 0,
-      filePath: '/mock/输入法.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '输入法测试', author: null, language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-ime', title: '输入法', volume: null, index: 1, total: 1,
-          previousPath: null, nextPath: null,
-        },
-        source: '北凉王府',
-        sourceCursor: 0,
-        insertions: [],
-        stats: {
-          correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null,
-        },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'ime-test',
+    revision: 0,
+    filePath: '/mock/输入法.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '输入法测试', author: null, language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-ime', title: '输入法', volume: null, index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '北凉王府',
+      sourceCursor: 0,
+      insertions: [],
+      stats: {
+        correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null,
+      },
+    }),
   });
 
   const capture = page.locator('textarea.input-capture');
@@ -193,36 +192,77 @@ test('literary plugin commits IME text once and uses brackets for comments', asy
   await expect(page.locator('.comment')).toHaveText('风骨凛然');
   await capture.fill('】王府');
 
-  await expect(page.getByText('输入【开始评注')).toBeVisible();
+  await expect(capture).toHaveAttribute('aria-label', '输入原文');
   await expect(page.locator('.chapter-stats')).toContainText('4 已抄 · 0 错字 · 4 评注');
-  await expect(page.getByRole('button', { name: '抄写' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '评注' })).toHaveCount(0);
+});
+
+test('literary comments accept distinct IME punctuation and corner-bracket commits without losing text', async ({ page }) => {
+  await page.goto('/plugins/literary-commentary/index.html');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open', documentId: 'corner-comment-ime', revision: 0,
+    filePath: '/mock/角括号.litstudy', locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '评注', author: null, language: 'zh-CN' },
+      chapter: { id: 'corner', title: '评注', volume: null, index: 1, total: 1, previousPath: null, nextPath: null },
+      source: '北凉王府', sourceCursor: 0, insertions: [],
+      stats: { correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+    }),
+  });
+  const capture = page.locator('textarea.input-capture');
+  await expect(capture).toBeAttached();
+  await capture.evaluate((element: HTMLTextAreaElement) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true }));
+    element.value = '北凉';
+    element.dispatchEvent(new CompositionEvent('compositionend', { data: '北凉', bubbles: true }));
+    // A distinct punctuation commit is not a duplicate of the preceding IME text.
+    element.value = '「';
+    element.dispatchEvent(new InputEvent('input', { data: '「', inputType: 'insertFromComposition', bubbles: true }));
+  });
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await capture.evaluate((element: HTMLTextAreaElement) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true }));
+    element.value = '风骨';
+    element.dispatchEvent(new CompositionEvent('compositionend', { data: '风骨', bubbles: true }));
+    element.value = '风骨';
+    element.dispatchEvent(new InputEvent('input', { data: '风骨', inputType: 'insertFromComposition', bubbles: true }));
+  });
+  await expect(page.locator('.comment')).toHaveText('风骨');
+  await capture.evaluate((element: HTMLTextAreaElement) => {
+    element.value = '」';
+    element.dispatchEvent(new InputEvent('input', { data: '」', inputType: 'insertText', bubbles: true }));
+  });
+  await expect(capture).toHaveAttribute('aria-label', '输入原文');
+  await capture.fill('王府');
+  await expect(page.locator('.comment')).toHaveText('风骨');
+  await expect(page.locator('.mistake')).toHaveCount(0);
+  await expect(page.locator('.chapter-stats')).toContainText('4 已抄 · 0 错字 · 2 评注');
 });
 
 test('literary plugin preserves macOS deletion and undo shortcuts', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'shortcut-test',
-      revision: 0,
-      filePath: '/mock/快捷键.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '快捷键测试', author: null, language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-shortcuts', title: '快捷键', volume: null, index: 1, total: 1,
-          previousPath: null, nextPath: null,
-        },
-        source: '第一行\n第二行',
-        sourceCursor: 0,
-        insertions: [],
-        stats: {
-          correct: 0, mistakes: 17, pasted: 0, startedAt: null, completedAt: null,
-        },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'shortcut-test',
+    revision: 0,
+    filePath: '/mock/快捷键.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '快捷键测试', author: null, language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-shortcuts', title: '快捷键', volume: null, index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '第一行\n第二行',
+      sourceCursor: 0,
+      insertions: [],
+      stats: {
+        correct: 0, mistakes: 17, pasted: 0, startedAt: null, completedAt: null,
+      },
+    }),
   });
 
   const capture = page.locator('textarea.input-capture');
@@ -268,26 +308,25 @@ test('literary plugin preserves macOS deletion and undo shortcuts', async ({ pag
  */
 test('[regression] literary plugin lets the caret rewind into copied text to annotate it', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'rewind-test',
-      revision: 0,
-      filePath: '/mock/倒带.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '倒带测试', author: null, language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-rewind', title: '倒带', volume: null, index: 1, total: 1,
-          previousPath: null, nextPath: null,
-        },
-        source: '北凉王府龙盘虎踞',
-        sourceCursor: '北凉王府'.length,
-        insertions: [],
-        stats: { correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'rewind-test',
+    revision: 0,
+    filePath: '/mock/倒带.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '倒带测试', author: null, language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-rewind', title: '倒带', volume: null, index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '北凉王府龙盘虎踞',
+      sourceCursor: '北凉王府'.length,
+      insertions: [],
+      stats: { correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+    }),
   });
 
   const capture = page.locator('textarea.input-capture');
@@ -324,26 +363,25 @@ test('[regression] literary plugin lets the caret rewind into copied text to ann
 
 test('[regression] Shift+Tab fills in the rest of the sentence', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
-  await page.evaluate(() => {
-    window.postMessage({
-      type: 'file-open',
-      documentId: 'sentence-test',
-      revision: 0,
-      filePath: '/mock/整句.litstudy',
-      locale: 'zh-CN',
-      content: JSON.stringify({
-        schemaVersion: 1,
-        book: { title: '整句测试', author: null, language: 'zh-CN' },
-        chapter: {
-          id: 'chapter-sentence', title: '整句', volume: null, index: 1, total: 1,
-          previousPath: null, nextPath: null,
-        },
-        source: '庭前有梅。夜雪初停。',
-        sourceCursor: 0,
-        insertions: [],
-        stats: { correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
-      }),
-    }, '*');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open',
+    documentId: 'sentence-test',
+    revision: 0,
+    filePath: '/mock/整句.litstudy',
+    locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '整句测试', author: null, language: 'zh-CN' },
+      chapter: {
+        id: 'chapter-sentence', title: '整句', volume: null, index: 1, total: 1,
+        previousPath: null, nextPath: null,
+      },
+      source: '庭前有梅。夜雪初停。',
+      sourceCursor: 0,
+      insertions: [],
+      stats: { correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+    }),
   });
 
   const capture = page.locator('textarea.input-capture');
@@ -367,15 +405,16 @@ test('[regression] Enter and IME confirmation keep editing an earlier annotation
   const plugin = page.frameLocator('iframe[title="Literary commentary"]');
   await expect(plugin.getByText('正在打开文学评注章节...')).toBeVisible();
 
-  await page.evaluate(() => {
+  // Act as the host: hand the iframe its port, then talk only over it.
+  await page.evaluate((connectType) => {
     const iframe = document.querySelector('iframe')!;
     const saved = document.querySelector('#saved-study')!;
-    window.addEventListener('message', (event) => {
-      if (event.source === iframe.contentWindow && event.data?.type === 'file-state') {
-        saved.textContent = event.data.content;
-      }
-    });
-    iframe.contentWindow!.postMessage({
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event: MessageEvent) => {
+      if (event.data?.type === 'file-state') saved.textContent = event.data.content;
+    };
+    iframe.contentWindow!.postMessage({ type: connectType }, '*', [channel.port2]);
+    channel.port1.postMessage({
       type: 'file-open',
       documentId: 'rewound-enter-test',
       revision: 0,
@@ -396,8 +435,8 @@ test('[regression] Enter and IME confirmation keep editing an earlier annotation
         ],
         stats: { correct: 4, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
       }),
-    }, '*');
-  });
+    });
+  }, PLUGIN_CONNECT_TYPE);
 
   const capture = plugin.locator('textarea.input-capture');
   const article = plugin.locator('article');

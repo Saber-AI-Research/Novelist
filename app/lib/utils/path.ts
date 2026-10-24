@@ -38,3 +38,8 @@ export function pathStartsWithChild(path: string, parent: string): boolean {
   }
   return normalizedPath.startsWith(`${normalizedParent}/`);
 }
+
+/** True when `path` is `root` itself or lies inside it. */
+export function pathIsWithin(path: string, root: string): boolean {
+  return pathsEqual(path, root) || pathStartsWithChild(path, root);
+}

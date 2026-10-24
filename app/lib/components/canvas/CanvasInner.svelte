@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import {
     SvelteFlow,
     Controls,
     Background,
     MiniMap,
+    ConnectionMode,
     PanOnScrollMode,
     useSvelteFlow,
     type Node,
@@ -20,6 +21,9 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { commands } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { createTabReloadGate } from '../structured-file';
+  import { createTabsStructuredSaver } from '../structured-file-tab-saver';
+  import { canvasToFlow, flowToCanvas, parseCanvas, serializeCanvas } from './canvas-format';
 
   let { paneId = 'pane-1' }: { paneId?: string } = $props();
 
@@ -69,27 +73,14 @@
 
   let tab = $derived(tabsStore.getPaneActiveTab(paneId));
 
-  // --- Schema ----------------------------------------------------------------
-  // On-disk format (backwards-compat with both our previous schema and
-  // Obsidian's .canvas format).
-  //
-  //   { "nodes": [ ... ], "edges": [ ... ] }
-  //
-  // Node union:
-  //   { type: "text",  id, x, y, width, height, text }
-  //   { type: "file",  id, x, y, width, height, file }
-  //   { type: "group", id, x, y, width, height, label, color? }
-  interface DiskNodeText  { id: string; type: 'text';  x: number; y: number; width: number; height: number; text: string }
-  interface DiskNodeFile  { id: string; type: 'file';  x: number; y: number; width: number; height: number; file: string }
-  interface DiskNodeGroup { id: string; type: 'group'; x: number; y: number; width: number; height: number; label: string; color?: string }
-  type DiskNode = DiskNodeText | DiskNodeFile | DiskNodeGroup;
-  interface DiskEdge { id: string; from: string; to: string; label?: string }
-  interface DiskData { nodes: DiskNode[]; edges: DiskEdge[] }
-
   let nodes = $state<Node[]>([]);
   let edges = $state<Edge[]>([]);
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let loadedKey = $state<string | null>(null);
+  /** Unknown top-level keys of the loaded file, written back on save. */
+  let fileExtra: Record<string, unknown> = {};
+  /** Set when the file is not a canvas: shown read-only, never saved. */
+  let parseError = $state<string | null>(null);
+  const shouldReload = createTabReloadGate();
+  const saver = createTabsStructuredSaver();
 
   const nodeTypes: NodeTypes = {
     text: CanvasTextNode,
@@ -99,130 +90,14 @@
 
   function uuid() { return crypto.randomUUID(); }
 
-  function parseData(raw: string): DiskData {
-    try {
-      const data = JSON.parse(raw);
-      const rawNodes: any[] = Array.isArray(data?.nodes) ? data.nodes : [];
-      const rawEdges: any[] = Array.isArray(data?.edges) ? data.edges : [];
-      const diskNodes: DiskNode[] = [];
-      for (const n of rawNodes) {
-        if (!n || typeof n !== 'object') continue;
-        const base = {
-          id: typeof n.id === 'string' ? n.id : uuid(),
-          x: Number(n.x ?? 0),
-          y: Number(n.y ?? 0),
-          width: Number(n.width ?? 220),
-          height: Number(n.height ?? 120),
-        };
-        const type = n.type;
-        if (type === 'file' && typeof n.file === 'string') {
-          diskNodes.push({ ...base, type: 'file', file: n.file });
-        } else if (type === 'group') {
-          diskNodes.push({ ...base, type: 'group', label: typeof n.label === 'string' ? n.label : '', color: typeof n.color === 'string' ? n.color : undefined });
-        } else {
-          // Fall-through: treat as text, migrating legacy `content` field.
-          const text = typeof n.text === 'string' ? n.text : (typeof n.content === 'string' ? n.content : '');
-          diskNodes.push({ ...base, type: 'text', text });
-        }
-      }
-      const diskEdges: DiskEdge[] = rawEdges
-        .filter(e => e && typeof e === 'object' && typeof e.from === 'string' && typeof e.to === 'string')
-        .map(e => ({ id: typeof e.id === 'string' ? e.id : uuid(), from: e.from, to: e.to, label: typeof e.label === 'string' ? e.label : undefined }));
-      return { nodes: diskNodes, edges: diskEdges };
-    } catch {
-      return { nodes: [], edges: [] };
-    }
-  }
-
-  function diskToFlow(disk: DiskData): { nodes: Node[]; edges: Edge[] } {
-    const flowNodes: Node[] = disk.nodes.map((n) => {
-      if (n.type === 'text') {
-        return {
-          id: n.id,
-          type: 'text',
-          position: { x: n.x, y: n.y },
-          width: n.width,
-          height: n.height,
-          data: {
-            text: n.text,
-            onChange: (text: string) => updateTextContent(n.id, text),
-            onResize: () => markDirtyAndSave(),
-          },
-        };
-      }
-      if (n.type === 'file') {
-        return {
-          id: n.id,
-          type: 'file',
-          position: { x: n.x, y: n.y },
-          width: n.width,
-          height: n.height,
-          data: {
-            filePath: n.file,
-            onOpen: (p: string) => openFileInTab(p),
-            onResize: () => markDirtyAndSave(),
-          },
-        };
-      }
-      return {
-        id: n.id,
-        type: 'group',
-        position: { x: n.x, y: n.y },
-        width: n.width,
-        height: n.height,
-        zIndex: -1,
-        selectable: true,
-        data: {
-          label: n.label,
-          color: n.color ?? GROUP_COLORS[0],
-          palette: GROUP_COLORS,
-          onLabelChange: (label: string) => updateGroupLabel(n.id, label),
-          onColorChange: (color: string) => updateGroupColor(n.id, color),
-          onResize: () => markDirtyAndSave(),
-        },
-      };
-    });
-    const flowEdges: Edge[] = disk.edges.map((e) => ({
-      id: e.id,
-      source: e.from,
-      target: e.to,
-      label: e.label,
-    }));
-    return { nodes: flowNodes, edges: flowEdges };
-  }
-
-  function flowToDisk(): DiskData {
-    const diskNodes: DiskNode[] = nodes.map((n) => {
-      const w = Math.round((n.width ?? (n as any).measured?.width ?? 220) as number);
-      const h = Math.round((n.height ?? (n as any).measured?.height ?? 120) as number);
-      const base = {
-        id: n.id,
-        x: Math.round(n.position.x),
-        y: Math.round(n.position.y),
-        width: w,
-        height: h,
-      };
-      if (n.type === 'file') {
-        return { ...base, type: 'file' as const, file: (n.data as any).filePath ?? '' };
-      }
-      if (n.type === 'group') {
-        return {
-          ...base,
-          type: 'group' as const,
-          label: (n.data as any).label ?? '',
-          color: (n.data as any).color,
-        };
-      }
-      return { ...base, type: 'text' as const, text: (n.data as any).text ?? '' };
-    });
-    const diskEdges: DiskEdge[] = edges.map((e) => ({
-      id: e.id,
-      from: e.source,
-      to: e.target,
-      label: typeof e.label === 'string' ? e.label : undefined,
-    }));
-    return { nodes: diskNodes, edges: diskEdges };
-  }
+  const flowHandlers = {
+    onTextChange: (nodeId: string, text: string) => updateTextContent(nodeId, text),
+    onOpenFile: (path: string) => { void openFileInTab(path); },
+    onGroupLabelChange: (nodeId: string, label: string) => updateGroupLabel(nodeId, label),
+    onGroupColorChange: (nodeId: string, color: string) => updateGroupColor(nodeId, color),
+    onResize: () => markDirtyAndSave(),
+    groupPalette: GROUP_COLORS,
+  };
 
   function updateTextContent(nodeId: string, text: string) {
     const idx = nodes.findIndex((n) => n.id === nodeId);
@@ -255,43 +130,44 @@
     await commands.registerOpenFile(filePath);
   }
 
-  // Load when tab changes.
   $effect(() => {
-    const key = tab ? `${tab.id}:${tab.filePath ?? ''}` : null;
-    if (key === loadedKey) return;
-    loadedKey = key;
-    if (!tab) { nodes = []; edges = []; return; }
-    const data = parseData(tab.content ?? '');
-    const flow = diskToFlow(data);
+    const current = tab;
+    if (!shouldReload(current)) return;
+    if (!current) {
+      nodes = [];
+      edges = [];
+      fileExtra = {};
+      parseError = null;
+      return;
+    }
+    // Content is read untracked: our own edits update it and must not reload.
+    const parsed = parseCanvas(untrack(() => current.content ?? ''));
+    if (!parsed.ok) {
+      nodes = [];
+      edges = [];
+      fileExtra = {};
+      parseError = parsed.error;
+      return;
+    }
+    const flow = canvasToFlow(parsed.data, flowHandlers);
     nodes = flow.nodes;
     edges = flow.edges;
+    fileExtra = parsed.data.extra;
+    parseError = null;
   });
 
+  /** Copy the canvas into the tab right away; the disk write is debounced. */
   function markDirtyAndSave() {
-    if (tab) tabsStore.markDirty(tab.id);
-    scheduleSave();
+    const current = tab;
+    if (!current || parseError !== null) return;
+    tabsStore.updateContent(current.id, serializeCanvas(flowToCanvas(nodes, edges, fileExtra)));
+    if (current.filePath) saver.schedule(current.id);
   }
 
-  function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    const activeTab = tab;
-    if (!activeTab || !activeTab.filePath) return;
-    const snapshot = JSON.stringify(flowToDisk(), null, 2);
-    const snapTabId = activeTab.id;
-    const snapPath = activeTab.filePath;
-    saveTimer = setTimeout(async () => {
-      saveTimer = null;
-      await commands.registerWriteIgnore(snapPath);
-      const r = await commands.writeFile(snapPath, snapshot);
-      if (r.status === 'ok') {
-        tabsStore.updateContent(snapTabId, snapshot);
-        tabsStore.markSaved(snapTabId);
-      }
-    }, 400);
-  }
-
+  // Unmounting (tab switch to a non-canvas file, pane close) must write the
+  // pending edit, not cancel it.
   onDestroy(() => {
-    if (saveTimer) clearTimeout(saveTimer);
+    void saver.flush();
   });
 
   // --- Obsidian-style group drag: when a group moves, the nodes spatially
@@ -561,6 +437,13 @@
 
 <svelte:window onclick={closeContextMenu} />
 
+{#if parseError !== null}
+  <div class="canvas-editor parse-error" role="alert" data-testid="canvas-parse-error">
+    <p class="parse-error-title">{t('canvas.parseErrorTitle')}</p>
+    <p class="parse-error-hint">{t('canvas.parseErrorHint')}</p>
+    <code class="parse-error-detail">{parseError}</code>
+  </div>
+{:else}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="canvas-editor"
@@ -581,6 +464,7 @@
     minZoom={0.3}
     maxZoom={2}
     elevateNodesOnSelect={false}
+    connectionMode={ConnectionMode.Loose}
     onnodedragstart={onNodeDragStart}
     onnodedrag={onNodeDrag}
     onnodedragstop={onNodeDragStop}
@@ -635,6 +519,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .canvas-editor {
@@ -653,6 +538,24 @@
     pointer-events: none;
     z-index: 20;
     background: color-mix(in srgb, var(--novelist-accent) 6%, transparent);
+  }
+  .canvas-editor.parse-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    text-align: center;
+    color: var(--novelist-text-secondary);
+  }
+  .parse-error-title { margin: 0; font-size: 0.95rem; font-weight: 500; color: var(--novelist-text); }
+  .parse-error-hint { margin: 0; font-size: 0.8rem; max-width: 460px; }
+  .parse-error-detail {
+    font-size: 0.75rem;
+    max-width: 460px;
+    overflow-wrap: anywhere;
+    opacity: 0.8;
   }
 
   /* --- Floating toolbar ---------------------------------------------------- */

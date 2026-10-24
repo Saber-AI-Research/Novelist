@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { dndzone, type DndEvent } from 'svelte-dnd-action';
+  import { connectToHost } from '../../host-channel';
 
   interface Card { id: string; text: string }
   interface Column { id: string; name: string; cards: Card[] }
   interface Board { columns: Column[] }
 
-  let filePath = $state<string | null>(null);
+  let documentId = $state('');
+  let revision = $state(0);
   let board = $state<Board>({ columns: defaultColumns() });
   let editingColumnId = $state<string | null>(null);
   let addingCardColumnId = $state<string | null>(null);
@@ -45,16 +47,16 @@
   }
 
   function markDirty() {
-    if (!dirty) {
+    if (!dirty && documentId) {
       dirty = true;
-      window.parent.postMessage({ type: 'mark-dirty' }, '*');
+      host.post({ type: 'mark-dirty', documentId });
     }
   }
 
   function save() {
-    if (!filePath) return;
+    if (!documentId) return;
     const content = JSON.stringify(board, null, 2);
-    window.parent.postMessage({ type: 'file-save', filePath, content }, '*');
+    host.post({ type: 'file-save', documentId, revision, content });
     dirty = false;
   }
 
@@ -63,25 +65,26 @@
     for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
   }
 
+  // Messages from the host arrive only on the host-issued MessagePort.
+  const host = connectToHost((d: Record<string, any>) => {
+    if (d.type === 'file-open') {
+      documentId = typeof d.documentId === 'string' ? d.documentId : '';
+      revision = Number.isInteger(d.revision) && d.revision >= 0 ? d.revision : 0;
+      board = parseBoard(d.content ?? '');
+      dirty = false;
+    } else if (d.type === 'theme-update' && d.theme) {
+      applyTheme(d.theme);
+    }
+  });
+
   onMount(() => {
-    window.addEventListener('message', (e) => {
-      const d = e.data;
-      if (!d || typeof d !== 'object') return;
-      if (d.type === 'file-open') {
-        filePath = d.filePath ?? null;
-        board = parseBoard(d.content ?? '');
-        dirty = false;
-      } else if (d.type === 'theme-update' && d.theme) {
-        applyTheme(d.theme);
-      }
-    });
     window.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         save();
       }
     });
-    window.parent.postMessage({ type: 'plugin-ready' }, '*');
+    host.post({ type: 'plugin-ready' });
   });
 
   // svelte-dnd-action handlers

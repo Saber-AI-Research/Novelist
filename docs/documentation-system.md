@@ -17,7 +17,6 @@ every temporary plan should either move out of the active surface or disappear.
 | `docs/design-docs/` | Durable architecture, invariants, and engineering decisions. | A code path, data model, lifecycle rule, or testing rule must guide future work. |
 | `docs/exec-plans/active/` | Unshipped implementation plans. | Work has a plan but is not yet delivered. |
 | `docs/exec-plans/completed/` | Historical plans for shipped work. | A plan ships and is still useful as an audit trail. |
-| `docs/superpowers/` | Workflow-generated specs and plans. | Superpowers produced an approved design or plan during a feature thread. |
 | `docs/references/` | Lookup material, examples, and external-reference notes. | A reference is useful but does not express a product contract or architecture decision. |
 
 ## Release Documentation Rule
@@ -59,9 +58,7 @@ execute it. Once a release contains the work:
 - Delete the plan when it only repeats a product spec or design doc.
 - Link the completed plan from the release note if it explains release context.
 
-The `docs/superpowers/` tree can keep generated specs and plans in place. When
-one ships, the release note should point to it and any durable decisions should
-be copied into `docs/design-docs/` or `docs/product-specs/`.
+
 
 ## Recent Cleanup
 

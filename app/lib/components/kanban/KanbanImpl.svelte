@@ -1,106 +1,85 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { dndzone, type DndEvent } from 'svelte-dnd-action';
   import { tabsStore } from '$lib/stores/tabs.svelte';
-  import { commands } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { isImeComposing } from '$lib/utils/ime';
   import { IconClose } from '../icons';
+  import { createTabReloadGate } from '../structured-file';
+  import { createTabsStructuredSaver } from '../structured-file-tab-saver';
+  import {
+    kanbanId,
+    parseKanbanBoard,
+    serializeKanbanBoard,
+    type KanbanBoard,
+    type KanbanCard,
+    type KanbanColumn,
+  } from './board';
 
   let { paneId = 'pane-1' }: { paneId?: string } = $props();
 
   let tab = $derived(tabsStore.getPaneActiveTab(paneId));
 
-  interface Card { id: string; text: string }
-  interface Column { id: string; name: string; cards: Card[] }
-  interface Board { columns: Column[] }
-
-  let board = $state<Board>({ columns: defaultColumns() });
+  let board = $state<KanbanBoard>({ columns: [] });
+  /** Set when the file is not a board: shown read-only, never saved. */
+  let parseError = $state<string | null>(null);
   let editingColumnId = $state<string | null>(null);
   let addingCardColumnId = $state<string | null>(null);
   let newCardText = $state('');
-  let loadedKey = $state<string | null>(null);
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  const shouldReload = createTabReloadGate();
+  const saver = createTabsStructuredSaver();
 
-  function defaultColumns(): Column[] {
-    return [
-      { id: cid(), name: t('kanban.column.todo'), cards: [] },
-      { id: cid(), name: t('kanban.column.doing'), cards: [] },
-      { id: cid(), name: t('kanban.column.done'), cards: [] },
-    ];
-  }
-
-  function cid() { return Math.random().toString(36).slice(2, 10); }
-
-  function parseBoard(content: string): Board {
-    try {
-      const data = JSON.parse(content);
-      if (!data || !Array.isArray(data.columns)) return { columns: defaultColumns() };
-      return {
-        columns: data.columns.map((c: Record<string, unknown>) => ({
-          id: typeof c.id === 'string' ? c.id : cid(),
-          name: typeof c.name === 'string' ? c.name : 'Column',
-          cards: Array.isArray(c.cards)
-            ? c.cards.map((card: Record<string, unknown>) => ({
-                id: typeof card.id === 'string' ? card.id : cid(),
-                text: typeof card.text === 'string' ? card.text : '',
-              }))
-            : [],
-        })),
-      };
-    } catch {
-      return { columns: defaultColumns() };
-    }
-  }
-
-  // Load from tab.content whenever active tab changes.
   $effect(() => {
-    const key = tab ? `${tab.id}:${tab.filePath ?? ''}` : null;
-    if (key === loadedKey) return;
-    loadedKey = key;
-    if (!tab) { board = { columns: defaultColumns() }; return; }
-    board = parseBoard(tab.content ?? '');
+    const current = tab;
+    if (!shouldReload(current)) return;
+    editingColumnId = null;
+    addingCardColumnId = null;
+    if (!current) {
+      board = { columns: [] };
+      parseError = null;
+      return;
+    }
+    // Content is read untracked: our own edits update it and must not reload.
+    const content = untrack(() => current.content ?? '');
+    const parsed = parseKanbanBoard(content, [
+      t('kanban.column.todo'),
+      t('kanban.column.doing'),
+      t('kanban.column.done'),
+    ]);
+    if (parsed.ok) {
+      board = parsed.board;
+      parseError = null;
+    } else {
+      board = { columns: [] };
+      parseError = parsed.error;
+    }
   });
 
-  function markDirtyAndSave() {
-    if (tab) tabsStore.markDirty(tab.id);
-    scheduleSave();
+  /** Copy the board into the tab right away; the disk write is debounced. */
+  function commitEdit() {
+    const current = tab;
+    if (!current || parseError !== null) return;
+    tabsStore.updateContent(current.id, serializeKanbanBoard(board));
+    if (current.filePath) saver.schedule(current.id);
   }
 
-  function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    const activeTab = tab;
-    if (!activeTab || !activeTab.filePath) return;
-    const snapshot = JSON.stringify(board, null, 2);
-    const snapTabId = activeTab.id;
-    const snapPath = activeTab.filePath;
-    saveTimer = setTimeout(async () => {
-      saveTimer = null;
-      await commands.registerWriteIgnore(snapPath);
-      const r = await commands.writeFile(snapPath, snapshot);
-      if (r.status === 'ok') {
-        tabsStore.updateContent(snapTabId, snapshot);
-        tabsStore.markSaved(snapTabId);
-      }
-    }, 400);
-  }
-
-  function handleColumnCardsConsider(colId: string, e: CustomEvent<DndEvent<Card>>) {
+  function handleColumnCardsConsider(colId: string, e: CustomEvent<DndEvent<KanbanCard>>) {
     const idx = board.columns.findIndex(c => c.id === colId);
     if (idx < 0) return;
     board.columns[idx].cards = e.detail.items;
   }
-  function handleColumnCardsFinalize(colId: string, e: CustomEvent<DndEvent<Card>>) {
+  function handleColumnCardsFinalize(colId: string, e: CustomEvent<DndEvent<KanbanCard>>) {
     const idx = board.columns.findIndex(c => c.id === colId);
     if (idx < 0) return;
     board.columns[idx].cards = e.detail.items;
-    markDirtyAndSave();
+    commitEdit();
   }
-  function handleColumnsConsider(e: CustomEvent<DndEvent<Column>>) {
+  function handleColumnsConsider(e: CustomEvent<DndEvent<KanbanColumn>>) {
     board.columns = e.detail.items;
   }
-  function handleColumnsFinalize(e: CustomEvent<DndEvent<Column>>) {
+  function handleColumnsFinalize(e: CustomEvent<DndEvent<KanbanColumn>>) {
     board.columns = e.detail.items;
-    markDirtyAndSave();
+    commitEdit();
   }
 
   function addCard(colId: string) {
@@ -108,8 +87,8 @@
     if (!text) { addingCardColumnId = null; return; }
     const col = board.columns.find(c => c.id === colId);
     if (col) {
-      col.cards.push({ id: cid(), text });
-      markDirtyAndSave();
+      col.cards.push({ id: kanbanId(), text });
+      commitEdit();
     }
     newCardText = '';
     addingCardColumnId = null;
@@ -119,33 +98,59 @@
     const col = board.columns.find(c => c.id === colId);
     if (!col) return;
     col.cards = col.cards.filter(c => c.id !== cardId);
-    markDirtyAndSave();
+    commitEdit();
   }
 
   function addColumn() {
-    board.columns.push({ id: cid(), name: t('kanban.newColumn'), cards: [] });
-    markDirtyAndSave();
+    board.columns.push({ id: kanbanId(), name: t('kanban.newColumn'), cards: [] });
+    commitEdit();
   }
 
   function deleteColumn(colId: string) {
     board.columns = board.columns.filter(c => c.id !== colId);
-    markDirtyAndSave();
+    commitEdit();
   }
 
   function renameColumn(colId: string, name: string) {
     const col = board.columns.find(c => c.id === colId);
     if (col && col.name !== name) {
       col.name = name || 'Column';
-      markDirtyAndSave();
+      commitEdit();
     }
     editingColumnId = null;
   }
 
+  function onColumnNameKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
+    if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+    else if (e.key === 'Escape') editingColumnId = null;
+  }
+
+  function onCardInputKeydown(e: KeyboardEvent, colId: string) {
+    if (isImeComposing(e)) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      addCard(colId);
+    } else if (e.key === 'Escape') {
+      addingCardColumnId = null;
+      newCardText = '';
+    }
+  }
+
+  // Unmounting (tab switch to a non-kanban file, pane close) must write the
+  // pending edit, not cancel it.
   onDestroy(() => {
-    if (saveTimer) clearTimeout(saveTimer);
+    void saver.flush();
   });
 </script>
 
+{#if parseError !== null}
+  <div class="parse-error" role="alert" data-testid="kanban-parse-error">
+    <p class="parse-error-title">{t('kanban.parseErrorTitle')}</p>
+    <p class="parse-error-hint">{t('kanban.parseErrorHint')}</p>
+    <code class="parse-error-detail">{parseError}</code>
+  </div>
+{:else}
 <div class="board">
   <section
     class="columns"
@@ -163,7 +168,7 @@
               value={col.name}
               autofocus
               onblur={(e) => renameColumn(col.id, (e.target as HTMLInputElement).value)}
-              onkeydown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { editingColumnId = null; } }}
+              onkeydown={onColumnNameKeydown}
             />
           {:else}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -197,7 +202,7 @@
               placeholder={t('kanban.cardPlaceholder')}
               autofocus
               onblur={() => addCard(col.id)}
-              onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addCard(col.id); } if (e.key === 'Escape') { addingCardColumnId = null; newCardText = ''; } }}
+              onkeydown={(e) => onCardInputKeydown(e, col.id)}
             ></textarea>
           {:else}
             <button class="add-card" onclick={() => { addingCardColumnId = col.id; newCardText = ''; }}>{t('kanban.addCard')}</button>
@@ -209,6 +214,7 @@
     <button class="add-column" onclick={addColumn}>{t('kanban.addColumn')}</button>
   </section>
 </div>
+{/if}
 
 <style>
   .board {
@@ -218,6 +224,25 @@
     padding: 14px;
     background: var(--novelist-bg);
     color: var(--novelist-text);
+  }
+  .parse-error {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    text-align: center;
+    color: var(--novelist-text-secondary);
+  }
+  .parse-error-title { margin: 0; font-size: 0.95rem; font-weight: 500; color: var(--novelist-text); }
+  .parse-error-hint { margin: 0; font-size: 0.8rem; max-width: 460px; }
+  .parse-error-detail {
+    font-size: 0.75rem;
+    max-width: 460px;
+    overflow-wrap: anywhere;
+    opacity: 0.8;
   }
   .columns {
     display: flex;

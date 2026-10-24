@@ -1,0 +1,15 @@
+[plugin]
+id = "book-translation"
+name = "书籍翻译"
+version = "0.1.2"
+description = "按章节编辑书籍译文，并查看手动请求的参考译文"
+author = "Novelist Team"
+permissions = ["read", "write", "ui", "ai:http"]
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+file_extensions = [".novtrans"]
+label = "书籍翻译"
+creatable = false
+requires_app_reload = false

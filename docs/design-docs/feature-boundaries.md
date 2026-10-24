@@ -64,7 +64,6 @@ performance/clarity as long as observable behavior doesn't change.
 |--------|---------|
 | `core/src/services/plugin_host/` | QuickJS sandbox, permission tiers |
 | `core/src/services/file_watcher.rs` | BLAKE3 self-write suppression, rename-ignore |
-| `core/src/services/rope_document.rs` | Ropey-backed huge-file backend |
 | `core/src/commands/file.rs`, `project.rs`, `recent.rs`, `settings.rs`, `template_files.rs` | IPC commands |
 | `app/lib/stores/*.svelte.ts` | Reactive state |
 | `app/lib/composables/app-events.svelte.ts` | Event wiring (file-changed, file-renamed, drag-drop, …) |

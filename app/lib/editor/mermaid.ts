@@ -2,6 +2,7 @@ import { WidgetType, EditorView, Decoration, type DecorationSet } from '@codemir
 import { syntaxTree } from '@codemirror/language';
 import { StateField, type EditorState, type Range } from '@codemirror/state';
 import { imeComposingField } from './ime-guard';
+import { isBlockContainer } from './markdown-extensions';
 
 interface BlockRange {
   from: number;
@@ -221,7 +222,7 @@ function getCodeContent(node: any, state: EditorState): string {
 
 /**
  * Build block decorations for mermaid code blocks.
- * Full-doc scan is acceptable — mermaid blocks are rare (typically <10).
+ * Full-doc scan over block containers only — mermaid blocks are rare.
  */
 function buildMermaidBlockState(state: EditorState): MermaidBlockState {
   const decos: Range<Decoration>[] = [];
@@ -230,10 +231,10 @@ function buildMermaidBlockState(state: EditorState): MermaidBlockState {
 
   syntaxTree(state).iterate({
     enter(node) {
-      if (node.name !== 'FencedCode') return;
+      if (node.name !== 'FencedCode') return isBlockContainer(node.name);
 
       const info = getCodeInfo(node.node, state);
-      if (info !== 'mermaid') return;
+      if (info !== 'mermaid') return false;
       ranges.push({ from: node.from, to: node.to });
 
       if (cursorInRange(cursorHeads, node.from, node.to)) return false;

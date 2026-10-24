@@ -1,9 +1,11 @@
+import { pathBasename } from '$lib/utils/path';
+
 /** Pattern for scratch file names: novelist_scratch_<unix_millis>.md */
 const SCRATCH_PATTERN = /^novelist_scratch_\d+\.md$/;
 
 /** Check if a file path points to a scratch (temporary) file by its filename pattern. */
 export function isScratchFile(filePath: string): boolean {
-  const fileName = filePath.split('/').pop() || '';
+  const fileName = pathBasename(filePath);
   return SCRATCH_PATTERN.test(fileName);
 }
 

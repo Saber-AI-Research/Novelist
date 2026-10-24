@@ -30,6 +30,14 @@
     tabsStore.closeTab(id);
   }
 
+  function handleTabKeydown(e: KeyboardEvent, id: string) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleTabClick(id);
+    }
+  }
+
   function handleAuxClick(e: MouseEvent, id: string) {
     if (e.button === 1) {
       e.preventDefault();
@@ -119,18 +127,23 @@
   class="tab-bar flex items-center overflow-x-auto"
   data-testid="tab-bar"
   data-tauri-drag-region
+  role="tablist"
+  tabindex="-1"
   ondragover={handleDragOver}
   ondragleave={handleDragLeave}
   ondrop={handleDrop}
   style="flex: 1 1 auto; min-width: 0; height: 100%;"
 >
   {#each paneTabs as tab, i (tab.id)}
-    <button
+    <div
       class="tab-item group relative flex items-center h-full shrink-0 cursor-pointer"
       class:tab-active={tab.id === paneActiveTabId}
       class:drop-before={dropIndex === i}
       class:drop-after={dropIndex === paneTabs.length && i === paneTabs.length - 1}
       data-testid="tab-{tab.fileName}"
+      role="tab"
+      tabindex="0"
+      aria-selected={tab.id === paneActiveTabId}
       draggable="true"
       ondragstart={(e) => handleDragStart(e, tab.id)}
       ondragend={handleDragEnd}
@@ -147,6 +160,7 @@
         white-space: nowrap;
       "
       onclick={() => handleTabClick(tab.id)}
+      onkeydown={(e) => handleTabKeydown(e, tab.id)}
       onauxclick={(e) => handleAuxClick(e, tab.id)}
     >
       {#if tab.isDirty}
@@ -166,9 +180,8 @@
         ></span>
       {/if}
       <span>{tab.fileName}</span>
-      <span
-        role="button"
-        tabindex="-1"
+      <button
+        type="button"
         class="close-btn flex items-center justify-center rounded-sm cursor-pointer"
         data-testid="tab-close-{tab.fileName}"
         style="
@@ -182,12 +195,12 @@
           transition: opacity 0.12s ease, background 0.12s ease;
         "
         onclick={(e: MouseEvent) => handleCloseTab(e, tab.id)}
-        onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); tabsStore.closeTab(tab.id); } }}
         title={t('tab.close')}
+        aria-label="{t('tab.close')} {tab.fileName}"
       >
         &#x2715;
-      </span>
-    </button>
+      </button>
+    </div>
   {/each}
 </div>
   {#if paneTabs.length > 0}
@@ -215,8 +228,21 @@
   .tab-item:hover {
     color: var(--novelist-text-secondary) !important;
   }
+  .close-btn {
+    padding: 0;
+    border: none;
+    background: transparent;
+  }
   .tab-item:hover .close-btn {
     opacity: 0.5 !important;
+  }
+  /* Keyboard users see the close button once the tab or the button has focus. */
+  .tab-item:focus-within .close-btn {
+    opacity: 0.5 !important;
+  }
+  .tab-item .close-btn:focus-visible {
+    opacity: 1 !important;
+    outline: 1px solid var(--novelist-accent);
   }
   .tab-item .close-btn:hover {
     opacity: 1 !important;

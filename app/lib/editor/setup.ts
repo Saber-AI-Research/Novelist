@@ -13,7 +13,7 @@ import { tags } from '@lezer/highlight';
 import { searchKeymap, highlightSelectionMatches, search } from '@codemirror/search';
 import { createNovelistSearchPanel, openOrRefocusSearch } from './search-panel';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
-import { wysiwygPlugin, linkClickPlugin, imagePastePlugin } from './wysiwyg';
+import { wysiwygPlugin, linkClickPlugin, imagePastePlugin, wysiwygImageDocumentDir } from './wysiwyg';
 import { unifiedLineSelectionPlugin } from './selection-line';
 import { mermaidPlugin } from './mermaid';
 import { mathPlugin } from './math';
@@ -128,6 +128,7 @@ const stabilizerStates = new WeakMap<EditorView, StabilizerState>();
 const scrollStabilizerPlugin = ViewPlugin.fromClass(class {
   private state: StabilizerState;
   private cleanup: () => void;
+  private disarmFrame = 0;
 
   constructor(private view: EditorView) {
     this.state = {
@@ -150,6 +151,18 @@ const scrollStabilizerPlugin = ViewPlugin.fromClass(class {
       this.state.guardActive = true;
       this.state.guardScrollTop = view.scrollDOM.scrollTop;
       this.state.guardClickPos = view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? -1;
+      // The native jump comes from this click's own dispatch, so its scroll
+      // event fires within the next frames. Disarm after the click's frame
+      // and CM6's follow-up measure frame: a click that caused no scroll must
+      // not leave the guard armed for a later legitimate jump (outline click,
+      // Go to Line, find-next, Cmd+End).
+      cancelAnimationFrame(this.disarmFrame);
+      this.disarmFrame = requestAnimationFrame(() => {
+        this.disarmFrame = requestAnimationFrame(() => {
+          this.disarmFrame = 0;
+          this.state.guardActive = false;
+        });
+      });
     };
 
     // Layer 2: scroll listener
@@ -170,7 +183,7 @@ const scrollStabilizerPlugin = ViewPlugin.fromClass(class {
           const pos = this.state.guardClickPos;
           if (pos >= 0) {
             queueMicrotask(() => {
-              view.dispatch({ selection: { anchor: pos } });
+              view.dispatch({ selection: { anchor: Math.min(pos, view.state.doc.length) } });
             });
           }
 
@@ -215,8 +228,9 @@ const scrollStabilizerPlugin = ViewPlugin.fromClass(class {
 
   destroy() {
     this.cleanup();
+    cancelAnimationFrame(this.disarmFrame);
     stabilizerStates.delete(this.view);
-    if (this.state.settleTimer) clearTimeout(this.state.settleTimer);
+    clearTimeout(this.state.settleTimer ?? undefined);
   }
 });
 
@@ -509,6 +523,8 @@ interface EditorOptions {
   highlightMatches?: boolean;
   /** File type for language mode selection. Default: 'markdown' */
   fileType?: FileType;
+  /** Directory of the open document, for resolving relative image paths. */
+  imageDocumentDir?: string;
 }
 
 /**
@@ -584,6 +600,7 @@ export function createEditorExtensions(options?: EditorOptions): Extension[] {
   // Disable WYSIWYG for tall docs to prevent height-map drift
   if (options?.wysiwyg !== false && !options?.tallDoc) {
     exts.push(wysiwygPlugin);
+    if (options?.imageDocumentDir) exts.push(wysiwygImageDocumentDir(options.imageDocumentDir));
     // Mermaid diagram rendering — lazy-loaded, only active when mermaid blocks exist
     exts.push(mermaidPlugin);
     // KaTeX math rendering — lazy-loaded, only active when math nodes exist

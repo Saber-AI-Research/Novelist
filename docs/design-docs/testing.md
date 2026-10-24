@@ -21,11 +21,20 @@ wide test totals; suite size changes frequently.
 
 `pnpm verify:quick` runs `pnpm check` followed by unit and integration suites.
 `pnpm verify:unit` runs unit and integration without the Svelte check.
-The CI workflow runs `pnpm check`, `pnpm test:coverage`,
-`pnpm test:e2e:browser`, Rust format/Clippy/tests, and the ignored real-Pandoc
-matrices (`pnpm test:rust:pandoc`) against pinned Pandoc 3.10. Those matrices
-cover styled-copy extensions plus CJK HTML/DOCX/EPUB export. `pnpm test:all` is
-Vitest plus `cargo test`; it does not include browser or native Playwright.
+The CI workflow runs on three platforms. The macOS job runs `pnpm check`,
+`pnpm test:coverage`, browser Playwright in WebKit and Chromium
+(`pnpm test:e2e:all-browsers`), `pnpm build` plus the bundle-size benchmark,
+Rust format/Clippy/tests, the macOS-gated `e2e-testing` command tests
+(`cargo test --locked --features e2e-testing --lib commands::e2e`), and the
+ignored real-Pandoc matrices (`pnpm test:rust:pandoc`) against pinned Pandoc
+3.10. The Windows and Linux jobs run `pnpm check`, `pnpm test`, strict Clippy,
+`cargo test`, and the same real-Pandoc matrices against the same pinned Pandoc
+release, so Pandoc-dependent tests never silently skip there. Those matrices
+cover styled-copy extensions plus CJK HTML/DOCX/EPUB export. In CI, Playwright
+retries only to capture a trace: `failOnFlakyTests` fails a test that passes
+only on retry. `.gitattributes` checks out text files with LF on every
+platform. `pnpm test:all` is Vitest plus `cargo test`; it does not include
+browser or native Playwright.
 
 ## Suite-size discipline
 
@@ -85,10 +94,17 @@ Stable browser practices:
 
 - Select user-facing controls with `data-testid` or accessible roles, not
   layout coordinates or private CSS where a stable contract exists.
-- Synchronize with Playwright assertions, `expect.poll`, or explicit fixture
-  release points. Do not add arbitrary sleeps.
+- Synchronize with Playwright assertions, `expect.poll`, `page.clock`, or
+  explicit fixture release points. Do not add arbitrary sleeps
+  (`waitForTimeout`) or non-waiting `isVisible()` guards: open a project from
+  the Welcome screen with `openRecentProject(page)`, which waits for the
+  asynchronously loaded recent list.
+- Every test fails on a console error, page error, or unhandled-IPC warning
+  collected by the `browserErrors` fixture. A test that deliberately provokes
+  one allows exactly that message with
+  `test.use({ allowedBrowserErrors: [/exact message/] })`.
 - Add every new IPC command used by a browser workflow to `tauri-mock.ts`;
-  unknown commands are surfaced as browser errors.
+  unknown commands are surfaced as browser errors and fail the test.
 - Use `appKeys`/`window.__test_api__` only for shortcuts the browser or OS
   intercepts and identity-sensitive editor lifecycle/setup that visible DOM
   cannot prove; ordinary interactions should use the visible UI.
@@ -127,12 +143,15 @@ aggregate includes them. Those exact accepted results are task evidence
 snapshots, not a repository-wide count promise or a durable dependency on the
 ignored `.sisyphus` work archive.
 
-After every `@task23` test, the automatic fixture releases blocked operations,
-resets updater/portable state, clears local/session storage and browser caches,
-performs a full mock reset, checks browser errors, and compares files, invokes,
-listeners, pending waiters, AI/Publish/updater/template/plugin state against one
-exact zero-residue object. A negative UI assertion should also assert the exact
-forbidden IPC/request count whenever possible.
+After every `@task23` test, the automatic fixture releases blocked operations
+and resets updater/portable state, then reads the residue *before* the full
+reset: any pending waiter left after the release, or any unhandled IPC command,
+fails the test. It then clears local/session storage and browser caches,
+performs a full mock reset, checks browser errors again, and compares files,
+invokes, listeners, pending waiters, AI/Publish/updater/template/plugin state
+against one exact zero-residue object, which proves the reset is complete. A
+negative UI assertion should also assert the exact forbidden IPC/request count
+whenever possible.
 
 ## Native macOS boundary
 

@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 /**
@@ -23,12 +23,8 @@ async function enterProject(app: any, dirPath: string, files: MockFileEntry[]) {
     [dirPath, files] as const,
   );
 
-  // Recent-project-0 maps to MOCK_PROJECT_DIR; only click if the welcome screen is up.
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  // Recent-project-0 maps to MOCK_PROJECT_DIR.
+  await openRecentProject(app);
 }
 
 async function triggerNewFile(app: any) {
@@ -37,8 +33,7 @@ async function triggerNewFile(app: any) {
 
 async function triggerSave(app: any) {
   await app.evaluate(async () => {
-    const saveFn = (window as any).__novelist_save;
-    if (saveFn) await saveFn();
+    await (window as any).__test_api__.save();
   });
 }
 

@@ -3,6 +3,7 @@
   import { commandRegistry, getSecondaryLabel } from '$lib/stores/commands.svelte';
   import { formatShortcut } from '$lib/stores/shortcuts.svelte';
   import { t } from '$lib/i18n';
+  import { isImeComposing } from '$lib/utils/ime';
 
   interface Props {
     onClose: () => void;
@@ -16,6 +17,7 @@
   const results = $derived(commandRegistry.search(query));
 
   function handleKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') { onClose(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, results.length - 1); }
     if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }

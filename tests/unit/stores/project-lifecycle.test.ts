@@ -27,7 +27,9 @@ vi.mock('$lib/stores/settings.svelte', () => ({
 }));
 
 import { projectStore } from '$lib/stores/project.svelte';
-import { commands } from '$lib/ipc/commands';
+import { commands, type FileEntry } from '$lib/ipc/commands';
+
+type Listing = { status: 'ok'; data: FileEntry[] } | { status: 'error'; error: string };
 
 function entry(name: string, isDir: boolean, path = `/proj/${name}`) {
   return { name, path, is_dir: isDir, size: 0, mtime: 0, ctime: 0 };
@@ -208,6 +210,37 @@ describe('[contract] projectStore.refreshFolder', () => {
     await projectStore.setProject('/proj', null, [entry('a.md', false)]);
     await projectStore.refreshFolder('/proj/ghost');
     expect(commands.listDirectory).not.toHaveBeenCalled();
+  });
+
+  it('drops a root listing that resolves after a project switch', async () => {
+    await projectStore.setProject('/projA', null, [entry('甲.md', false, '/projA/甲.md')]);
+    const listing = Promise.withResolvers<Listing>();
+    vi.mocked(commands.listDirectory).mockReturnValueOnce(listing.promise);
+
+    const refresh = projectStore.refreshFolder('/projA');
+    await projectStore.setProject('/projB', null, [entry('乙.md', false, '/projB/乙.md')]);
+    listing.resolve({ status: 'ok', data: [entry('甲.md', false, '/projA/甲.md'), entry('新.md', false, '/projA/新.md')] });
+    await refresh;
+
+    expect(projectStore.dirPath).toBe('/projB');
+    expect(projectStore.files.map(f => f.path)).toEqual(['/projB/乙.md']);
+  });
+
+  it('stops refreshLoadedFolders once the project changes mid-walk', async () => {
+    await projectStore.setProject('/projA', null, [entry('sub', true, '/projA/sub')]);
+    vi.mocked(commands.listDirectory).mockResolvedValueOnce({ status: 'ok', data: [] });
+    await projectStore.expandFolder('/projA/sub');
+    const listing = Promise.withResolvers<Listing>();
+    vi.mocked(commands.listDirectory).mockReset().mockReturnValueOnce(listing.promise);
+
+    const refresh = projectStore.refreshLoadedFolders();
+    await projectStore.setProject('/projB', null, [entry('乙.md', false, '/projB/乙.md')]);
+    listing.resolve({ status: 'ok', data: [] });
+    await refresh;
+
+    expect(commands.listDirectory).toHaveBeenCalledTimes(1);
+    expect(commands.listDirectory).toHaveBeenCalledWith('/projA/sub', false);
+    expect(projectStore.files.map(f => f.path)).toEqual(['/projB/乙.md']);
   });
 
   it('silently returns when listDirectory errors after a prior expand', async () => {

@@ -1,10 +1,9 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 // Retention/data integrity is exercised against the real Rust service. This
 // browser regression owns the panel's duplicate-submit and IME boundary.
 test('[regression] snapshot panel submits once while pending and leaves IME Enter alone', async ({ app }) => {
-  const recent = app.getByTestId('recent-project-0');
-  if (await recent.isVisible()) await recent.click();
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.getByRole('button', { name: 'SNAPS', exact: true }).click();
   const input = app.getByPlaceholder('Snapshot name...');

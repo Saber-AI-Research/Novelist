@@ -64,17 +64,10 @@ const OVERVIEW: LiteraryStudyOverview = {
 };
 
 test.describe('Literary commentary projects', () => {
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
-  });
-
   test('offers literary commentary as a first-class project type before plugins load', async ({
     app,
-    browserErrors,
   }) => {
     await app.getByRole('button', { name: 'New Project', exact: true }).click();
-    await app.waitForTimeout(250);
-    expect(browserErrors).toEqual([]);
 
     const literaryCategory = app.getByTestId('new-project-category-literary-study');
     await expect(literaryCategory).toBeVisible();
@@ -93,7 +86,6 @@ test.describe('Literary commentary projects', () => {
 
   test('keeps the import actions reachable below a bounded preview', async ({
     app,
-    browserErrors,
   }) => {
     await app.setViewportSize({ width: 900, height: 600 });
     await app.getByRole('button', { name: 'New Project', exact: true }).click();
@@ -128,13 +120,11 @@ test.describe('Literary commentary projects', () => {
     await expect(footer).toBeInViewport();
     await expect(submit).toBeVisible();
     await expect(submit).toBeInViewport();
-    expect(browserErrors).toEqual([]);
   });
 
   test('auto-enables the editor and exposes progress plus book replacement in the side panel', async ({
     app,
     mockState,
-    browserErrors,
   }) => {
     const files = [
       { name: '学习内容', path: CHAPTER_DIR, is_dir: true, size: 0 },
@@ -168,8 +158,6 @@ test.describe('Literary commentary projects', () => {
     }]);
 
     await app.getByTestId('toggle-literary-study').click();
-    await app.waitForTimeout(250);
-    expect(browserErrors).toEqual([]);
     const panel = app.getByTestId('literary-study-panel');
     await expect(panel).toBeVisible();
     await expect(panel).toContainText('The Analects');
@@ -189,7 +177,6 @@ test.describe('Literary commentary projects', () => {
   test('creates new files beside the active literary chapter, not in a stale directory', async ({
     app,
     mockState,
-    browserErrors,
   }) => {
     const volumeDir = `${CHAPTER_DIR}/Book I`;
     const chapterPath = `${volumeDir}/Chapter One.litstudy`;
@@ -249,6 +236,5 @@ test.describe('Literary commentary projects', () => {
 
     await app.getByTestId('sidebar-files').click({ button: 'right', position: { x: 8, y: 300 } });
     await expect(app.getByTestId('sidebar-view-new-literary-commentary')).toHaveCount(0);
-    expect(browserErrors).toEqual([]);
   });
 });

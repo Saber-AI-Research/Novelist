@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 const TABLE_SOURCE = '| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |';
 const TABLE_DOC = `# Title\n\n${TABLE_SOURCE}\n\nafter the table\n`;
@@ -17,11 +17,7 @@ function docText(app: Page): Promise<string> {
 
 test.describe('Editable tables', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
     await app.getByTestId('sidebar-file-Chapter 1.md').click();
     await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
     await loadTable(app);

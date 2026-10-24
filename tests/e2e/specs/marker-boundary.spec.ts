@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 import type { Page } from '@playwright/test';
 import type { EditorView } from '@codemirror/view';
@@ -33,11 +33,7 @@ async function setDocument(app: Page, doc: string, cursor: number) {
 
 test.describe('[regression] inline marker caret boundaries', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
     await app.getByTestId('sidebar-file-Chapter 1.md').click();
     await expect.poll(() => app.evaluate(() =>
       (window as EditorTestWindow).__test_api__.getActiveEditor()?.filePath ?? null

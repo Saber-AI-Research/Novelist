@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 /**
@@ -16,11 +16,7 @@ async function seedAndOpen(app: Page, files: MockFileEntry[]) {
     ([d, f]) => (window as any).__TAURI_MOCK_STATE__.openProject(d, f),
     [MOCK_PROJECT_DIR, files] as [string, MockFileEntry[]],
   );
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
 }
 
 async function openFileInEditor(app: Page, fileName: string) {
@@ -36,24 +32,13 @@ test.describe('Cmd+M move-file palette', () => {
     ]);
     await openFileInEditor(app, 'Chapter 1.md');
 
-    // Open the palette via the registered command (browsers intercept Cmd+M,
-    // so we invoke the command directly through the registry).
+    // Browsers intercept Cmd+M, so reach the move command by name through the
+    // command palette.
     await app.evaluate(() => {
-      // Reach into the already-mounted commandRegistry via the move-file
-      // command. Fallback: exposed via the palette's handler map.
-      const handler = (window as any).__novelist_command_handlers__?.['move-file'];
-      if (handler) return handler();
-      // Command registry isn't globally exposed — use command palette UI.
-      const ev = new KeyboardEvent('keydown', { key: 'p', metaKey: true, shiftKey: true });
-      window.dispatchEvent(ev);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', metaKey: true, shiftKey: true }));
     });
-
-    // Fallback path: if the direct handler isn't there, fish the palette via
-    // the command palette UI. The move command is still reachable by name.
-    if (!(await app.getByTestId('move-palette').isVisible().catch(() => false))) {
-      await app.getByTestId('palette-input').fill('Move');
-      await app.getByTestId('palette-result-0').click();
-    }
+    await app.getByTestId('palette-input').fill('Move');
+    await app.getByTestId('palette-result-0').click();
 
     await expect(app.getByTestId('move-palette')).toBeVisible();
 

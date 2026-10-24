@@ -113,15 +113,14 @@ export function toggleWrap(view: EditorView, marker: string) {
       if (markerRanges.length >= 2) {
         const first = markerRanges[0];
         const last = markerRanges[markerRanges.length - 1];
-        const removedBefore = first.to - first.from;
-        const newFrom = Math.max(first.to, from) - removedBefore;
-        const newTo = Math.max(first.to, to) - removedBefore;
+        const changes = view.state.changes([
+          { from: first.from, to: first.to, insert: '' },
+          { from: last.from, to: last.to, insert: '' },
+        ]);
+        const { anchor, head } = view.state.selection.main;
         view.dispatch({
-          changes: [
-            { from: first.from, to: first.to, insert: '' },
-            { from: last.from, to: last.to, insert: '' },
-          ],
-          selection: { anchor: newFrom, head: newTo },
+          changes,
+          selection: { anchor: changes.mapPos(anchor), head: changes.mapPos(head) },
         });
         return;
       }
@@ -140,20 +139,29 @@ export function toggleWrap(view: EditorView, marker: string) {
  * When adding, strips any existing `#…` heading prefix first.
  */
 export function toggleLinePrefix(view: EditorView, prefix: string) {
-  const { from, to } = view.state.selection.main;
+  const { from, anchor, head } = view.state.selection.main;
   const line = view.state.doc.lineAt(from);
   const text = line.text;
+  let removeLen: number;
+  let insert = '';
   if (text.startsWith(prefix + ' ')) {
-    view.dispatch({
-      changes: { from: line.from, to: line.from + prefix.length + 1, insert: '' },
-      selection: { anchor: from - (prefix.length + 1), head: Math.max(line.from, to - (prefix.length + 1)) },
-    });
+    removeLen = prefix.length + 1;
   } else {
-    const existingMatch = text.match(/^(#{1,6})\s*/);
-    const removeLen = existingMatch ? existingMatch[0].length : 0;
-    view.dispatch({
-      changes: { from: line.from, to: line.from + removeLen, insert: prefix + ' ' },
-      selection: { anchor: from + (prefix.length + 1 - removeLen), head: Math.max(line.from, to + (prefix.length + 1 - removeLen)) },
-    });
+    // Only an ATX heading marker (hashes followed by space/tab or line end);
+    // `#hashtag` / `#1` are content and must survive.
+    const existingMatch = text.match(/^#{1,6}(?:[ \t]+|$)/);
+    removeLen = existingMatch ? existingMatch[0].length : 0;
+    insert = prefix + ' ';
   }
+  const changes = view.state.changes({ from: line.from, to: line.from + removeLen, insert });
+  // Positions inside the old marker land after the new prefix; anchor and
+  // head are both >= line.from, so the floor never moves a later position.
+  const floor = line.from + insert.length;
+  view.dispatch({
+    changes,
+    selection: {
+      anchor: Math.max(floor, changes.mapPos(anchor, 1)),
+      head: Math.max(floor, changes.mapPos(head, 1)),
+    },
+  });
 }

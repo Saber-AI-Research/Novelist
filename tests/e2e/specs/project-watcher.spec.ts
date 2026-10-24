@@ -2,6 +2,9 @@ import { test, expect } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('project watcher ownership', () => {
+  // Both tests make the watcher fail to start on purpose; the app logs it.
+  test.use({ allowedBrowserErrors: [/^console: Failed to start file watcher: native watcher unavailable$/] });
+
   test('watcher start failure keeps the current workspace uncommitted and reports the failure', async ({
     app,
     mockState,

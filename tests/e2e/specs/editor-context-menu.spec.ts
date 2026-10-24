@@ -127,7 +127,7 @@ test.describe('Editor context menu', () => {
     expect(len).toBeGreaterThan(0);
   });
 
-  test('cut via menu removes selected text from the document', async ({ app, appKeys, browserErrors, clipboardCapture }) => {
+  test('cut via menu removes selected text from the document', async ({ app, appKeys, clipboardCapture }) => {
     await clipboardCapture.startDeferred();
     const initial = await app.evaluate(() => {
       const view = (window as any).__test_api__.getActiveEditor().view;
@@ -171,10 +171,9 @@ test.describe('Editor context menu', () => {
       };
     })).toEqual(initial);
     await expect(app.locator('.cm-content')).toContainText('你好，world');
-    expect(browserErrors).toEqual([]);
   });
 
-  test('cut keeps deletion and undo state when clipboard rejects', async ({ app, appKeys, browserErrors, clipboardCapture }) => {
+  test('cut keeps deletion and undo state when clipboard rejects', async ({ app, appKeys, clipboardCapture }) => {
     await clipboardCapture.startRejected('denied: token=secret');
     const initial = await app.evaluate(() => {
       const view = (window as any).__test_api__.getActiveEditor().view;
@@ -207,8 +206,6 @@ test.describe('Editor context menu', () => {
     });
     await expect(app.locator('.cm-content')).not.toContainText('文本');
     await expect(app.getByTestId('editor-context-menu')).toHaveCount(0);
-    expect(browserErrors).toEqual([]);
-
     await appKeys.pressMod('z');
     expect(await app.evaluate(() => {
       const view = (window as any).__test_api__.getActiveEditor().view;

@@ -22,7 +22,7 @@ import {
 } from '$lib/services/managed-name-persistence';
 import { isImeComposing } from '$lib/editor/ime-guard';
 import type { EditorView } from '@codemirror/view';
-import type { ViewportManager } from '$lib/editor/viewport';
+import type { EditorState } from '@codemirror/state';
 
 interface TabState {
   id: string;
@@ -70,6 +70,35 @@ export interface PathRetargetResult {
 
 type IpcResult = { status: 'ok' } | { status: 'error'; error: unknown };
 
+/** Outcome of `tabsStore.saveTab`. */
+export type SaveTabResult =
+  | { status: 'saved'; filePath: string }
+  | { status: 'clean' }
+  | { status: 'missing' }
+  | { status: 'error'; error: string };
+
+/** Surface a failed save in the app's operation-error toast. */
+export function reportSaveFailure(fileName: string, error: unknown) {
+  console.error(`[tabs] save failed for ${fileName}:`, error);
+  window.dispatchEvent(new CustomEvent('novelist-operation-error', {
+    detail: { message: t('dialog.saveFailedFor', { name: fileName, error: String(error) }) },
+  }));
+}
+
+/** Write a document, telling the watcher to ignore the resulting change. */
+async function writeDocument(
+  filePath: string,
+  content: string,
+): Promise<{ status: 'ok' } | { status: 'error'; error: string }> {
+  try {
+    await commands.registerWriteIgnore(filePath);
+    const result = await commands.writeFile(filePath, content);
+    return result.status === 'ok' ? { status: 'ok' } : { status: 'error', error: String(result.error) };
+  } catch (e) {
+    return { status: 'error', error: String(e) };
+  }
+}
+
 async function runPathSyncOperation(
   operation: string,
   run: () => Promise<IpcResult>,
@@ -106,28 +135,15 @@ function finishPathRetarget(changed: number, failedOperations: string[]): PathRe
 const editorViews = new Map<string, EditorView>();
 
 /**
- * Tracks which tabs are in viewport mode.
- * For these tabs, syncFromView() must NOT read from CM6 (it only has a window).
- * Save must go through the Rope backend instead.
- */
-const viewportModeTabs = new Set<string>();
-
-export interface ViewportSnapshotMetadata {
-  manager: ViewportManager;
-}
-
-const viewportSnapshotMetadata = new Map<string, ViewportSnapshotMetadata>();
-
-/**
  * Saved CM6 EditorStates per tab, preserving undo history across tab switches.
  */
-const savedEditorStates = new Map<string, import('@codemirror/state').EditorState>();
+const savedEditorStates = new Map<string, EditorState>();
 
-export function saveEditorState(tabId: string, state: import('@codemirror/state').EditorState) {
+export function saveEditorState(tabId: string, state: EditorState) {
   savedEditorStates.set(tabId, state);
 }
 
-export function getSavedEditorState(tabId: string): import('@codemirror/state').EditorState | undefined {
+export function getSavedEditorState(tabId: string): EditorState | undefined {
   return savedEditorStates.get(tabId);
 }
 
@@ -135,38 +151,12 @@ export function deleteSavedEditorState(tabId: string) {
   savedEditorStates.delete(tabId);
 }
 
-export function registerEditorView(tabId: string, view: EditorView, isViewportMode = false) {
+export function registerEditorView(tabId: string, view: EditorView) {
   editorViews.set(tabId, view);
-  if (isViewportMode) {
-    viewportModeTabs.add(tabId);
-  } else {
-    viewportModeTabs.delete(tabId);
-    viewportSnapshotMetadata.delete(tabId);
-  }
-}
-
-export function registerViewportSnapshotMetadata(
-  tabId: string,
-  metadata: ViewportSnapshotMetadata,
-) {
-  viewportModeTabs.add(tabId);
-  viewportSnapshotMetadata.set(tabId, { manager: metadata.manager });
-}
-
-export function getViewportSnapshotMetadata(
-  tabId: string,
-): ViewportSnapshotMetadata | undefined {
-  return viewportSnapshotMetadata.get(tabId);
 }
 
 export function unregisterEditorView(tabId: string) {
   editorViews.delete(tabId);
-  viewportModeTabs.delete(tabId);
-  viewportSnapshotMetadata.delete(tabId);
-}
-
-export function isTabViewportMode(tabId: string): boolean {
-  return viewportModeTabs.has(tabId);
 }
 
 export function getEditorView(tabId: string): EditorView | undefined {
@@ -174,8 +164,6 @@ export function getEditorView(tabId: string): EditorView | undefined {
 }
 
 export function getEditorContent(tabId: string): string | null {
-  // NEVER read from CM6 for viewport mode tabs — it only has a window!
-  if (viewportModeTabs.has(tabId)) return null;
   const view = editorViews.get(tabId);
   return view ? view.state.doc.toString() : null;
 }
@@ -233,6 +221,10 @@ class TabsStore {
   paneSizes = $state<number[]>([1]);
   /** Monotonic counter for minting pane ids beyond pane-1/pane-2. */
   private paneSeq = 1;
+  /** Tabs whose close (prompt, save) is in flight. */
+  private closingTabIds = new Set<string>();
+  /** Per-path write chain, so two saves of one file never overlap. */
+  private writeChains = new Map<string, Promise<unknown>>();
 
   private rememberActiveFile() {
     projectStore.rememberLastOpenFile(this.activeTab?.filePath ?? null);
@@ -279,21 +271,18 @@ class TabsStore {
 
   toggleSplit() {
     if (this.splitActive) {
-      // Collapse to one column: merge every other pane's tabs into pane-1,
-      // skipping duplicates by filePath (cleaning up their per-tab state).
+      // Collapse to one column: merge every other pane's tabs into pane-1.
+      // A duplicate of a file pane-1 already shows is folded into that tab.
       const pane1 = this.panes[0];
-      const existingPaths = new Set(pane1.tabs.map(t => t.filePath));
       for (const pane of this.panes.slice(1)) {
         for (const tab of pane.tabs) {
-          if (!existingPaths.has(tab.filePath)) {
+          const kept = pane1.tabs.find(t => t.filePath === tab.filePath);
+          if (!kept) {
             pane1.tabs.push(tab);
-            existingPaths.add(tab.filePath);
-          } else {
-            // Mirror unregisterEditorView, plus the saved CM state.
-            savedEditorStates.delete(tab.id);
-            editorViews.delete(tab.id);
-            viewportModeTabs.delete(tab.id);
-            viewportSnapshotMetadata.delete(tab.id);
+          } else if (!this.foldDuplicateInto(tab, kept)) {
+            // Its unsaved text differs from the kept tab: keep both rather
+            // than drop edits.
+            pane1.tabs.push(tab);
           }
         }
       }
@@ -307,6 +296,24 @@ class TabsStore {
       // default to an even split here.
       this.normalizePaneSizes();
     }
+  }
+
+  /**
+   * Drop `dup`, a same-file duplicate of `kept`, after carrying its edits
+   * over. Returns false (and leaves `dup` alone) when `dup` holds unsaved
+   * text that differs from `kept`, since dropping it would lose that text.
+   */
+  private foldDuplicateInto(dup: TabState, kept: TabState): boolean {
+    // Syncing copies a live editor's text into same-file tabs that have no
+    // editor, so a background `kept` tab receives the duplicate's edits here.
+    this.syncFromView(dup.id);
+    if (dup.isDirty) {
+      if (dup.content !== (getEditorContent(kept.id) ?? kept.content)) return false;
+      kept.isDirty = true;
+    }
+    savedEditorStates.delete(dup.id);
+    editorViews.delete(dup.id);
+    return true;
   }
 
   setActivePane(paneId: string) {
@@ -605,24 +612,41 @@ class TabsStore {
       return;
     }
 
-    const rawName = pathBasename(filePath) || filePath;
-    const fileName = isScratchFile(filePath) ? nextScratchDisplayName() : rawName;
-    const id = crypto.randomUUID();
-    pane.tabs.push({
-      id,
+    const tab = this.createTab(filePath, content, options, () => (
+      isScratchFile(filePath) ? nextScratchDisplayName() : pathBasename(filePath) || filePath
+    ));
+    pane.tabs.push(tab);
+    pane.activeTabId = tab.id;
+    projectStore.rememberLastOpenFile(filePath);
+  }
+
+  /**
+   * Build a tab record. When the file is already open in another pane the new
+   * tab starts from that tab's live text, dirty flag and name, not the disk
+   * `content` the caller read, so the two copies never diverge.
+   */
+  private createTab(
+    filePath: string,
+    content: string,
+    options: OpenTabOptions,
+    displayName: () => string,
+  ): TabState {
+    const sibling = this.freshestTabForPath(filePath);
+    if (sibling) this.syncFromView(sibling.id);
+    const text = sibling ? sibling.content : content;
+    return {
+      id: crypto.randomUUID(),
       filePath,
-      fileName,
-      content,
-      isDirty: false,
+      fileName: sibling ? sibling.fileName : displayName(),
+      content: text,
+      isDirty: sibling?.isDirty ?? false,
       scrollPosition: 0,
       cursorPosition: 0,
       version: 0,
-      externalState: 'present',
+      externalState: sibling?.externalState ?? 'present',
       justCreated: options.justCreated === true,
-      lastSyncedH1: extractFirstH1(content) ?? '',
-    });
-    pane.activeTabId = id;
-    projectStore.rememberLastOpenFile(filePath);
+      lastSyncedH1: sibling ? sibling.lastSyncedH1 : extractFirstH1(text) ?? '',
+    };
   }
 
   /** Open a tab in a specific pane (for "Open in Other Pane"). */
@@ -636,22 +660,9 @@ class TabsStore {
       return;
     }
 
-    const fileName = pathBasename(filePath) || filePath;
-    const id = crypto.randomUUID();
-    pane.tabs.push({
-      id,
-      filePath,
-      fileName,
-      content,
-      isDirty: false,
-      scrollPosition: 0,
-      cursorPosition: 0,
-      version: 0,
-      externalState: 'present',
-      justCreated: options.justCreated === true,
-      lastSyncedH1: extractFirstH1(content) ?? '',
-    });
-    pane.activeTabId = id;
+    const tab = this.createTab(filePath, content, options, () => pathBasename(filePath) || filePath);
+    pane.tabs.push(tab);
+    pane.activeTabId = tab.id;
     projectStore.rememberLastOpenFile(filePath);
   }
 
@@ -768,13 +779,14 @@ class TabsStore {
   }
 
   async closeTab(id: string) {
-    // Find which pane contains this tab
-    for (const pane of this.panes) {
-      const idx = pane.tabs.findIndex(t => t.id === id);
-      if (idx === -1) continue;
-      const tab = pane.tabs[idx];
-
-      // Prompt for unsaved changes (Save / Don't Save / Cancel)
+    const tab = this.findTab(id);
+    // A second close of the same tab (X click, then Cmd+W behind the prompt)
+    // must not queue a second prompt for a tab the first one may remove.
+    if (!tab || this.closingTabIds.has(id)) return;
+    this.closingTabIds.add(id);
+    try {
+      // Typing only flags the tab dirty; pick up any text the flag missed.
+      this.syncFromView(id);
       if (tab.isDirty) {
         const scratch = isScratchFile(tab.filePath);
         const choice = await confirmUnsavedChanges({
@@ -783,57 +795,171 @@ class TabsStore {
         });
         if (choice === 'cancel') return;
         if (choice === 'save') {
-          this.syncFromView(tab.id);
-          const fresh = this.findByPath(tab.filePath);
-          if (fresh) {
-            if (scratch) {
-              const savePath = await saveDialog({
-                defaultPath: fresh.fileName,
-                filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv'] }],
-              });
-              if (savePath) {
-                await commands.registerWriteIgnore(savePath);
-                const result = await commands.writeFile(savePath, fresh.content);
-                if (result.status === 'ok') {
-                  this.markSaved(fresh.id);
-                } else {
-                  console.error('[tabs] save before close failed:', result.error);
-                  return;
-                }
-              } else {
-                // User cancelled the Save-As native picker — abort the close.
-                return;
-              }
-            } else {
-              await commands.registerWriteIgnore(fresh.filePath);
-              const result = await commands.writeFile(fresh.filePath, fresh.content);
-              if (result.status === 'ok') {
-                await this.tryRenameAfterSave(fresh.filePath, fresh.content);
-                this.markSaved(fresh.id);
-              } else {
-                console.error('[tabs] save before close failed:', result.error);
-                return;
-              }
-            }
-          }
+          const saved = scratch
+            ? await this.saveScratchBeforeClose(id)
+            : await this.saveBeforeClose(id);
+          if (!saved) return;
         }
         // choice === 'discard' falls through: close without saving.
       }
+      // Prompts and writes awaited above: the tab may have moved or gone.
+      this.removeTab(id);
+    } finally {
+      this.closingTabIds.delete(id);
+    }
+  }
 
+  /** Save a tab that is about to close. False keeps it open. */
+  private async saveBeforeClose(id: string): Promise<boolean> {
+    const name = this.findTab(id)?.fileName ?? '';
+    const result = await this.saveTab(id);
+    if (result.status === 'error') {
+      reportSaveFailure(name, result.error);
+      return false;
+    }
+    if (result.status === 'missing') return false;
+    // Keys typed while the write ran are not on disk: keep the tab open.
+    return this.findTab(id)?.isDirty === false;
+  }
+
+  /** Save As for a scratch tab that is about to close. False keeps it open. */
+  private async saveScratchBeforeClose(id: string): Promise<boolean> {
+    const before = this.findTab(id);
+    if (!before) return false;
+    const savePath = await saveDialog({
+      defaultPath: before.fileName,
+      filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv'] }],
+    });
+    // Cancelling the native picker aborts the close.
+    if (!savePath) return false;
+    const tab = this.findTab(id);
+    if (!tab) return false;
+    this.syncFromView(id);
+    const content = tab.content;
+    const result = await writeDocument(savePath, content);
+    if (result.status === 'error') {
+      reportSaveFailure(tab.fileName, result.error);
+      return false;
+    }
+    return (getEditorContent(id) ?? tab.content) === content;
+  }
+
+  /** Remove a tab by id from whichever pane holds it now. */
+  private removeTab(id: string) {
+    for (const pane of this.panes) {
+      const idx = pane.tabs.findIndex(t => t.id === id);
+      if (idx === -1) continue;
+      const [tab] = pane.tabs.splice(idx, 1);
       savedEditorStates.delete(id);
-      const closedFilePath = tab.filePath;
-      pane.tabs.splice(idx, 1);
       if (pane.activeTabId === id) {
         pane.activeTabId = pane.tabs.length > 0 ? pane.tabs[Math.min(idx, pane.tabs.length - 1)].id : null;
       }
-      if (!this.findByPath(closedFilePath)) {
-        commands.unregisterOpenFile(closedFilePath).catch(() => {});
+      if (!this.findByPath(tab.filePath)) {
+        commands.unregisterOpenFile(tab.filePath).catch(() => {});
       }
       // An emptied non-sole column collapses away (VSCode-like).
       this.removePaneIfEmpty(pane.id);
       this.rememberActiveFile();
       return;
     }
+  }
+
+  private async withWriteLock<T>(filePath: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.writeChains.get(filePath) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(run);
+    this.writeChains.set(filePath, current);
+    try {
+      return await current;
+    } finally {
+      if (this.writeChains.get(filePath) === current) this.writeChains.delete(filePath);
+    }
+  }
+
+  /**
+   * Write one tab's live text to its own file. The text comes from this tab's
+   * editor (looked up by id), never from another pane's copy of the file.
+   * After the write it runs the H1 rename and `markWritten` for every tab of
+   * the file. `force` writes a clean tab too (conflict "Keep mine").
+   */
+  async saveTab(id: string, options: { force?: boolean } = {}): Promise<SaveTabResult> {
+    const initial = this.findTab(id);
+    if (!initial) return { status: 'missing' };
+    return this.withWriteLock(initial.filePath, async (): Promise<SaveTabResult> => {
+      const tab = this.findTab(id);
+      if (!tab) return { status: 'missing' };
+      this.syncFromView(id);
+      if (!tab.isDirty && !options.force) return { status: 'clean' };
+      const { filePath, content } = tab;
+      const written = await writeDocument(filePath, content);
+      if (written.status === 'error') return written;
+      let finalPath = filePath;
+      try {
+        finalPath = await this.tryRenameAfterSave(filePath, content);
+      } catch (e) {
+        console.warn('[tabs] auto-rename after save failed:', e);
+        finalPath = this.findTab(id)?.filePath ?? filePath;
+      }
+      this.markWritten(finalPath, content);
+      return { status: 'saved', filePath: finalPath };
+    });
+  }
+
+  /**
+   * `content` is now on disk at `filePath`. Each tab of that file whose live
+   * text equals it becomes clean. A dirty tab whose text differs stays dirty:
+   * keys typed during the write are not on disk. A clean tab whose text
+   * differs is a stale copy and is reloaded with the written text.
+   */
+  markWritten(filePath: string, content: string) {
+    for (const tab of this.findAllByPath(filePath)) {
+      tab.externalState = 'present';
+      if ((getEditorContent(tab.id) ?? tab.content) === content) {
+        tab.content = content;
+        tab.isDirty = false;
+      } else if (!tab.isDirty) {
+        this.replaceTabContent(tab, content);
+      }
+    }
+  }
+
+  /** Swap in new text, discarding saved editor state so a mounted editor reloads. */
+  private replaceTabContent(tab: TabState, content: string) {
+    tab.content = content;
+    tab.version += 1;
+    savedEditorStates.delete(tab.id);
+  }
+
+  /**
+   * Called before a tab mounts its editor. If the same file is live in
+   * another pane's editor, take that text: edits made there never reached
+   * this background tab. Drops this tab's saved editor state if it differs.
+   */
+  adoptLiveSiblingContent(id: string) {
+    const tab = this.findTab(id);
+    if (!tab) return;
+    const live = this.findAllByPath(tab.filePath).find(t => t.id !== id && editorViews.has(t.id));
+    const text = live ? getEditorContent(live.id) : null;
+    if (!live || text === null) return;
+    const saved = savedEditorStates.get(id);
+    if ((saved ? saved.doc.toString() : tab.content) === text) return;
+    tab.content = text;
+    tab.isDirty = live.isDirty;
+    savedEditorStates.delete(id);
+  }
+
+  /** The tab of `filePath` holding the newest text: one with a live editor, else the first. */
+  private freshestTabForPath(filePath: string): TabState | undefined {
+    const tabs = this.findAllByPath(filePath);
+    return tabs.find(t => editorViews.has(t.id)) ?? tabs[0];
+  }
+
+  /** The tab with this id, in whichever pane holds it. */
+  findTab(id: string): TabState | undefined {
+    for (const pane of this.panes) {
+      const tab = pane.tabs.find(t => t.id === id);
+      if (tab) return tab;
+    }
+    return undefined;
   }
 
   activateTab(id: string) {
@@ -887,15 +1013,18 @@ class TabsStore {
   syncFromView(id: string) {
     const content = getEditorContent(id);
     if (content === null) return;
-    for (const pane of this.panes) {
-      const tab = pane.tabs.find(t => t.id === id);
-      if (tab) {
-        if (tab.content !== content) {
-          tab.content = content;
-          tab.isDirty = true;
-        }
-        return;
-      }
+    const tab = this.findTab(id);
+    if (!tab) return;
+    if (tab.content !== content) {
+      tab.content = content;
+      tab.isDirty = true;
+    }
+    // Cross-pane edits only reach same-file tabs that have an editor. Give
+    // the others this text so none of them reopens an older copy later.
+    for (const sibling of this.findAllByPath(tab.filePath)) {
+      if (sibling.id === id || editorViews.has(sibling.id) || sibling.content === content) continue;
+      this.replaceTabContent(sibling, content);
+      sibling.isDirty = tab.isDirty;
     }
   }
 
@@ -923,18 +1052,6 @@ class TabsStore {
         tab.filePath = newPath;
         tab.fileName = pathBasename(newPath) || newPath;
         return;
-      }
-    }
-  }
-
-  /** Mark all tabs with the given file path as saved (used after cross-pane sync saves). */
-  markSavedByPath(filePath: string) {
-    for (const pane of this.panes) {
-      for (const tab of pane.tabs) {
-        if (tab.filePath === filePath) {
-          tab.isDirty = false;
-          tab.externalState = 'present';
-        }
       }
     }
   }
@@ -1000,25 +1117,40 @@ class TabsStore {
     return this.allTabs.filter(t => t.isDirty);
   }
 
-  /** Sync all dirty tabs from their EditorViews and save to disk. */
+  /**
+   * Save every dirty tab (quit, project switch, export). Returns false when a
+   * write failed or a tab is still dirty afterwards (edited during the save).
+   */
   async saveAllDirty(): Promise<boolean> {
     let allSaved = true;
-    for (const tab of this.dirtyTabs) {
-      this.syncFromView(tab.id);
-      const fresh = this.findByPath(tab.filePath);
-      if (fresh?.isDirty) {
-        await commands.registerWriteIgnore(fresh.filePath);
-        const result = await commands.writeFile(fresh.filePath, fresh.content);
-        if (result.status === 'ok') {
-          await this.tryRenameAfterSave(fresh.filePath, fresh.content);
-          this.markSaved(fresh.id);
-        } else {
-          console.error('[tabs] saveAllDirty failed:', result.error);
-          allSaved = false;
-        }
+    for (const id of this.dirtyTabs.map(tab => tab.id)) {
+      const tab = this.findTab(id);
+      // Already written along with a same-file tab in another pane.
+      if (!tab?.isDirty) continue;
+      const name = tab.fileName;
+      const result = await this.saveTab(id);
+      if (result.status === 'error') {
+        reportSaveFailure(name, result.error);
+        allSaved = false;
       }
     }
-    return allSaved;
+    return allSaved && this.dirtyTabs.length === 0;
+  }
+
+  /**
+   * Ask about unsaved tabs before the app exits without the window's
+   * close-requested prompt (e.g. `relaunch()`). Resolves true when it is safe
+   * to go on: nothing dirty, everything saved, or the user chose Don't Save.
+   */
+  async promptUnsavedBeforeExit(): Promise<boolean> {
+    const dirty = this.dirtyTabs;
+    if (dirty.length === 0) return true;
+    const choice = await confirmUnsavedChanges({
+      fileNames: dirty.map(tab => tab.fileName).join(', '),
+      saveLabel: t('dialog.save'),
+    });
+    if (choice === 'cancel') return false;
+    return choice === 'discard' || this.saveAllDirty();
   }
 }
 

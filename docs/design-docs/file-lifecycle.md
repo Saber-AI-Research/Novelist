@@ -29,9 +29,10 @@ dirty-state flaps.
 - BLAKE3 hashing detects self-writes (app writes → watcher sees → would
   otherwise think external change → prompts conflict dialog on user's
   own save). The Rust write path hashes the exact encoded bytes staged for
-  atomic rename and registers that expected hash immediately before rename.
-  Only an observed event with the same hash is suppressed; a distinct external
-  write immediately after save is never hidden by a time-only ignore window.
+  atomic rename. The expected hash also records the saving window's label.
+  Only that owner's matching event is suppressed; other owners retain their
+  notification and polling cursor. Background writes with no owner notify every
+  owner. A distinct external write is never hidden by a time-only ignore window.
 
 ## External-edit auto-reload (watcher + polling fallback)
 
@@ -85,6 +86,16 @@ hidden — so a backgrounded Novelist catches up within ~1s of being refocused,
 which is exactly when the user is looking at it.
 - `register_rename_ignore(old, new)` is called *before* the rename so the
   watcher doesn't emit stale events for either path during the transition.
+  Entries expire after 5 s and are withdrawn (`clear_rename_ignore`) when the
+  rename fails, so they never swallow a later real event.
+- Notify commits the file's on-disk mtime together with its hash, and both
+  notify and the poll adopt the new mtime when the bytes are unchanged, so the
+  poll's stat gate keeps skipping saved or touched files. Hashing runs on
+  blocking threads, never on the async workers. `directory-changed` goes only
+  to the window whose watcher saw the event.
+- Closing a window releases its watcher, debounce task, poll cursors and
+  tracked aliases (`release_window_resources` in `lib.rs`); window labels are
+  never reused, so nothing else would free them.
 - `file-changed` handler in `app/lib/composables/app-events.svelte.ts`
   must tolerate paths without `/` (root-level files have no parent
   slash); guard parent-path calc accordingly.
@@ -97,19 +108,107 @@ suppression. The original disk bytes and encoding state remain unchanged;
 the save reports an error rather than silently replacing characters or
 converting to UTF-8.
 
+UTF-16LE and UTF-16BE saves explicitly encode UTF-16 code units with the original
+endianness and BOM, including surrogate pairs. `encoding_rs::Encoding::encode`
+is not used for these encodings because its UTF-16 output encoding is UTF-8.
+Normal and conditional saves resolve symlinks before choosing the write lock,
+encoding identity, sibling temporary file, and rename destination. Saving an
+alias therefore updates the real target without replacing the link.
+
+Template-created files stage bytes in an exclusively created sibling temporary
+file and publish without replacing an existing destination. A collision retries
+the numbered name; existing `.novelist-tmp` files and dangling symlinks are not
+overwritten. Project TOML is serialized through `ProjectConfig`, not interpolated
+from unescaped project names.
+
 ## WebDAV synchronization
 
-`services/sync.rs` tracks a common BLAKE3 content hash per file. Only successful
-transfers or byte-equality advance that baseline; conflicts and failed transfers
-leave it unchanged and appear in `SyncStatus.errors`. Legacy timestamp-only
-states remain readable: equal versions establish a common hash, while differing
-versions require explicit reconciliation instead of guessing from timestamps.
+`services/sync.rs` reconciles each file three ways against a common BLAKE3
+content hash, the baseline. Only successful transfers, propagated deletions or
+byte-equality advance it; conflicts and failed transfers leave it unchanged and
+appear in `SyncStatus.errors`.
 
-Recursive local/remote discovery uses the shared project-content allowlist.
-Directory capabilities reject local symlink traversal. Downloads compare local
-bytes again before atomic replacement; uploads use `If-None-Match: *` for new
-files or a strong ETag precondition for existing remote files. A server without
-a usable ETag cannot safely accept an automatic overwrite; the error is surfaced.
+| Local | Remote | Action |
+|---|---|---|
+| equals remote | equals local | nothing; the baseline becomes that content |
+| unchanged since baseline | changed | download |
+| changed | unchanged since baseline | upload with `If-Match` |
+| unchanged since baseline | deleted | keep a copy in app data, then delete locally |
+| deleted | unchanged since baseline | `DELETE` with `If-Match` |
+| new, or changed | absent or deleted | upload: an edit wins over a deletion |
+| absent or deleted | new, or changed | download: an edit wins over a deletion |
+| changed | changed differently | conflict; nothing is transferred |
+
+A rename, including an automatic managed-name rename, is a deletion of the old
+path plus a new file, so it reaches every device without leaving a stale copy
+under the old name. A locally deleted file is first copied to
+`<app data>/sync/<project-hash>/deleted/<run>/<path>`, and removed only while
+its bytes still equal the baseline. An iCloud Drive placeholder
+(`.<name>.icloud`) means the file was evicted, not deleted; it is reported and
+the remote copy stays. Empty directories are left in place. Upload and
+download counts in `SyncStatus` include propagated deletions.
+
+Baselines from completed transfers are saved even when the run stops later (a
+failed request, or an identity check), so a later edit is not turned into a
+permanent conflict; `last_sync` advances only after the closing identity check.
+Legacy timestamp-only states remain readable: equal versions establish a common
+hash, while differing versions require explicit reconciliation instead of
+guessing from timestamps.
+
+Listings request `getetag`. The strong ETag received with a baseline (from the
+GET or PUT response) is stored next to it; while a later listing still reports
+that ETag the remote bytes equal the baseline and the GET is skipped. Missing
+or weak ETags always fall back to a full download.
+
+Each project carries a versioned, random identity in
+`.novelist/sync-identity.json`. Keep this file when moving or copying the same
+logical project to another device. Independent projects with identical names
+use different `novelist-sync/<project-id>/` remote trees. The remote tree carries
+the same identity card and must pass identity validation before file transfers;
+a nonempty tree with a missing or mismatched card is not adopted. Credentials
+remain in the application data directory, outside the project identity card.
+Baselines are bound to the project ID, WebDAV URL, and account. The card is
+staged in a temporary file, fsynced, and published with a hard link (or, on
+filesystems without links, a rename while no card exists): a crash never leaves
+a partial card, and creation never replaces an existing one.
+
+Legacy `novelist/<project-name>/` trees have no trustworthy identity. If a
+nonempty legacy tree exists when initializing a new namespace, sync stops until
+the writer backs it up, reconciles its files into the intended local project,
+and explicitly checks the legacy migration acknowledgment in Settings → Sync.
+That first device then publishes a claim card,
+`novelist-sync/legacy-claims/<project-name>.json`, naming its project ID. The
+claim is created with `If-None-Match: *`, so exactly one device wins, and only
+then is its namespace seeded. Any other copy whose own identity was never
+published finds the claim — even if it also acknowledged, and even after the
+legacy tree was cleaned up — and stops with `SyncStatus.adoptable_project_id`
+instead of starting a second namespace that would silently split the devices.
+Settings → Sync then offers "Join existing sync namespace"
+(`adopt_sync_identity`). It verifies that the local identity owns no remote
+data, that the claim still names the offered ID and that the namespace's own
+card matches, then atomically replaces the local card. The next sync starts with
+fresh baselines: identical files are adopted, one-sided files transfer, and
+files that differ are reported as conflicts. A different project that only
+shares the folder name is renamed instead. Sync never imports, overwrites, or
+deletes the legacy remote tree, and a device carrying an already established
+identity never needs to acknowledge it again. A deliberately independent fork
+must use a fresh project identity rather than copy the original identity card.
+
+The settings form shows a stored password as `****`. `save_sync_config` and
+`test_sync_connection` substitute the stored password only while the WebDAV URL
+and username are unchanged; after either changes, the password is cleared
+rather than sent to the new host. Config files are read and written on
+blocking threads.
+
+Recursive local/remote discovery uses the shared project-content allowlist,
+applied before any name check: non-content files such as macOS `Icon\r` are
+ignored, and a content file whose name cannot be represented remotely
+(non-UTF-8, control characters) is skipped and reported without stopping the
+rest of the sync. Directory capabilities reject local symlink traversal.
+Downloads compare local bytes again before atomic replacement; uploads use
+`If-None-Match: *` for new files or a strong ETag precondition for existing
+remote files. A server without a usable ETag cannot safely accept an automatic
+overwrite or deletion; the error is surfaced.
 
 All WebDAV operations construct URLs by encoding logical path segments once.
 CJK and literal `#`, `?`, `%` filenames retain distinct identities. DAV hrefs
@@ -120,8 +219,12 @@ Snapshot mirroring removes any stale completion marker before retrying content.
 Every directory and file transfer must succeed and match local metadata counts
 before the final `metadata.json` PUT. Failed uploads remain visibly incomplete.
 Requests, including response bodies, have a 30-second deadline; a snapshot upload
-has a 300-second overall limit so stalled optional mirroring cannot retain the
-project snapshot lock indefinitely.
+has a 300-second overall limit. Mirroring runs after the snapshot lock is
+released, under a per-project mirror lock taken before it: listing and
+restoring never wait for WebDAV, while uploads and remote deletions stay in
+order. A retired snapshot's remote copy is deleted only after its replacement
+uploaded completely. An unreadable snapshot folder is logged and skipped, and a
+failed local retirement is logged, so neither blocks listing or creation.
 
 ## Save flow auto-rename
 

@@ -289,7 +289,9 @@ External edit (vim/AI)                                          |
 
 The following viewport architecture is a proposal and is not wired into
 `Editor.svelte`. Current production behavior is the read-only full-document tier
-described above.
+described above. The unwired prototype (`rope_document.rs` IPC and
+`app/lib/editor/viewport.ts`) was removed in v0.6.1; an implementation would
+start again from this design, including a rope crate dependency.
 
 ```
 Rust Backend (source of truth)              Frontend (viewport only)
@@ -326,14 +328,6 @@ Rust Backend (source of truth)              Frontend (viewport only)
 
 Future target: if viewport mode is wired, the JS heap should stay constant
 (~35 MB) regardless of file size because only a window is loaded.
-
-#### Rust dependency for large files
-
-```toml
-ropey = "1"  # Rope data structure for large text, O(log n) access/edit
-```
-
-> **Why ropey**: Unlike `String`, a rope doesn't require contiguous memory. A 50 MB file in a `String` needs a single 50 MB allocation; in a rope, it's distributed across small chunks. This prevents OOM and reduces GC pressure on the allocator. Edits are also O(log n) vs O(n) for `String`.
 
 ## 6. Plugin System
 
@@ -753,7 +747,6 @@ core/
 |   |   +-- mod.rs
 |   |   +-- file_watcher.rs          # File system watcher (notify crate)
 |   |   +-- conflict.rs              # External edit conflict detection & resolution
-|   |   +-- rope_document.rs        # ropey::Rope wrapper for large file viewport mode
 |   |   +-- pandoc.rs               # Pandoc CLI detection, invocation, output streaming
 |   |   +-- plugin_host/
 |   |       +-- mod.rs
@@ -784,7 +777,6 @@ tokio = { version = "1", features = ["full"] }
 rquickjs = { version = "0.8", features = ["bindgen"] }  # Plugin sandbox
 notify = "7"                         # File system watcher
 blake3 = "1"                         # Fast file content hashing (conflict detection)
-ropey = "1"                          # Rope data structure for large file viewport mode
 thiserror = "2"                      # Error handling
 tracing = "0.1"                      # Structured logging
 ```

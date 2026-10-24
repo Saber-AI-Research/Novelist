@@ -1,5 +1,6 @@
 <script lang="ts">
   import { NodeResizer, NodeToolbar, Position } from '@xyflow/svelte';
+  import { isImeComposing } from '$lib/utils/ime';
 
   interface Props {
     data: {
@@ -36,9 +37,10 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (isImeComposing(e)) return;
     if (e.key === 'Enter') { e.preventDefault(); finishEdit(); }
     if (e.key === 'Escape') { editing = false; }
-    e.stopPropagation();
   }
 
   function stopMouse(e: MouseEvent) { e.stopPropagation(); }

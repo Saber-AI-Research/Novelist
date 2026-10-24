@@ -1,13 +1,27 @@
-import { Transformer } from 'markmap-lib';
 import { Markmap } from 'markmap-view';
+import { connectToHost } from '../../host-channel';
+import { createMindmapTransformer } from './transformer';
+
+const host = connectToHost((data) => {
+  if (data.type === 'content-update' && typeof data.content === 'string') {
+    scheduleUpdate(data.content);
+  } else if (data.type === 'theme-update' && data.theme && typeof data.theme === 'object') {
+    const root = document.documentElement;
+    for (const [key, value] of Object.entries(data.theme as Record<string, string>)) {
+      // Map --novelist-* to local CSS vars
+      const localKey = key.replace('--novelist-', '--');
+      root.style.setProperty(localKey, value);
+    }
+  }
+});
 
 const svgEl = document.getElementById('mindmap-svg') as unknown as SVGSVGElement;
 const fitBtn = document.getElementById('fit-btn')!;
 
-const transformer = new Transformer();
+const transformer = createMindmapTransformer();
 let mm: Markmap | null = null;
 let lastContent = '';
-let updateTimer: ReturnType<typeof setTimeout> | null = null;
+let updateTimer: number | undefined;
 
 function updateMindmap(content: string) {
   if (content === lastContent && mm) return;
@@ -21,8 +35,8 @@ function updateMindmap(content: string) {
 }
 
 function scheduleUpdate(content: string) {
-  if (updateTimer) clearTimeout(updateTimer);
-  updateTimer = setTimeout(() => updateMindmap(content), 300);
+  window.clearTimeout(updateTimer);
+  updateTimer = window.setTimeout(() => updateMindmap(content), 300);
 }
 
 // Initialize markmap
@@ -35,22 +49,4 @@ mm = Markmap.create(svgEl, {
 
 fitBtn.addEventListener('click', () => mm?.fit());
 
-// Listen for messages from host
-window.addEventListener('message', (event) => {
-  const data = event.data;
-  if (!data || typeof data !== 'object') return;
-
-  if (data.type === 'content-update' && typeof data.content === 'string') {
-    scheduleUpdate(data.content);
-  } else if (data.type === 'theme-update' && data.theme) {
-    const root = document.documentElement;
-    for (const [key, value] of Object.entries(data.theme as Record<string, string>)) {
-      // Map --novelist-* to local CSS vars
-      const localKey = key.replace('--novelist-', '--');
-      root.style.setProperty(localKey, value);
-    }
-  }
-});
-
-// Notify host we're ready
-window.parent.postMessage({ type: 'plugin-ready' }, '*');
+host.post({ type: 'plugin-ready' });

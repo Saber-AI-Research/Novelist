@@ -9,7 +9,8 @@ use crate::services::rename_migration::{
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -35,28 +36,49 @@ impl EncodingState {
 static TEXT_WRITE_LOCKS: Lazy<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn text_write_lock_key(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
+fn resolve_text_write_target(path: &Path) -> Result<PathBuf, AppError> {
+    let mut target = path.to_path_buf();
+    for _ in 0..40 {
+        if let Ok(canonical) = target.canonicalize() {
+            return Ok(canonical);
+        }
 
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    match (parent.canonicalize(), path.file_name()) {
-        (Ok(canonical_parent), Some(file_name)) => canonical_parent.join(file_name),
-        _ => path.to_path_buf(),
+        // A deleted target still leaves a symlink at the selected path. Follow
+        // it before applying new-file behavior rather than replacing the link.
+        if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_symlink()) {
+            let linked = std::fs::read_link(&target)?;
+            target = if linked.is_absolute() {
+                linked
+            } else {
+                target
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(linked)
+            };
+            continue;
+        }
+
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return Ok(match (parent.canonicalize(), target.file_name()) {
+            (Ok(canonical_parent), Some(file_name)) => canonical_parent.join(file_name),
+            _ => target,
+        });
     }
+    Err(AppError::InvalidInput(format!(
+        "Symbolic link target cannot be resolved: {}",
+        path.display()
+    )))
 }
 
-fn text_write_lock(path: &Path) -> Result<Arc<AsyncMutex<()>>, AppError> {
-    let key = text_write_lock_key(path);
+fn text_write_lock_for_target(target: &Path) -> Result<Arc<AsyncMutex<()>>, AppError> {
     let mut locks = TEXT_WRITE_LOCKS
         .lock()
         .map_err(|e| AppError::Custom(format!("Lock poisoned: {e}")))?;
     Ok(locks
-        .entry(key)
+        .entry(target.to_path_buf())
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone())
 }
@@ -149,6 +171,19 @@ pub(crate) fn decode_bytes(bytes: &[u8]) -> (Option<&'static str>, String) {
 fn encode_string(content: &str, encoding_name: &str) -> Result<Vec<u8>, AppError> {
     let encoding = encoding_rs::Encoding::for_label(encoding_name.as_bytes())
         .ok_or_else(|| AppError::Custom(format!("Unknown encoding: {}", encoding_name)))?;
+    // encoding_rs intentionally encodes UTF-16 labels as UTF-8. Preserve the
+    // BOM-detected byte order explicitly, including surrogate pairs.
+    if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE {
+        let mut bytes = Vec::with_capacity(2 + content.len() * 2);
+        if encoding == encoding_rs::UTF_16LE {
+            bytes.extend_from_slice(&[0xFF, 0xFE]);
+            bytes.extend(content.encode_utf16().flat_map(u16::to_le_bytes));
+        } else {
+            bytes.extend_from_slice(&[0xFE, 0xFF]);
+            bytes.extend(content.encode_utf16().flat_map(u16::to_be_bytes));
+        }
+        return Ok(bytes);
+    }
     let (encoded, _, had_errors) = encoding.encode(content);
     if had_errors {
         return Err(AppError::InvalidInput(format!(
@@ -167,7 +202,7 @@ fn validate_path(path: &str) -> Result<PathBuf, AppError> {
 
     // Block path traversal via ".." components
     for component in p.components() {
-        if let std::path::Component::ParentDir = component {
+        if let Component::ParentDir = component {
             return Err(AppError::PathNotAllowed(format!(
                 "Path traversal not allowed: {}",
                 path
@@ -175,24 +210,80 @@ fn validate_path(path: &str) -> Result<PathBuf, AppError> {
         }
     }
 
-    #[cfg(unix)]
-    {
-        let blocked = ["/etc", "/System", "/usr", "/bin", "/sbin"];
-        if p.is_absolute() && blocked.iter().any(|b| p.starts_with(b)) {
-            return Err(AppError::PathNotAllowed(path.to_string()));
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let lower = path.to_lowercase();
-        let blocked = ["\\windows", "\\system32", "\\program files"];
-        if blocked.iter().any(|b| lower.contains(b)) {
-            return Err(AppError::PathNotAllowed(path.to_string()));
-        }
+    // Check both the literal path and its symlink-resolved form, so neither a
+    // relative path, a differently-cased spelling nor a symlink reaches a
+    // system directory.
+    if (p.is_absolute() && is_system_path(&p)) || is_system_path(&resolve_for_policy(&p)) {
+        return Err(AppError::PathNotAllowed(path.to_string()));
     }
 
     Ok(p)
+}
+
+/// Absolute, symlink-resolved form of `path`. Missing trailing components are
+/// appended to the deepest existing ancestor's canonical path.
+fn resolve_for_policy(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut resolved) = existing.canonicalize() {
+            resolved.extend(missing.iter().rev());
+            return resolved;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return absolute,
+        }
+    }
+}
+
+/// Case-insensitive: macOS and Windows volumes ignore case by default.
+#[cfg(unix)]
+fn is_system_path(path: &Path) -> bool {
+    const BLOCKED: [&str; 6] = ["/etc", "/private/etc", "/System", "/usr", "/bin", "/sbin"];
+    BLOCKED.iter().any(|blocked| {
+        let mut components = path.components();
+        Path::new(blocked).components().all(|expected| {
+            components.next().is_some_and(|actual| {
+                actual
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+            })
+        })
+    })
+}
+
+/// The first directory below a drive or share root: `C:\Windows`,
+/// `C:\Program Files`, `C:\Program Files (x86)` (any case, verbatim or not).
+#[cfg(windows)]
+fn is_system_path(path: &Path) -> bool {
+    let first = path
+        .components()
+        .find(|component| !matches!(component, Component::Prefix(_) | Component::RootDir));
+    let Some(Component::Normal(first)) = first else {
+        return false;
+    };
+    let first = first.to_string_lossy();
+    ["windows", "program files", "program files (x86)"]
+        .iter()
+        .any(|blocked| first.eq_ignore_ascii_case(blocked))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_system_path(_path: &Path) -> bool {
+    false
 }
 
 fn sanitize_filename(name: &str) -> Result<String, AppError> {
@@ -280,28 +371,53 @@ pub(crate) fn decode_file_bytes(
     bytes: &[u8],
     enc_state: &EncodingState,
 ) -> Result<String, AppError> {
-    let (detected_encoding, content) = decode_bytes(bytes);
+    let (content, encoding) = decode_file_bytes_detached(path, bytes);
+    encoding.store(enc_state)?;
+    Ok(content)
+}
 
-    // Store or clear encoding for this path
+/// The encoding detected for one file, to be stored in [`EncodingState`] once
+/// the caller is back on a thread that can borrow the managed state.
+pub(crate) struct FileEncodingRecord {
+    canonical: String,
+    encoding: Option<&'static str>,
+}
+
+impl FileEncodingRecord {
+    pub(crate) fn store(self, enc_state: &EncodingState) -> Result<(), AppError> {
+        let mut map = enc_state
+            .encodings
+            .lock()
+            .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))?;
+        if let Some(enc) = self.encoding {
+            tracing::info!("Stored encoding {} for {}", enc, self.canonical);
+            map.insert(self.canonical, enc);
+        } else {
+            map.remove(&self.canonical);
+        }
+        Ok(())
+    }
+}
+
+/// Decode without touching shared state, so large inputs can be decoded on a
+/// blocking thread. Store the returned record to remember the encoding.
+pub(crate) fn decode_file_bytes_detached(
+    path: &Path,
+    bytes: &[u8],
+) -> (String, FileEncodingRecord) {
+    let (encoding, content) = decode_bytes(bytes);
     let canonical = path
         .canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .to_string();
-    {
-        let mut map = enc_state
-            .encodings
-            .lock()
-            .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))?;
-        if let Some(enc) = detected_encoding {
-            tracing::info!("Stored encoding {} for {}", enc, canonical);
-            map.insert(canonical, enc);
-        } else {
-            map.remove(&canonical);
-        }
-    }
-
-    Ok(content)
+    (
+        content,
+        FileEncodingRecord {
+            canonical,
+            encoding,
+        },
+    )
 }
 
 #[tauri::command]
@@ -331,6 +447,7 @@ async fn write_file_locked(
     content: &str,
     enc_state: &EncodingState,
     file_watcher_state: Option<&crate::services::file_watcher::FileWatcherState>,
+    write_owner: Option<&str>,
 ) -> Result<(), AppError> {
     tracing::info!(
         "[write_file] path={}, content_bytes={}, content_lines={}",
@@ -342,18 +459,15 @@ async fn write_file_locked(
     // Preserve the explicit missing-parent error used by the public writer.
     ensure_text_write_parent_exists(p)?;
 
-    // Check if this file was originally read in a non-UTF-8 encoding
-    let canonical = p
-        .canonicalize()
-        .unwrap_or_else(|_| p.to_path_buf())
-        .to_string_lossy()
-        .to_string();
+    // The caller resolves the target before locking, so encoding lookup, temp
+    // staging, rename and watcher suppression all use the same file identity.
+    let canonical = p.to_string_lossy();
     let encoding_name = {
         let map = enc_state
             .encodings
             .lock()
             .map_err(|e| AppError::Custom(format!("Lock poisoned: {}", e)))?;
-        map.get(&canonical).copied()
+        map.get(canonical.as_ref()).copied()
     };
 
     let bytes: Vec<u8> = if let Some(enc) = encoding_name {
@@ -363,32 +477,96 @@ async fn write_file_locked(
         content.as_bytes().to_vec()
     };
 
-    let temp_path = format!("{}.novelist-tmp", p.display());
-    tokio::fs::write(&temp_path, &bytes)
+    let expected_hash = blake3::hash(&bytes);
+    let target = p.to_path_buf();
+    let temp_path = tokio::task::spawn_blocking(move || stage_sibling_temp(&target, &bytes))
         .await
-        .map_err(|e| AppError::Custom(format!("write {}: {}", temp_path, e)))?;
+        .map_err(|e| AppError::Custom(format!("write task failed: {e}")))??;
     if let Some(watcher_state) = file_watcher_state {
-        crate::services::file_watcher::register_expected_write_inner(
+        if let Err(error) = crate::services::file_watcher::register_expected_write_inner(
             &p.to_string_lossy(),
-            blake3::hash(&bytes),
+            expected_hash,
             watcher_state,
-        )?;
+            write_owner,
+        ) {
+            discard_staged_temp(&temp_path).await;
+            return Err(error);
+        }
     }
-    if let Err(error) = tokio::fs::rename(&temp_path, &p).await {
+    if let Err(error) = tokio::fs::rename(&temp_path, p).await {
         if let Some(watcher_state) = file_watcher_state {
             let _ = crate::services::file_watcher::clear_expected_write_inner(
                 &p.to_string_lossy(),
                 watcher_state,
             );
         }
+        discard_staged_temp(&temp_path).await;
         return Err(AppError::Custom(format!(
             "rename {} -> {}: {}",
-            temp_path,
+            temp_path.display(),
             p.display(),
             error
         )));
     }
     Ok(())
+}
+
+static STAGED_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Durably stage `bytes` in a new, exclusively created file next to `target`
+/// so the final rename replaces it atomically. The `.novelist-tmp` suffix
+/// keeps the file watcher quiet; the name is independent of the target's
+/// length. A failed write removes the staged file.
+fn stage_sibling_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf, AppError> {
+    use std::io::Write;
+
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..32 {
+        let seq = STAGED_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(
+            ".novelist-write-{}-{seq}.novelist-tmp",
+            std::process::id()
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(AppError::Custom(format!(
+                    "write {}: {error}",
+                    temp.display()
+                )))
+            }
+        };
+        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        drop(file);
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(AppError::Custom(format!(
+                "write {}: {error}",
+                temp.display()
+            )));
+        }
+        return Ok(temp);
+    }
+    Err(AppError::Custom(format!(
+        "cannot allocate a temporary file next to {}",
+        target.display()
+    )))
+}
+
+async fn discard_staged_temp(temp: &Path) {
+    if let Err(error) = tokio::fs::remove_file(temp).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(path = %temp.display(), %error, "staged write cleanup failed");
+        }
+    }
 }
 
 /// Internal: write a file, re-encoding to original encoding if needed.
@@ -398,10 +576,10 @@ pub(crate) async fn write_file_inner(
     content: &str,
     enc_state: &EncodingState,
 ) -> Result<(), AppError> {
-    let p = validate_path(path)?;
-    let mutex = text_write_lock(&p)?;
+    let p = resolve_text_write_target(&validate_path(path)?)?;
+    let mutex = text_write_lock_for_target(&p)?;
     let _guard = mutex.lock().await;
-    write_file_locked(&p, content, enc_state, None).await
+    write_file_locked(&p, content, enc_state, None, None).await
 }
 
 pub(crate) async fn write_file_with_watcher_inner(
@@ -409,11 +587,21 @@ pub(crate) async fn write_file_with_watcher_inner(
     content: &str,
     enc_state: &EncodingState,
     file_watcher_state: &crate::services::file_watcher::FileWatcherState,
+    write_owner: Option<&str>,
 ) -> Result<(), AppError> {
-    let p = validate_path(path)?;
-    let mutex = text_write_lock(&p)?;
+    // Pin the resolved destination before locking; renaming onto an alias
+    // itself would replace its symlink instead of updating the actual file.
+    let p = resolve_text_write_target(&validate_path(path)?)?;
+    let mutex = text_write_lock_for_target(&p)?;
     let _guard = mutex.lock().await;
-    write_file_locked(&p, content, enc_state, Some(file_watcher_state)).await
+    write_file_locked(
+        &p,
+        content,
+        enc_state,
+        Some(file_watcher_state),
+        write_owner,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -421,10 +609,18 @@ pub(crate) async fn write_file_with_watcher_inner(
 pub async fn write_file(
     path: String,
     content: String,
+    window: tauri::WebviewWindow,
     encoding_state: tauri::State<'_, EncodingState>,
     file_watcher_state: tauri::State<'_, crate::services::file_watcher::FileWatcherState>,
 ) -> Result<(), AppError> {
-    write_file_with_watcher_inner(&path, &content, &encoding_state, &file_watcher_state).await
+    write_file_with_watcher_inner(
+        &path,
+        &content,
+        &encoding_state,
+        &file_watcher_state,
+        Some(window.label()),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, Serialize, specta::Type, PartialEq, Eq)]
@@ -445,7 +641,7 @@ fn resolve_project_scoped_text_target(project_dir: &str, path: &str) -> Result<P
         ));
     }
 
-    let requested = validate_path(path)?;
+    let requested = resolve_text_write_target(&validate_path(path)?)?;
     let effective_target = if requested.exists() {
         requested.canonicalize().map_err(|_| {
             AppError::InvalidInput("Conditional write target cannot be resolved".into())
@@ -489,10 +685,11 @@ pub(crate) async fn write_file_if_unchanged_inner(
     content: &str,
     enc_state: &EncodingState,
     file_watcher_state: &crate::services::file_watcher::FileWatcherState,
+    write_owner: Option<&str>,
 ) -> Result<WriteFileIfUnchangedResult, AppError> {
     let p = resolve_project_scoped_text_target(project_dir, path)?;
     let effective_path = p.to_string_lossy().to_string();
-    let mutex = text_write_lock(&p)?;
+    let mutex = text_write_lock_for_target(&p)?;
     let _guard = mutex.lock().await;
     ensure_text_write_parent_exists(&p)?;
 
@@ -505,7 +702,14 @@ pub(crate) async fn write_file_if_unchanged_inner(
         return Ok(WriteFileIfUnchangedResult::Conflict);
     }
 
-    write_file_locked(&p, content, enc_state, Some(file_watcher_state)).await?;
+    write_file_locked(
+        &p,
+        content,
+        enc_state,
+        Some(file_watcher_state),
+        write_owner,
+    )
+    .await?;
     Ok(WriteFileIfUnchangedResult::Written)
 }
 
@@ -516,6 +720,7 @@ pub async fn write_file_if_unchanged(
     path: String,
     expected_content: Option<String>,
     content: String,
+    window: tauri::WebviewWindow,
     encoding_state: tauri::State<'_, EncodingState>,
     file_watcher_state: tauri::State<'_, crate::services::file_watcher::FileWatcherState>,
 ) -> Result<WriteFileIfUnchangedResult, AppError> {
@@ -526,6 +731,7 @@ pub async fn write_file_if_unchanged(
         &content,
         &encoding_state,
         &file_watcher_state,
+        Some(window.label()),
     )
     .await
 }
@@ -643,9 +849,7 @@ pub async fn create_file(parent_dir: String, filename: String) -> Result<String,
 #[tauri::command]
 #[specta::specta]
 pub async fn create_scratch_file() -> Result<String, AppError> {
-    let cache_dir = dirs::cache_dir()
-        .ok_or_else(|| AppError::Custom("Cannot determine cache directory".into()))?
-        .join("novelist");
+    let cache_dir = scratch_cache_dir()?;
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     let ts = std::time::SystemTime::now()
@@ -657,6 +861,62 @@ pub async fn create_scratch_file() -> Result<String, AppError> {
 
     tokio::fs::write(&file_path, "").await?;
     Ok(file_path.to_string_lossy().to_string())
+}
+
+fn scratch_cache_dir() -> Result<PathBuf, AppError> {
+    Ok(dirs::cache_dir()
+        .ok_or_else(|| AppError::Custom("Cannot determine cache directory".into()))?
+        .join("novelist"))
+}
+
+fn is_scratch_file_name(name: &str) -> bool {
+    name.strip_prefix("novelist_scratch_")
+        .and_then(|rest| rest.strip_suffix(".md"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Delete a scratch file made by [`create_scratch_file`] (after Save As).
+/// Only `novelist_scratch_<millis>.md` regular files directly inside the
+/// scratch cache directory can be removed.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_scratch_file(path: String) -> Result<(), AppError> {
+    delete_scratch_file_in(&scratch_cache_dir()?, &path).await
+}
+
+async fn delete_scratch_file_in(scratch_dir: &Path, path: &str) -> Result<(), AppError> {
+    let p = validate_path(path)?;
+    let name = p
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| is_scratch_file_name(name))
+        .ok_or_else(|| AppError::PathNotAllowed(format!("Not a scratch file: {path}")))?;
+    let parent = p
+        .parent()
+        .ok_or_else(|| AppError::PathNotAllowed(format!("Not a scratch file: {path}")))?;
+    let (Ok(parent), Ok(scratch_dir)) = (parent.canonicalize(), scratch_dir.canonicalize()) else {
+        return Err(AppError::FileNotFound(path.to_string()));
+    };
+    if parent != scratch_dir {
+        return Err(AppError::PathNotAllowed(format!(
+            "Not a scratch file: {path}"
+        )));
+    }
+    let target = parent.join(name);
+    match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(AppError::PathNotAllowed(format!(
+                "Not a scratch file: {path}"
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::FileNotFound(path.to_string()))
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    }
+    tokio::fs::remove_file(&target).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -869,6 +1129,14 @@ pub(crate) async fn rename_item_inner(
         return Err(AppError::FileNotFound(old_path));
     }
 
+    let case_alias =
+        new_path != old && new_path.exists() && is_same_directory_entry(&old, &new_path);
+    if case_alias {
+        // Case/normalization-only rename on an insensitive volume. Sidecars on
+        // the same volume already resolve under the new spelling, and the
+        // write-then-remove migration would delete the alias it just wrote.
+        return rename_case_alias(&old, &new_path, encoding_state).await;
+    }
     if new_path.exists() && new_path != old {
         if allow_collision_bump.unwrap_or(false) {
             let p = std::path::Path::new(&safe_name);
@@ -908,14 +1176,18 @@ pub(crate) async fn rename_item_inner(
         .map(|p| p.to_string_lossy().to_string());
     // Suppress the imminent file-watcher events for the old and new paths so
     // the frontend doesn't reload the file (which would lose editor state).
-    crate::services::file_watcher::register_rename_ignore(
+    let (old_key, new_key) = (
         old.to_string_lossy().to_string(),
         new_path.to_string_lossy().to_string(),
-    )
-    .await;
+    );
+    crate::services::file_watcher::register_rename_ignore(old_key.clone(), new_key.clone()).await;
     record_rename_step("watcher-ignore");
     record_rename_step("filesystem-rename");
-    tokio::fs::rename(&old, &new_path).await?;
+    if let Err(error) = tokio::fs::rename(&old, &new_path).await {
+        crate::services::file_watcher::clear_rename_ignore(&old_key, &new_key).await;
+        let _ = remove_rename_journal(&journal.path).await;
+        return Err(error.into());
+    }
     record_rename_step("metadata-migration");
     let mut migration = migrate_rename_sidecars_guarded(&project_dir, &mappings, false).await;
     if matches!(migration.status, RenameMigrationStatus::FullSuccess) {
@@ -939,6 +1211,35 @@ pub(crate) async fn rename_item_inner(
     Ok(RenameItemResult {
         new_path: new_path.to_string_lossy().to_string(),
         migration,
+    })
+}
+
+async fn rename_case_alias(
+    old: &Path,
+    new_path: &Path,
+    encoding_state: &EncodingState,
+) -> Result<RenameItemResult, AppError> {
+    let old_canon = old.canonicalize().ok();
+    let (old_key, new_key) = (
+        old.to_string_lossy().to_string(),
+        new_path.to_string_lossy().to_string(),
+    );
+    crate::services::file_watcher::register_rename_ignore(old_key.clone(), new_key.clone()).await;
+    if let Err(error) = tokio::fs::rename(old, new_path).await {
+        crate::services::file_watcher::clear_rename_ignore(&old_key, &new_key).await;
+        return Err(error.into());
+    }
+    if let (Some(o), Ok(n)) = (old_canon, new_path.canonicalize()) {
+        migrate_encoding_state_tree(encoding_state, &o, &n);
+    }
+    Ok(RenameItemResult {
+        new_path: new_key,
+        migration: RenameMigrationResult {
+            status: RenameMigrationStatus::FullSuccess,
+            migrated: 0,
+            conflicts: 0,
+            errors: Vec::new(),
+        },
     })
 }
 
@@ -1104,12 +1405,17 @@ pub(crate) async fn move_item_inner(
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    crate::services::file_watcher::register_rename_ignore(
+    let (source_key, dest_key) = (
         source.to_string_lossy().to_string(),
         dest.to_string_lossy().to_string(),
-    )
-    .await;
-    tokio::fs::rename(&source, &dest).await?;
+    );
+    crate::services::file_watcher::register_rename_ignore(source_key.clone(), dest_key.clone())
+        .await;
+    if let Err(error) = tokio::fs::rename(&source, &dest).await {
+        crate::services::file_watcher::clear_rename_ignore(&source_key, &dest_key).await;
+        let _ = remove_rename_journal(&journal.path).await;
+        return Err(error.into());
+    }
     let mut migration = migrate_rename_sidecars_guarded(&project_dir, &mappings, false).await;
     if matches!(migration.status, RenameMigrationStatus::FullSuccess) {
         if let Err(err) = remove_rename_journal(&journal.path).await {
@@ -1134,22 +1440,79 @@ pub(crate) async fn move_item_inner(
     })
 }
 
+/// Delete a file or folder inside `project_dir`. The entry is resolved
+/// through its canonical parent, so a symlink is removed itself (never its
+/// target), and neither the project root nor anything outside it can go.
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_item(path: String) -> Result<(), AppError> {
+pub async fn delete_item(project_dir: String, path: String) -> Result<(), AppError> {
+    let project = validate_project_dir(&project_dir)?;
+    let canonical_project = project.canonicalize()?;
     let p = validate_path(&path)?;
-    if !p.exists() {
-        return Err(AppError::FileNotFound(path));
-    }
-    if p.is_symlink() {
-        // Remove the symlink itself, not its target
-        tokio::fs::remove_file(&p).await?;
-    } else if p.is_dir() {
-        tokio::fs::remove_dir_all(&p).await?;
+    let normalized: PathBuf = p.components().collect();
+    let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name()) else {
+        return Err(AppError::PathNotAllowed(format!("Cannot delete {path}")));
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
     } else {
-        tokio::fs::remove_file(&p).await?;
+        parent
+    };
+    let canonical_parent = match parent.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::FileNotFound(path))
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    if !canonical_parent.starts_with(&canonical_project) {
+        return Err(AppError::PathNotAllowed(format!(
+            "delete path outside project: project={project_dir} path={path}"
+        )));
+    }
+    let target = canonical_parent.join(name);
+    let metadata = match tokio::fs::symlink_metadata(&target).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::FileNotFound(path))
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if metadata.file_type().is_symlink_dir() {
+            tokio::fs::remove_dir(&target).await?;
+            return Ok(());
+        }
+    }
+    if metadata.is_dir() {
+        tokio::fs::remove_dir_all(&target).await?;
+    } else {
+        tokio::fs::remove_file(&target).await?;
     }
     Ok(())
+}
+
+/// True when `a` and `b` are two spellings of one directory entry, as on a
+/// case- or normalization-insensitive volume (`chapter.md` / `Chapter.md`).
+/// Hard links are distinct entries for one file and do not count.
+fn is_same_directory_entry(a: &Path, b: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev()
+            && left.ino() == right.ino()
+            && (left.is_dir() || left.nlink() == 1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right);
+        matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    }
 }
 
 /// Reveal a file or folder in the platform's file manager (Finder on macOS).
@@ -1331,14 +1694,19 @@ pub async fn write_binary_file(path: String, base64_data: String) -> Result<(), 
         }
     }
 
-    // Atomic write: temp file then rename
-    let temp_path = format!("{}.novelist-tmp", p.display());
-    tokio::fs::write(&temp_path, &bytes)
+    let target = p.clone();
+    let temp_path = tokio::task::spawn_blocking(move || stage_sibling_temp(&target, &bytes))
         .await
-        .map_err(|e| AppError::Custom(format!("write {}: {}", temp_path, e)))?;
-    tokio::fs::rename(&temp_path, &p)
-        .await
-        .map_err(|e| AppError::Custom(format!("rename {} -> {}: {}", temp_path, p.display(), e)))?;
+        .map_err(|e| AppError::Custom(format!("write task failed: {e}")))??;
+    if let Err(error) = tokio::fs::rename(&temp_path, &p).await {
+        discard_staged_temp(&temp_path).await;
+        return Err(AppError::Custom(format!(
+            "rename {} -> {}: {}",
+            temp_path.display(),
+            p.display(),
+            error
+        )));
+    }
     Ok(())
 }
 
@@ -1361,6 +1729,21 @@ mod tests {
     fn write_with_parent(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    /// Fails if any staged `*.novelist-tmp` file remains next to `near`.
+    fn assert_no_staged_temp(near: &Path) {
+        let Some(dir) = near.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let temps: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".novelist-tmp"))
+            .collect();
+        assert!(temps.is_empty(), "staged temp files left behind: {temps:?}");
     }
 
     #[tokio::test]
@@ -1389,8 +1772,7 @@ mod tests {
             .unwrap();
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "# New Content");
-        let temp_path = format!("{}.novelist-tmp", file_path.to_string_lossy());
-        assert!(!std::path::Path::new(&temp_path).exists());
+        assert_no_staged_temp(&file_path);
     }
 
     #[tokio::test]
@@ -2641,33 +3023,297 @@ mod tests {
         assert_eq!(fs::read_to_string(&new_path).unwrap(), "src");
     }
 
+    async fn delete_in(project: &Path, target: &Path) -> Result<(), AppError> {
+        delete_item(
+            project.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn test_delete_file() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("delete_me.md");
         fs::write(&file, "content").unwrap();
-        delete_item(file.to_string_lossy().to_string())
-            .await
-            .unwrap();
+        delete_in(dir.path(), &file).await.unwrap();
         assert!(!file.exists());
     }
 
     #[tokio::test]
     async fn test_delete_directory() {
         let dir = TempDir::new().unwrap();
-        let sub = dir.path().join("subdir");
+        let sub = dir.path().join("第一卷");
         fs::create_dir(&sub).unwrap();
-        fs::write(sub.join("file.md"), "").unwrap();
-        delete_item(sub.to_string_lossy().to_string())
-            .await
-            .unwrap();
+        fs::write(sub.join("第一章.md"), "").unwrap();
+        delete_in(dir.path(), &sub).await.unwrap();
         assert!(!sub.exists());
     }
 
     #[tokio::test]
     async fn test_delete_item_not_found() {
-        let result = delete_item("/nonexistent.md".to_string()).await;
+        let dir = TempDir::new().unwrap();
+        let result = delete_in(dir.path(), &dir.path().join("missing.md")).await;
+        assert!(
+            matches!(result, Err(AppError::FileNotFound(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_paths_outside_the_project_and_the_root_itself() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("notes.md");
+        fs::write(&victim, "keep").unwrap();
+
+        let error = delete_in(&project, &victim).await.unwrap_err();
+        assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+
+        let error = delete_in(&project, &outside).await.unwrap_err();
+        assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+        assert!(outside.is_dir());
+
+        let mut with_slash = project.to_string_lossy().to_string();
+        with_slash.push('/');
+        let error = delete_item(project.to_string_lossy().to_string(), with_slash)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+        assert!(project.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_never_follows_symlinks_out_of_the_project() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("chapter.md"), "external").unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("linked-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.join("chapter.md"), project.join("link.md")).unwrap();
+
+        // A child reached through a symlinked folder lies outside the project.
+        let error = delete_in(&project, &project.join("linked-dir/chapter.md"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+        assert!(outside.join("chapter.md").exists());
+
+        // Deleting the symlink entries removes only the links.
+        delete_in(&project, &project.join("linked-dir"))
+            .await
+            .unwrap();
+        delete_in(&project, &project.join("link.md")).await.unwrap();
+        assert!(!project.join("linked-dir").exists());
+        assert!(fs::symlink_metadata(project.join("link.md")).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("chapter.md")).unwrap(),
+            "external"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_scratch_file_only_removes_scratch_files_in_the_scratch_dir() {
+        let root = TempDir::new().unwrap();
+        let scratch_dir = root.path().join("cache");
+        let elsewhere = root.path().join("project");
+        fs::create_dir_all(&scratch_dir).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        let scratch = scratch_dir.join("novelist_scratch_1700000000000.md");
+        let named = scratch_dir.join("notes.md");
+        let foreign = elsewhere.join("novelist_scratch_1700000000001.md");
+        for path in [&scratch, &named, &foreign] {
+            fs::write(path, "text").unwrap();
+        }
+
+        for rejected in [&named, &foreign] {
+            let error = delete_scratch_file_in(&scratch_dir, &rejected.to_string_lossy())
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+            assert!(rejected.exists());
+        }
+        delete_scratch_file_in(&scratch_dir, &scratch.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!scratch.exists());
+    }
+
+    fn volume_is_case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("case-probe.md");
+        fs::write(&probe, "").unwrap();
+        let insensitive = dir.join("CASE-PROBE.md").exists();
+        fs::remove_file(probe).unwrap();
+        insensitive
+    }
+
+    #[tokio::test]
+    async fn case_only_rename_succeeds_on_case_insensitive_volumes() {
+        let dir = TempDir::new().unwrap();
+        if !volume_is_case_insensitive(dir.path()) {
+            return;
+        }
+        let project = dir.path().to_string_lossy().to_string();
+        let old = dir.path().join("chapter.md");
+        fs::write(&old, "# 第一章").unwrap();
+        crate::commands::draft::write_draft_note(
+            project.clone(),
+            old.to_string_lossy().to_string(),
+            "草稿".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = rename_item_inner(
+            project.clone(),
+            old.to_string_lossy().to_string(),
+            "Chapter.md".to_string(),
+            Some(true),
+            &enc(),
+        )
+        .await
+        .unwrap();
+
+        let renamed = dir.path().join("Chapter.md");
+        assert_eq!(Path::new(&result.new_path), renamed);
+        assert!(
+            matches!(result.migration.status, RenameMigrationStatus::FullSuccess),
+            "{:?}",
+            result.migration
+        );
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".md"))
+            .collect();
+        assert_eq!(names, vec!["Chapter.md".to_string()]);
+        assert_eq!(fs::read_to_string(&renamed).unwrap(), "# 第一章");
+        assert_eq!(
+            crate::commands::draft::read_draft_note(project, renamed.to_string_lossy().to_string())
+                .await
+                .unwrap(),
+            Some("草稿".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_onto_a_different_existing_file_still_reports_collision() {
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("a.md");
+        let existing = dir.path().join("b.md");
+        fs::write(&old, "a").unwrap();
+        fs::write(&existing, "b").unwrap();
+        let error = rename_item_inner(
+            dir.path().to_string_lossy().to_string(),
+            old.to_string_lossy().to_string(),
+            "b.md".to_string(),
+            None,
+            &enc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Already exists"), "{error}");
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_blocks_system_dirs_in_any_case_and_through_symlinks() {
+        for path in ["/etc/passwd", "/ETC/passwd", "/usr/local/x.md", "/System/x"] {
+            assert!(
+                matches!(validate_path(path), Err(AppError::PathNotAllowed(_))),
+                "{path}"
+            );
+        }
+        let dir = TempDir::new().unwrap();
+        let link = dir.path().join("config");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let through_link = link.join("hosts");
+        assert!(matches!(
+            validate_path(&through_link.to_string_lossy()),
+            Err(AppError::PathNotAllowed(_))
+        ));
+        let ordinary = dir.path().join("稿件/第一章.md");
+        assert!(validate_path(&ordinary.to_string_lossy()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_rename_onto_directory_leaves_target_intact_and_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("chapter.md");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("child.md"), "child").unwrap();
+        let watcher = crate::services::file_watcher::FileWatcherState::new();
+        let path = target.to_string_lossy().to_string();
+
+        let error = write_file_with_watcher_inner(&path, "正文", &enc(), &watcher, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("rename"), "{error}");
+        assert_eq!(
+            fs::read_to_string(target.join("child.md")).unwrap(),
+            "child"
+        );
+        assert_no_staged_temp(&target);
+        assert!(!crate::services::file_watcher::expected_write_registered(
+            &path, &watcher
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_staging_in_read_only_folder_keeps_original() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let folder = dir.path().join("locked");
+        fs::create_dir(&folder).unwrap();
+        let file = folder.join("第一章.md");
+        fs::write(&file, "原文").unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = folder.join("probe");
+        if fs::write(&probe, "").is_ok() {
+            // Running with privileges that ignore directory permissions.
+            fs::remove_file(probe).unwrap();
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let watcher = crate::services::file_watcher::FileWatcherState::new();
+        let path = file.to_string_lossy().to_string();
+
+        let result = write_file_with_watcher_inner(&path, "新文", &enc(), &watcher, None).await;
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+
         assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "原文");
+        assert_no_staged_temp(&file);
+        assert!(!crate::services::file_watcher::expected_write_registered(
+            &path, &watcher
+        ));
+    }
+
+    #[tokio::test]
+    async fn watcher_registration_failure_removes_staged_temp() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("第一章.md");
+        fs::write(&file, "原文").unwrap();
+        let watcher = crate::services::file_watcher::FileWatcherState::new();
+        crate::services::file_watcher::poison_for_test(&watcher);
+
+        let result =
+            write_file_with_watcher_inner(&file.to_string_lossy(), "新文", &enc(), &watcher, None)
+                .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "原文");
+        assert_no_staged_temp(&file);
     }
 
     #[tokio::test]
@@ -2717,6 +3363,99 @@ mod tests {
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "new content");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_normal_save_preserves_symlink_target_and_legacy_encoding() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = dir.path().join("targets");
+        fs::create_dir(&target_dir).unwrap();
+        let target = target_dir.join("chapter.md");
+        let alias = dir.path().join("linked.md");
+        let original_text = "第一章\n落霞与孤鹜齐飞，秋水共长天一色。";
+        let (original, _, _) = encoding_rs::GBK.encode(original_text);
+        fs::write(&target, &original).unwrap();
+        std::os::unix::fs::symlink("targets/chapter.md", &alias).unwrap();
+        let state = enc();
+        assert_eq!(
+            read_file_inner(&alias.to_string_lossy(), &state)
+                .await
+                .unwrap(),
+            original_text,
+        );
+        assert!(Arc::ptr_eq(
+            &text_write_lock_for_target(&resolve_text_write_target(&target).unwrap()).unwrap(),
+            &text_write_lock_for_target(&resolve_text_write_target(&alias).unwrap()).unwrap(),
+        ));
+
+        write_file_inner(&alias.to_string_lossy(), "更新章节", &state)
+            .await
+            .unwrap();
+
+        assert!(alias.is_symlink());
+        assert_eq!(
+            fs::read_link(&alias).unwrap(),
+            PathBuf::from("targets/chapter.md")
+        );
+        let (expected, _, _) = encoding_rs::GBK.encode("更新章节");
+        assert_eq!(fs::read(&target).unwrap(), expected.as_ref());
+        assert_eq!(fs::read(&alias).unwrap(), expected.as_ref());
+        assert_no_staged_temp(&alias);
+        assert_no_staged_temp(&target);
+
+        // Saving after the real file was deleted must recreate it, not replace
+        // the dangling alias or forget its original encoding identity.
+        fs::remove_file(&target).unwrap();
+        write_file_inner(&alias.to_string_lossy(), "重新创建", &state)
+            .await
+            .unwrap();
+        assert!(alias.is_symlink());
+        let (recreated, _, _) = encoding_rs::GBK.encode("重新创建");
+        assert_eq!(fs::read(&target).unwrap(), recreated.as_ref());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_normal_save_creates_file_under_symlinked_parent() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = dir.path().join("target");
+        let alias_dir = dir.path().join("alias");
+        fs::create_dir(&target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, &alias_dir).unwrap();
+
+        write_file_inner(
+            &alias_dir.join("new.md").to_string_lossy(),
+            "新文件😀",
+            &enc(),
+        )
+        .await
+        .unwrap();
+
+        assert!(alias_dir.is_symlink());
+        assert_eq!(
+            fs::read(target_dir.join("new.md")).unwrap(),
+            "新文件😀".as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_normal_save_does_not_replace_unresolvable_symlink_cycle() {
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("first.md");
+        let second = dir.path().join("second.md");
+        std::os::unix::fs::symlink("second.md", &first).unwrap();
+        std::os::unix::fs::symlink("first.md", &second).unwrap();
+
+        let error = write_file_inner(&first.to_string_lossy(), "must not replace", &enc())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+        assert!(first.is_symlink());
+        assert!(second.is_symlink());
+        assert_no_staged_temp(&first);
+    }
+
     #[test]
     fn test_write_file_if_unchanged_result_serializes_as_snake_case() {
         assert_eq!(
@@ -2744,6 +3483,7 @@ mod tests {
             updated,
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2766,13 +3506,14 @@ mod tests {
             "replacement",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
 
         assert_eq!(result, WriteFileIfUnchangedResult::Conflict);
         assert_eq!(fs::read(&file_path).unwrap(), original);
-        assert!(!Path::new(&format!("{}.novelist-tmp", file_path.display())).exists());
+        assert_no_staged_temp(&file_path);
     }
 
     #[tokio::test]
@@ -2787,6 +3528,7 @@ mod tests {
             "新文件",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2808,6 +3550,7 @@ mod tests {
             "replacement",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2829,6 +3572,7 @@ mod tests {
             "replacement",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2861,6 +3605,7 @@ mod tests {
             updated,
             &state,
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -2907,7 +3652,8 @@ mod tests {
         let file_path = dir.path().join("serialized.md");
         fs::write(&file_path, "v0").unwrap();
 
-        let lock = text_write_lock(&file_path).unwrap();
+        let lock =
+            text_write_lock_for_target(&resolve_text_write_target(&file_path).unwrap()).unwrap();
         let guard = lock.lock().await;
         let path = file_path.to_string_lossy().to_string();
         let normal_state = std::sync::Arc::new(enc());
@@ -2929,6 +3675,7 @@ mod tests {
                 "conditional",
                 &conditional_state,
                 &watcher_state,
+                None,
             )
             .await
         });
@@ -2963,7 +3710,8 @@ mod tests {
         fs::write(&real_path, "current").unwrap();
         std::os::unix::fs::symlink(&real_path, &alias_path).unwrap();
 
-        let lock = text_write_lock(&real_path).unwrap();
+        let lock =
+            text_write_lock_for_target(&resolve_text_write_target(&real_path).unwrap()).unwrap();
         let guard = lock.lock().await;
         let alias = alias_path.to_string_lossy().to_string();
         let state = std::sync::Arc::new(enc());
@@ -2978,6 +3726,7 @@ mod tests {
                 "replacement",
                 &state,
                 &watcher_state,
+                None,
             )
             .await
         });
@@ -3015,6 +3764,7 @@ mod tests {
             "不得写入",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -3022,7 +3772,7 @@ mod tests {
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert_eq!(fs::read_to_string(&external).unwrap(), "外部原文");
         assert!(alias.is_symlink());
-        assert!(!Path::new(&format!("{}.novelist-tmp", external.display())).exists());
+        assert_no_staged_temp(&external);
     }
 
     #[cfg(unix)]
@@ -3043,6 +3793,7 @@ mod tests {
             "项目内更新",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap();
@@ -3050,6 +3801,22 @@ mod tests {
         assert_eq!(result, WriteFileIfUnchangedResult::Written);
         assert!(alias.is_symlink());
         assert_eq!(fs::read_to_string(&real).unwrap(), "项目内更新");
+
+        fs::remove_file(&real).unwrap();
+        let recreated = write_file_if_unchanged_inner(
+            &project.to_string_lossy(),
+            &alias.to_string_lossy(),
+            None,
+            "重新创建目标",
+            &enc(),
+            &crate::services::file_watcher::FileWatcherState::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recreated, WriteFileIfUnchangedResult::Written);
+        assert!(alias.is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "重新创建目标");
     }
 
     #[cfg(unix)]
@@ -3072,13 +3839,14 @@ mod tests {
             "不得创建",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap_err();
 
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert!(!external_target.exists());
-        assert!(!Path::new(&format!("{}.novelist-tmp", external_target.display())).exists());
+        assert_no_staged_temp(&external_target);
     }
 
     #[tokio::test]
@@ -3094,6 +3862,7 @@ mod tests {
             "content",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -3101,7 +3870,7 @@ mod tests {
         assert!(matches!(err, AppError::FileNotFound(_)));
         assert!(!file_path.exists());
         assert!(!missing_parent.exists());
-        assert!(!Path::new(&format!("{}.novelist-tmp", file_path.display())).exists());
+        assert_no_staged_temp(&file_path);
     }
 
     #[tokio::test]
@@ -3117,6 +3886,7 @@ mod tests {
             "new content",
             &enc(),
             &crate::services::file_watcher::FileWatcherState::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -3124,7 +3894,7 @@ mod tests {
         assert!(matches!(err, AppError::FileNotFound(_)));
         assert!(!file_path.exists());
         assert!(!missing_parent.exists());
-        assert!(!Path::new(&format!("{}.novelist-tmp", file_path.display())).exists());
+        assert_no_staged_temp(&file_path);
     }
 
     #[tokio::test]
@@ -3225,6 +3995,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_roundtrip_utf16_preserves_bom_byte_order_and_surrogate_pairs() {
+        let cases: [(&str, &[u8], &[u8]); 2] = [
+            (
+                "UTF-16LE",
+                &[
+                    0xFF, 0xFE, 0x2D, 0x4E, 0x87, 0x65, 0x3D, 0xD8, 0x00, 0xDE, 0x0A, 0x00, 0x41,
+                    0x00,
+                ],
+                &[
+                    0xFF, 0xFE, 0xB0, 0x65, 0xE0, 0x7A, 0x3D, 0xD8, 0x80, 0xDE, 0x0A, 0x00, 0x42,
+                    0x00,
+                ],
+            ),
+            (
+                "UTF-16BE",
+                &[
+                    0xFE, 0xFF, 0x4E, 0x2D, 0x65, 0x87, 0xD8, 0x3D, 0xDE, 0x00, 0x00, 0x0A, 0x00,
+                    0x41,
+                ],
+                &[
+                    0xFE, 0xFF, 0x65, 0xB0, 0x7A, 0xE0, 0xD8, 0x3D, 0xDE, 0x80, 0x00, 0x0A, 0x00,
+                    0x42,
+                ],
+            ),
+        ];
+        for (encoding, original_bytes, updated_bytes) in cases {
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join("utf16.txt");
+            fs::write(&file, original_bytes).unwrap();
+            let path = file.to_string_lossy();
+            let state = enc();
+            let watcher = crate::services::file_watcher::FileWatcherState::new();
+            let original = "中文😀\nA";
+            let updated = "新章🚀\nB";
+            assert_eq!(read_file_inner(&path, &state).await.unwrap(), original);
+
+            write_file_with_watcher_inner(&path, original, &state, &watcher, Some("window-a"))
+                .await
+                .unwrap();
+            assert_eq!(fs::read(&file).unwrap(), original_bytes, "{encoding}");
+
+            let result = write_file_if_unchanged_inner(
+                &dir.path().to_string_lossy(),
+                &path,
+                Some(original),
+                updated,
+                &state,
+                &watcher,
+                Some("window-a"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, WriteFileIfUnchangedResult::Written);
+            assert_eq!(fs::read(&file).unwrap(), updated_bytes, "{encoding}");
+            assert_eq!(read_file_inner(&path, &state).await.unwrap(), updated);
+            assert_eq!(
+                state
+                    .encodings
+                    .lock()
+                    .unwrap()
+                    .get(file.canonicalize().unwrap().to_string_lossy().as_ref())
+                    .copied(),
+                Some(encoding),
+            );
+            assert_no_staged_temp(Path::new(&*path));
+        }
+    }
+
+    #[tokio::test]
     async fn test_gbk_unmappable_save_preserves_original_and_allows_retry() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("gbk.txt");
@@ -3246,7 +4085,7 @@ mod tests {
         );
 
         let unmappable = format!("{text}\u{1f642}");
-        let error = write_file_with_watcher_inner(&path, &unmappable, &state, &watcher)
+        let error = write_file_with_watcher_inner(&path, &unmappable, &state, &watcher, None)
             .await
             .unwrap_err();
         assert!(matches!(error, AppError::InvalidInput(_)));
@@ -3255,7 +4094,7 @@ mod tests {
             state.encodings.lock().unwrap().get(&canonical),
             Some(&"GBK")
         );
-        assert!(!Path::new(&format!("{path}.novelist-tmp")).exists());
+        assert_no_staged_temp(Path::new(&*path));
 
         let error = write_file_if_unchanged_inner(
             &dir.path().to_string_lossy(),
@@ -3264,6 +4103,7 @@ mod tests {
             &unmappable,
             &state,
             &watcher,
+            None,
         )
         .await
         .unwrap_err();
@@ -3273,7 +4113,7 @@ mod tests {
             state.encodings.lock().unwrap().get(&canonical),
             Some(&"GBK")
         );
-        assert!(!Path::new(&format!("{path}.novelist-tmp")).exists());
+        assert_no_staged_temp(Path::new(&*path));
 
         let representable = format!("{text}\n第二章");
         let result = write_file_if_unchanged_inner(
@@ -3283,6 +4123,7 @@ mod tests {
             &representable,
             &state,
             &watcher,
+            None,
         )
         .await
         .unwrap();
@@ -3294,7 +4135,7 @@ mod tests {
             Some(&"GBK")
         );
 
-        write_file_with_watcher_inner(&path, text, &state, &watcher)
+        write_file_with_watcher_inner(&path, text, &state, &watcher, None)
             .await
             .unwrap();
         assert_eq!(fs::read(&file_path).unwrap(), original_bytes.as_ref());

@@ -18,6 +18,7 @@ import {
   type SnapshotConfig,
   type ViewConfig,
 } from '$lib/ipc/commands';
+import { pathIsWithin } from '$lib/utils/path';
 
 const DEFAULT_SIDEBAR_FONT_SIZE = 14;
 const MIN_SIDEBAR_FONT_SIZE = 12;
@@ -290,16 +291,17 @@ class SettingsStore {
   }
 
   /**
-   * Where Cmd+N should create next, given a project fallback. Respects the
+   * Where Cmd+N should create next, given the open project root. Respects the
    * pinned `default_dir` first, then the live `last_used_dir`, then the
-   * project root.
+   * project root. Both values can come from the global layer (recorded while
+   * another project was open), so a folder outside `projectRoot` is ignored —
+   * otherwise Cmd+N would create the file inside a different project.
    */
   resolveNewFileDir(projectRoot: string): string {
-    return (
-      this.effective.new_file.default_dir ||
-      this.effective.new_file.last_used_dir ||
-      projectRoot
-    );
+    const { default_dir, last_used_dir } = this.effective.new_file;
+    if (default_dir && pathIsWithin(default_dir, projectRoot)) return default_dir;
+    if (last_used_dir && pathIsWithin(last_used_dir, projectRoot)) return last_used_dir;
+    return projectRoot;
   }
 
   /**

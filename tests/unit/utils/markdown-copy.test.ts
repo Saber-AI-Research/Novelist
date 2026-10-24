@@ -77,6 +77,31 @@ describe('markdownToHtml', () => {
     expect(html).toContain('<ol>');
     expect(html).toContain('</ol>');
   });
+
+  it('escapes HTML-significant characters in prose and inline code', () => {
+    expect(markdownToHtml('if a<b && c>d')).toBe('<p>if a&lt;b &amp;&amp; c&gt;d</p>');
+    expect(markdownToHtml('use `Vec<String>` here')).toBe('<p>use <code>Vec&lt;String&gt;</code> here</p>');
+    expect(markdownToHtml('<script>alert(1)</script>')).toBe('<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>');
+  });
+
+  it('keeps inline code contents literal instead of applying emphasis', () => {
+    expect(markdownToHtml('`**not bold**`')).toBe('<p><code>**not bold**</code></p>');
+  });
+
+  it('drops non-http link targets but keeps their text', () => {
+    expect(markdownToHtml('[点我](javascript:alert(1))')).toBe('<p>点我)</p>');
+    expect(markdownToHtml('[x](data:text/html,hi)')).toBe('<p>x</p>');
+  });
+
+  it('escapes quotes in link targets and ignores link titles', () => {
+    expect(markdownToHtml('[a](https://e.com/?q="x"&y=1 "Title")')).toBe(
+      '<p><a href="https://e.com/?q=&quot;x&quot;&amp;y=1">a</a></p>',
+    );
+  });
+
+  it('does not let emphasis rules rewrite underscores inside link targets', () => {
+    expect(markdownToHtml('[章节](https://e.com/_a_/b)')).toBe('<p><a href="https://e.com/_a_/b">章节</a></p>');
+  });
 });
 
 describe('markdownToPlainText', () => {

@@ -6,6 +6,7 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { pathDirname } from '$lib/utils/path';
   import { t } from '$lib/i18n';
+  import { isImeComposing } from '$lib/utils/ime';
 
   /**
    * Move-file palette. Opens via Cmd+M. Lists every directory in the project
@@ -62,6 +63,7 @@
   });
 
   function handleKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') { onClose(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, results.length - 1); }
     if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }

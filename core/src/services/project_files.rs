@@ -11,7 +11,7 @@ pub(crate) fn is_project_content_path(relative: &Path) -> bool {
     };
     if first == ".novelist" {
         return matches!(components.next(), Some(Component::Normal(name))
-            if name == "project.toml" || name == "literary-study.json")
+            if name == "project.toml" || name == "literary-study.json" || name == "book-translation.json")
             && components.next().is_none();
     }
     if first.to_string_lossy().starts_with('.')
@@ -27,7 +27,15 @@ pub(crate) fn is_project_content_path(relative: &Path) -> bool {
             .extension()
             .and_then(|extension| extension.to_str()),
         Some(
-            "md" | "markdown" | "txt" | "json" | "jsonl" | "csv" | "litstudy" | "canvas" | "kanban"
+            "md" | "markdown"
+                | "txt"
+                | "json"
+                | "jsonl"
+                | "csv"
+                | "litstudy"
+                | "novtrans"
+                | "canvas"
+                | "kanban"
         )
     )
 }

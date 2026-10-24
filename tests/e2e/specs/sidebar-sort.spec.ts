@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 /**
@@ -28,11 +28,7 @@ async function seedProjectFiles(app: Page, dirPath: string, files: MockFileEntry
 
 async function enterMockProject(app: Page, dirPath: string, files: MockFileEntry[]) {
   await seedProjectFiles(app, dirPath, files);
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
 }
 
 async function navigateToRecent(app: Page, index: number) {

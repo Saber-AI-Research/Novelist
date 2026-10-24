@@ -16,11 +16,14 @@
 //!   <body…>
 
 use crate::error::AppError;
+use crate::services::atomic_file::atomic_write_sync;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
+use tempfile::TempPath;
 
 const MAX_ID_LEN: usize = 64;
 
@@ -293,6 +296,27 @@ async fn ensure_project_templates_dir(project_dir: &Path) -> Result<PathBuf, App
     Ok(dir)
 }
 
+/// Stage complete, durable bytes in an exclusively created sibling file.
+/// The owned path removes the staging file on every failed write or publish.
+fn stage_template_bytes(parent: &Path, bytes: &[u8]) -> Result<TempPath, AppError> {
+    let mut builder = tempfile::Builder::new();
+    builder
+        .prefix(".novelist-template-")
+        .suffix(".novelist-tmp");
+    // tempfile stages 0600 by default and persisting keeps that mode; ask for
+    // the normal 0666 (minus umask) so published files match other new files.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let mut temporary = builder.tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    Ok(temporary.into_temp_path())
+}
+
 fn summary_from_parsed(
     id: &str,
     source: TemplateSource,
@@ -515,9 +539,12 @@ pub async fn write_template_file(
     let fm = front_matter_from_input(&front_matter);
     let content = format_template(&fm, &body);
 
-    let temp = dir.join(format!("{id}.md.novelist-tmp"));
-    tokio::fs::write(&temp, content.as_bytes()).await?;
-    tokio::fs::rename(&temp, &target).await?;
+    let content = tokio::task::spawn_blocking(move || -> Result<String, AppError> {
+        atomic_write_sync(&target, content.as_bytes())?;
+        Ok(content)
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("write template task: {error}")))??;
 
     let parsed = parse_template(&content)?;
     summary_from_parsed(&id, TemplateSource::Project, &parsed)
@@ -570,6 +597,43 @@ pub async fn delete_template_file(project_dir: String, id: String) -> Result<(),
     Ok(())
 }
 
+fn duplicate_template_into_project(
+    dir: &Path,
+    bundled_id: &str,
+    new_id: Option<&str>,
+    raw: &str,
+) -> Result<TemplateFileSummary, AppError> {
+    if let Some(explicit) = new_id {
+        validate_id(explicit)?;
+    }
+    let parsed = parse_template(raw)?;
+    let mut temporary = stage_template_bytes(dir, raw.as_bytes())?;
+    let mut final_id = new_id.unwrap_or(bundled_id).to_string();
+    let mut n = 2u32;
+    loop {
+        let target = dir.join(format!("{final_id}.md"));
+        match temporary.persist_noclobber(&target) {
+            Ok(()) => return summary_from_parsed(&final_id, TemplateSource::Project, &parsed),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary = error.path;
+                if new_id.is_some() {
+                    return Err(AppError::InvalidInput(format!(
+                        "template {final_id}.md already exists"
+                    )));
+                }
+                final_id = format!("{bundled_id}-{n}");
+                n += 1;
+                if n > 999 {
+                    return Err(AppError::Custom(
+                        "too many existing copies of this template".into(),
+                    ));
+                }
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn duplicate_bundled_template(
@@ -590,47 +654,13 @@ pub async fn duplicate_bundled_template(
         )));
     }
     let raw = tokio::fs::read_to_string(&src_path).await?;
-    // Validate parse before writing a copy.
-    let _ = parse_template(&raw)?;
 
     let dir = ensure_project_templates_dir(&pd).await?;
-    let (final_id, final_path) = match new_id {
-        Some(explicit) => {
-            validate_id(&explicit)?;
-            let p = dir.join(format!("{explicit}.md"));
-            if p.exists() {
-                return Err(AppError::InvalidInput(format!(
-                    "template {explicit}.md already exists"
-                )));
-            }
-            (explicit, p)
-        }
-        None => {
-            // Auto-bump: bundled_id, bundled_id-2, bundled_id-3, …
-            let base = bundled_id.clone();
-            let mut candidate = base.clone();
-            let mut n = 2u32;
-            loop {
-                let p = dir.join(format!("{candidate}.md"));
-                if !p.exists() {
-                    break (candidate, p);
-                }
-                candidate = format!("{base}-{n}");
-                n += 1;
-                if n > 999 {
-                    return Err(AppError::Custom(
-                        "too many existing copies of this template".into(),
-                    ));
-                }
-            }
-        }
-    };
-
-    let temp = final_path.with_extension("md.novelist-tmp");
-    tokio::fs::write(&temp, raw.as_bytes()).await?;
-    tokio::fs::rename(&temp, &final_path).await?;
-    let parsed = parse_template(&raw)?;
-    summary_from_parsed(&final_id, TemplateSource::Project, &parsed)
+    tokio::task::spawn_blocking(move || {
+        duplicate_template_into_project(&dir, &bundled_id, new_id.as_deref(), &raw)
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("duplicate template task: {error}")))?
 }
 
 /// Create a new file in `dir` with `body`. If `filename` already exists,
@@ -664,30 +694,39 @@ pub async fn create_file_with_body(
         return Err(AppError::NotADirectory(parent.display().to_string()));
     }
 
-    let p = Path::new(&filename);
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        let p = Path::new(&filename);
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let ext = p
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
 
-    let mut target = parent.join(&filename);
-    let mut n = 2u32;
-    while target.exists() {
-        target = parent.join(format!("{stem} {n}{ext}"));
-        n += 1;
-        if n > 9999 {
-            return Err(AppError::Custom("collision counter overflowed".into()));
+        let mut temporary = stage_template_bytes(&parent, body.as_bytes())?;
+        let mut target = parent.join(&filename);
+        let mut n = 2u32;
+        loop {
+            // Publication itself decides collisions, including concurrent creates
+            // and dangling symlinks; no prior exists() check can reserve a name.
+            match temporary.persist_noclobber(&target) {
+                Ok(()) => return Ok(target.to_string_lossy().to_string()),
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    temporary = error.path;
+                    target = parent.join(format!("{stem} {n}{ext}"));
+                    n += 1;
+                    if n > 9999 {
+                        return Err(AppError::Custom("collision counter overflowed".into()));
+                    }
+                }
+                Err(error) => return Err(error.error.into()),
+            }
         }
-    }
-
-    let temp = target.with_extension("novelist-tmp");
-    tokio::fs::write(&temp, body.as_bytes()).await?;
-    tokio::fs::rename(&temp, &target).await?;
-    Ok(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("create template file task: {error}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +924,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_template_preserves_existing_temporary_files() {
+        let td = make_project();
+        let dir = project_templates_dir(td.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_temp = dir.join("scene.md.novelist-tmp");
+        std::fs::write(&old_temp, "unrelated temporary data").unwrap();
+        for body in ["first body", "replacement body"] {
+            let front_matter = TemplateFrontMatterInput {
+                name: "scene".into(),
+                mode: TemplateMode::Insert,
+                description: None,
+                default_filename: None,
+            };
+            write_template_file(
+                td.path().to_string_lossy().to_string(),
+                "scene".into(),
+                front_matter,
+                body.into(),
+            )
+            .await
+            .unwrap();
+            let saved = read_one(&dir.join("scene.md"), "scene", TemplateSource::Project)
+                .await
+                .unwrap();
+            assert_eq!(saved.body, body);
+            assert_eq!(
+                std::fs::read_to_string(&old_temp).unwrap(),
+                "unrelated temporary data"
+            );
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn duplicate_template_preserves_targets_and_temporary_files() {
+        let td = make_project();
+        let old_temp = td.path().join("scene.md.novelist-tmp");
+        std::fs::write(&old_temp, "unrelated temporary data").unwrap();
+        let original = "---\nname: scene\nmode: insert\n---\noriginal body";
+        let replacement = "---\nname: scene\nmode: insert\n---\nreplacement body";
+        let first = duplicate_template_into_project(td.path(), "scene", None, original).unwrap();
+        assert_eq!(first.id, "scene");
+        let collision =
+            duplicate_template_into_project(td.path(), "scene", Some("scene"), replacement);
+        assert!(matches!(collision, Err(AppError::InvalidInput(_))));
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("scene.md")).unwrap(),
+            original
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 2);
+        let second =
+            duplicate_template_into_project(td.path(), "scene", None, replacement).unwrap();
+        assert_eq!(second.id, "scene-2");
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("scene-2.md")).unwrap(),
+            replacement
+        );
+        assert_eq!(
+            std::fs::read_to_string(old_temp).unwrap(),
+            "unrelated temporary data"
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn duplicate_template_concurrently_keeps_each_body() {
+        let td = make_project();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let mut copies = tokio::task::JoinSet::new();
+        for index in 0..12 {
+            let dir = td.path().to_path_buf();
+            let barrier = barrier.clone();
+            copies.spawn_blocking(move || {
+                let raw = format!("---\nname: scene\nmode: insert\n---\nbody {index}");
+                barrier.wait();
+                let summary = duplicate_template_into_project(&dir, "scene", None, &raw).unwrap();
+                (summary.id, raw)
+            });
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        while let Some(result) = copies.join_next().await {
+            let (id, raw) = result.unwrap();
+            assert!(ids.insert(id.clone()));
+            assert_eq!(
+                std::fs::read_to_string(td.path().join(format!("{id}.md"))).unwrap(),
+                raw
+            );
+        }
+        assert_eq!(ids.len(), 12);
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 12);
+    }
+
+    #[tokio::test]
     async fn create_file_with_body_bumps_collision() {
         let td = make_project();
         let dir = td.path().to_string_lossy().to_string();
@@ -896,6 +1028,153 @@ mod tests {
             .unwrap();
         assert_ne!(a, b);
         assert!(b.contains("note 2.md"));
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(b).unwrap(), "B");
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn create_file_with_body_preserves_existing_temporary_files() {
+        let td = make_project();
+        let existing = [
+            "chapter.novelist-tmp",
+            "chapter.md.novelist-tmp",
+            ".novelist-template-existing.novelist-tmp",
+        ];
+        for filename in existing {
+            std::fs::write(td.path().join(filename), filename).unwrap();
+        }
+        let path = create_file_with_body(
+            td.path().to_string_lossy().to_string(),
+            "chapter.md".into(),
+            "new chapter body".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(Path::new(&path), td.path().join("chapter.md"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "new chapter body");
+        for filename in existing {
+            assert_eq!(
+                std::fs::read_to_string(td.path().join(filename)).unwrap(),
+                filename
+            );
+        }
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 4);
+    }
+
+    #[tokio::test]
+    async fn create_file_with_body_concurrently_keeps_each_body() {
+        let td = make_project();
+        std::fs::write(td.path().join("chapter.md"), "existing chapter").unwrap();
+        std::fs::write(td.path().join("chapter.novelist-tmp"), "existing temporary").unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+        let mut creates = tokio::task::JoinSet::new();
+        for index in 0..16 {
+            let dir = td.path().to_string_lossy().to_string();
+            let barrier = barrier.clone();
+            creates.spawn(async move {
+                let body = format!("chapter body {index}");
+                barrier.wait().await;
+                let path = create_file_with_body(dir, "chapter.md".into(), body.clone())
+                    .await
+                    .unwrap();
+                (path, body)
+            });
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        while let Some(result) = creates.join_next().await {
+            let (path, body) = result.unwrap();
+            assert!(paths.insert(path.clone()));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+        }
+        assert_eq!(paths.len(), 16);
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("chapter.md")).unwrap(),
+            "existing chapter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(td.path().join("chapter.novelist-tmp")).unwrap(),
+            "existing temporary"
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 18);
+    }
+
+    #[tokio::test]
+    async fn create_file_with_body_cleans_staging_after_publish_failure() {
+        let td = make_project();
+        let existing = td.path().join("chapter.novelist-tmp");
+        std::fs::write(&existing, "unrelated temporary data").unwrap();
+        // This exceeds supported filesystem component limits, but staging uses
+        // its own short sibling name and succeeds before publication fails.
+        let result = create_file_with_body(
+            td.path().to_string_lossy().to_string(),
+            "x".repeat(40_000),
+            "body that must not leak".into(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(existing).unwrap(),
+            "unrelated temporary data"
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_file_with_body_keeps_dangling_symlink_targets() {
+        let td = make_project();
+        let existing = td.path().join("chapter.md");
+        std::os::unix::fs::symlink("missing.md", &existing).unwrap();
+        let path = create_file_with_body(
+            td.path().to_string_lossy().to_string(),
+            "chapter.md".into(),
+            "new chapter".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(Path::new(&path), td.path().join("chapter 2.md"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "new chapter");
+        assert_eq!(
+            std::fs::read_link(existing).unwrap(),
+            Path::new("missing.md")
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 2);
+    }
+
+    /// Staged files are created 0600 by tempfile; published template files
+    /// must instead get the same umask-derived mode as any other new file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn template_created_files_get_the_normal_new_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let td = make_project();
+        let plain = td.path().join("plain.md");
+        std::fs::File::create(&plain).unwrap();
+        let expected = mode(&plain);
+
+        let created = create_file_with_body(
+            td.path().to_string_lossy().to_string(),
+            "第一章.md".into(),
+            "正文".into(),
+        )
+        .await
+        .unwrap();
+        let duplicated = duplicate_template_into_project(
+            td.path(),
+            "scene",
+            None,
+            "---\nname: scene\nmode: insert\n---\nbody",
+        )
+        .unwrap();
+
+        assert_eq!(mode(Path::new(&created)), expected, "{expected:o}");
+        assert_eq!(
+            mode(&td.path().join(format!("{}.md", duplicated.id))),
+            expected,
+            "{expected:o}"
+        );
     }
 
     #[tokio::test]

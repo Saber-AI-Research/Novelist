@@ -1,6 +1,7 @@
 use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::models::plugin::{PluginInfo, PluginManifest, RegisteredCommandInfo};
@@ -11,6 +12,12 @@ use super::permissions;
 const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 const PLUGIN_STACK_LIMIT: usize = 256 * 1024;
 const PLUGIN_EXECUTION_LIMIT: Duration = Duration::from_millis(500);
+/// QuickJS enforces `PLUGIN_EXECUTION_LIMIT` only through its interrupt hook,
+/// which native code such as the regex engine never polls. The host waits at
+/// most this long for a plugin thread, then abandons that instance.
+const PLUGIN_HOST_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// Native headroom above the 256 KiB QuickJS stack limit.
+const PLUGIN_THREAD_STACK: usize = 2 * 1024 * 1024;
 // Rust-owned result copies are not charged to QuickJS's heap. Bound them too,
 // including repeated references to the same JS string and sparse arrays.
 const PLUGIN_TRANSFER_LIMIT: usize = 8 * 1024 * 1024;
@@ -164,12 +171,18 @@ fn result_length(object: &Object<'_>) -> rquickjs::Result<u32> {
     })
 }
 
+/// The document state commands may read. Shared, never copied per command.
+#[derive(Clone)]
+struct DocumentSnapshot {
+    content: Arc<String>,
+    selection: (usize, usize),
+    word_count: usize,
+}
+
 fn bind_document<'js>(
     ctx: &Ctx<'js>,
     novelist: &Object<'js>,
-    document: &str,
-    selection: (usize, usize),
-    word_count: usize,
+    document: &DocumentSnapshot,
 ) -> rquickjs::Result<()> {
     // Capture document text inside the limited JS heap, not inside Rust
     // callbacks that a plugin could retain across arbitrarily many commands.
@@ -182,18 +195,11 @@ fn bind_document<'js>(
     )?;
     bind.call((
         novelist.clone(),
-        document,
-        selection.0,
-        selection.1,
-        word_count,
+        document.content.as_str(),
+        document.selection.0,
+        document.selection.1,
+        document.word_count,
     ))
-}
-
-/// A loaded plugin instance with its own QuickJS context.
-pub struct PluginInstance {
-    pub manifest: PluginManifest,
-    pub context: Context,
-    pub active: bool,
 }
 
 /// Registered command from a plugin.
@@ -201,16 +207,6 @@ struct RegisteredCommand {
     plugin_id: String,
     command_id: String,
     label: String,
-}
-
-struct PluginHostInner {
-    // Each Context owns its runtime. A failed plugin can release its entire
-    // heap (including queued promise jobs) without disrupting other plugins.
-    plugins: HashMap<String, PluginInstance>,
-    document_content: String,
-    selection: (usize, usize),
-    word_count: usize,
-    registered_commands: Vec<RegisteredCommand>,
 }
 
 /// A text replacement produced by a plugin command (replaceSelection / replaceRange).
@@ -221,54 +217,29 @@ pub struct PendingReplacement {
     pub text: String,
 }
 
-macro_rules! lock_inner {
-    ($self:expr) => {
-        $self
-            .inner
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {}", e))
-    };
+fn host_timeout_error(phase: &str) -> String {
+    format!(
+        "{phase}: plugin time limit ({} ms) exceeded inside native code that ignores the 500 ms limit (for example a catastrophic regular expression); the plugin was stopped",
+        PLUGIN_HOST_TIMEOUT.as_millis()
+    )
 }
 
-/// Thread-safe plugin host managed by Tauri.
-pub struct PluginHostState {
-    inner: Mutex<PluginHostInner>,
+/// One plugin's QuickJS context. Lives only on that plugin's thread; each
+/// context owns its runtime, so dropping it releases the entire heap
+/// (including queued promise jobs) without disturbing other plugins.
+struct PluginRuntime {
+    context: Context,
+    can_read: bool,
+    can_write: bool,
 }
 
-impl PluginHostState {
-    pub fn new() -> Self {
-        // No QuickJS allocation until a plugin is actually loaded.
-        Self {
-            inner: Mutex::new(PluginHostInner {
-                plugins: HashMap::new(),
-                document_content: String::new(),
-                selection: (0, 0),
-                word_count: 0,
-                registered_commands: Vec::new(),
-            }),
-        }
-    }
-
-    /// Update the document state that plugins can read.
-    pub fn set_document_state(
-        &self,
-        content: String,
-        selection_from: usize,
-        selection_to: usize,
-        word_count: usize,
-    ) {
-        let mut inner = lock_inner!(self).unwrap();
-        inner.document_content = content;
-        inner.selection = (selection_from, selection_to);
-        inner.word_count = word_count;
-    }
-
-    /// Load a plugin from its manifest and source code.
-    pub fn load_plugin(&self, manifest: PluginManifest, source: &str) -> Result<(), String> {
-        let mut inner = lock_inner!(self)?;
-        if source.len() > PLUGIN_TRANSFER_LIMIT {
-            return Err("Plugin source exceeds the 8 MiB input limit; reduce plugin size".into());
-        }
+impl PluginRuntime {
+    fn load(
+        plugin_id: &str,
+        permissions: &[String],
+        source: &str,
+        document: &DocumentSnapshot,
+    ) -> Result<(Self, Vec<RegisteredCommand>), String> {
         let runtime =
             Runtime::new().map_err(|error| format!("Failed to create QuickJS runtime: {error}"))?;
         runtime.set_memory_limit(PLUGIN_MEMORY_LIMIT);
@@ -277,17 +248,15 @@ impl PluginHostState {
         let context = Context::full(&runtime).map_err(|error| {
             format!("QuickJS context creation failed within the 64 MiB memory limit: {error}")
         })?;
-        let plugin_id = &manifest.plugin.id;
-        let new_commands = budget.run(&context, "Plugin load", |ctx, budget| {
+        let can_read = permissions::has_permission(permissions, "read");
+        let can_write = permissions::has_permission(permissions, "write");
+        let commands = budget.run(&context, "Plugin load", |ctx, budget| {
             let globals = ctx.globals();
             let novelist = Object::new(ctx.clone())?;
-            bind_document(
-                &ctx,
-                &novelist,
-                &inner.document_content,
-                inner.selection,
-                inner.word_count,
-            )?;
+            // Document accessors exist only for plugins granted `read`.
+            if can_read {
+                bind_document(&ctx, &novelist, document)?;
+            }
             globals.set("novelist", novelist)?;
             ctx.eval::<(), _>(
                 r#"
@@ -308,7 +277,7 @@ impl PluginHostState {
                 budget.check()?;
                 let command: Object = commands.get(index)?;
                 registered.push(RegisteredCommand {
-                    plugin_id: plugin_id.clone(),
+                    plugin_id: plugin_id.to_owned(),
                     command_id: read_result_string(&command, "id", &mut remaining)?,
                     label: read_result_string(&command, "label", &mut remaining)?,
                 });
@@ -316,104 +285,29 @@ impl PluginHostState {
             Ok(registered)
         })?;
         drop(budget);
-
-        // Commit registration only once source and metadata conversion both
-        // succeed. A failed reload leaves the previous instance untouched.
-        inner
-            .registered_commands
-            .retain(|c| c.plugin_id != *plugin_id);
-        inner.registered_commands.extend(new_commands);
-        inner.plugins.insert(
-            plugin_id.clone(),
-            PluginInstance {
-                manifest,
+        Ok((
+            Self {
                 context,
-                active: true,
+                can_read,
+                can_write,
             },
-        );
-        Ok(())
+            commands,
+        ))
     }
 
-    /// Unload a plugin.
-    pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), String> {
-        let mut inner = lock_inner!(self)?;
-        inner.plugins.remove(plugin_id);
-        inner
-            .registered_commands
-            .retain(|c| c.plugin_id != plugin_id);
-        Ok(())
-    }
-
-    /// List all loaded plugins.
-    pub fn list_loaded_plugins(&self) -> Vec<PluginInfo> {
-        let inner = lock_inner!(self).unwrap_or_else(|e| panic!("{}", e));
-        inner
-            .plugins
-            .values()
-            .map(|p| PluginInfo {
-                id: p.manifest.plugin.id.clone(),
-                name: p.manifest.plugin.name.clone(),
-                version: p.manifest.plugin.version.clone(),
-                permissions: p.manifest.plugin.permissions.clone(),
-                active: p.active,
-                ui: p.manifest.ui.clone(),
-                description: p.manifest.plugin.description.clone(),
-                author: p.manifest.plugin.author.clone(),
-                icon: p.manifest.plugin.icon.clone(),
-                builtin: false,
-                enabled: p.active,
-            })
-            .collect()
-    }
-
-    /// Get all registered commands.
-    pub fn get_registered_commands(&self) -> Vec<RegisteredCommandInfo> {
-        let inner = lock_inner!(self).unwrap_or_else(|e| panic!("{}", e));
-        inner
-            .registered_commands
-            .iter()
-            .map(|c| RegisteredCommandInfo {
-                plugin_id: c.plugin_id.clone(),
-                command_id: c.command_id.clone(),
-                label: c.label.clone(),
-            })
-            .collect()
-    }
-
-    /// Invoke a registered plugin command. Returns any pending text replacements.
-    pub fn invoke_command(
+    fn invoke(
         &self,
-        plugin_id: &str,
         command_id: &str,
+        document: &DocumentSnapshot,
     ) -> Result<Vec<PendingReplacement>, String> {
-        if !command_id
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(format!("Invalid command ID: {command_id}"));
-        }
-        let mut inner = lock_inner!(self)?;
-        let plugin = inner
-            .plugins
-            .get(plugin_id)
-            .ok_or_else(|| format!("Plugin not found: {plugin_id}"))?;
-        if !plugin.active {
-            return Err(format!("Plugin is not active: {plugin_id}"));
-        }
-        let budget = ExecutionBudget::arm(plugin.context.runtime());
-        let result = budget.run(&plugin.context, "Plugin command", |ctx, budget| {
+        let budget = ExecutionBudget::arm(self.context.runtime());
+        let result = budget.run(&self.context, "Plugin command", |ctx, budget| {
             let novelist: Object = ctx.globals().get("novelist")?;
-            bind_document(
-                &ctx,
-                &novelist,
-                &inner.document_content,
-                inner.selection,
-                inner.word_count,
-            )?;
-            let has_write =
-                permissions::has_permission(&plugin.manifest.plugin.permissions, "write");
-            if has_write {
-                let (sel_from, sel_to) = inner.selection;
+            if self.can_read {
+                bind_document(&ctx, &novelist, document)?;
+            }
+            if self.can_write {
+                let (sel_from, sel_to) = document.selection;
                 ctx.eval::<(), _>("var __pending_replacements = [];")?;
                 ctx.eval::<(), _>(format!(
                     r#"
@@ -437,7 +331,7 @@ impl PluginHostState {
                 ));
             }
             let mut replacements = Vec::new();
-            if has_write {
+            if self.can_write {
                 let pending: Object = ctx.globals().get("__pending_replacements")?;
                 let count = result_length(&pending)?;
                 let mut remaining = PLUGIN_TRANSFER_LIMIT;
@@ -454,14 +348,276 @@ impl PluginHostState {
             Ok(replacements)
         });
         drop(budget);
-        if result.is_err() {
-            // A command may have queued replacements, jobs or retained a full
-            // heap before failing. Never reuse that partially mutated context.
-            // Dropping its isolated runtime discards jobs and runs QuickJS GC.
+        result
+    }
+}
+
+type CommandResult = Result<Vec<PendingReplacement>, String>;
+
+struct InvokeRequest {
+    command_id: String,
+    document: DocumentSnapshot,
+    reply: mpsc::SyncSender<CommandResult>,
+}
+
+/// Body of a plugin thread: load, then serve commands until the host drops
+/// the instance (unload, replacement, failure or abandonment).
+fn run_plugin_thread(
+    plugin_id: String,
+    permissions: Vec<String>,
+    source: String,
+    document: DocumentSnapshot,
+    loaded: mpsc::SyncSender<Result<Vec<RegisteredCommand>, String>>,
+    requests: mpsc::Receiver<InvokeRequest>,
+) {
+    let runtime = match PluginRuntime::load(&plugin_id, &permissions, &source, &document) {
+        Ok((runtime, commands)) => {
+            // A closed channel means the host gave up waiting for this load.
+            if loaded.send(Ok(commands)).is_err() {
+                return;
+            }
+            runtime
+        }
+        Err(error) => {
+            let _ = loaded.send(Err(error));
+            return;
+        }
+    };
+    drop((source, document));
+    for request in requests {
+        let result = runtime.invoke(&request.command_id, &request.document);
+        // A failed command may have queued jobs, partial replacements or a
+        // full heap: never reuse its context. A closed reply channel means
+        // the host abandoned this instance after `PLUGIN_HOST_TIMEOUT`.
+        let failed = result.is_err();
+        if request.reply.send(result).is_err() || failed {
+            return;
+        }
+    }
+}
+
+struct LoadedPlugin {
+    manifest: PluginManifest,
+    /// Dropping the last sender ends the plugin thread once it is idle.
+    requests: mpsc::Sender<InvokeRequest>,
+    /// Distinguishes a reloaded instance from the one a failing call used.
+    generation: u64,
+}
+
+struct PluginHostInner {
+    plugins: HashMap<String, LoadedPlugin>,
+    document: DocumentSnapshot,
+    registered_commands: Vec<RegisteredCommand>,
+    next_generation: u64,
+}
+
+/// Thread-safe plugin host managed by Tauri.
+///
+/// Plugin JS never runs under the host lock: every plugin owns a dedicated
+/// thread, and callers wait at most `PLUGIN_HOST_TIMEOUT` for it. A plugin
+/// stuck in native code is dropped from the host and its thread abandoned.
+#[derive(Clone)]
+pub struct PluginHostState {
+    inner: Arc<Mutex<PluginHostInner>>,
+}
+
+impl PluginHostState {
+    pub fn new() -> Self {
+        // No QuickJS allocation until a plugin is actually loaded.
+        Self {
+            inner: Arc::new(Mutex::new(PluginHostInner {
+                plugins: HashMap::new(),
+                document: DocumentSnapshot {
+                    content: Arc::new(String::new()),
+                    selection: (0, 0),
+                    word_count: 0,
+                },
+                registered_commands: Vec::new(),
+                next_generation: 0,
+            })),
+        }
+    }
+
+    /// Plugin code never runs while this is held, so a panic elsewhere cannot
+    /// leave the bookkeeping half-updated between statements.
+    fn lock(&self) -> MutexGuard<'_, PluginHostInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Update the document state that plugins can read.
+    pub fn set_document_state(
+        &self,
+        content: String,
+        selection_from: usize,
+        selection_to: usize,
+        word_count: usize,
+    ) {
+        self.lock().document = DocumentSnapshot {
+            content: Arc::new(content),
+            selection: (selection_from, selection_to),
+            word_count,
+        };
+    }
+
+    /// Load a plugin from its manifest and source code. A failed reload leaves
+    /// the previous instance untouched.
+    pub fn load_plugin(
+        &self,
+        manifest: PluginManifest,
+        source: impl Into<String>,
+    ) -> Result<(), String> {
+        let source = source.into();
+        if source.len() > PLUGIN_TRANSFER_LIMIT {
+            return Err("Plugin source exceeds the 8 MiB input limit; reduce plugin size".into());
+        }
+        let document = self.lock().document.clone();
+        let plugin_id = manifest.plugin.id.clone();
+        let permissions = manifest.plugin.permissions.clone();
+        let (loaded_tx, loaded_rx) = mpsc::sync_channel(1);
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let thread_plugin_id = plugin_id.clone();
+        thread::Builder::new()
+            .name("novelist-plugin".into())
+            .stack_size(PLUGIN_THREAD_STACK)
+            .spawn(move || {
+                run_plugin_thread(
+                    thread_plugin_id,
+                    permissions,
+                    source,
+                    document,
+                    loaded_tx,
+                    requests_rx,
+                )
+            })
+            .map_err(|error| format!("Failed to start plugin thread: {error}"))?;
+        let new_commands = match loaded_rx.recv_timeout(PLUGIN_HOST_TIMEOUT) {
+            Ok(result) => result?,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(host_timeout_error("Plugin load")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Plugin load: plugin thread exited unexpectedly".into())
+            }
+        };
+
+        // Commit registration only once source and metadata conversion both
+        // succeed. Replacing the entry drops the previous instance's sender.
+        let mut inner = self.lock();
+        let generation = inner.next_generation;
+        inner.next_generation += 1;
+        inner
+            .registered_commands
+            .retain(|c| c.plugin_id != plugin_id);
+        inner.registered_commands.extend(new_commands);
+        inner.plugins.insert(
+            plugin_id,
+            LoadedPlugin {
+                manifest,
+                requests: requests_tx,
+                generation,
+            },
+        );
+        Ok(())
+    }
+
+    /// Unload a plugin.
+    pub fn unload_plugin(&self, plugin_id: &str) {
+        let mut inner = self.lock();
+        inner.plugins.remove(plugin_id);
+        inner
+            .registered_commands
+            .retain(|c| c.plugin_id != plugin_id);
+    }
+
+    /// Drop `plugin_id` only if it is still the instance a failed call used.
+    fn discard(&self, plugin_id: &str, generation: u64) {
+        let mut inner = self.lock();
+        if inner
+            .plugins
+            .get(plugin_id)
+            .is_some_and(|plugin| plugin.generation == generation)
+        {
             inner.plugins.remove(plugin_id);
             inner
                 .registered_commands
                 .retain(|c| c.plugin_id != plugin_id);
+        }
+    }
+
+    /// List all loaded plugins.
+    pub fn list_loaded_plugins(&self) -> Vec<PluginInfo> {
+        self.lock()
+            .plugins
+            .values()
+            .map(|p| PluginInfo {
+                id: p.manifest.plugin.id.clone(),
+                name: p.manifest.plugin.name.clone(),
+                version: p.manifest.plugin.version.clone(),
+                permissions: p.manifest.plugin.permissions.clone(),
+                active: true,
+                ui: p.manifest.ui.clone(),
+                description: p.manifest.plugin.description.clone(),
+                author: p.manifest.plugin.author.clone(),
+                icon: p.manifest.plugin.icon.clone(),
+                builtin: false,
+                enabled: true,
+            })
+            .collect()
+    }
+
+    /// Get all registered commands.
+    pub fn get_registered_commands(&self) -> Vec<RegisteredCommandInfo> {
+        self.lock()
+            .registered_commands
+            .iter()
+            .map(|c| RegisteredCommandInfo {
+                plugin_id: c.plugin_id.clone(),
+                command_id: c.command_id.clone(),
+                label: c.label.clone(),
+            })
+            .collect()
+    }
+
+    /// Invoke a registered plugin command. Returns any pending text replacements.
+    pub fn invoke_command(&self, plugin_id: &str, command_id: &str) -> CommandResult {
+        if !command_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("Invalid command ID: {command_id}"));
+        }
+        let (requests, generation, document) = {
+            let inner = self.lock();
+            let plugin = inner
+                .plugins
+                .get(plugin_id)
+                .ok_or_else(|| format!("Plugin not found: {plugin_id}"))?;
+            (
+                plugin.requests.clone(),
+                plugin.generation,
+                inner.document.clone(),
+            )
+        };
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let request = InvokeRequest {
+            command_id: command_id.to_owned(),
+            document,
+            reply: reply_tx,
+        };
+        let result = if requests.send(request).is_err() {
+            Err("Plugin command: plugin thread is no longer running".to_string())
+        } else {
+            match reply_rx.recv_timeout(PLUGIN_HOST_TIMEOUT) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(host_timeout_error("Plugin command")),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    Err("Plugin command: plugin thread exited unexpectedly".to_string())
+                }
+            }
+        };
+        drop(requests);
+        if result.is_err() {
+            // The plugin thread has already discarded its context (or is
+            // abandoned); never route another command to it.
+            self.discard(plugin_id, generation);
         }
         result
     }
@@ -495,25 +651,42 @@ mod tests {
     }
 
     #[test]
-    fn test_set_document_state() {
+    fn document_accessors_require_read_permission() {
         let host = PluginHostState::new();
-        host.set_document_state("Hello World".to_string(), 0, 5, 2);
-        // Verify by loading a plugin that reads it
-        let manifest = make_manifest("reader", vec!["read"]);
-        let source = r#"
-            var doc = novelist.getDocument();
+        host.set_document_state("机密 manuscript".to_string(), 0, 2, 2);
+        let reader = r#"
+            if (novelist.getDocument() !== "机密 manuscript") throw new Error("wrong document");
             var sel = novelist.getSelection();
-            var wc = novelist.getWordCount();
-            globalThis.__test_doc = doc;
-            globalThis.__test_sel_from = sel.from;
-            globalThis.__test_sel_to = sel.to;
-            globalThis.__test_wc = wc;
+            if (sel.from !== 0 || sel.to !== 2 || novelist.getWordCount() !== 2) {
+                throw new Error("wrong selection");
+            }
+            novelist.registerCommand("probe", "Probe", function() {
+                if (novelist.getDocument() !== "机密 manuscript") throw new Error("stale document");
+            });
         "#;
-        host.load_plugin(manifest, source).unwrap();
-        // Plugin loaded successfully means document state was accessible
-        let plugins = host.list_loaded_plugins();
-        assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].id, "reader");
+        host.load_plugin(make_manifest("reader", vec!["read"]), reader)
+            .unwrap();
+        host.invoke_command("reader", "probe").unwrap();
+        // `write` implies `read`.
+        host.load_plugin(make_manifest("writer", vec!["write"]), reader)
+            .unwrap();
+        host.invoke_command("writer", "probe").unwrap();
+
+        let blind = r#"
+            function exposed() {
+                return typeof novelist.getDocument !== "undefined"
+                    || typeof novelist.getSelection !== "undefined"
+                    || typeof novelist.getWordCount !== "undefined"
+                    || typeof novelist.replaceSelection !== "undefined";
+            }
+            if (exposed()) throw new Error("document exposed at load");
+            novelist.registerCommand("probe", "Probe", function() {
+                if (exposed()) throw new Error("document exposed to command");
+            });
+        "#;
+        host.load_plugin(make_manifest("blind", vec!["ui"]), blind)
+            .unwrap();
+        assert!(host.invoke_command("blind", "probe").unwrap().is_empty());
     }
 
     #[test]
@@ -573,7 +746,7 @@ mod tests {
         assert_eq!(host.list_loaded_plugins().len(), 1);
         assert_eq!(host.get_registered_commands().len(), 1);
 
-        host.unload_plugin("temp").unwrap();
+        host.unload_plugin("temp");
         assert_eq!(host.list_loaded_plugins().len(), 0);
         assert_eq!(host.get_registered_commands().len(), 0);
     }
@@ -655,7 +828,7 @@ mod tests {
         assert_eq!(host.get_registered_commands().len(), 2);
 
         // Unload one
-        host.unload_plugin("plugin1").unwrap();
+        host.unload_plugin("plugin1");
         assert_eq!(host.list_loaded_plugins().len(), 1);
         assert_eq!(host.get_registered_commands().len(), 1);
         assert_eq!(host.get_registered_commands()[0].command_id, "b");
@@ -1003,6 +1176,74 @@ mod tests {
                 });"#,
                 "invalid UTF-8",
             );
+        });
+    }
+
+    /// Backtracking regexes run in native code that never polls QuickJS's
+    /// interrupt hook, so only the host-side timeout can stop them.
+    const CATASTROPHIC_REGEX: &str = r#"/(a+)+$/.test("a".repeat(40) + "!")"#;
+
+    fn assert_host_timeout(started: Instant, error: &str) {
+        assert!(error.contains("time limit"), "{error}");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= PLUGIN_HOST_TIMEOUT
+                && elapsed < PLUGIN_HOST_TIMEOUT + Duration::from_secs(2),
+            "host waited {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn host_timeout_abandons_a_load_stuck_in_a_native_regex() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            load_healthy(&host, "healthy");
+            load_healthy(&host, "stuck");
+            let started = Instant::now();
+            let error = host
+                .load_plugin(
+                    make_manifest("stuck", vec!["write"]),
+                    format!("{CATASTROPHIC_REGEX};"),
+                )
+                .unwrap_err();
+            assert_host_timeout(started, &error);
+            // The global state stays usable while the abandoned thread spins,
+            // and a failed reload keeps the previous instance.
+            assert_eq!(host.list_loaded_plugins().len(), 2);
+            assert_healthy(&host, "healthy");
+            assert_healthy(&host, "stuck");
+            load_healthy(&host, "fresh");
+            assert_healthy(&host, "fresh");
+        });
+    }
+
+    #[test]
+    fn host_timeout_abandons_a_command_stuck_in_a_native_regex() {
+        isolated_resource_case(|| {
+            let host = PluginHostState::new();
+            load_healthy(&host, "healthy");
+            host.load_plugin(
+                make_manifest("stuck", vec!["write"]),
+                format!(
+                    r#"novelist.registerCommand("bad", "Bad", function() {{
+                        novelist.replaceSelection("must not escape");
+                        {CATASTROPHIC_REGEX};
+                    }});"#
+                ),
+            )
+            .unwrap();
+            let started = Instant::now();
+            let error = host.invoke_command("stuck", "bad").unwrap_err();
+            assert_host_timeout(started, &error);
+            assert!(host.list_loaded_plugins().iter().all(|p| p.id != "stuck"));
+            assert!(host
+                .get_registered_commands()
+                .iter()
+                .all(|c| c.plugin_id != "stuck"));
+            assert!(host.invoke_command("stuck", "bad").is_err());
+            assert_healthy(&host, "healthy");
+            load_healthy(&host, "stuck");
+            assert_healthy(&host, "stuck");
         });
     }
 }

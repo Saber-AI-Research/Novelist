@@ -60,7 +60,7 @@ export async function deleteEntries(
   const failedPaths: string[] = [];
   const refreshParents = new Set<string>();
   for (const target of targets) {
-    const result = await commands.deleteItem(target.path);
+    const result = await commands.deleteItem(deletionRoot(target.path), target.path);
     if (result.status === 'ok') {
       deletedPaths.push(target.path);
       projectStore.removeWorkspacePath(target.path);
@@ -81,6 +81,16 @@ export async function deleteEntries(
   }
 
   return { status: 'completed', deletedPaths, failedPaths };
+}
+
+/**
+ * The folder the backend confines a delete to: the open project for project
+ * entries, otherwise (a standalone file in single-file mode) its own folder.
+ */
+function deletionRoot(path: string): string {
+  const projectDir = projectStore.dirPath;
+  if (projectDir && pathStartsWithChild(path, projectDir)) return projectDir;
+  return pathDirname(path);
 }
 
 export function collapseNestedTargets(entries: readonly DeletableEntry[]): DeletableEntry[] {

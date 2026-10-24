@@ -68,14 +68,17 @@
     }
   }
 
+  // Every edit starts with all secrets masked; a reveal never carries over to another host.
   function startAdd(provider: ProviderId) {
+    revealedFields = new Set();
     editing = { host: newHost(provider), isNew: true };
   }
   function startEdit(host: HostConfig) {
+    revealedFields = new Set();
     // $state.snapshot — structuredClone throws on Svelte 5 $state proxies.
     editing = { host: $state.snapshot(host) as HostConfig, isNew: false };
   }
-  function cancelEdit() { editing = null; }
+  function cancelEdit() { editing = null; revealedFields = new Set(); }
   async function saveEdit() {
     if (!editing) return;
     const idx = settings.hosts.findIndex(h => h.id === editing!.host.id);
@@ -83,6 +86,7 @@
     else settings.hosts.push(editing.host);
     if (editing.isNew && !settings.active_host_id) settings.active_host_id = editing.host.id;
     editing = null;
+    revealedFields = new Set();
     await persist();
   }
   async function removeHost(id: string) {
@@ -263,8 +267,8 @@
               />
               {#if f.secret}
                 <button type="button" class="reveal-btn" onclick={() => toggleReveal(f.key)}
-                        title={shown ? '隐藏' : '显示'}
-                        aria-label={shown ? '隐藏' : '显示'}>
+                        title={shown ? t('settings.imageHosts.hideSecret') : t('settings.imageHosts.showSecret')}
+                        aria-label={shown ? t('settings.imageHosts.hideSecret') : t('settings.imageHosts.showSecret')}>
                   {#if shown}
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
                   {:else}

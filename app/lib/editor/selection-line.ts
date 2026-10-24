@@ -34,29 +34,38 @@ const selectedLineDeco = Decoration.line({ class: 'cm-novelist-selected-line' })
 /**
  * Pure builder — exported for unit testing. Takes the document and a
  * selection directly instead of an `EditorView`, so tests can assert the
- * decoration set without booting CM6.
+ * decoration set without booting CM6. Only lines inside `visibleRanges` are
+ * decorated, so the cost follows the viewport, not the selection size
+ * (Cmd+A on a huge file).
  */
-export function buildSelectionDecorations(doc: Text, selection: EditorSelection): DecorationSet {
+export function buildSelectionDecorations(
+  doc: Text,
+  selection: EditorSelection,
+  visibleRanges: readonly { from: number; to: number }[] = [{ from: 0, to: doc.length }],
+): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   const seenLines = new Set<number>();
 
   for (const sel of selection.ranges) {
     if (sel.empty) continue;
-    const fromLine = doc.lineAt(sel.from);
-    const toLine = doc.lineAt(sel.to);
+    for (const visible of visibleRanges) {
+      const from = Math.max(sel.from, visible.from);
+      const to = Math.min(sel.to, visible.to);
+      if (from > to) continue;
+      const lastLine = doc.lineAt(to).number;
+      for (let n = doc.lineAt(from).number; n <= lastLine; n++) {
+        const line = doc.line(n);
+        const coversFromLeft = sel.from <= line.from;
+        const coversToRight = sel.to >= line.to;
 
-    for (let n = fromLine.number; n <= toLine.number; n++) {
-      const line = doc.line(n);
-      const coversFromLeft = sel.from <= line.from;
-      const coversToRight = sel.to >= line.to;
-
-      if (coversFromLeft && coversToRight) {
-        if (seenLines.has(n)) continue;
-        seenLines.add(n);
-        ranges.push(selectedLineDeco.range(line.from));
+        if (coversFromLeft && coversToRight) {
+          if (seenLines.has(n)) continue;
+          seenLines.add(n);
+          ranges.push(selectedLineDeco.range(line.from));
+        }
+        // Partial coverage: deliberately no decoration — native `::selection`
+        // handles wrap-aware painting of the selected text run.
       }
-      // Partial coverage: deliberately no decoration — native `::selection`
-      // handles wrap-aware painting of the selected text run.
     }
   }
 
@@ -67,11 +76,12 @@ export const unifiedLineSelectionPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
     constructor(view: EditorView) {
-      this.decorations = buildSelectionDecorations(view.state.doc, view.state.selection);
+      this.decorations = buildSelectionDecorations(view.state.doc, view.state.selection, view.visibleRanges);
     }
     update(update: ViewUpdate) {
       if (update.selectionSet || update.docChanged || update.viewportChanged) {
-        this.decorations = buildSelectionDecorations(update.view.state.doc, update.view.state.selection);
+        const { state, visibleRanges } = update.view;
+        this.decorations = buildSelectionDecorations(state.doc, state.selection, visibleRanges);
       }
     }
   },

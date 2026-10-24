@@ -1,6 +1,7 @@
 pub mod ai_bridge;
 pub mod ai_files;
 pub mod bench;
+pub mod book_translation;
 pub mod claude_bridge;
 pub mod cli_shim;
 pub mod codex_bridge;

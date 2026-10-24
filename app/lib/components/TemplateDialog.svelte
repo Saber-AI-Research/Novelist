@@ -3,7 +3,10 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { templatesStore } from '$lib/stores/templates.svelte';
   import type { TemplateMode } from '$lib/ipc/commands';
+  import { isImeComposing } from '$lib/utils/ime';
   import { IconClose } from './icons';
+  import { focusTrap } from './focus-trap';
+  import { templateFrontMatter } from './template-dialog';
 
   interface Props {
     /** If set, the dialog edits an existing template; otherwise it creates. */
@@ -65,17 +68,7 @@
     error = '';
     try {
       const id = initialId ?? slugify(name);
-      await templatesStore.create(
-        pd,
-        id,
-        {
-          name: name.trim(),
-          mode,
-          description: description.trim() ? description.trim() : null,
-          defaultFilename: mode === 'new-file' && defaultFilename.trim() ? defaultFilename.trim() : null,
-        },
-        body,
-      );
+      await templatesStore.create(pd, id, templateFrontMatter({ name, mode, description, defaultFilename }), body);
       onClose();
     } catch (e: any) {
       error = e?.message ?? String(e);
@@ -85,6 +78,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); save(); return; }
   }
@@ -95,9 +89,18 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="tmpl-backdrop" data-testid="template-dialog" onclick={onClose}>
-  <div class="tmpl-card" onclick={(e) => e.stopPropagation()}>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="tmpl-card"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="template-dialog-title"
+    tabindex="-1"
+    use:focusTrap
+    onclick={(e) => e.stopPropagation()}
+  >
     <div class="tmpl-head">
-      <span>{isEditing ? t('template.dialogEditTitle') : t('template.dialogNewTitle')}</span>
+      <span id="template-dialog-title">{isEditing ? t('template.dialogEditTitle') : t('template.dialogNewTitle')}</span>
       <button type="button" class="tmpl-x" onclick={onClose} aria-label={t('template.dialogCancel')}><IconClose size={14} /></button>
     </div>
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { t } from '$lib/i18n';
   import { aiAgentSettings } from './settings.svelte';
   import {
     detectClaudeCli,
@@ -338,7 +339,10 @@
     onLoadFailure(ctx, e) {
       if (destroyed || !isActiveToken(ctx)) return;
       const message = sanitizeAgentTurnFailureMessage(e instanceof Error ? e.message : String(e));
-      error = `Failed to load AI Agent sessions for ${ctx.projectDir ?? 'this project'}: ${message}`;
+      error = t('aiAgent.error.loadSessions', {
+        project: ctx.projectDir ?? t('aiAgent.error.thisProject'),
+        message,
+      });
     },
   });
 
@@ -636,7 +640,9 @@
       createAttachmentFromContext({
         id: `${asset.kind}:${asset.id}`,
         kind: 'manual-note',
-        label: `${asset.kind === 'skill' ? 'Skill' : 'Command'}: ${asset.name}`,
+        label: asset.kind === 'skill'
+          ? t('aiAgent.attachment.skill', { name: asset.name })
+          : t('aiAgent.attachment.command', { name: asset.name }),
         path: asset.path,
         content: asset.content,
       }),
@@ -647,7 +653,7 @@
       .map((session) => ({
         id: `session:${session.id}`,
         kind: 'session',
-        label: `Session: ${session.title}`,
+        label: t('aiAgent.attachment.session', { title: session.title }),
         source: 'session',
         mode: 'summary',
         content: session.turns.map((turn) =>
@@ -740,7 +746,7 @@
     if (!isActiveToken(lifecycleToken)) return;
     const s = aiAgentSessions.sessions.find((session) => session.id === sessionId);
     if (!s || s.turns.length < 2) {
-      saveStatus = 'Need a longer session to compact.';
+      saveStatus = t('aiAgent.compactNeedsLonger');
       setTimeout(() => (saveStatus = null), 2500);
       return;
     }
@@ -766,7 +772,7 @@
   async function handleSpecialAgentCommand(commandId: string, token: AiAgentProjectToken): Promise<boolean> {
     if (!isActiveToken(token)) return true;
     if (commandId === 'clear') {
-      if (activeId && window.confirm('Clear transcript for this session? This cannot be undone.')) {
+      if (activeId && window.confirm(t('aiAgent.menu.clearConfirm'))) {
         await clearAgentSession(activeId, token);
       }
       return true;
@@ -776,7 +782,7 @@
       return true;
     }
     if (commandId === 'compact') {
-      if (window.confirm('Compact session transcript? This replaces the current transcript with a summary.')) {
+      if (window.confirm(t('aiAgent.menu.compactConfirm'))) {
         if (activeId) await compactAgentSession(activeId, token);
       }
       return true;
@@ -868,8 +874,8 @@
     if (ev.kind === 'exit') {
       if (persistent && s) dropLive(s.sessionUuid);
       const message = ev.code == null
-        ? 'Agent process exited before completing the turn.'
-        : `Agent process exited with code ${ev.code} before completing the turn.`;
+        ? t('aiAgent.error.processExited')
+        : t('aiAgent.error.processExitedCode', { code: ev.code });
       if (persistent) {
         if (attempt && failAttempt(sessionId, attempt, 'stream', message)) aiAgentSessions.markInterrupted(sessionId);
       } else {
@@ -962,7 +968,7 @@
         attempt = running;
         await ensureListening(sessionId, token, attempt);
         if (!isActiveToken(token) || !ownsAttemptInPhase(sessionId, attempt, 'running')) return;
-        if (!runtime.runTurn) throw new Error('Provider cannot run this turn.');
+        if (!runtime.runTurn) throw new Error(t('aiAgent.error.providerCannotRun'));
         await runtime.runTurn({
           sessionUuid: session.sessionUuid,
           prompt: outbound,
@@ -983,7 +989,7 @@
       attempt = running;
       const uuid = await ensureLive(sessionId, token, attempt);
       if (!isActiveToken(token) || !ownsAttemptInPhase(sessionId, attempt, 'running')) return;
-      if (!uuid) throw new Error('Failed to spawn Claude CLI');
+      if (!uuid) throw new Error(t('aiAgent.error.spawnFailed'));
       try {
         await runtime.send(uuid, outbound);
       } catch (e) {
@@ -1024,7 +1030,7 @@
       createAttachmentFromContext({
         id: `skill:${skill.id}`,
         kind: 'manual-note',
-        label: `Skill: ${skill.name}`,
+        label: t('aiAgent.attachment.skill', { name: skill.name }),
         path: skill.path,
         content: skill.content,
       }),
@@ -1073,7 +1079,7 @@
       sessionId,
       turnId,
       'context',
-      `Failed to resolve prompt context: ${message}`,
+      t('aiAgent.error.resolveContext', { message }),
     );
     releaseAttempt(sessionId, attempt);
     const failedSession = aiAgentSessions.sessions.find((session) => session.id === sessionId);
@@ -1095,14 +1101,14 @@
     if (!text) return;
     error = null;
     if (!lifecycleReady) {
-      error = 'AI Agent is still loading this project.';
+      error = t('aiAgent.error.stillLoading');
       return;
     }
     const sessionId = aiAgentSessions.ensureOne();
     const s = aiAgentSessions.sessions.find((x) => x.id === sessionId);
     if (!s) return;
     if (turnInFlight.has(sessionId)) {
-      error = 'A turn is already running for this session.';
+      error = t('aiAgent.error.turnRunning');
       return;
     }
     const token = projectLifecycle.capture();
@@ -1150,7 +1156,7 @@
           sessionId,
           turnId,
           'send',
-          `Could not persist turn: ${e instanceof Error ? e.message : String(e)}`,
+          t('aiAgent.error.persistTurn', { message: e instanceof Error ? e.message : String(e) }),
         );
         releaseAttempt(sessionId, attempt);
         if (input.trim() === text) input = '';
@@ -1196,7 +1202,7 @@
     } catch (e) {
       if (isActiveToken(token) && ownsAttemptInPhase(sessionId, attempt, 'reserved')) {
         releaseAttempt(sessionId, attempt);
-        aiAgentSessions.failTurn(sessionId, turnId, 'send', `Could not persist turn: ${e instanceof Error ? e.message : String(e)}`);
+        aiAgentSessions.failTurn(sessionId, turnId, 'send', t('aiAgent.error.persistTurn', { message: e instanceof Error ? e.message : String(e) }));
       }
       return;
     }
@@ -1261,7 +1267,7 @@
     } catch (e) {
       if (isActiveToken(token) && ownsAttemptInPhase(session.id, attempt, 'reserved')) {
         releaseAttempt(session.id, attempt);
-        aiAgentSessions.failTurn(session.id, turnId, 'send', `Could not persist retry: ${e instanceof Error ? e.message : String(e)}`);
+        aiAgentSessions.failTurn(session.id, turnId, 'send', t('aiAgent.error.persistRetry', { message: e instanceof Error ? e.message : String(e) }));
       }
       return;
     }
@@ -1342,7 +1348,7 @@
         if (aiAgentSessions.sessions.length === 0) {
           fallbackId = aiAgentSessions.create();
           const createdFallback = aiAgentSessions.sessions.find((session) => session.id === fallbackId);
-          if (!createdFallback) throw new Error('Failed to create fallback Agent session');
+          if (!createdFallback) throw new Error(t('aiAgent.error.fallbackSession'));
           fallback = createdFallback;
           await persistAgentSessionFor(token.projectDir, createdFallback);
           fallbackPersisted = true;
@@ -1460,29 +1466,29 @@
   let sessionMenuActions = $derived([
     {
       id: 'save',
-      label: 'Save transcript',
+      label: t('aiAgent.menu.save'),
       disabled: turns.length === 0 || !lifecycleReady,
       onSelect: (id: string) => saveAgentToProject(undefined, id),
     },
     {
       id: 'fork',
-      label: 'Fork session',
+      label: t('aiAgent.menu.fork'),
       disabled: turns.length === 0 || busy || !lifecycleReady,
       onSelect: forkSession,
     },
     {
       id: 'compact',
-      label: 'Compact session',
+      label: t('aiAgent.menu.compact'),
       disabled: turns.length < 2 || busy || !lifecycleReady,
-      confirmation: 'Compact session transcript? This replaces the current transcript with a summary.',
+      confirmation: t('aiAgent.menu.compactConfirm'),
       onSelect: (id: string) => compactAgentSession(id),
     },
     {
       id: 'clear',
-      label: 'Clear transcript',
+      label: t('aiAgent.menu.clear'),
       disabled: turns.length === 0 || busy || !lifecycleReady,
       danger: true,
-      confirmation: 'Clear transcript for this session? This cannot be undone.',
+      confirmation: t('aiAgent.menu.clearConfirm'),
       onSelect: (id: string) => clearAgentSession(id, projectLifecycle.capture()),
     },
   ]);
@@ -1490,9 +1496,9 @@
   function handleSessionActionError(cause: unknown | null) {
     sessionActionError = cause == null
       ? null
-      : `Session action failed: ${sanitizeAgentTurnFailureMessage(
-          cause instanceof Error ? cause.message : String(cause),
-        )}`;
+      : t('aiAgent.error.sessionAction', {
+          message: sanitizeAgentTurnFailureMessage(cause instanceof Error ? cause.message : String(cause)),
+        });
   }
 
   async function persistRetiredSessions(
@@ -1609,7 +1615,7 @@
           createAttachmentFromContext({
             id: 'memory',
             kind: 'manual-note',
-            label: 'Project memory',
+            label: t('aiAgent.attachment.memory'),
             path: assets.memory.path,
             content: assets.memory.content,
           }),
@@ -1656,9 +1662,9 @@
   function persistProjectSessionsInBackground() {
     void persistProjectSessions().catch((e) => {
       if (!destroyed) {
-        error = `Failed to persist AI Agent sessions: ${sanitizeAgentTurnFailureMessage(
-          e instanceof Error ? e.message : String(e),
-        )}`;
+        error = t('aiAgent.error.persistSessions', {
+          message: sanitizeAgentTurnFailureMessage(e instanceof Error ? e.message : String(e)),
+        });
       }
     });
   }
@@ -1728,13 +1734,13 @@
     if (!isActiveToken(lifecycleToken)) return;
     const s = aiAgentSessions.sessions.find((session) => session.id === sessionId);
     if (!s || s.turns.length === 0) {
-      saveStatus = 'Nothing to save.';
+      saveStatus = t('aiAgent.nothingToSave');
       setTimeout(() => (saveStatus = null), 2500);
       return;
     }
     const projectDir = lifecycleToken.projectDir;
     if (!projectDir) {
-      saveStatus = 'Open a project first.';
+      saveStatus = t('aiAgent.openProjectFirst');
       setTimeout(() => (saveStatus = null), 3000);
       return;
     }
@@ -1744,10 +1750,12 @@
     try {
       const resolvedPath = await saveAiChat(projectDir, filename, body);
       if (!isActiveToken(lifecycleToken)) return;
-      saveStatus = `Saved · .novelist/chats/${aiChatBasename(resolvedPath)}`;
+      saveStatus = t('aiAgent.saved', { file: aiChatBasename(resolvedPath) });
     } catch (e) {
       if (!isActiveToken(lifecycleToken)) return;
-      saveStatus = `Save failed: ${sanitizeAgentTurnFailureMessage(e instanceof Error ? e.message : String(e))}`;
+      saveStatus = t('aiAgent.saveFailed', {
+        message: sanitizeAgentTurnFailureMessage(e instanceof Error ? e.message : String(e)),
+      });
     }
     setTimeout(() => (saveStatus = null), 4000);
   }
@@ -1864,10 +1872,10 @@
             }
           : candidate.changeSet,
       }));
-      markApplyFailure(context, reason ?? `Could not apply changes to ${file.path}.`);
+      markApplyFailure(context, reason ?? t('aiAgent.error.applyFailed', { path: file.path }));
     };
     if (file.status === 'modify' && file.originalText === null) {
-      markConflict('Change proposal is missing original file content.');
+      markConflict(t('aiAgent.error.missingOriginal'));
       return 'conflict';
     }
     const expectedText = file.status === 'create' ? null : file.originalText;
@@ -1956,11 +1964,28 @@
   }
 
   function failureLabel(stage: AgentTurnFailureStage): string {
-    if (stage === 'context') return 'Context failed';
-    if (stage === 'send') return 'Send failed';
-    if (stage === 'tool') return 'Tool failed';
-    if (stage === 'apply') return 'Apply failed';
-    return 'Stream failed';
+    if (stage === 'context') return t('aiAgent.failure.context');
+    if (stage === 'send') return t('aiAgent.failure.send');
+    if (stage === 'tool') return t('aiAgent.failure.tool');
+    if (stage === 'apply') return t('aiAgent.failure.apply');
+    return t('aiAgent.failure.stream');
+  }
+
+  /**
+   * Split a translated string around its `{name}` placeholders so the
+   * substituted values (binary names, commands, paths) keep their `<code>`
+   * styling in every locale.
+   */
+  function codeParts(key: string, params: Record<string, string>): Array<{ text: string; code: boolean }> {
+    return t(key)
+      .split(/(\{\w+\})/)
+      .filter(Boolean)
+      .map((piece) => {
+        const name = /^\{(\w+)\}$/.exec(piece)?.[1];
+        return name !== undefined && name in params
+          ? { text: params[name], code: true }
+          : { text: piece, code: false };
+      });
   }
 </script>
 
@@ -1977,29 +2002,29 @@
     disableDelete={busy || !lifecycleReady}
     disableActions={!lifecycleReady}
     testidPrefix="ai-agent-session"
-    newLabel="New agent session"
+    newLabel={t('aiAgent.newSession')}
   />
   <header>
     <div class="title">
-      <span>AI Agent</span>
+      <span>{t('aiAgent.title')}</span>
       <span class:plan={agentMode === 'plan'} class="badge mode" data-testid="ai-agent-mode-badge">
-        {agentMode}
+        {agentMode === 'plan' ? t('aiAgent.modeBadge.plan') : t('aiAgent.modeBadge.act')}
       </span>
       {#if isLive}
-        <span class="badge live" title={activeSession?.sessionUuid.slice(0, 8)}>● live</span>
+        <span class="badge live" title={activeSession?.sessionUuid.slice(0, 8)}>{t('aiAgent.status.live')}</span>
       {:else if detecting}
-        <span class="badge pending">detecting</span>
+        <span class="badge pending">{t('aiAgent.status.detecting')}</span>
       {:else if !detected && !effectiveCliPath}
-        <span class="badge bad">no CLI</span>
+        <span class="badge bad">{t('aiAgent.status.noCli')}</span>
       {:else}
-        <span class="badge idle">idle</span>
+        <span class="badge idle">{t('aiAgent.status.idle')}</span>
       {/if}
       {#if activeSession?.interrupted}
-        <span class="badge interrupted">interrupted</span>
+        <span class="badge interrupted">{t('aiAgent.status.interrupted')}</span>
       {/if}
     </div>
     <div class="actions">
-      <button class="novelist-btn novelist-btn-quiet icon-btn" title="Settings" aria-label="Settings" onclick={() => (settingsOpen = !settingsOpen)}><IconGear size={14} /></button>
+      <button class="novelist-btn novelist-btn-quiet icon-btn" title={t('aiAgent.settings')} aria-label={t('aiAgent.settings')} onclick={() => (settingsOpen = !settingsOpen)}><IconGear size={14} /></button>
     </div>
   </header>
 
@@ -2012,25 +2037,23 @@
   {#if !detecting && !detected && !effectiveCliPath}
     <div class="empty">
       {#if activeProvider === 'codex'}
-        <p class="empty-title">Codex CLI not found</p>
+        <p class="empty-title">{t('aiAgent.codexMissing.title')}</p>
         <p>
-          This session uses a locally installed <code>codex</code> binary. Install Codex and run
-          <code>codex login</code>, then reload — or open Settings and set an absolute path.
+          {#each codeParts('aiAgent.codexMissing.body', { binary: 'codex', command: 'codex login' }) as part, pi (pi)}{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}{/each}
         </p>
         <p>
           <a href="https://github.com/openai/codex" target="_blank" rel="noreferrer">
-            Install instructions →
+            {t('aiAgent.installInstructions')}
           </a>
         </p>
       {:else}
-        <p class="empty-title">Claude Code CLI not found</p>
+        <p class="empty-title">{t('aiAgent.claudeMissing.title')}</p>
         <p>
-          AI Agent uses a locally installed <code>claude</code> binary. Install Claude Code, then reload —
-          or open Settings and set an absolute path.
+          {#each codeParts('aiAgent.claudeMissing.body', { binary: 'claude' }) as part, pi (pi)}{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}{/each}
         </p>
         <p>
           <a href="https://docs.claude.com/en/docs/claude-code/overview" target="_blank" rel="noreferrer">
-            Install instructions →
+            {t('aiAgent.installInstructions')}
           </a>
         </p>
       {/if}
@@ -2040,7 +2063,7 @@
       {#each turns as turn, i (i)}
         {#if turn.role === 'user'}
           <div class="turn user">
-            <div class="role">You</div>
+            <div class="role">{t('aiAgent.role.user')}</div>
             <div class="text">{turn.displayText ?? turn.text}</div>
             {#if turn.attachments?.length}
               <div class="turn-attachments">
@@ -2053,7 +2076,7 @@
         {:else}
           <div class="turn assistant">
             <div class="role">
-              Claude
+              {t('aiAgent.role.assistant')}
               {#if turn.cost != null}
                 <span class="cost">${turn.cost.toFixed(4)}</span>
               {/if}
@@ -2062,7 +2085,7 @@
               {@const plan = proposedPlan(turn.text)}
               {#if plan}
                 <div class="plan-card" data-testid="ai-agent-plan-card">
-                  <div class="plan-title">Proposed plan</div>
+                  <div class="plan-title">{t('aiAgent.proposedPlan')}</div>
                   <div>{plan}</div>
                 </div>
               {/if}
@@ -2079,7 +2102,7 @@
                 </details>
               {:else if part.card.kind === 'tool-result'}
                 <details class="card tool-result" class:error={part.card.status === 'error'}>
-                  <summary><span class="summary-icon"><IconArrowInsert size={12} /></span> {part.card.status === 'error' ? 'failed' : 'result'}</summary>
+                  <summary><span class="summary-icon"><IconArrowInsert size={12} /></span> {part.card.status === 'error' ? t('aiAgent.toolFailed') : t('aiAgent.toolResult')}</summary>
                   <pre>{part.card.content.length > 4000 ? part.card.content.slice(0, 4000) + '\n…' : part.card.content}</pre>
                 </details>
               {:else if part.card.kind === 'apply-changes'}
@@ -2095,20 +2118,20 @@
               {/if}
             {/each}
             {#if turn.usage}
-              <div class="usage" title="Codex token usage">
-                ↑{turn.usage.input.toLocaleString()} ↓{turn.usage.output.toLocaleString()} tokens
+              <div class="usage" title={t('aiAgent.usageTitle')}>
+                {t('aiAgent.usage', { input: turn.usage.input.toLocaleString(), output: turn.usage.output.toLocaleString() })}
               </div>
             {/if}
             {#if turn.turnId && turnInFlight.get(activeSession?.id ?? '')?.turnId === turn.turnId}
               <div class="turn-state running">
-                <span>Running</span>
+                <span>{t('aiAgent.running')}</span>
                 <button
                   type="button"
                   class="novelist-btn novelist-btn-ghost novelist-btn-sm"
-                  aria-label="Stop turn"
+                  aria-label={t('aiAgent.stopTurn')}
                   data-testid="ai-agent-turn-stop-{turn.turnId}"
                   onclick={stopActiveSession}
-                >Stop</button>
+                >{t('aiAgent.stop')}</button>
               </div>
             {/if}
             {#if turn.turnId && turn.failure}
@@ -2124,21 +2147,21 @@
                 <button
                   type="button"
                   class="novelist-btn novelist-btn-ghost novelist-btn-sm"
-                  aria-label="Retry turn"
+                  aria-label={t('aiAgent.retryTurn')}
                   disabled={busy}
                   onclick={() => requestTurnRetry(turn.turnId)}
-                >Retry</button>
+                >{t('aiAgent.retry')}</button>
               </div>
             {:else if turn.turnId && turn.status === 'stopped'}
               <div class="turn-state stopped" data-testid="ai-agent-turn-stopped-{turn.turnId}">
-                <span>Stopped</span>
+                <span>{t('aiAgent.stopped')}</span>
                 <button
                   type="button"
                   class="novelist-btn novelist-btn-ghost novelist-btn-sm"
-                  aria-label="Retry turn"
+                  aria-label={t('aiAgent.retryTurn')}
                   disabled={busy}
                   onclick={() => requestTurnRetry(turn.turnId)}
-                >Retry</button>
+                >{t('aiAgent.retry')}</button>
               </div>
             {/if}
           </div>
@@ -2148,9 +2171,9 @@
         <div class="hello">
           <p>
             {#if projectStore.dirPath}
-              Session will spawn in <code>{projectStore.dirPath}</code> when you send.
+              {#each codeParts('aiAgent.helloProject', { path: projectStore.dirPath }) as part, pi (pi)}{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}{/each}
             {:else}
-              Open a project for full agent capabilities. Without a project, claude runs in its default cwd.
+              {t('aiAgent.helloNoProject')}
             {/if}
           </p>
         </div>
@@ -2167,7 +2190,7 @@
 
     <AiComposer
       value={input}
-      placeholder="Ask the agent... @current /plan $plot-doctor"
+      placeholder={t('aiAgent.placeholder')}
       attachments={attachments}
       mentionVisible={mentionMenuVisible}
       mentionQuery={mentionQuery}
@@ -2193,8 +2216,8 @@
           class="novelist-btn novelist-btn-ghost"
           data-testid="ai-agent-mode-toggle"
           onclick={() => setActiveMode(agentMode === 'plan' ? 'act' : 'plan')}
-          title="Shift+Tab also toggles Plan/Act"
-        >{agentMode === 'plan' ? 'Act' : 'Plan'}</button>
+          title={t('aiAgent.modeToggleTitle')}
+        >{agentMode === 'plan' ? t('aiAgent.modeToggle.act') : t('aiAgent.modeToggle.plan')}</button>
       {/snippet}
     </AiComposer>
   {/if}

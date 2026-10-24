@@ -28,16 +28,23 @@ export function getSecondaryLabel(c: Command): string | undefined {
 }
 
 /**
- * Window (in milliseconds) during which a second `execute(id)` call
- * for the same ID is ignored. Protects against OS menu accelerator
- * + JS keydown handler both dispatching the same command when a
- * shortcut has a menu equivalent.
+ * Who dispatched an `execute`. One physical keystroke on a shortcut with a
+ * native menu equivalent can arrive twice — once as the OS menu accelerator
+ * (`'menu'`) and once through the JS keydown handler (`'app'`). Two dispatches
+ * from the same source are always distinct user actions (e.g. two quick
+ * presses of the same shortcut) and must both run.
+ */
+export type CommandSource = 'menu' | 'app';
+
+/**
+ * Window (in milliseconds) during which an `execute(id)` from one source is
+ * ignored after the same ID ran from the other source.
  */
 const DEDUPE_WINDOW_MS = 50;
 
 class CommandRegistry {
   commands = $state<Command[]>([]);
-  private lastExecuted = new Map<string, number>();
+  private lastExecuted = new Map<string, { at: number; source: CommandSource }>();
 
   register(cmd: Command) {
     // Avoid duplicates
@@ -46,13 +53,13 @@ class CommandRegistry {
     }
   }
 
-  execute(id: string) {
+  execute(id: string, source: CommandSource = 'app') {
     const now = Date.now();
     const last = this.lastExecuted.get(id);
-    if (last !== undefined && now - last < DEDUPE_WINDOW_MS) {
+    if (last && last.source !== source && now - last.at < DEDUPE_WINDOW_MS) {
       return;
     }
-    this.lastExecuted.set(id, now);
+    this.lastExecuted.set(id, { at: now, source });
 
     const cmd = this.commands.find(c => c.id === id);
     if (cmd) cmd.handler();
@@ -71,9 +78,8 @@ class CommandRegistry {
 
   /**
    * Test helper — drops the dedupe window memory. Not called from
-   * production code. Production tests that fire the same command in
-   * rapid succession (e.g. two shortcut parser variants for the same
-   * action) would otherwise trip the 50 ms dedupe window.
+   * production code. Tests that mix menu and app dispatches of the same
+   * command would otherwise trip the 50 ms cross-source dedupe window.
    */
   _resetDedupe() {
     this.lastExecuted.clear();

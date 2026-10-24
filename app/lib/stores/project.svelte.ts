@@ -345,16 +345,20 @@ class ProjectStore {
 
   /** Re-fetch children for a previously-loaded folder (used by file watcher + post-move). */
   async refreshFolder(path: string): Promise<void> {
+    // A project switch while `listDirectory` is in flight must not paste the
+    // old project's listing into the new project's sidebar.
+    const generation = this.generation;
+    const projectDir = this.dirPath;
     // Project root is represented by `this.files` (no wrapper node).
-    if (path === this.dirPath) {
+    if (path === projectDir) {
       const result = await commands.listDirectory(path, this.showHiddenFiles);
-      if (result.status === 'ok') this.updateFiles(result.data);
+      if (result.status === 'ok' && this.isSameProject(generation, projectDir)) this.updateFiles(result.data);
       return;
     }
     const node = this.findFolder(path);
     if (!node || node.children === undefined) return; // not loaded -> nothing to refresh
     const result = await commands.listDirectory(path, this.showHiddenFiles);
-    if (result.status !== 'ok') return;
+    if (result.status !== 'ok' || !this.isSameProject(generation, projectDir)) return;
     const prev = new Map(node.children.map(n => [n.path, n]));
     node.children = result.data.map(e => {
       const existing = prev.get(e.path);
@@ -367,7 +371,9 @@ class ProjectStore {
 
   /** Re-fetch the root plus all folders whose children have already been loaded. */
   async refreshLoadedFolders(): Promise<void> {
-    if (!this.dirPath) return;
+    const projectDir = this.dirPath;
+    if (!projectDir) return;
+    const generation = this.generation;
     const paths = new Set<string>();
     function walk(nodes: FileNode[]) {
       for (const n of nodes) {
@@ -379,10 +385,14 @@ class ProjectStore {
       }
     }
     walk(this.files);
-    for (const path of paths) {
+    for (const path of [...paths, projectDir]) {
+      if (!this.isSameProject(generation, projectDir)) return;
       await this.refreshFolder(path);
     }
-    await this.refreshFolder(this.dirPath);
+  }
+
+  private isSameProject(generation: number, projectDir: string | null): boolean {
+    return this.generation === generation && this.dirPath === projectDir;
   }
 }
 

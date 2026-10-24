@@ -21,6 +21,7 @@ use commands::ai_files::{
     write_ai_memory, write_ai_session,
 };
 use commands::bench::log_startup_phase;
+use commands::book_translation::create_book_translation_project;
 use commands::claude_bridge::{
     claude_cli_detect, claude_cli_kill, claude_cli_send, claude_cli_spawn, ClaudeBridgeState,
 };
@@ -32,13 +33,13 @@ use commands::e2e::{
     capture_e2e_webview_snapshot, perform_e2e_native_command_v, perform_e2e_native_paste,
 };
 use commands::export::{
-    cancel_export_project, check_pandoc, export_project, set_pandoc_path, stage_export_css,
-    ExportState,
+    cancel_export_project, check_pandoc, discard_staged_export_css, export_project,
+    set_pandoc_path, stage_export_css, ExportState,
 };
 use commands::file::{
     broadcast_file_renamed, create_directory, create_file, create_scratch_file, delete_item,
-    duplicate_file, get_file_encoding, list_directory, move_item, read_file, rename_item,
-    reveal_in_file_manager, search_in_project, write_binary_file, write_file,
+    delete_scratch_file, duplicate_file, get_file_encoding, list_directory, move_item, read_file,
+    rename_item, reveal_in_file_manager, search_in_project, write_binary_file, write_file,
     write_file_if_unchanged, EncodingState,
 };
 use commands::image_host::{
@@ -84,7 +85,9 @@ use commands::styled_copy::{
     convert_markdown_to_styled_html, read_styled_copy_image, write_styled_clipboard,
 };
 #[cfg(feature = "sync")]
-use commands::sync::{get_sync_config, save_sync_config, sync_now, test_sync_connection};
+use commands::sync::{
+    adopt_sync_identity, get_sync_config, save_sync_config, sync_now, test_sync_connection,
+};
 use commands::template::{
     create_project_from_template, delete_template, import_template_zip, list_templates,
     save_project_as_template,
@@ -103,10 +106,6 @@ use services::file_watcher::{
     stop_file_watcher, unregister_open_file, FileWatcherState,
 };
 use services::plugin_host::sandbox::PluginHostState;
-use services::rope_document::{
-    rope_apply_edit, rope_close, rope_get_lines, rope_line_to_char, rope_open, rope_save,
-    rope_snapshot, RopeDocumentState,
-};
 use specta::Type;
 use tauri::{Emitter, Manager};
 use tauri_specta::{collect_commands, Builder};
@@ -360,7 +359,7 @@ pub fn run() {
 
     #[cfg(feature = "sync")]
     // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
-    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // as `number` (file sizes, epoch-ms timestamps — all far
     // below 2^53), matching the pre-rc.25 bindings; without it the export
     // refuses BigInt-style types outright.
     let builder = Builder::<tauri::Wry>::new()
@@ -387,6 +386,7 @@ pub fn run() {
             list_directory,
             create_file,
             create_scratch_file,
+            delete_scratch_file,
             create_directory,
             rename_item,
             compute_document_key,
@@ -399,6 +399,7 @@ pub fn run() {
             check_pandoc,
             set_pandoc_path,
             stage_export_css,
+            discard_staged_export_css,
             cancel_export_project,
             export_project,
             detect_project,
@@ -429,13 +430,6 @@ pub fn run() {
             scaffold_plugin,
             get_plugins_dir,
             is_portable_mode,
-            rope_open,
-            rope_get_lines,
-            rope_apply_edit,
-            rope_save,
-            rope_close,
-            rope_line_to_char,
-            rope_snapshot,
             read_draft_note,
             write_draft_note,
             delete_draft_note,
@@ -450,6 +444,7 @@ pub fn run() {
             list_templates,
             create_project_from_template,
             inspect_literary_source,
+            create_book_translation_project,
             create_literary_study_project,
             read_literary_study_overview,
             replace_literary_study_book,
@@ -532,10 +527,11 @@ pub fn run() {
             save_sync_config,
             sync_now,
             test_sync_connection,
+            adopt_sync_identity,
         ]);
     #[cfg(not(feature = "sync"))]
     // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
-    // as `number` (file sizes, epoch-ms timestamps, rope offsets — all far
+    // as `number` (file sizes, epoch-ms timestamps — all far
     // below 2^53), matching the pre-rc.25 bindings; without it the export
     // refuses BigInt-style types outright.
     let builder = Builder::<tauri::Wry>::new()
@@ -558,6 +554,7 @@ pub fn run() {
             list_directory,
             create_file,
             create_scratch_file,
+            delete_scratch_file,
             create_directory,
             rename_item,
             compute_document_key,
@@ -570,6 +567,7 @@ pub fn run() {
             check_pandoc,
             set_pandoc_path,
             stage_export_css,
+            discard_staged_export_css,
             cancel_export_project,
             export_project,
             detect_project,
@@ -600,13 +598,6 @@ pub fn run() {
             scaffold_plugin,
             get_plugins_dir,
             is_portable_mode,
-            rope_open,
-            rope_get_lines,
-            rope_apply_edit,
-            rope_save,
-            rope_close,
-            rope_line_to_char,
-            rope_snapshot,
             read_draft_note,
             write_draft_note,
             delete_draft_note,
@@ -621,6 +612,7 @@ pub fn run() {
             list_templates,
             create_project_from_template,
             inspect_literary_source,
+            create_book_translation_project,
             create_literary_study_project,
             read_literary_study_overview,
             replace_literary_study_book,
@@ -791,34 +783,9 @@ pub fn run() {
             let _ = app.emit("menu-command", event.id().0.clone());
         })
         .on_window_event(|window, event| {
-            if !matches!(event, tauri::WindowEvent::Destroyed) {
-                return;
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                release_window_resources(window.app_handle(), window.label());
             }
-
-            let owner_label = window.label().to_string();
-            let app = window.app_handle().clone();
-            if let Some(state) = app.try_state::<ClaudeBridgeState>() {
-                state.tombstone_owner(&owner_label);
-            }
-            if let Some(state) = app.try_state::<CodexBridgeState>() {
-                state.tombstone_owner(&owner_label);
-            }
-            if let Some(state) = app.try_state::<WindowImageCapabilities>() {
-                state.clear_owner(&owner_label);
-            }
-
-            let claude_app = app.clone();
-            let claude_owner = owner_label.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Some(state) = claude_app.try_state::<ClaudeBridgeState>() {
-                    state.drain_owner(&claude_owner).await;
-                }
-            });
-            tauri::async_runtime::spawn(async move {
-                if let Some(state) = app.try_state::<CodexBridgeState>() {
-                    state.drain_owner(&owner_label).await;
-                }
-            });
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -853,7 +820,6 @@ pub fn run() {
         .manage(FileWatcherState::new())
         .manage(WindowImageCapabilities::new())
         .manage(PluginHostState::new())
-        .manage(RopeDocumentState::new())
         .manage(EncodingState::new())
         .manage(ExportState::new())
         .manage(PendingOpenFiles::new())
@@ -1000,6 +966,70 @@ pub fn run() {
             // Suppress unused variable warnings on non-macOS
             let _ = (app, event);
         });
+}
+
+/// Free everything keyed by a destroyed window's label. Labels are never
+/// reused (`novelist-${Date.now()}`), so anything left behind would leak for
+/// the rest of the session — e.g. a recursive file watcher whose debounce task
+/// keeps running for a window that no longer exists.
+fn release_window_resources<R: tauri::Runtime>(app: &tauri::AppHandle<R>, owner_label: &str) {
+    if let Some(state) = app.try_state::<FileWatcherState>() {
+        if let Err(error) = services::file_watcher::stop_file_watcher_inner(owner_label, &state) {
+            tracing::warn!(
+                "failed to stop the file watcher of closed window {owner_label}: {error}"
+            );
+        }
+    }
+    if let Some(state) = app.try_state::<ClaudeBridgeState>() {
+        state.tombstone_owner(owner_label);
+    }
+    if let Some(state) = app.try_state::<CodexBridgeState>() {
+        state.tombstone_owner(owner_label);
+    }
+    if let Some(state) = app.try_state::<WindowImageCapabilities>() {
+        state.clear_owner(owner_label);
+    }
+
+    let claude_app = app.clone();
+    let claude_owner = owner_label.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Some(state) = claude_app.try_state::<ClaudeBridgeState>() {
+            state.drain_owner(&claude_owner).await;
+        }
+    });
+    let codex_app = app.clone();
+    let codex_owner = owner_label.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Some(state) = codex_app.try_state::<CodexBridgeState>() {
+            state.drain_owner(&codex_owner).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod window_lifecycle_tests {
+    use super::*;
+    use services::file_watcher::{install_watcher_for_test, owns_watcher_resources};
+
+    #[test]
+    fn destroyed_window_stops_its_file_watcher_and_keeps_other_windows() {
+        let app = tauri::test::mock_app();
+        app.manage(FileWatcherState::new());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chapter.md");
+        std::fs::write(&file, "text").unwrap();
+        let state = app.state::<FileWatcherState>();
+        let mut closed = install_watcher_for_test(&state, "closed", dir.path(), &file);
+        let mut open = install_watcher_for_test(&state, "open", dir.path(), &file);
+
+        release_window_resources(app.handle(), "closed");
+
+        // The debounce task was cancelled and every resource of that label freed.
+        assert_eq!(closed.try_recv(), Ok(()));
+        assert!(!owns_watcher_resources(&state, "closed"));
+        assert!(owns_watcher_resources(&state, "open"));
+        assert!(open.try_recv().is_err());
+    }
 }
 
 #[cfg(test)]

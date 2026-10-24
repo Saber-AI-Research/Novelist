@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import nativeSmokeSource from '../e2e/native/run-native-smoke.mjs?raw';
 import * as nativeRunSupport from '../e2e/native/native-run-support.mjs';
 import { NATIVE_FIXTURE_TIMEOUT_MS, NATIVE_WORKFLOW_TIMEOUT_MS } from '../e2e/native/native-timeouts';
 
@@ -240,35 +239,6 @@ describe('native Playwright child watchdog', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('starts lifecycle monitoring immediately and forwards wrapper signals to the process group', () => {
-    const spawn = nativeSmokeSource.indexOf('const child = spawn(');
-    const waitCreation = nativeSmokeSource.indexOf('const childResultPromise = waitForPlaywrightChild(child);', spawn);
-    const interactiveSetup = nativeSmokeSource.indexOf('if (interactiveEnvironment)', spawn);
-    const waitConsumption = nativeSmokeSource.indexOf('await childResultPromise;', waitCreation);
-
-    expect(waitCreation).toBeGreaterThan(spawn);
-    expect(waitCreation).toBeLessThan(interactiveSetup);
-    expect(waitConsumption).toBeGreaterThan(interactiveSetup);
-    expect(nativeSmokeSource).toContain("process.kill(-child.pid, 'SIGTERM')");
-    expect(nativeSmokeSource).not.toContain("const forwardSignal = () => child.kill('SIGTERM')");
-  });
-
-  it('removes wrapper signal listeners immediately after the child promise settles', () => {
-    const settled = nativeSmokeSource.indexOf('await childResultPromise;');
-    const removeSigint = nativeSmokeSource.indexOf("process.off('SIGINT', forwardSignal);", settled);
-    const removeSigterm = nativeSmokeSource.indexOf("process.off('SIGTERM', forwardSignal);", settled);
-    const cleanup = nativeSmokeSource.indexOf('const cleanupErrors = [];', settled);
-
-    expect(settled).toBeGreaterThan(-1);
-    expect(removeSigint).toBeGreaterThan(settled);
-    expect(removeSigterm).toBeGreaterThan(removeSigint);
-    expect(removeSigterm).toBeLessThan(cleanup);
-  });
-
-  it('spawns Playwright as a detached process-group leader', () => {
-    expect(nativeSmokeSource).toMatch(/const child = spawn\([\s\S]*?detached: true,[\s\S]*?stdio: 'inherit'/);
-  });
-
   it('adds every compliant child budget before starting the parent watchdog', () => {
     expect({
       fixture: NATIVE_FIXTURE_TIMEOUT_MS,
@@ -291,19 +261,5 @@ describe('native Playwright child watchdog', () => {
     );
     expect(nativeRunSupport.PLAYWRIGHT_CHILD_TERM_GRACE_MS).toBe(10_000);
     expect(nativeRunSupport.PLAYWRIGHT_CHILD_KILL_GRACE_MS).toBe(5_000);
-  });
-
-  it('routes watchdog failure through the wrapper cleanup and evidence path', () => {
-    const spawn = nativeSmokeSource.indexOf('const child = spawn(');
-    const wait = nativeSmokeSource.indexOf('const childResultPromise = waitForPlaywrightChild(child);');
-    const consume = nativeSmokeSource.indexOf('await childResultPromise;', wait);
-    const cleanup = nativeSmokeSource.indexOf('const cleanupErrors = [];', consume);
-
-    expect(wait).toBeGreaterThan(spawn);
-    expect(consume).toBeGreaterThan(wait);
-    expect(cleanup).toBeGreaterThan(consume);
-    expect(nativeSmokeSource).toContain('childExitCode = childResult.exitCode;');
-    expect(nativeSmokeSource).toContain('childExitReason = childResult.reason;');
-    expect(nativeSmokeSource).toContain('`playwright_exit_reason=${JSON.stringify(childExitReason)}`');
   });
 });

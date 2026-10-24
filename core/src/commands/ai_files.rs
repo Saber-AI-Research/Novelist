@@ -5,6 +5,10 @@
 //! path safety and atomic writes, while TypeScript owns session shape.
 
 use crate::error::AppError;
+use crate::services::sidecar::{
+    atomic_write_bytes_confined, open_confined_metadata_dir, read_bytes_confined,
+    remove_file_confined, ConfinedMetadataDir,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -83,32 +87,71 @@ fn validate_id(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn ai_dir(project_dir: &str) -> Result<PathBuf, AppError> {
-    Ok(validate_project_dir(project_dir)?
-        .join(".novelist")
-        .join("ai"))
+const AI_SUBDIR: &str = "ai";
+const SESSIONS_SUBDIR: &str = "sessions";
+const MEMORY_FILE: &str = "memory.md";
+const MAX_AI_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+/// `<project>/.novelist/ai`, opened without following symlinks and confined to
+/// the canonical project root, so writes and deletes can never land outside.
+fn open_ai_dir(project_dir: &str, create: bool) -> Result<Option<ConfinedMetadataDir>, AppError> {
+    let project = validate_project_dir(project_dir)?;
+    open_confined_metadata_dir(&project, AI_SUBDIR, create)
 }
 
-fn sessions_dir(project_dir: &str) -> Result<PathBuf, AppError> {
-    Ok(ai_dir(project_dir)?.join("sessions"))
-}
+/// `<project>/.novelist/ai/sessions` with the same confinement.
+fn open_sessions_dir(
+    project_dir: &str,
+    create: bool,
+) -> Result<Option<ConfinedMetadataDir>, AppError> {
+    use cap_fs_ext::DirExt;
 
-fn session_path(project_dir: &str, kind: AiSessionKind, id: &str) -> Result<PathBuf, AppError> {
-    validate_id(id)?;
-    Ok(sessions_dir(project_dir)?.join(format!("{}-{id}.json", kind.prefix())))
-}
-
-fn atomic_write(path: &Path, content: &str) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let Some(ai) = open_ai_dir(project_dir, create)? else {
+        return Ok(None);
+    };
+    match ai.dir.symlink_metadata(SESSIONS_SUBDIR) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(AppError::PathNotAllowed(format!(
+                "AI sessions directory must not be a symlink: {}",
+                ai.absolute.join(SESSIONS_SUBDIR).display()
+            )))
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(AppError::NotADirectory(
+                ai.absolute.join(SESSIONS_SUBDIR).display().to_string(),
+            ))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match ai.dir.create_dir(SESSIONS_SUBDIR) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(AppError::Io(error)),
+            }
+        }
+        Err(error) => return Err(AppError::Io(error)),
     }
-    let tmp = path.with_extension(format!(
-        "{}.novelist-tmp",
-        path.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
-    ));
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let dir = ai.dir.open_dir_nofollow(SESSIONS_SUBDIR).map_err(|error| {
+        AppError::PathNotAllowed(format!(
+            "Cannot open AI sessions directory {}: {error}",
+            ai.absolute.join(SESSIONS_SUBDIR).display()
+        ))
+    })?;
+    Ok(Some(ConfinedMetadataDir {
+        dir,
+        absolute: ai.absolute.join(SESSIONS_SUBDIR),
+    }))
+}
+
+fn session_file_name(kind: AiSessionKind, id: &str) -> Result<String, AppError> {
+    validate_id(id)?;
+    Ok(format!("{}-{id}.json", kind.prefix()))
+}
+
+fn utf8_file(bytes: Vec<u8>) -> Result<String, AppError> {
+    String::from_utf8(bytes)
+        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))
 }
 
 mod ai_chat_save {
@@ -539,70 +582,77 @@ pub async fn save_ai_chat(
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_ai_sessions(
+pub async fn list_ai_sessions(
     project_dir: String,
     kind: AiSessionKind,
 ) -> Result<Vec<AiSessionFile>, AppError> {
-    let dir = sessions_dir(&project_dir)?;
-    if !dir.exists() {
+    let Some(storage) = open_sessions_dir(&project_dir, false)? else {
         return Ok(Vec::new());
-    }
-    let prefix = format!("{}-", kind.prefix());
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    };
+    tokio::task::spawn_blocking(move || {
+        let prefix = format!("{}-", kind.prefix());
+        let mut out = Vec::new();
+        for entry in storage.dir.entries()? {
+            let entry = entry?;
+            // `file_type` does not follow symlinks, so links are skipped.
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(&prefix) || !name.ends_with(".json") {
+                continue;
+            }
+            let id = name[prefix.len()..name.len() - ".json".len()].to_string();
+            if validate_id(&id).is_err() {
+                continue;
+            }
+            let updated_at = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            out.push(AiSessionFile {
+                id,
+                kind,
+                path: storage.absolute.join(name).to_string_lossy().to_string(),
+                updated_at,
+            });
         }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !name.starts_with(&prefix) || !name.ends_with(".json") {
-            continue;
-        }
-        let id = name[prefix.len()..name.len() - ".json".len()].to_string();
-        if validate_id(&id).is_err() {
-            continue;
-        }
-        let updated_at = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        out.push(AiSessionFile {
-            id,
-            kind,
-            path: path.to_string_lossy().to_string(),
-            updated_at,
+        out.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
         });
-    }
-    out.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    Ok(out)
+        Ok(out)
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("AI session listing failed: {error}")))?
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn read_ai_session(
+pub async fn read_ai_session(
     project_dir: String,
     kind: AiSessionKind,
     id: String,
 ) -> Result<Option<String>, AppError> {
-    let path = session_path(&project_dir, kind, &id)?;
-    if !path.exists() {
+    let name = session_file_name(kind, &id)?;
+    let Some(storage) = open_sessions_dir(&project_dir, false)? else {
         return Ok(None);
-    }
-    Ok(Some(fs::read_to_string(path)?))
+    };
+    read_bytes_confined(&storage, &name, MAX_AI_FILE_BYTES)
+        .await?
+        .map(utf8_file)
+        .transpose()
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn write_ai_session(
+pub async fn write_ai_session(
     project_dir: String,
     kind: AiSessionKind,
     id: String,
@@ -612,22 +662,24 @@ pub fn write_ai_session(
     // accidental callers.
     serde_json::from_str::<serde_json::Value>(&body_json)
         .map_err(|e| AppError::InvalidInput(format!("Invalid AI session JSON: {e}")))?;
-    let path = session_path(&project_dir, kind, &id)?;
-    atomic_write(&path, &body_json)
+    let name = session_file_name(kind, &id)?;
+    let storage = open_sessions_dir(&project_dir, true)?
+        .expect("create=true always returns the sessions directory");
+    atomic_write_bytes_confined(&storage, &name, body_json.as_bytes()).await
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn delete_ai_session(
+pub async fn delete_ai_session(
     project_dir: String,
     kind: AiSessionKind,
     id: String,
 ) -> Result<(), AppError> {
-    let path = session_path(&project_dir, kind, &id)?;
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
+    let name = session_file_name(kind, &id)?;
+    let Some(storage) = open_sessions_dir(&project_dir, false)? else {
+        return Ok(());
+    };
+    remove_file_confined(&storage, &name).await
 }
 
 fn read_asset_file(path: &Path, root: &Path, kind: &str) -> Option<AiPromptAsset> {
@@ -679,16 +731,34 @@ fn collect_markdown_files(dir: &Path, root: &Path, kind: &str) -> Vec<AiPromptAs
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_ai_prompt_assets(project_dir: String) -> Result<AiPromptAssets, AppError> {
-    let root = ai_dir(&project_dir)?;
-    let commands = collect_markdown_files(&root.join("commands"), &root, "command");
-    let skills = collect_markdown_files(&root.join("skills"), &root, "skill");
-    let memory_path = root.join("memory.md");
-    let memory = if memory_path.exists() {
-        read_asset_file(&memory_path, &root, "memory")
-    } else {
-        None
+pub async fn list_ai_prompt_assets(project_dir: String) -> Result<AiPromptAssets, AppError> {
+    let Some(ai) = open_ai_dir(&project_dir, false)? else {
+        return Ok(AiPromptAssets {
+            commands: Vec::new(),
+            skills: Vec::new(),
+            memory: None,
+        });
     };
+    let memory = read_bytes_confined(&ai, MEMORY_FILE, MAX_AI_FILE_BYTES)
+        .await?
+        .map(utf8_file)
+        .transpose()?
+        .map(|content| AiPromptAsset {
+            id: MEMORY_FILE.to_string(),
+            kind: "memory".to_string(),
+            path: ai.absolute.join(MEMORY_FILE).to_string_lossy().to_string(),
+            name: "memory".to_string(),
+            content,
+        });
+    let root = ai.absolute;
+    let (commands, skills) = tokio::task::spawn_blocking(move || {
+        (
+            collect_markdown_files(&root.join("commands"), &root, "command"),
+            collect_markdown_files(&root.join("skills"), &root, "skill"),
+        )
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("AI prompt listing failed: {error}")))?;
     Ok(AiPromptAssets {
         commands,
         skills,
@@ -698,9 +768,9 @@ pub fn list_ai_prompt_assets(project_dir: String) -> Result<AiPromptAssets, AppE
 
 #[tauri::command]
 #[specta::specta]
-pub fn write_ai_memory(project_dir: String, body: String) -> Result<(), AppError> {
-    let path = ai_dir(&project_dir)?.join("memory.md");
-    atomic_write(&path, &body)
+pub async fn write_ai_memory(project_dir: String, body: String) -> Result<(), AppError> {
+    let ai = open_ai_dir(&project_dir, true)?.expect("create=true always returns the AI directory");
+    atomic_write_bytes_confined(&ai, MEMORY_FILE, body.as_bytes()).await
 }
 
 #[cfg(test)]
@@ -1028,8 +1098,8 @@ mod tests {
         assert!(!outside.join("chat.md").exists());
     }
 
-    #[test]
-    fn rejects_path_traversal_ids() {
+    #[tokio::test]
+    async fn rejects_path_traversal_ids() {
         let dir = tempdir().unwrap();
         let err = write_ai_session(
             dir.path().to_string_lossy().to_string(),
@@ -1037,33 +1107,120 @@ mod tests {
             "../bad".into(),
             "{}".into(),
         )
+        .await
         .unwrap_err();
         assert!(err.to_string().contains("illegal"));
     }
 
-    #[test]
-    fn write_read_list_delete_session_roundtrip() {
+    #[tokio::test]
+    async fn write_read_list_delete_session_roundtrip() {
         let dir = tempdir().unwrap();
         let root = dir.path().to_string_lossy().to_string();
         write_ai_session(
             root.clone(),
             AiSessionKind::Agent,
             "abc_123".into(),
-            "{\"x\":1}".into(),
+            "{\"x\":\"第一章\"}".into(),
         )
+        .await
         .unwrap();
-        let list = list_ai_sessions(root.clone(), AiSessionKind::Agent).unwrap();
+        let list = list_ai_sessions(root.clone(), AiSessionKind::Agent)
+            .await
+            .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "abc_123");
-        let body = read_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into()).unwrap();
-        assert_eq!(body.as_deref(), Some("{\"x\":1}"));
-        delete_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into()).unwrap();
-        let body = read_ai_session(root, AiSessionKind::Agent, "abc_123".into()).unwrap();
+        let body = read_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into())
+            .await
+            .unwrap();
+        assert_eq!(body.as_deref(), Some("{\"x\":\"第一章\"}"));
+        let sessions = dir.path().join(".novelist/ai/sessions");
+        assert!(fs::read_dir(&sessions).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("novelist-tmp")));
+        delete_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into())
+            .await
+            .unwrap();
+        let body = read_ai_session(root, AiSessionKind::Agent, "abc_123".into())
+            .await
+            .unwrap();
         assert!(body.is_none());
     }
 
-    #[test]
-    fn prompt_assets_skip_hidden_and_unsupported() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_session_saves_never_interleave() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let bodies: Vec<String> = (0..8)
+            .map(|index| format!("{{\"turns\":\"{}\"}}", "字".repeat(20_000 + index)))
+            .collect();
+        let mut saves = tokio::task::JoinSet::new();
+        for body in bodies.clone() {
+            let root = root.clone();
+            saves.spawn(async move {
+                write_ai_session(root, AiSessionKind::Talk, "same".into(), body).await
+            });
+        }
+        while let Some(result) = saves.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let stored = read_ai_session(root, AiSessionKind::Talk, "same".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bodies.contains(&stored), "session bytes were interleaved");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_ai_folders_cannot_redirect_writes_or_deletes() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(project.join(".novelist")).unwrap();
+        fs::create_dir_all(outside.join("sessions")).unwrap();
+        fs::write(outside.join("sessions/talk-victim.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".novelist/ai")).unwrap();
+        let root = project.to_string_lossy().to_string();
+
+        let write = write_ai_session(root.clone(), AiSessionKind::Talk, "x".into(), "{}".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(write, AppError::PathNotAllowed(_)), "{write:?}");
+        let memory = write_ai_memory(root.clone(), "secret".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(memory, AppError::PathNotAllowed(_)), "{memory:?}");
+        let delete = delete_ai_session(root, AiSessionKind::Talk, "victim".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(delete, AppError::PathNotAllowed(_)), "{delete:?}");
+        assert!(outside.join("sessions/talk-victim.json").exists());
+        assert!(!outside.join("memory.md").exists());
+        assert!(!outside.join("sessions/talk-x.json").exists());
+
+        // A symlinked sessions folder inside a real ai folder is rejected too.
+        fs::remove_file(project.join(".novelist/ai")).unwrap();
+        fs::create_dir(project.join(".novelist/ai")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("sessions"),
+            project.join(".novelist/ai/sessions"),
+        )
+        .unwrap();
+        let error = delete_ai_session(
+            project.to_string_lossy().to_string(),
+            AiSessionKind::Talk,
+            "victim".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
+        assert!(outside.join("sessions/talk-victim.json").exists());
+    }
+
+    #[tokio::test]
+    async fn prompt_assets_skip_hidden_and_unsupported() {
         let dir = tempdir().unwrap();
         let root = dir.path().join(".novelist").join("ai");
         fs::create_dir_all(root.join("commands")).unwrap();
@@ -1078,20 +1235,24 @@ mod tests {
         .unwrap();
         fs::write(root.join("memory.md"), "memory").unwrap();
 
-        let assets = list_ai_prompt_assets(dir.path().to_string_lossy().to_string()).unwrap();
+        let assets = list_ai_prompt_assets(dir.path().to_string_lossy().to_string())
+            .await
+            .unwrap();
         assert_eq!(assets.commands.len(), 1);
         assert_eq!(assets.commands[0].name, "rewrite");
         assert_eq!(assets.skills.len(), 1);
         assert_eq!(assets.memory.as_ref().unwrap().content, "memory");
     }
 
-    #[test]
-    fn write_memory_overwrites_memory_md() {
+    #[tokio::test]
+    async fn write_memory_overwrites_memory_md() {
         let dir = tempdir().unwrap();
         let root = dir.path().to_string_lossy().to_string();
-        write_ai_memory(root.clone(), "first".into()).unwrap();
-        write_ai_memory(root.clone(), "second".into()).unwrap();
-        let assets = list_ai_prompt_assets(root).unwrap();
+        write_ai_memory(root.clone(), "first".into()).await.unwrap();
+        write_ai_memory(root.clone(), "second".into())
+            .await
+            .unwrap();
+        let assets = list_ai_prompt_assets(root).await.unwrap();
         assert_eq!(assets.memory.unwrap().content, "second");
     }
 }

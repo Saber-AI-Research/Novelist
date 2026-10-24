@@ -15,17 +15,20 @@ export type AppShortcutContext = {
 
 /**
  * True when the keystroke originates from a text input that is NOT the
- * CodeMirror editor — e.g. the AI composer textarea, a dialog field, or any
- * other `<input>/<textarea>/[contenteditable]`. The editor lives inside
- * `.cm-editor` and must keep its global shortcuts (formatting, save), so it
- * is explicitly excluded. Used to stop tab-cycling and customizable shortcuts
- * (close-tab, new-file, …) from leaking out of focused panels/dialogs.
+ * CodeMirror editor — e.g. the AI composer textarea, a dialog field, an
+ * editable table cell inside the editor, or any other
+ * `<input>/<textarea>/[contenteditable]`. Classification uses the nearest
+ * editable host: CodeMirror's own `.cm-content` keeps its global shortcuts
+ * (formatting, save), while editable islands nested inside it (table cells)
+ * are inputs of their own. Used to stop tab-cycling and customizable
+ * shortcuts (close-tab, new-file, …) from leaking out of focused
+ * panels/dialogs/cells.
  */
 function isNonEditorTextInput(e: KeyboardEvent): boolean {
   const el = e.target as HTMLElement | null;
   if (!el || typeof el.closest !== 'function') return false;
-  if (el.closest('.cm-editor')) return false;
-  return !!el.closest('input, textarea, [contenteditable="true"]');
+  const host = el.closest('input, textarea, [contenteditable="true"]');
+  return !!host && !host.classList.contains('cm-content');
 }
 
 /**

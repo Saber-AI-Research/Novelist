@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { slashCommandExtension } from '$lib/editor/slash-commands';
@@ -357,6 +357,74 @@ describe('[contract] slash menu widget lifecycle', () => {
     expect(document.querySelector('.cm-slash-menu')).toBeNull();
 
     view.destroy();
+  });
+
+  it('[regression] Enter on "/xyz" with no matches inserts a newline and closes the menu', async () => {
+    const state = EditorState.create({
+      doc: '',
+      extensions: createEditorExtensions({ wysiwyg: true }),
+    });
+    const view = new EditorView({ state, parent: container });
+    view.focus();
+
+    for (const ch of '/xyz') simulateTyping(view, ch);
+    await flushTimers();
+    expect(document.querySelector('.cm-slash-menu-empty')).not.toBeNull();
+
+    view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await flushTimers();
+
+    expect(view.state.doc.toString()).toBe('/xyz\n');
+    expect(document.querySelector('.cm-slash-menu')).toBeNull();
+
+    // Arrow keys belong to the editor again.
+    const arrow = new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(arrow);
+    expect(view.state.selection.main.head).toBeLessThan(view.state.doc.length);
+
+    view.destroy();
+  });
+
+  it('does not swallow arrow keys while "No results" is shown', async () => {
+    const state = EditorState.create({
+      doc: 'above\n',
+      selection: { anchor: 6 },
+      extensions: createEditorExtensions({ wysiwyg: true }),
+    });
+    const view = new EditorView({ state, parent: container });
+    view.focus();
+
+    for (const ch of '/xyz') simulateTyping(view, ch);
+    await flushTimers();
+    view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    await flushTimers();
+
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(1);
+    expect(document.querySelector('.cm-slash-menu')).toBeNull();
+
+    view.destroy();
+  });
+
+  it('positions in layout coordinates at non-100% zoom', async () => {
+    document.documentElement.style.transform = 'scale(2)';
+    const state = EditorState.create({
+      doc: '',
+      extensions: createEditorExtensions({ wysiwyg: true }),
+    });
+    const view = new EditorView({ state, parent: container });
+    try {
+      vi.spyOn(view, 'coordsAtPos').mockReturnValue({ left: 100, right: 101, top: 32, bottom: 50 });
+      simulateTyping(view, '/');
+      await flushTimers();
+
+      const menu = document.querySelector('.cm-slash-menu') as HTMLElement;
+      // Screen: below the caret (50 + 6px gap at 2x) → layout = screen / 2.
+      expect(parseFloat(menu.style.top)).toBeCloseTo((50 + 12) / 2);
+      expect(parseFloat(menu.style.left)).toBeCloseTo(100 / 2);
+    } finally {
+      document.documentElement.style.transform = '';
+      view.destroy();
+    }
   });
 
   it('flips above the cursor when positioned in the lower half of the viewport', async () => {

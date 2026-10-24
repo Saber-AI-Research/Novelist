@@ -2,13 +2,25 @@
   import { onMount } from 'svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { homeDir } from '@tauri-apps/api/path';
+  import Languages from '@lucide/svelte/icons/languages';
   import BookOpen from '@lucide/svelte/icons/book-open';
   import { commands } from '$lib/ipc/commands';
   import type { TemplateInfo } from '$lib/ipc/commands';
   import { i18n, t } from '$lib/i18n';
   import { categoryLabel, templateName, templateDescription } from '$lib/utils/templateI18n';
+  import { isImeComposing } from '$lib/utils/ime';
+  import { focusTrap } from './focus-trap';
 
   const LITERARY_TEMPLATE_ID = 'literary-commentary';
+  const BOOK_TRANSLATION_TEMPLATE_ID = 'book-translation';
+  const BOOK_TRANSLATION_CATEGORY = 'book-translation';
+  const BOOK_TRANSLATION_TEMPLATE: TemplateInfo = {
+    id: BOOK_TRANSLATION_TEMPLATE_ID,
+    name: 'Book Translation',
+    description: 'Import a book and create a chapter-by-chapter translation project',
+    category: BOOK_TRANSLATION_CATEGORY,
+    builtin: true,
+  };
   const LITERARY_CATEGORY = 'literary-study';
   const LITERARY_TEMPLATE: TemplateInfo = {
     id: LITERARY_TEMPLATE_ID,
@@ -22,10 +34,11 @@
     onClose: () => void;
     onProjectCreated: (path: string) => void;
     onLiteraryImport: () => void;
+    onBookTranslationImport: () => void;
   }
-  let { onClose, onProjectCreated, onLiteraryImport }: Props = $props();
+  let { onClose, onProjectCreated, onLiteraryImport, onBookTranslationImport }: Props = $props();
 
-  let templates = $state<TemplateInfo[]>([LITERARY_TEMPLATE]);
+  let templates = $state<TemplateInfo[]>([LITERARY_TEMPLATE, BOOK_TRANSLATION_TEMPLATE]);
   let selectedTemplate = $state<TemplateInfo | null>(LITERARY_TEMPLATE);
   let projectName = $state('My Project');
   let parentDir = $state('');
@@ -76,10 +89,11 @@
 
     const available = templatesResult.status === 'fulfilled'
       && templatesResult.value.status === 'ok'
-      ? templatesResult.value.data.filter((template) => template.id !== LITERARY_TEMPLATE_ID)
+      ? templatesResult.value.data.filter((template) =>
+        template.id !== LITERARY_TEMPLATE_ID && template.id !== BOOK_TRANSLATION_TEMPLATE_ID)
       : [];
     const selectedId = selectedTemplate?.id;
-    templates = [...available, LITERARY_TEMPLATE];
+    templates = [...available, LITERARY_TEMPLATE, BOOK_TRANSLATION_TEMPLATE];
     selectedTemplate = templates.find((template) => template.id === selectedId)
       ?? templates[0]
       ?? null;
@@ -100,9 +114,13 @@
   }
 
   async function handleCreate() {
-    if (!selectedTemplate) return;
+    if (!selectedTemplate || creating) return;
     if (selectedTemplate.id === LITERARY_TEMPLATE_ID) {
       onLiteraryImport();
+      return;
+    }
+    if (selectedTemplate.id === BOOK_TRANSLATION_TEMPLATE_ID) {
+      onBookTranslationImport();
       return;
     }
     if (!projectName.trim() || !parentDir.trim()) return;
@@ -125,10 +143,16 @@
     creating = false;
   }
 
+  /** Closing mid-create would still switch projects when the create finishes. */
+  function requestClose() {
+    if (!creating) onClose();
+  }
+
   function handleKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') {
       e.preventDefault();
-      onClose();
+      requestClose();
     } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleCreate();
@@ -140,15 +164,23 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="dialog-backdrop" onclick={onClose}>
+<div class="dialog-backdrop" onclick={requestClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog" onclick={(e) => e.stopPropagation()}>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="new-project-dialog-title"
+    tabindex="-1"
+    use:focusTrap
+    onclick={(e) => e.stopPropagation()}
+  >
 
     <!-- Header -->
     <div class="dialog-header">
-      <h2 class="dialog-title">{t('newProject.title')}</h2>
-      <button class="dialog-close-btn" onclick={onClose} title="Close">
+      <h2 class="dialog-title" id="new-project-dialog-title">{t('newProject.title')}</h2>
+      <button class="dialog-close-btn" onclick={requestClose} disabled={creating} title={t('newProject.cancel')} aria-label={t('newProject.cancel')}>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
       </button>
     </div>
@@ -185,6 +217,8 @@
               <div class="template-icon">
                 {#if tpl.id === LITERARY_TEMPLATE_ID}
                   <BookOpen size={32} strokeWidth={1.2} />
+                {:else if tpl.id === BOOK_TRANSLATION_TEMPLATE_ID}
+                  <Languages size={32} strokeWidth={1.2} />
                 {:else}
                   <svg width="32" height="32" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
                     <path d={templateIcon(tpl.id)} />
@@ -209,7 +243,7 @@
 
     <!-- Bottom: Project config -->
     <div class="dialog-footer">
-      {#if selectedTemplate?.id !== LITERARY_TEMPLATE_ID}
+      {#if selectedTemplate?.id !== LITERARY_TEMPLATE_ID && selectedTemplate?.id !== BOOK_TRANSLATION_TEMPLATE_ID}
         <div class="footer-fields">
         <div class="field-row">
           <label class="field-label" for="np-name">{t('newProject.name')}</label>
@@ -235,23 +269,24 @@
         </div>
         </div>
       {/if}
-
       {#if error}
         <div class="footer-error">{error}</div>
       {/if}
 
       <div class="footer-actions">
-        <button class="btn-cancel" onclick={onClose}>{t('newProject.cancel')}</button>
+        <button class="btn-cancel" onclick={requestClose} disabled={creating}>{t('newProject.cancel')}</button>
         <button
           class="btn-create"
           onclick={handleCreate}
-          disabled={creating || !selectedTemplate || (selectedTemplate.id !== LITERARY_TEMPLATE_ID && (!projectName.trim() || !parentDir.trim()))}
+          disabled={creating || !selectedTemplate || (![LITERARY_TEMPLATE_ID, BOOK_TRANSLATION_TEMPLATE_ID].includes(selectedTemplate.id) && (!projectName.trim() || !parentDir.trim()))}
         >
           {creating
             ? t('newProject.creating')
             : selectedTemplate?.id === LITERARY_TEMPLATE_ID
               ? t('literaryImport.continue')
-              : t('newProject.create')}
+              : selectedTemplate?.id === BOOK_TRANSLATION_TEMPLATE_ID
+                ? t('translationImport.continue')
+                : t('newProject.create')}
         </button>
       </div>
     </div>

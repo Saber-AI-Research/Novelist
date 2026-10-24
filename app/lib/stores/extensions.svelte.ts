@@ -13,8 +13,27 @@ export interface UIExtension {
   creatable?: boolean;
   /** Enable/disable changes become active after an app relaunch. */
   requiresAppReload?: boolean;
-  /** True for first-party panels rendered as native Svelte components. */
+  /** Permissions granted to this plugin by the host. */
+  permissions?: string[];
+  /**
+   * True for first-party extensions: native panels, and iframe plugins whose
+   * folder ships in the app's bundled resources (computed by the host, never
+   * taken from the manifest). Privileged host features gate on this flag.
+   */
   builtin?: boolean;
+}
+
+/**
+ * Mirrors `services::plugin_host::permissions::has_permission`: `write`
+ * implies `read`.
+ */
+export function hasPluginPermission(
+  permissions: readonly string[] | undefined,
+  required: string,
+): boolean {
+  return permissions?.some(
+    (permission) => permission === required || (permission === 'write' && required === 'read'),
+  ) ?? false;
 }
 
 /**
@@ -78,6 +97,8 @@ class ExtensionStore {
           fileExtensions: plugin.ui.file_extensions ?? undefined,
           creatable: plugin.ui.creatable ?? true,
           requiresAppReload: plugin.ui.requires_app_reload,
+          permissions: plugin.permissions,
+          builtin: plugin.builtin,
         };
 
         if (ext.type === 'panel') {

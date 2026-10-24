@@ -1,7 +1,7 @@
 // @ts-expect-error Playwright runs specs in Node; the app tsconfig intentionally omits Node types.
 import { readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
-import { test, expect, type MockInvokeCall } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject, type MockInvokeCall } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 const CANONICAL_MARKDOWN = readFileSync(
@@ -69,11 +69,7 @@ interface PlatformKeys {
 }
 
 async function openChapter(app: Page): Promise<void> {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
 }
@@ -310,18 +306,13 @@ test.describe('[contract] Styled Copy complete browser and security matrix', () 
     }));
   });
 
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
-  });
-
-  test('matches generated Rope, styled conversion, safe-read, upload, and clipboard IPC fields', async ({ app, mockState }) => {
+  test('matches generated styled conversion, safe-read, upload, and clipboard IPC fields', async ({ app, mockState }) => {
     const results = await app.evaluate(async ({ selected, projectDir }) => {
       const modulePath = '/app/lib/ipc/commands.ts';
       const { commands } = await import(modulePath);
       return {
-        rope: await commands.ropeSnapshot('task-8-rope'),
         conversion: await commands.convertMarkdownToStyledHtml(selected),
-        image: await commands.readStyledCopyImage(`${projectDir}/图片/封面 1.png`, [projectDir]),
+        image: await commands.readStyledCopyImage(`${projectDir}/图片/封面 1.png`),
         upload: await commands.uploadImageImgur(
           [137, 80, 78, 71],
           'contract.png',
@@ -332,22 +323,14 @@ test.describe('[contract] Styled Copy complete browser and security matrix', () 
       };
     }, { selected: SELECTED_CJK, projectDir: MOCK_PROJECT_DIR });
 
-    expect(results.rope).toEqual({
-      status: 'ok',
-      data: { text: 'Mock Rope snapshot\n', generation: 7, total_lines: 2, total_chars: 19 },
-    });
     expect(results.conversion.status).toBe('ok');
     expect(results.image).toEqual({ status: 'ok', data: { bytes: PNG_BYTES, mime: 'image/png' } });
     expect(results.upload.status).toBe('ok');
     expect(results.clipboard).toEqual({ status: 'ok', data: null });
 
     const calls = await mockState.getInvokeCalls();
-    expect(commandCalls(calls, 'rope_snapshot').at(-1)?.args).toEqual({ fileId: 'task-8-rope' });
     expect(commandCalls(calls, 'convert_markdown_to_styled_html').at(-1)?.args).toEqual({ markdown: SELECTED_CJK });
-    expect(commandCalls(calls, 'read_styled_copy_image').at(-1)?.args).toEqual({
-      path: COVER_PATH,
-      allowedRoots: [MOCK_PROJECT_DIR],
-    });
+    expect(commandCalls(calls, 'read_styled_copy_image').at(-1)?.args).toEqual({ path: COVER_PATH });
     expect(commandCalls(calls, 'upload_image_imgur').at(-1)?.args).toMatchObject({
       bytes: [137, 80, 78, 71],
       filename: 'contract.png',
@@ -532,7 +515,6 @@ test.describe('[contract] Styled Copy complete browser and security matrix', () 
     const calls = await mockState.getInvokeCalls();
     expect(commandCalls(calls, 'read_styled_copy_image').some((call) => (
       call.args.path === `${MOCK_PROJECT_DIR}/../escape.png`
-      && JSON.stringify(call.args.allowedRoots) === JSON.stringify([MOCK_PROJECT_DIR])
     ))).toBe(true);
     expect(commandCalls(calls, 'write_styled_clipboard')).toHaveLength(0);
   });

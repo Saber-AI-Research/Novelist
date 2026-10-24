@@ -1,7 +1,7 @@
 [plugin]
 id = "kanban"
 name = "Kanban"
-version = "0.1.0"
+version = "0.1.1"
 description = "Trello-style kanban board editor for .kanban files"
 author = "Novelist Team"
 permissions = ["read", "write", "ui"]

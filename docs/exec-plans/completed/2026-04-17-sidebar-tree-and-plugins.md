@@ -1,6 +1,6 @@
 # Sidebar Tree, Drag-Drop, Plugin Add Button, Help Tooltip, Language Scope — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add lazy-loading expandable sub-folders + drag-drop in the sidebar, a "+" button with folder/scaffold actions in Settings > Plugins, a "?" help card with a Copy-prompt button, and scope the language picker to Settings > Editor only.
 

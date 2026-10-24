@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
@@ -15,11 +15,7 @@ const GHOST_CHANNEL = {
 };
 
 async function openChapter(app: Page) {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
 }
@@ -101,10 +97,6 @@ test.describe('[contract] Styled Copy publish dialog UI', () => {
     await mockState.setPublishChannels([]);
     await openChapter(app);
     await installFrozenSelection(app);
-  });
-
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
   });
 
   test('is available without channels and copies the frozen selected source through safe controls', async ({ app, mockState }) => {

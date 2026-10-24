@@ -1,6 +1,7 @@
 <script lang="ts">
   import { commands } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { isImeComposing } from '$lib/utils/ime';
 
   interface Props {
     existingIds: string[];
@@ -39,6 +40,7 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (isImeComposing(e)) return;
     if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
     if (e.key === 'Enter' && canSubmit) { e.preventDefault(); submit(); }
   }

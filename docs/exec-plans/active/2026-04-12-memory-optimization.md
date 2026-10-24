@@ -1,6 +1,6 @@
 # Memory Optimization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Reduce Novelist's runtime memory footprint from ~120MB RSS (release) to under 80MB by eliminating unnecessary allocations, deferring heavy subsystem initialization, and optimizing the dependency tree.
 

@@ -1,3 +1,4 @@
+pub(crate) mod atomic_file;
 pub mod cli;
 pub mod file_routing;
 pub mod file_watcher;
@@ -8,8 +9,6 @@ pub mod portable;
 pub(crate) mod project_files;
 pub mod publish;
 pub mod rename_migration;
-pub mod rope_benchmark;
-pub mod rope_document;
 pub mod sidecar;
 #[cfg(feature = "sync")]
 pub mod snapshot_webdav;

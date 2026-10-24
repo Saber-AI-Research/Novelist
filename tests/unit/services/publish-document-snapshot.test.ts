@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
-import type { ViewportManager } from '$lib/editor/viewport';
 
 const { readFile } = vi.hoisted(() => ({ readFile: vi.fn() }));
 
@@ -13,19 +12,10 @@ vi.mock('$lib/i18n', () => ({ t: (key: string) => key }));
 
 import { commands } from '$lib/ipc/commands';
 import { projectStore } from '$lib/stores/project.svelte';
-import {
-  registerEditorView,
-  registerViewportSnapshotMetadata,
-  tabsStore,
-  unregisterEditorView,
-} from '$lib/stores/tabs.svelte';
+import { registerEditorView, tabsStore, unregisterEditorView } from '$lib/stores/tabs.svelte';
 import { capturePublishDocumentSnapshot } from '$lib/services/publish-document-snapshot';
 
 const registeredViews: Array<{ tabId: string; view: EditorView }> = [];
-
-function fakeViewportManager(fileId: string, baseCharOffset: number): ViewportManager {
-  return { fileId, baseCharOffset } as unknown as ViewportManager;
-}
 
 function mountView(
   tabId: string,
@@ -149,76 +139,6 @@ describe('[contract] capturePublishDocumentSnapshot', () => {
     expect(capturePublishDocumentSnapshot('pane-1')).toEqual({
       kind: 'blocked',
       code: 'editor_view_unavailable',
-      paneId: 'pane-1',
-      tabId: tab.id,
-    });
-    expect(commands.readFile).not.toHaveBeenCalled();
-  });
-
-  it('returns a complete Rope source only when viewport metadata is registered', () => {
-    tabsStore.openTab('/project/large.md', 'stored partial text must not be used');
-    const tab = tabsStore.activeTab!;
-    const windowText = 'window 未保存片段 tail';
-    const selectionText = '未保存片段';
-    const localFrom = windowText.indexOf(selectionText);
-    const localTo = localFrom + selectionText.length;
-    const view = mountView(tab.id, windowText, { anchor: localFrom, head: localTo });
-    const manager = fakeViewportManager('manager-rope-file', 10_000);
-    const contradictoryMetadata = {
-      fileId: 'stale-rope-file',
-      manager,
-    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
-    registerViewportSnapshotMetadata(tab.id, contradictoryMetadata);
-
-    const result = capturePublishDocumentSnapshot('pane-1');
-
-    expect(result).toEqual({
-      kind: 'rope',
-      paneId: 'pane-1',
-      tabId: tab.id,
-      fileId: 'manager-rope-file',
-      filePath: '/project/large.md',
-      documentDir: '/project',
-      projectDir: null,
-      mainSelection: {
-        from: 10_000 + localFrom,
-        to: 10_000 + localTo,
-        text: selectionText,
-      },
-    });
-    expect(view.state.doc.toString()).toBe(windowText);
-    expect(commands.readFile).not.toHaveBeenCalled();
-  });
-
-  it('blocks a viewport source when snapshot metadata is absent', () => {
-    tabsStore.openTab('/project/large.md', 'stored text must not be used');
-    const tab = tabsStore.activeTab!;
-    const view = mountView(tab.id, 'partial window');
-    registerEditorView(tab.id, view, true);
-
-    expect(capturePublishDocumentSnapshot('pane-1')).toEqual({
-      kind: 'blocked',
-      code: 'viewport_snapshot_unavailable',
-      paneId: 'pane-1',
-      tabId: tab.id,
-    });
-    expect(commands.readFile).not.toHaveBeenCalled();
-  });
-
-  it('blocks a viewport source when the registered manager has an empty file ID', () => {
-    tabsStore.openTab('/project/large.md', 'stored text must not be used');
-    const tab = tabsStore.activeTab!;
-    mountView(tab.id, 'partial window');
-    const manager = fakeViewportManager('', 0);
-    const contradictoryMetadata = {
-      fileId: 'stale-nonempty-file',
-      manager,
-    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
-    registerViewportSnapshotMetadata(tab.id, contradictoryMetadata);
-
-    expect(capturePublishDocumentSnapshot('pane-1')).toEqual({
-      kind: 'blocked',
-      code: 'viewport_snapshot_unavailable',
       paneId: 'pane-1',
       tabId: tab.id,
     });

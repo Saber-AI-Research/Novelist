@@ -7,7 +7,6 @@
   import {
     capturePublishDocumentSnapshot,
     type EditorPublishDocumentSnapshot,
-    type RopePublishDocumentSnapshot,
   } from '$lib/services/publish-document-snapshot';
   import { t } from '$lib/i18n';
   import { pathDirname } from '$lib/utils/path';
@@ -22,7 +21,7 @@
   let menuOpen = $state(false);
   let dialogChannel = $state<ChannelConfig | null>(null);
   let dialogMode = $state<PublishDialogMode | null>(null);
-  let dialogSource = $state<EditorPublishDocumentSnapshot | RopePublishDocumentSnapshot | null>(null);
+  let dialogSource = $state<EditorPublishDocumentSnapshot | null>(null);
   let channels = $state<ChannelConfig[]>([]);
   let buttonEl = $state<HTMLButtonElement | null>(null);
   let openOperation = 0;
@@ -88,9 +87,9 @@
     activeDoc = null;
   }
 
-  function captureStyledCopySource(): EditorPublishDocumentSnapshot | RopePublishDocumentSnapshot | null {
+  function captureStyledCopySource(): EditorPublishDocumentSnapshot | null {
     const result = capturePublishDocumentSnapshot(paneId);
-    return result.kind === 'editor' || result.kind === 'rope' ? result : null;
+    return result.kind === 'editor' ? result : null;
   }
 
   async function loadPaneActiveDoc() {

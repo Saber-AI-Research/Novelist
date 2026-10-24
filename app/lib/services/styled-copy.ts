@@ -1,19 +1,13 @@
 import type { EditorState } from '@codemirror/state';
-import { commands, type RopeSnapshot } from '$lib/ipc/commands';
-import type {
-  EditorPublishDocumentSnapshot,
-  RopePublishDocumentSnapshot,
-} from '$lib/services/publish-document-snapshot';
+import { commands } from '$lib/ipc/commands';
+import type { EditorPublishDocumentSnapshot } from '$lib/services/publish-document-snapshot';
 import { stripFrontMatter } from '$lib/services/publish';
 import {
   createStyledCopyAssetSession,
   type StyledCopyAssetSession,
   type StyledCopyAssetSessionInput,
 } from '$lib/services/styled-copy-assets';
-import {
-  getEditorView,
-  getViewportSnapshotMetadata,
-} from '$lib/stores/tabs.svelte';
+import { getEditorView } from '$lib/stores/tabs.svelte';
 import { normalizePandocHtml } from '$lib/utils/styled-copy/normalize';
 import { ALLOWED_FINAL_TAGS } from '$lib/utils/styled-copy/sanitize';
 import {
@@ -43,9 +37,7 @@ import type {
 } from '$lib/utils/styled-copy/types';
 import { createWarningCollector } from '$lib/utils/styled-copy/warnings';
 
-export type StyledCopySource =
-  | EditorPublishDocumentSnapshot
-  | RopePublishDocumentSnapshot;
+export type StyledCopySource = EditorPublishDocumentSnapshot;
 
 export type StyledCopyControllerStatus =
   | 'idle'
@@ -67,7 +59,6 @@ export interface StyledCopyControllerOptions {
 
 export type StyledCopyRuntimeError =
   | { readonly code: 'source_stale' }
-  | { readonly code: 'rope_snapshot_unavailable' }
   | { readonly code: 'pandoc_not_found' }
   | {
       readonly code: 'unsupported_pandoc_extensions';
@@ -111,10 +102,6 @@ export interface StyledCopyControllerDependencies {
     markdown: string,
     signal: AbortSignal,
   ): Promise<NativeResult<string>>;
-  loadRopeSnapshot(
-    source: RopePublishDocumentSnapshot,
-    signal: AbortSignal,
-  ): Promise<NativeResult<RopeSnapshot>>;
   getCurrentEditorState(tabId: string): EditorState | undefined;
   normalizePandocHtml(html: string): StyledCopyResult<SemanticDocument>;
   createAssetSession(input: StyledCopyAssetSessionInput): StyledCopyAssetSession;
@@ -150,7 +137,6 @@ interface PreviewArtifact {
   previewAssets: ResolvedStyledCopyAssetUrls;
   normalizationWarnings: readonly StyledCopyWarning[];
   previewWarnings: readonly StyledCopyWarning[];
-  ropeGeneration: number | null;
 }
 
 const FINAL_TAGS = new Set<string>(ALLOWED_FINAL_TAGS);
@@ -166,18 +152,6 @@ const NO_UNSUPPORTED_EXTENSIONS: readonly string[] = Object.freeze([]);
 const DEFAULT_DEPENDENCIES: StyledCopyControllerDependencies = {
   convertMarkdownToStyledHtml(markdown) {
     return commands.convertMarkdownToStyledHtml(markdown);
-  },
-  async loadRopeSnapshot(source) {
-    const manager = getViewportSnapshotMetadata(source.tabId)?.manager;
-    if (manager?.fileId === source.fileId) {
-      try {
-        const data = await manager.snapshot();
-        return { status: 'ok', data };
-      } catch {
-        return { status: 'error', error: 'rope_snapshot_unavailable' };
-      }
-    }
-    return commands.ropeSnapshot(source.fileId);
   },
   getCurrentEditorState(tabId) {
     return getEditorView(tabId)?.state;
@@ -240,17 +214,14 @@ export function createStyledCopyController(
       error: null,
     }));
 
-    const resolved = await resolveScopedMarkdown(source, state.options.scope, dependencies, controller.signal);
-    if (!isActive(generation, controller.signal)) return state;
-    if (resolved.kind === 'error') {
-      publishState(errorState(state, resolved.error));
-      return state;
-    }
+    const markdown = state.options.scope === 'selection' && source.mainSelection?.text.length
+      ? source.mainSelection.text
+      : source.fullText;
 
     let converted: NativeResult<string>;
     try {
       converted = await dependencies.convertMarkdownToStyledHtml(
-        stripFrontMatter(resolved.markdown),
+        stripFrontMatter(markdown),
         controller.signal,
       );
     } catch {
@@ -282,7 +253,6 @@ export function createStyledCopyController(
       assetSession = dependencies.createAssetSession({
         assets: collectLogicalAssets(normalized.value),
         documentDir: source.documentDir,
-        projectDir: source.projectDir,
         target: state.options.target,
         wechatTheme: state.options.wechatTheme,
       });
@@ -327,15 +297,8 @@ export function createStyledCopyController(
       return state;
     }
 
-    const sourceError = await currentSourceError(
-      source,
-      resolved.ropeGeneration,
-      dependencies,
-      controller.signal,
-    );
-    if (!isActive(generation, controller.signal)) return state;
-    if (sourceError) {
-      publishState(errorState(state, sourceError));
+    if (!sourceIsCurrent(source, dependencies)) {
+      publishState(errorState(state, { code: 'source_stale' }));
       return state;
     }
 
@@ -345,7 +308,6 @@ export function createStyledCopyController(
       previewAssets: freezeResolvedAssets(previewAssets.value),
       normalizationWarnings: freezeWarnings(normalized.warnings),
       previewWarnings: freezeWarnings(previewAssets.warnings),
-      ropeGeneration: resolved.ropeGeneration,
     });
     publishState(createState({
       ...state,
@@ -407,15 +369,8 @@ export function createStyledCopyController(
       return state;
     }
 
-    const sourceError = await currentSourceError(
-      source,
-      artifact.ropeGeneration,
-      dependencies,
-      controller.signal,
-    );
-    if (!isActive(generation, controller.signal)) return state;
-    if (sourceError) {
-      publishState(errorState(state, sourceError));
+    if (!sourceIsCurrent(source, dependencies)) {
+      publishState(errorState(state, { code: 'source_stale' }));
       return state;
     }
 
@@ -471,7 +426,7 @@ export function createStyledCopyController(
     generation: number,
     signal: AbortSignal,
   ): Promise<StyledCopyControllerState> {
-    if (source.kind === 'editor' && !sourceIsCurrent(source, dependencies)) {
+    if (!sourceIsCurrent(source, dependencies)) {
       publishState(errorState(state, { code: 'source_stale' }));
       return state;
     }
@@ -527,15 +482,8 @@ export function createStyledCopyController(
       return state;
     }
     if (!isActive(generation, signal)) return state;
-    const sourceError = await currentSourceError(
-      source,
-      artifact.ropeGeneration,
-      dependencies,
-      signal,
-    );
-    if (!isActive(generation, signal)) return state;
-    if (sourceError) {
-      publishState(errorState(state, sourceError));
+    if (!sourceIsCurrent(source, dependencies)) {
+      publishState(errorState(state, { code: 'source_stale' }));
       return state;
     }
     if (!dependencies.writeStyledClipboard) {
@@ -785,64 +733,7 @@ function sourceIsCurrent(
   source: StyledCopySource,
   dependencies: StyledCopyControllerDependencies,
 ): boolean {
-  return source.kind === 'rope'
-    || dependencies.getCurrentEditorState(source.tabId) === source.editorGeneration;
-}
-
-async function resolveScopedMarkdown(
-  source: StyledCopySource,
-  scope: CopyScope,
-  dependencies: StyledCopyControllerDependencies,
-  signal: AbortSignal,
-): Promise<
-  | { kind: 'ok'; markdown: string; ropeGeneration: number | null }
-  | { kind: 'error'; error: StyledCopyRuntimeError }
-> {
-  if (source.kind === 'editor') {
-    const markdown = scope === 'selection' && source.mainSelection?.text.length
-      ? source.mainSelection.text
-      : source.fullText;
-    return { kind: 'ok', markdown, ropeGeneration: null };
-  }
-
-  try {
-    const snapshot = await dependencies.loadRopeSnapshot(source, signal);
-    if (snapshot.status !== 'ok') {
-      return { kind: 'error', error: { code: 'rope_snapshot_unavailable' } };
-    }
-    const frozen = Object.freeze({
-      text: snapshot.data.text,
-      generation: snapshot.data.generation,
-    });
-    return {
-      kind: 'ok',
-      markdown: scope === 'selection' && source.mainSelection?.text.length
-        ? source.mainSelection.text
-        : frozen.text,
-      ropeGeneration: frozen.generation,
-    };
-  } catch {
-    return { kind: 'error', error: { code: 'rope_snapshot_unavailable' } };
-  }
-}
-
-async function currentSourceError(
-  source: StyledCopySource,
-  ropeGeneration: number | null,
-  dependencies: StyledCopyControllerDependencies,
-  signal: AbortSignal,
-): Promise<StyledCopyRuntimeError | null> {
-  if (source.kind === 'editor') {
-    return sourceIsCurrent(source, dependencies) ? null : { code: 'source_stale' };
-  }
-  if (ropeGeneration === null) return { code: 'rope_snapshot_unavailable' };
-  try {
-    const current = await dependencies.loadRopeSnapshot(source, signal);
-    if (current.status !== 'ok') return { code: 'rope_snapshot_unavailable' };
-    return current.data.generation === ropeGeneration ? null : { code: 'source_stale' };
-  } catch {
-    return { code: 'rope_snapshot_unavailable' };
-  }
+  return dependencies.getCurrentEditorState(source.tabId) === source.editorGeneration;
 }
 
 function mapPandocError(nativeError: string): StyledCopyRuntimeError {

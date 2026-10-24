@@ -47,6 +47,12 @@ const ENTRIES: Record<string, PluginSettingsEntry> = {
     panelId: 'ai-agent',
     load: () => import('$lib/components/ai-agent/AiAgentSettings.svelte'),
   },
+  'book-translation': {
+    pluginId: 'book-translation',
+    label: 'Book Translation',
+    labelKey: 'settings.plugins.bookTranslation.name',
+    load: () => import('$lib/components/BookTranslationSettings.svelte'),
+  },
 };
 
 export const pluginSettings = {

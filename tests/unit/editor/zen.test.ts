@@ -80,4 +80,22 @@ describe('[precision] lineFocusPlugin', () => {
       document.body.innerHTML = '';
     }
   });
+
+  it('[regression] re-dims synchronously when the caret moves to another line', () => {
+    const view = mountWith('one\ntwo\nthree', lineFocusPlugin);
+    const dimmedLines = () => {
+      const starts: number[] = [];
+      const iter = view.plugin(lineFocusPlugin)!.decorations.iter();
+      for (; iter.value; iter.next()) starts.push(view.state.doc.lineAt(iter.from).number);
+      return starts;
+    };
+    try {
+      expect(dimmedLines()).toEqual([2, 3]);
+      view.dispatch({ selection: { anchor: view.state.doc.line(2).from } }); // ArrowDown
+      expect(dimmedLines()).toEqual([1, 3]);
+    } finally {
+      view.destroy();
+      document.body.innerHTML = '';
+    }
+  });
 });

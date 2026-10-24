@@ -7,7 +7,10 @@ export default defineConfig({
   testDir: './tests/e2e/specs',
   fullyParallel: true,
   forbidOnly: isCI,
+  // Retries only collect a trace ('on-first-retry'); a test that needs one to
+  // pass still fails CI instead of hiding the flake.
   retries: isCI ? 2 : 0,
+  failOnFlakyTests: isCI,
   workers: isCI ? 1 : undefined,
   reporter: [
     ['list'],

@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 /**
  * Regression guards for the unified selection-background subsystem.
@@ -52,11 +52,7 @@ function isTransparent(color: string): boolean {
 }
 
 async function openFirstProjectFile(app: any, fileTestId = 'sidebar-file-Chapter 1.md') {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
   await app.getByTestId(fileTestId).click();
   await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
 }
@@ -82,7 +78,7 @@ test.describe('[regression] Unified selection background — invariant 1+2 (line
       view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
     });
 
-    await app.waitForTimeout(200);
+    await expect.poll(() => app.locator('.cm-novelist-selected-line').count()).toBeGreaterThan(3);
 
     const { distinctLineLefts, count } = await app.evaluate(() => {
       const lefts: number[] = [];
@@ -107,7 +103,7 @@ test.describe('[regression] Unified selection background — invariant 1+2 (line
       const view = (window as any).__novelist_view;
       view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
     });
-    await app.waitForTimeout(200);
+    await expect(app.locator('.cm-selectionBackground').first()).toBeAttached();
 
     const bgColors = await app.evaluate(() => {
       const colors: string[] = [];
@@ -150,7 +146,6 @@ test.describe('[regression] Unified selection background — invariant 3+4+5 (::
       // Caret only — establish an unselected baseline.
       view.dispatch({ selection: { anchor: 0 } });
     });
-    await app.waitForTimeout(150);
 
     // Probe the effective `::selection` background color by reading it from
     // a throwaway stylesheet and the active theme class. CM6's
@@ -217,7 +212,7 @@ test.describe('[regression] Unified selection background — invariant 3+4+5 (::
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
       view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
     });
-    await app.waitForTimeout(150);
+    await expect(app.locator('.cm-line.cm-novelist-selected-line').first()).toBeAttached();
 
     // Read the computed background color of a fully-selected line.
     const lineBg = await app.evaluate(() => {
@@ -275,7 +270,10 @@ test.describe('[regression] Unified selection background — invariant 3+4+5 (::
       // visual wrap at any realistic editor width.
       view.dispatch({ selection: { anchor: 10, head: 180 } });
     });
-    await app.waitForTimeout(200);
+    await expect.poll(() => app.evaluate(() => {
+      const sel = window.getSelection();
+      return sel && sel.rangeCount > 0 ? sel.getRangeAt(0).getClientRects().length : 0;
+    })).toBeGreaterThanOrEqual(2);
 
     // Use window.getSelection's client rects — these correspond to the
     // visual rectangles the browser uses to paint `::selection`. On a

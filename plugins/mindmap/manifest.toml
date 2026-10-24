@@ -1,7 +1,7 @@
 [plugin]
 id = "mindmap"
 name = "Mindmap"
-version = "1.0.0"
+version = "1.0.1"
 description = "Auto-generated mindmap panel from document headings"
 author = "Novelist Team"
 permissions = ["read", "ui"]

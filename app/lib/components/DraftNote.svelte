@@ -9,8 +9,10 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { t } from '$lib/i18n';
   import { registerRenameFlushProvider } from '$lib/services/rename-coordinator';
+  import { registerProjectSwitchFlushProvider } from '$lib/services/project-switch-coordinator';
   import { handleDraftSaveFireAndForget, writeDraftNoteStrict } from '$lib/services/draft-notes';
   import { pathStartsWithChild } from '$lib/utils/path';
+  import { DraftNoteSaver } from './draft-note-saver';
 
   interface Props {
     filePath: string;
@@ -19,11 +21,14 @@
   let { filePath }: Props = $props();
   let container: HTMLDivElement;
   let view: EditorView | null = null;
-  let currentFilePath = '';
+  let loadingFilePath = '';
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingSave: Promise<void> | null = null;
-  let queuedSave = false;
   let isDirty = $state(false);
+  const saver = new DraftNoteSaver({
+    write: (target, content) => writeDraftNoteStrict(target.projectDir, target.filePath, content),
+    getContent: () => view?.state.doc.toString() ?? null,
+    onDirtyChange: (dirty) => { isDirty = dirty; },
+  });
 
   const draftTheme = EditorView.theme({
     '&': {
@@ -63,7 +68,7 @@
       placeholder(t('draft.placeholder')),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
-          isDirty = true;
+          saver.markDirty();
           scheduleSave();
         }
       }),
@@ -89,7 +94,7 @@
   }
 
   function handleDraftSaveFailure(message: string) {
-    isDirty = true;
+    saver.markDirty();
     console.warn(message);
   }
 
@@ -98,49 +103,35 @@
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    if (!view || !projectStore.dirPath || !currentFilePath) return pendingSave ?? Promise.resolve();
-    if (pendingSave) {
-      queuedSave = true;
-      return pendingSave.then(() => {
-        if (!queuedSave) return;
-        queuedSave = false;
-        return saveDraft();
-      });
-    }
-    const content = view.state.doc.toString();
-    const savePromise = writeDraftNoteStrict(projectStore.dirPath, currentFilePath, content)
-      .then(() => {
-        if (view?.state.doc.toString() === content) isDirty = false;
-      })
-      .catch((error) => {
-        isDirty = true;
-        throw error;
-      })
-      .finally(() => {
-        if (pendingSave === savePromise) pendingSave = null;
-      });
-    pendingSave = savePromise;
-    return savePromise;
+    return saver.save();
   }
 
   async function flushForRename(oldPath: string) {
-    if (!currentFilePath) return;
-    if (currentFilePath !== oldPath && !pathStartsWithChild(currentFilePath, oldPath)) return;
-    if (isDirty) await saveDraft();
-    if (pendingSave) await pendingSave;
+    const target = saver.target;
+    if (!target) return;
+    if (target.filePath !== oldPath && !pathStartsWithChild(target.filePath, oldPath)) return;
+    await flushDraft();
+  }
+
+  async function flushDraft() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    await saver.flush();
   }
 
   async function loadDraft(path: string) {
-    if (!projectStore.dirPath) return;
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) return;
+    loadingFilePath = path;
 
-    // Save current draft before switching
-    if (view && currentFilePath && isDirty) {
-      await saveDraft();
-    }
+    // Save the current draft (to its own project and file) before switching.
+    if (view && saver.dirty) await saveDraft();
 
-    currentFilePath = path;
-
-    const result = await commands.readDraftNote(projectStore.dirPath, path);
+    const result = await commands.readDraftNote(projectDir, path);
+    // A newer file or project switch took over while this one was loading.
+    if (loadingFilePath !== path || projectStore.dirPath !== projectDir) return;
     const content = result.status === 'ok' && result.data != null ? result.data : '';
 
     if (view) {
@@ -150,23 +141,27 @@
 
     const state = EditorState.create({ doc: content, extensions: createDraftExtensions() });
     view = new EditorView({ state, parent: container });
-    isDirty = false;
+    saver.setTarget({ projectDir, filePath: path });
   }
 
   $effect(() => {
-    if (filePath && container && filePath !== currentFilePath) {
+    if (filePath && container && filePath !== loadingFilePath) {
       handleDraftSaveFireAndForget(loadDraft(filePath), handleDraftSaveFailure);
     }
   });
 
   onMount(() => {
     const unregisterRenameFlush = registerRenameFlushProvider(flushForRename);
+    // The project store changes `dirPath` before the tabs (and this panel)
+    // go away: write the draft into the project it belongs to first.
+    const unregisterProjectSwitchFlush = registerProjectSwitchFlushProvider(() => flushDraft());
     return () => {
       unregisterRenameFlush();
+      unregisterProjectSwitchFlush();
       if (saveTimer) clearTimeout(saveTimer);
-      if (view && isDirty) {
-        // Fire-and-forget save on unmount
-        handleDraftSaveFireAndForget(saveDraft(), handleDraftSaveFailure);
+      if (view && saver.dirty) {
+        // Fire-and-forget save on unmount; text and target are captured now.
+        handleDraftSaveFireAndForget(saver.save(), handleDraftSaveFailure);
       }
       if (view) {
         view.destroy();

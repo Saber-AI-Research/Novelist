@@ -163,7 +163,8 @@ async fn verify_or_create_identity(ctx: &WebDavCtx, project_dir: &str) -> Result
         &ctx.auth,
         webdav::PutCondition::Absent,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -282,16 +283,19 @@ async fn upload_snapshot(
         &ctx.auth,
         webdav::PutCondition::Unconditional,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 /// Upload content first and publish its completion marker only on total success.
-pub async fn try_upload_snapshot(project_dir: &str, meta: &SnapshotMeta) {
+/// Returns whether the remote now holds this complete snapshot; callers delete
+/// retired remote copies only then.
+pub async fn try_upload_snapshot(project_dir: &str, meta: &SnapshotMeta) -> bool {
     let Some(ctx) = get_webdav_ctx(project_dir) else {
-        return;
+        return false;
     };
-    // Snapshot mutation holds its lock through mirroring; even a responsive but
-    // very slow server must not monopolize that lock indefinitely.
+    // Even a responsive but very slow server must not hold this project's
+    // mirror lock (and so its next snapshot) indefinitely.
     let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
         webdav::validate_remote_path(&meta.id)?;
         if meta.id.is_empty() || meta.id.contains('/') {
@@ -307,8 +311,12 @@ pub async fn try_upload_snapshot(project_dir: &str, meta: &SnapshotMeta) {
             "Snapshot WebDAV upload deadline exceeded".into(),
         ))
     });
-    if let Err(error) = result {
-        tracing::warn!("Snapshot WebDAV upload failed: {error}");
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!("Snapshot WebDAV upload failed: {error}");
+            false
+        }
     }
 }
 

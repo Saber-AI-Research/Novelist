@@ -176,9 +176,9 @@ export async function uploadInlineBytes(
 
 /**
  * Find every `![](...)` reference in `docText` whose target is a local
- * file (not http/https/data URI), upload each sequentially, and return
- * a per-image report. Caller is responsible for applying the URL
- * replacements to the editor source.
+ * file (not http/https/data URI), upload each distinct target once,
+ * sequentially, and return a per-image report. Caller is responsible for
+ * applying the URL replacements to every occurrence in the editor source.
  */
 export async function uploadAllInDocument(
   docText: string,
@@ -186,7 +186,8 @@ export async function uploadAllInDocument(
   projectActiveHostId?: string | null,
 ): Promise<UploadReport> {
   const host = await loadActiveHost(projectActiveHostId);
-  const refs = extractImageRefs(docText);
+  // An image referenced twice must be uploaded once, not once per reference.
+  const refs = new Set(extractImageRefs(docText));
   const report: UploadReport = { successes: [], failures: [] };
   for (const ref of refs) {
     if (isRemoteUrl(ref)) continue;

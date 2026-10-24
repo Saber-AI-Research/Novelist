@@ -69,11 +69,12 @@ export function registerAppCommands(ctx: AppCommandContext) {
   const { t, getActiveEditorView } = ctx;
 
   /**
-   * Register a palette command resolved from an i18n key. Always
-   * populates `secondaryLabel` with the alternate-language string so
-   * users can search via either Chinese or English regardless of
-   * current locale. Falls back to a plain `label` when no key is
-   * available.
+   * Register a palette command resolved from an i18n key. `label` is a
+   * getter so it follows the active locale after a language switch (the
+   * registry keeps the first registration of an id). `secondaryLabelFn`
+   * resolves the alternate-language string so users can search via either
+   * Chinese or English regardless of current locale. Falls back to a plain
+   * `label` when no key is available.
    */
   function reg(opts: {
     id: string;
@@ -82,26 +83,26 @@ export function registerAppCommands(ctx: AppCommandContext) {
     shortcut?: string;
     handler: () => void;
   }) {
-    let label: string;
-    let secondaryLabelFn: (() => string | undefined) | undefined;
     if (opts.labelKey) {
       const key = opts.labelKey;
-      label = tFn(key);
-      // Resolved lazily at palette render time so the alternate-locale
-      // chunk has time to finish preloading after app boot.
-      secondaryLabelFn = () => {
-        const otherLocale = i18n.locale === 'zh-CN' ? 'en' : 'zh-CN';
-        const alt = tIn(otherLocale, key);
-        if (alt && alt !== label && alt !== key) return alt;
-        return undefined;
-      };
-    } else {
-      label = opts.label ?? opts.id;
+      commandRegistry.register({
+        id: opts.id,
+        get label() { return tFn(key); },
+        // Resolved lazily at palette render time so the alternate-locale
+        // chunk has time to finish preloading after app boot.
+        secondaryLabelFn: () => {
+          const otherLocale = i18n.locale === 'zh-CN' ? 'en' : 'zh-CN';
+          const alt = tIn(otherLocale, key);
+          return alt !== key && alt !== tFn(key) ? alt : undefined;
+        },
+        shortcut: opts.shortcut,
+        handler: opts.handler,
+      });
+      return;
     }
     commandRegistry.register({
       id: opts.id,
-      label,
-      secondaryLabelFn,
+      label: opts.label ?? opts.id,
       shortcut: opts.shortcut,
       handler: opts.handler,
     });
@@ -170,7 +171,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
     shortcut: shortcutsStore.get('ai-talk-new-session'),
     handler: () => {
       if (extensionStore.activePanelId !== 'ai-talk') extensionStore.openPanel('ai-talk');
-      aiTalkSessions.create();
+      aiTalkSessions.requestNewSession();
     },
   });
   reg({
@@ -225,38 +226,18 @@ export function registerAppCommands(ctx: AppCommandContext) {
     });
   }
 
-  // Chinese text tools
+  // Chinese text tools (lazy chunk: the OpenCC dictionaries are large)
   reg({ id: 'chinese-s2t', labelKey: 'command.simplifiedToTraditional', handler: async () => {
     const view = getActiveEditorView();
     if (!view) return;
-    const { from, to } = view.state.selection.main;
-    const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
     const { simplifiedToTraditional } = await import('$lib/utils/chinese');
-    const converted = await simplifiedToTraditional(text);
-    if (from === to) {
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: converted } });
-    } else {
-      view.dispatch({
-        changes: { from, to, insert: converted },
-        selection: { anchor: from, head: from + converted.length },
-      });
-    }
+    await convertChineseText(view, simplifiedToTraditional);
   }});
   reg({ id: 'chinese-t2s', labelKey: 'command.traditionalToSimplified', handler: async () => {
     const view = getActiveEditorView();
     if (!view) return;
-    const { from, to } = view.state.selection.main;
-    const text = from === to ? view.state.doc.toString() : view.state.sliceDoc(from, to);
     const { traditionalToSimplified } = await import('$lib/utils/chinese');
-    const converted = await traditionalToSimplified(text);
-    if (from === to) {
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: converted } });
-    } else {
-      view.dispatch({
-        changes: { from, to, insert: converted },
-        selection: { anchor: from, head: from + converted.length },
-      });
-    }
+    await convertChineseText(view, traditionalToSimplified);
   }});
   reg({ id: 'chinese-pinyin', labelKey: 'command.generatePinyin', handler: async () => {
     const view = getActiveEditorView();
@@ -345,6 +326,28 @@ export function registerAppCommands(ctx: AppCommandContext) {
 }
 
 /**
+ * Convert the selection (or the whole document when nothing is selected).
+ * The first conversion waits for the dictionary chunk to load; if the user
+ * typed meanwhile, the converted text is stale and replacing it would discard
+ * that typing, so nothing is dispatched.
+ */
+async function convertChineseText(view: EditorView, convert: (text: string) => Promise<string>): Promise<void> {
+  const startDoc = view.state.doc;
+  const { from, to } = view.state.selection.main;
+  const wholeDoc = from === to;
+  const converted = await convert(wholeDoc ? startDoc.toString() : view.state.sliceDoc(from, to));
+  if (view.state.doc !== startDoc) return;
+  if (wholeDoc) {
+    view.dispatch({ changes: { from: 0, to: startDoc.length, insert: converted } });
+  } else {
+    view.dispatch({
+      changes: { from, to, insert: converted },
+      selection: { anchor: from, head: from + converted.length },
+    });
+  }
+}
+
+/**
  * Find every local image reference in the active document, upload each
  * to the active host, and apply URL replacements in a single CodeMirror
  * transaction. Surfaces a summary toast via the `image-host-toast`
@@ -352,7 +355,6 @@ export function registerAppCommands(ctx: AppCommandContext) {
  */
 async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<void> {
   if (!view) return;
-  const docText = view.state.doc.toString();
   const docPath = tabsStore.activeTab?.filePath ?? null;
   const docDir = docPath ? pathDirname(docPath) : (projectStore.dirPath ?? '');
   if (!docDir) {
@@ -363,7 +365,7 @@ async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<voi
   }
   try {
     const { uploadAllInDocument } = await import('$lib/services/image-host');
-    const report = await uploadAllInDocument(docText, {
+    const report = await uploadAllInDocument(view.state.doc.toString(), {
       baseDir: docDir,
     });
     if (report.successes.length === 0 && report.failures.length === 0) {
@@ -372,20 +374,7 @@ async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<voi
       }));
       return;
     }
-    // Build one transaction with every replacement.
-    const changes: Array<{ from: number; to: number; insert: string }> = [];
-    for (const { original, url } of report.successes) {
-      // Find every occurrence of the original ref in the doc text and
-      // replace just the URL portion of each `![alt](original)` match.
-      const re = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(original)}(\\s+"[^"]*")?\\)`, 'g');
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(docText)) !== null) {
-        const matchStart = m.index;
-        const oldSrcStart = matchStart + 2 + m[1].length + 2;
-        const oldSrcEnd = oldSrcStart + original.length;
-        changes.push({ from: oldSrcStart, to: oldSrcEnd, insert: url });
-      }
-    }
+    const changes = imageUrlReplacements(view.state.doc.toString(), report.successes);
     if (changes.length > 0) {
       view.dispatch({ changes });
     }
@@ -401,6 +390,29 @@ async function uploadAllLocalImagesCommand(view: EditorView | null): Promise<voi
       detail: { kind: 'error', message: e instanceof Error ? e.message : String(e) },
     }));
   }
+}
+
+/**
+ * Changes that replace the URL portion of every `![alt](original)` in
+ * `docText` (the document as it is NOW, after the uploads — typing during
+ * the uploads moves the links). Each original is replaced once per
+ * occurrence even if the report lists it more than once.
+ */
+function imageUrlReplacements(
+  docText: string,
+  uploads: ReadonlyArray<{ original: string; url: string }>,
+): Array<{ from: number; to: number; insert: string }> {
+  const urlByOriginal = new Map(uploads.map(({ original, url }) => [original, url]));
+  const changes: Array<{ from: number; to: number; insert: string }> = [];
+  for (const [original, url] of urlByOriginal) {
+    const re = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(original)}(\\s+"[^"]*")?\\)`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(docText)) !== null) {
+      const from = m.index + 2 + m[1].length + 2; // past `![alt](`
+      changes.push({ from, to: from + original.length, insert: url });
+    }
+  }
+  return changes;
 }
 
 function escapeRegExp(s: string): string {

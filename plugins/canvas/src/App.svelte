@@ -11,6 +11,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import CanvasTextNode from './CanvasTextNode.svelte';
+  import { connectToHost } from '../../host-channel';
 
   interface CanvasData {
     nodes: CanvasNodeData[];
@@ -32,8 +33,11 @@
 
   let nodes = $state<Node[]>([]);
   let edges = $state<Edge[]>([]);
-  let currentFilePath = $state<string | null>(null);
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let documentId = $state('');
+  let revision = $state(0);
+  // At most one debounced save exists: a new `file-open` flushes it with the
+  // token it was scheduled for, so the host decides whether it still applies.
+  let pendingSave: { timer: ReturnType<typeof setTimeout>; documentId: string; revision: number } | null = null;
 
   const nodeTypes: NodeTypes = {
     text: CanvasTextNode,
@@ -88,22 +92,53 @@
     };
   }
 
+  function serializeCanvas(): string {
+    return JSON.stringify(flowToCanvasData(), null, 2);
+  }
+
+  function cancelPendingSave() {
+    if (pendingSave) clearTimeout(pendingSave.timer);
+    pendingSave = null;
+  }
+
+  function postSave(targetDocumentId: string, targetRevision: number) {
+    host.post({
+      type: 'file-save',
+      documentId: targetDocumentId,
+      revision: targetRevision,
+      content: serializeCanvas(),
+    });
+  }
+
+  function flushPendingSave() {
+    const pending = pendingSave;
+    if (!pending) return;
+    cancelPendingSave();
+    postSave(pending.documentId, pending.revision);
+  }
+
   function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      if (!currentFilePath) return;
-      const data = flowToCanvasData();
-      const content = JSON.stringify(data, null, 2);
-      window.parent.postMessage({
-        type: 'file-save',
-        filePath: currentFilePath,
-        content,
-      }, '*');
+    if (!documentId) return;
+    cancelPendingSave();
+    const targetDocumentId = documentId;
+    const targetRevision = revision;
+    const timer = setTimeout(() => {
+      pendingSave = null;
+      postSave(targetDocumentId, targetRevision);
     }, 1000);
+    pendingSave = { timer, documentId: targetDocumentId, revision: targetRevision };
   }
 
   function handleNodesChange() {
-    window.parent.postMessage({ type: 'mark-dirty' }, '*');
+    if (!documentId) return;
+    // Publish the live document so the host can mirror it to every view of
+    // the same file and reject snapshots that another view has replaced.
+    host.post({
+      type: 'file-state',
+      documentId,
+      revision,
+      content: serializeCanvas(),
+    });
     scheduleSave();
   }
 
@@ -120,13 +155,12 @@
     handleNodesChange();
   }
 
-  // Listen for messages from host
-  window.addEventListener('message', (event) => {
-    const data = event.data;
-    if (!data || typeof data !== 'object') return;
-
+  // Messages from the host arrive only on the host-issued MessagePort.
+  const host = connectToHost((data: Record<string, any>) => {
     if (data.type === 'file-open') {
-      currentFilePath = data.filePath;
+      flushPendingSave();
+      documentId = typeof data.documentId === 'string' ? data.documentId : '';
+      revision = Number.isInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
       const canvasData = parseCanvasData(data.content ?? '');
       const flow = canvasDataToFlow(canvasData);
       nodes = flow.nodes;
@@ -141,9 +175,9 @@
   });
 
   onMount(() => {
-    window.parent.postMessage({ type: 'plugin-ready' }, '*');
+    host.post({ type: 'plugin-ready' });
     return () => {
-      if (saveTimer) clearTimeout(saveTimer);
+      cancelPendingSave();
     };
   });
 </script>

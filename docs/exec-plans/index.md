@@ -19,9 +19,9 @@ should start from product specs, design docs, and the tech debt tracker.
 - [2026-05-06 publishing (v0.2.4)](completed/2026-05-06-publish.md)
 - [2026-05-07 rename UX & filename macros (v0.2.4)](completed/2026-05-07-v0.2.4-rename-and-macros.md)
 
-Workflow-generated specs and plans can also live under `docs/superpowers/`.
-When they ship, link them from the relevant release note and copy any lasting
-decision into a product spec or design doc.
+Keep active implementation plans under `docs/exec-plans/active/`.
+When they ship, move them to `docs/exec-plans/completed/` and copy lasting
+decisions into a product spec or design doc.
 
 ## Ongoing Tracker
 

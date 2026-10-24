@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR, type MockFileEntry } from '../fixtures/mock-data';
 
 /**
@@ -31,11 +31,7 @@ async function seedAndOpen(app: import('@playwright/test').Page, files: MockFile
     },
     [MOCK_PROJECT_DIR, files, contents] as const,
   );
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
 }
 
 test.describe('Cmd+S H1 auto-rename', () => {

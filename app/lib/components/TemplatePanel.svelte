@@ -5,6 +5,7 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import type { TemplateFileSummary, TemplateSource } from '$lib/ipc/commands';
   import TemplateDialog from '$lib/components/TemplateDialog.svelte';
+  import { templateDialogPrefill, type TemplateDialogPrefill } from '$lib/components/template-dialog';
   import { IconArrowInsert, IconDocument } from './icons';
 
   interface Props {
@@ -16,7 +17,7 @@
      */
     onExecute: (summary: TemplateFileSummary) => Promise<string | null>;
     /** Open dialog with a particular pre-fill (used for "Save current file as template"). */
-    openDialogRequest?: { id: string | null; prefill?: { name?: string; body?: string } } | null;
+    openDialogRequest?: { id: string | null; prefill?: TemplateDialogPrefill } | null;
     onDialogHandled?: () => void;
   }
   let { onExecute, openDialogRequest = null, onDialogHandled }: Props = $props();
@@ -24,7 +25,7 @@
   // --- dialog state ---
   let dialogOpen = $state(false);
   let dialogInitialId = $state<string | null>(null);
-  let dialogPrefill = $state<{ name?: string; body?: string } | undefined>(undefined);
+  let dialogPrefill = $state<TemplateDialogPrefill | undefined>(undefined);
 
   // --- context menu state ---
   let ctxMenu = $state<{ x: number; y: number; summary: TemplateFileSummary } | null>(null);
@@ -107,10 +108,7 @@
       if (!pd) return;
       const full = await templatesStore.read(s.source, s.id, pd);
       dialogInitialId = s.id;
-      dialogPrefill = {
-        name: full.summary.name,
-        body: full.body,
-      };
+      dialogPrefill = templateDialogPrefill(full);
       dialogOpen = true;
     } catch (e: any) {
       toast = e?.message ?? String(e);
@@ -315,6 +313,9 @@
     initialId={dialogInitialId}
     initialName={dialogPrefill?.name ?? ''}
     initialBody={dialogPrefill?.body ?? ''}
+    initialMode={dialogPrefill?.mode ?? 'insert'}
+    initialDescription={dialogPrefill?.description ?? ''}
+    initialDefaultFilename={dialogPrefill?.defaultFilename ?? ''}
     onClose={() => { dialogOpen = false; dialogInitialId = null; dialogPrefill = undefined; }}
   />
 {/if}

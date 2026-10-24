@@ -96,7 +96,6 @@
   function errorMessage(error: Readonly<StyledCopyControllerError>): string {
     switch (error.code) {
       case 'source_stale': return t('styledCopy.error.sourceStale');
-      case 'rope_snapshot_unavailable': return t('styledCopy.error.ropeUnavailable');
       case 'pandoc_not_found': return t('styledCopy.error.pandocNotFound');
       case 'unsupported_pandoc_extensions':
         return t('styledCopy.error.pandocExtensions', {

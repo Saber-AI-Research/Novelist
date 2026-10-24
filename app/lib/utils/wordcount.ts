@@ -2,12 +2,12 @@
  * CJK-aware word count — single-pass algorithm.
  *
  * Walks the string once, classifying each character:
- * - CJK character → count +1 immediately
- * - Whitespace → ends any in-progress Latin word
+ * - CJK character (ideograph, kana, CJK punctuation) → count +1 immediately
+ * - Whitespace (incl. the ideographic space U+3000 used for Chinese paragraph
+ *   indents) → ends any in-progress Latin word
  * - Other (Latin letter/digit/punct) → part of a Latin word
  *
- * Previous implementation used two full-document regex scans (match + replace).
- * This version is O(N) single-pass with no intermediate string allocations.
+ * Mirrored by `count_words_cjk` in `core/src/services/writing_stats.rs`.
  */
 export function countWords(text: string): number {
   if (!text.trim()) return 0;
@@ -26,6 +26,12 @@ export function countWords(text: string): number {
       } else {
         inLatinWord = true;
       }
+      continue;
+    }
+
+    // Ideographic space: whitespace, not a CJK symbol
+    if (code === 0x3000) {
+      if (inLatinWord) { count++; inLatinWord = false; }
       continue;
     }
 
@@ -56,7 +62,9 @@ function isCJK(code: number, text: string, i: number): boolean {
   if (code >= 0x4E00 && code <= 0x9FFF) return true;  // CJK Unified Ideographs
   if (code >= 0x3400 && code <= 0x4DBF) return true;  // CJK Extension A
   if (code >= 0xF900 && code <= 0xFAFF) return true;  // CJK Compatibility Ideographs
-  if (code >= 0x3000 && code <= 0x303F) return true;  // CJK Symbols and Punctuation
+  if (code >= 0x3001 && code <= 0x303F) return true;  // CJK Symbols and Punctuation (U+3000 is whitespace)
+  if (code >= 0x3040 && code <= 0x30FF) return true;  // Hiragana + Katakana
+  if (code >= 0x31F0 && code <= 0x31FF) return true;  // Katakana Phonetic Extensions
   if (code >= 0xFF00 && code <= 0xFFEF) return true;  // Fullwidth Forms
 
   // Supplementary planes (surrogate pairs) — Extension B through F

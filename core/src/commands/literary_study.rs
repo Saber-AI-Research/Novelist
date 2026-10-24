@@ -3,13 +3,16 @@ use crate::commands::settings::acquire_project_settings_guard;
 use crate::error::AppError;
 use crate::models::project::{OutlineConfig, ProjectConfig, ProjectMeta, WritingConfig};
 use crate::models::settings::PluginsConfig;
-use quick_xml::events::{BytesStart, Event};
+use crate::services::atomic_file::atomic_write_sync;
+use crate::services::writing_stats::is_cjk;
+use quick_xml::escape::resolve_xml_entity;
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
@@ -467,7 +470,9 @@ fn inspect_epub(path: &Path) -> Result<LiterarySourceInspection, AppError> {
                 continue;
             }
         };
-        let mut text = extract_xhtml_text(&document);
+        let mut text = extract_xhtml_text(&document).map_err(|error| {
+            AppError::InvalidInput(format!("Invalid EPUB chapter {item_path}: {error}"))
+        })?;
         if text.trim().is_empty() {
             continue;
         }
@@ -583,9 +588,13 @@ fn parse_container_rootfile(xml: &str) -> Result<String, AppError> {
 
 fn parse_opf(xml: &str) -> Result<OpfData, AppError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
     let mut opf = OpfData::default();
-    let mut capture: Option<Vec<u8>> = None;
+    // Metadata element being captured and its raw text. A value containing
+    // entity references arrives as several events, so it is joined first and
+    // only collapsed at the end tag (no per-event trimming around `&amp;`).
+    let mut capture: Option<(Vec<u8>, String)> = None;
+    let invalid_text =
+        |error: quick_xml::Error| AppError::InvalidInput(format!("Invalid OPF text: {error}"));
 
     loop {
         match reader.read_event() {
@@ -593,7 +602,9 @@ fn parse_opf(xml: &str) -> Result<OpfData, AppError> {
                 let qualified_name = element.name();
                 let name = local_name(qualified_name.as_ref());
                 match name {
-                    b"title" | b"creator" | b"language" => capture = Some(name.to_vec()),
+                    b"title" | b"creator" | b"language" => {
+                        capture = Some((name.to_vec(), String::new()))
+                    }
                     b"item" => parse_manifest_item(&reader, &element, &mut opf)?,
                     b"itemref" => parse_spine_item(&reader, &element, &mut opf)?,
                     b"spine" => opf.toc_id = attribute_value(&reader, &element, b"toc")?,
@@ -608,19 +619,31 @@ fn parse_opf(xml: &str) -> Result<OpfData, AppError> {
             Ok(Event::Text(text)) if capture.is_some() => {
                 let value = text
                     .xml_content()
-                    .map_err(|error| AppError::InvalidInput(format!("Invalid OPF text: {error}")))?
-                    .trim()
-                    .to_string();
-                match capture.as_deref() {
-                    Some(b"title") if opf.title.is_empty() => opf.title = value,
-                    Some(b"creator") if opf.author.is_none() => opf.author = Some(value),
-                    Some(b"language") if opf.language.is_none() => opf.language = Some(value),
-                    _ => {}
-                }
+                    .map_err(|error| invalid_text(error.into()))?;
+                capture.as_mut().expect("checked").1.push_str(&value);
+            }
+            Ok(Event::GeneralRef(reference)) if capture.is_some() => {
+                let (_, raw) = capture.as_mut().expect("checked");
+                resolve_general_ref(&reference, |value| raw.push_str(value))
+                    .map_err(invalid_text)?;
             }
             Ok(Event::End(element)) => {
-                if capture.as_deref() == Some(local_name(element.name().as_ref())) {
-                    capture = None;
+                let qualified_name = element.name();
+                let name = local_name(qualified_name.as_ref());
+                if capture
+                    .as_ref()
+                    .is_some_and(|(captured, _)| captured.as_slice() == name)
+                {
+                    let (captured, raw) = capture.take().expect("checked");
+                    let value = collapse_whitespace(&raw);
+                    if !value.is_empty() {
+                        match captured.as_slice() {
+                            b"title" if opf.title.is_empty() => opf.title = value,
+                            b"creator" if opf.author.is_none() => opf.author = Some(value),
+                            b"language" if opf.language.is_none() => opf.language = Some(value),
+                            _ => {}
+                        }
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -703,7 +726,6 @@ fn load_navigation_labels(
 
 fn parse_ncx(xml: &str) -> Result<HashMap<String, NavLabel>, AppError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
     let mut points: Vec<NavPoint> = Vec::new();
     let mut labels = HashMap::new();
     let mut in_label_text = false;
@@ -728,13 +750,18 @@ fn parse_ncx(xml: &str) -> Result<HashMap<String, NavLabel>, AppError> {
                 }
             }
             Ok(Event::Text(text)) if in_label_text && !points.is_empty() => {
-                points
-                    .last_mut()
-                    .expect("checked")
-                    .label
-                    .push_str(&text.xml_content().map_err(|error| {
+                let value = text.xml_content().map_err(|error| {
+                    AppError::InvalidInput(format!("Invalid EPUB navigation text: {error}"))
+                })?;
+                points.last_mut().expect("checked").label.push_str(&value);
+            }
+            Ok(Event::GeneralRef(reference)) if in_label_text && !points.is_empty() => {
+                let label = &mut points.last_mut().expect("checked").label;
+                resolve_general_ref(&reference, |value| label.push_str(value)).map_err(
+                    |error| {
                         AppError::InvalidInput(format!("Invalid EPUB navigation text: {error}"))
-                    })?);
+                    },
+                )?;
             }
             Ok(Event::End(element)) => match local_name(element.name().as_ref()) {
                 b"text" => in_label_text = false,
@@ -759,7 +786,6 @@ fn parse_ncx(xml: &str) -> Result<HashMap<String, NavLabel>, AppError> {
 
 fn parse_nav_document(xml: &str) -> Result<HashMap<String, NavLabel>, AppError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
     let mut labels = HashMap::new();
     let mut list_depth = 0_usize;
     let mut anchors: Vec<NavPoint> = Vec::new();
@@ -777,20 +803,23 @@ fn parse_nav_document(xml: &str) -> Result<HashMap<String, NavLabel>, AppError> 
                 _ => {}
             },
             Ok(Event::Text(text)) if !anchors.is_empty() => {
-                anchors
-                    .last_mut()
-                    .expect("checked")
-                    .label
-                    .push_str(&text.xml_content().map_err(|error| {
-                        AppError::InvalidInput(format!("Invalid EPUB nav text: {error}"))
-                    })?);
+                let value = text.xml_content().map_err(|error| {
+                    AppError::InvalidInput(format!("Invalid EPUB nav text: {error}"))
+                })?;
+                anchors.last_mut().expect("checked").label.push_str(&value);
+            }
+            Ok(Event::GeneralRef(reference)) if !anchors.is_empty() => {
+                let label = &mut anchors.last_mut().expect("checked").label;
+                resolve_general_ref(&reference, |value| label.push_str(value)).map_err(
+                    |error| AppError::InvalidInput(format!("Invalid EPUB nav text: {error}")),
+                )?;
             }
             Ok(Event::End(element)) => match local_name(element.name().as_ref()) {
                 b"a" => {
                     if let Some(anchor) = anchors.pop() {
                         if let Some(src) = anchor.src {
                             labels.entry(normalize_href(&src)).or_insert(NavLabel {
-                                title: anchor.label.trim().to_string(),
+                                title: collapse_whitespace(&anchor.label),
                                 volume: None,
                             });
                         }
@@ -815,17 +844,17 @@ fn insert_nav_point(labels: &mut HashMap<String, NavLabel>, parents: &[NavPoint]
     let Some(src) = point.src else {
         return;
     };
-    let title = point.label.trim();
+    let title = collapse_whitespace(&point.label);
     if title.is_empty() {
         return;
     }
     let volume = parents.iter().rev().find_map(|parent| {
-        (!parent.label.trim().is_empty()).then(|| parent.label.trim().to_string())
+        let label = collapse_whitespace(&parent.label);
+        (!label.is_empty()).then_some(label)
     });
-    labels.entry(normalize_href(&src)).or_insert(NavLabel {
-        title: title.to_string(),
-        volume,
-    });
+    labels
+        .entry(normalize_href(&src))
+        .or_insert(NavLabel { title, volume });
 }
 
 fn is_document_item(item: &OpfItem) -> bool {
@@ -837,15 +866,15 @@ fn is_document_item(item: &OpfItem) -> bool {
         || item.href.ends_with(".htm")
 }
 
-fn extract_xhtml_text(xml: &str) -> String {
+fn extract_xhtml_text(xml: &str) -> Result<String, quick_xml::Error> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut output = String::new();
+    let mut text = CollapsedText::default();
     let mut skip_depth = 0_usize;
 
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(element)) => {
+        match reader.read_event()? {
+            Event::Start(element) => {
                 let qualified_name = element.name();
                 let name = local_name(qualified_name.as_ref());
                 if skip_depth > 0 {
@@ -853,37 +882,113 @@ fn extract_xhtml_text(xml: &str) -> String {
                 } else if is_skipped_tag(name) {
                     skip_depth = 1;
                 } else if is_block_tag(name) {
-                    push_line_break(&mut output);
+                    text.push_line_break();
                 }
             }
-            Ok(Event::Empty(element)) if skip_depth == 0 => {
+            Event::Empty(element) if skip_depth == 0 => {
                 if is_block_tag(local_name(element.name().as_ref())) {
-                    push_line_break(&mut output);
+                    text.push_line_break();
                 }
             }
-            Ok(Event::Text(text)) if skip_depth == 0 => {
-                if let Ok(value) = text.xml_content() {
-                    push_collapsed_text(&mut output, &value);
-                }
+            Event::Text(content) if skip_depth == 0 => text.push_text(&content.xml_content()?),
+            Event::CData(content) if skip_depth == 0 => text.push_text(&content.xml_content()?),
+            Event::GeneralRef(reference) if skip_depth == 0 => {
+                resolve_general_ref(&reference, |value| text.push_text(value))?
             }
-            Ok(Event::CData(text)) if skip_depth == 0 => {
-                if let Ok(value) = text.xml_content() {
-                    push_collapsed_text(&mut output, &value);
-                }
-            }
-            Ok(Event::End(element)) => {
+            Event::End(element) => {
                 if skip_depth > 0 {
                     skip_depth -= 1;
                 } else if is_block_tag(local_name(element.name().as_ref())) {
-                    push_line_break(&mut output);
+                    text.push_line_break();
                 }
             }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            Event::Eof => break,
             _ => {}
         }
     }
-    normalize_extracted_text(&output)
+    Ok(normalize_extracted_text(&text.output))
+}
+
+/// Splices one `Event::GeneralRef` back into the text being collected.
+/// quick-xml 0.38 reports every `&…;` reference as its own event instead of
+/// folding it into `Event::Text`, so a loop that ignores it silently loses
+/// characters. Numeric references, the five predefined XML entities and the
+/// common XHTML entities in [`resolve_html_entity`] are resolved; any other
+/// named entity is kept verbatim rather than dropped.
+fn resolve_general_ref(
+    reference: &BytesRef<'_>,
+    sink: impl FnOnce(&str),
+) -> Result<(), quick_xml::Error> {
+    if let Some(character) = reference.resolve_char_ref()? {
+        sink(character.encode_utf8(&mut [0; 4]));
+        return Ok(());
+    }
+    let name = reference.decode()?;
+    if let Some(value) = resolve_xml_entity(&name) {
+        sink(value);
+    } else if let Some(character) = resolve_html_entity(&name) {
+        sink(character.encode_utf8(&mut [0; 4]));
+    } else {
+        sink(&format!("&{name};"));
+    }
+    Ok(())
+}
+
+/// HTML 4 Latin-1 entity names in code-point order, starting at U+00A0.
+const LATIN1_ENTITIES: [&str; 96] = [
+    "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf",
+    "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro",
+    "para", "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest",
+    "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute",
+    "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH", "Ntilde", "Ograve", "Oacute",
+    "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc", "Uuml", "Yacute",
+    "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
+    "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde",
+    "ograve", "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc",
+    "uuml", "yacute", "thorn", "yuml",
+];
+
+/// Common XHTML named entities beyond the five XML ones. EPUB 2 chapters
+/// declare the XHTML DTD and use these freely. quick-xml only ships the full
+/// HTML5 table behind its `escape-html` feature, which feature unification
+/// would also turn on for the `plist` crate, so the useful subset lives here.
+fn resolve_html_entity(name: &str) -> Option<char> {
+    if let Some(index) = LATIN1_ENTITIES.iter().position(|entity| *entity == name) {
+        return char::from_u32(0xA0 + index as u32);
+    }
+    Some(match name {
+        "ensp" => '\u{2002}',
+        "emsp" => '\u{2003}',
+        "thinsp" => '\u{2009}',
+        "zwnj" => '\u{200C}',
+        "zwj" => '\u{200D}',
+        "ndash" => '\u{2013}',
+        "mdash" => '\u{2014}',
+        "lsquo" => '\u{2018}',
+        "rsquo" => '\u{2019}',
+        "sbquo" => '\u{201A}',
+        "ldquo" => '\u{201C}',
+        "rdquo" => '\u{201D}',
+        "bdquo" => '\u{201E}',
+        "bull" => '\u{2022}',
+        "hellip" => '\u{2026}',
+        "trade" => '\u{2122}',
+        _ => return None,
+    })
+}
+
+/// Collapses whitespace runs in a title or navigation label to single spaces
+/// and trims both ends. Explicit spaces between CJK words are kept
+/// (`第一章 小二上酒`).
+fn collapse_whitespace(value: &str) -> String {
+    let mut collapsed = String::with_capacity(value.len());
+    for word in value.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed
 }
 
 fn is_skipped_tag(name: &[u8]) -> bool {
@@ -908,36 +1013,48 @@ fn is_block_tag(name: &[u8]) -> bool {
     )
 }
 
-fn push_line_break(output: &mut String) {
-    while output.ends_with(' ') || output.ends_with('\t') {
-        output.pop();
-    }
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
+/// Plain-text accumulator for XHTML chapters. Every whitespace run becomes a
+/// single space, including runs split across events by inline markup or
+/// entity references (`Tom ` `&amp;` ` Jerry` → `Tom & Jerry`). The one
+/// exception is a run containing a line break between two CJK characters:
+/// that is source wrapping inside CJK prose and must not inject a space.
+#[derive(Default)]
+struct CollapsedText {
+    output: String,
+    pending_space: bool,
+    pending_wrap: bool,
 }
 
-fn push_collapsed_text(output: &mut String, text: &str) {
-    for segment in text.split_whitespace() {
-        if segment.is_empty() {
-            continue;
+impl CollapsedText {
+    fn push_text(&mut self, text: &str) {
+        for character in text.chars() {
+            if character.is_whitespace() {
+                self.pending_space = true;
+                self.pending_wrap |= matches!(character, '\n' | '\r');
+                continue;
+            }
+            if std::mem::take(&mut self.pending_space) {
+                let wrapped = std::mem::take(&mut self.pending_wrap);
+                if let Some(previous) = self.output.chars().next_back() {
+                    let wrapped_cjk =
+                        wrapped && is_cjk(previous as u32) && is_cjk(character as u32);
+                    if !previous.is_whitespace() && !wrapped_cjk {
+                        self.output.push(' ');
+                    }
+                }
+            }
+            self.output.push(character);
         }
-        if output
-            .chars()
-            .last()
-            .is_some_and(|character| !character.is_whitespace())
-            && segment
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-            && output
-                .chars()
-                .last()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-        {
-            output.push(' ');
+    }
+
+    /// Block boundary: pending whitespace is dropped, since the line break
+    /// already separates the words.
+    fn push_line_break(&mut self) {
+        self.pending_space = false;
+        self.pending_wrap = false;
+        if !self.output.is_empty() && !self.output.ends_with('\n') {
+            self.output.push('\n');
         }
-        output.push_str(segment);
     }
 }
 
@@ -1305,18 +1422,24 @@ fn replace_literary_study_book_inner(
     })
 }
 
-fn validate_project_request(request: &CreateLiteraryStudyProjectRequest) -> Result<(), AppError> {
-    if request.project_name.trim().is_empty()
-        || request.project_name.contains('/')
-        || request.project_name.contains('\\')
-        || request.project_name.contains('\0')
-        || request.project_name == "."
-        || request.project_name == ".."
+pub(crate) fn validate_project_name(name: &str) -> Result<(), AppError> {
+    if name.trim().is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name == "."
+        || name == ".."
+        || name.len() > 255
     {
         return Err(AppError::InvalidInput(
             "Project name cannot be empty or contain path separators".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_project_request(request: &CreateLiteraryStudyProjectRequest) -> Result<(), AppError> {
+    validate_project_name(&request.project_name)?;
     validate_book_request(
         &request.title,
         &request.chapters,
@@ -2087,60 +2210,6 @@ fn ensure_safe_parent(root: &Path, relative_file: &str) -> Result<(), AppError> 
     Ok(())
 }
 
-fn atomic_write_sync(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::InvalidInput("Literary data path has no parent".to_string()))?;
-    std::fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| AppError::InvalidInput("Literary data path has no file name".to_string()))?
-        .to_string_lossy();
-    let mut last_collision = None;
-    for attempt in 0..32_u64 {
-        let temporary = parent.join(format!(
-            ".{file_name}.novelist-tmp-{}-{}-{}",
-            std::process::id(),
-            unique_suffix(),
-            attempt
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(mut file) => {
-                let write_result = (|| -> Result<(), AppError> {
-                    file.write_all(bytes)?;
-                    file.flush()?;
-                    file.sync_all()?;
-                    Ok(())
-                })();
-                drop(file);
-                if let Err(error) = write_result {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                if let Err(error) = std::fs::rename(&temporary, path) {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(AppError::Io(error));
-                }
-                return Ok(());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_collision = Some(error);
-            }
-            Err(error) => return Err(AppError::Io(error)),
-        }
-    }
-    Err(AppError::Io(last_collision.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "Unable to allocate a literary data temporary file",
-        )
-    })))
-}
-
 fn prune_empty_chapter_directories(root: &Path, previous: &[(String, LiteraryStudyFile)]) {
     let mut directories = previous
         .iter()
@@ -2171,7 +2240,7 @@ fn unique_suffix() -> u128 {
         .as_nanos()
 }
 
-fn sanitize_path_component(value: &str) -> String {
+pub(crate) fn sanitize_path_component(value: &str) -> String {
     let mut sanitized = value
         .chars()
         .map(|character| {
@@ -2299,8 +2368,113 @@ mod tests {
     fn extracts_xhtml_without_style_or_script_text() {
         let text = extract_xhtml_text(
             r#"<html><head><style>hidden</style></head><body><h3>第一章</h3><p>最终，<b>师叔祖</b>胜了。</p><script>bad()</script><p>下一段</p></body></html>"#,
-        );
+        )
+        .unwrap();
         assert_eq!(text, "第一章\n最终，师叔祖胜了。\n下一段");
+    }
+
+    #[test]
+    fn extracts_xhtml_entities_without_dropping_surrounding_spaces() {
+        let text = extract_xhtml_text(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <p>Tom &amp; Jerry &lt;3 &quot;cheese&quot; &apos;n&apos; &gt; mice.</p>
+  <p>Hello, <em>world</em>! Caf&#233; &#x263A;
+     wrapped line.</p>
+  <p>Kept&#160;apart &custom; verbatim</p>
+</body></html>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "Tom & Jerry <3 \"cheese\" 'n' > mice.\nHello, world! Café ☺ wrapped line.\nKept apart &custom; verbatim"
+        );
+    }
+
+    #[test]
+    fn extracts_common_xhtml_named_entities() {
+        let text = extract_xhtml_text(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;他说&mdash;&mdash;走吧&hellip;&hellip;&ldquo;好&rdquo;</p>
+<p>Wait&hellip; Caf&eacute; &laquo;na&iuml;ve&raquo; 1990&ndash;2000 &copy; A&nbsp;B &unknown;</p>
+</body></html>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "他说——走吧……“好”\nWait… Café «naïve» 1990–2000 © A B &unknown;"
+        );
+        // The Latin-1 table is positional; pin both ends and the gaps.
+        for (name, expected) in [
+            ("nbsp", '\u{A0}'),
+            ("iquest", '\u{BF}'),
+            ("Agrave", '\u{C0}'),
+            ("times", '\u{D7}'),
+            ("szlig", '\u{DF}'),
+            ("divide", '\u{F7}'),
+            ("yuml", '\u{FF}'),
+        ] {
+            assert_eq!(resolve_html_entity(name), Some(expected), "{name}");
+        }
+        assert_eq!(resolve_html_entity("NBSP"), None);
+    }
+
+    #[test]
+    fn extracts_cjk_xhtml_entities_without_injecting_wrap_spaces() {
+        let text = extract_xhtml_text(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>第&#20108;章 风&amp;雨</h1>
+<p>
+  最终，<b>师叔祖</b>胜了&#x3002;
+  他说&#65306;&#x201C;走吧&#x201D;
+</p>
+</body></html>"#,
+        )
+        .unwrap();
+        assert_eq!(text, "第二章 风&雨\n最终，师叔祖胜了。他说：“走吧”");
+    }
+
+    #[test]
+    fn malformed_xhtml_is_an_error_not_a_truncated_chapter() {
+        assert!(extract_xhtml_text("<p>第一段</p><p>第二段 & 第三段</p>").is_err());
+        assert!(extract_xhtml_text("<p>第一段</p><p>bad &#xZZ; ref</p>").is_err());
+        assert!(extract_xhtml_text("<body><p>第一段</div><p>第二段</p></body>").is_err());
+    }
+
+    #[test]
+    fn resolves_entities_in_opf_metadata_and_navigation_labels() {
+        let opf = parse_opf(
+            r#"<?xml version="1.0"?><package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>
+<dc:title>Tom &amp; Jerry:
+  &#x7B2C;&#x4E00;&#x5377;</dc:title>
+<dc:creator> 王&#x5C0F;明 </dc:creator>
+<dc:language>zh&#45;CN</dc:language>
+</metadata><manifest/><spine/></package>"#,
+        )
+        .unwrap();
+        assert_eq!(opf.title, "Tom & Jerry: 第一卷");
+        assert_eq!(opf.author.as_deref(), Some("王小明"));
+        assert_eq!(opf.language.as_deref(), Some("zh-CN"));
+
+        let ncx = parse_ncx(
+            r#"<ncx><navMap>
+<navPoint><navLabel><text>第一卷 &amp; 序</text></navLabel>
+  <navPoint><navLabel><text>Chapter &#49;: Tom &amp; Jerry</text></navLabel><content src="ch1.xhtml"/></navPoint>
+</navPoint>
+</navMap></ncx>"#,
+        )
+        .unwrap();
+        let chapter = &ncx["ch1.xhtml"];
+        assert_eq!(chapter.title, "Chapter 1: Tom & Jerry");
+        assert_eq!(chapter.volume.as_deref(), Some("第一卷 & 序"));
+
+        let nav = parse_nav_document(
+            r#"<html><body><nav><ol>
+<li><a href="ch1.xhtml">第一章 &lt;<span>上</span>&gt; &amp; 下</a></li>
+</ol></nav></body></html>"#,
+        )
+        .unwrap();
+        assert_eq!(nav["ch1.xhtml"].title, "第一章 <上> & 下");
     }
 
     #[test]
@@ -2776,11 +2950,8 @@ mod tests {
         assert!(replacement.stats.started_at.is_none());
     }
 
-    #[test]
-    fn inspects_minimal_epub() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("book.epub");
-        let file = File::create(&path).unwrap();
+    fn write_single_chapter_epub(path: &Path, chapter_xhtml: &str) {
+        let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("META-INF/container.xml", options).unwrap();
@@ -2795,15 +2966,40 @@ mod tests {
         )
         .unwrap();
         zip.start_file("OEBPS/chapter.xhtml", options).unwrap();
-        zip.write_all(r#"<html><body><h1>第一章</h1><p>正文</p></body></html>"#.as_bytes())
-            .unwrap();
+        zip.write_all(chapter_xhtml.as_bytes()).unwrap();
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn inspects_minimal_epub() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("book.epub");
+        write_single_chapter_epub(
+            &path,
+            r#"<html><body><h1>第一章</h1><p>正文</p></body></html>"#,
+        );
 
         let inspected = inspect_epub(&path).unwrap();
         assert_eq!(inspected.title, "测试书");
         assert_eq!(inspected.author.as_deref(), Some("作者"));
         assert_eq!(inspected.chapters.len(), 1);
         assert_eq!(inspected.chapters[0].text, "正文");
+    }
+
+    #[test]
+    fn malformed_epub_chapter_fails_import_with_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("book.epub");
+        write_single_chapter_epub(
+            &path,
+            r#"<html><body><h1>第一章</h1><p>前半</p><p>后半 & 丢失</p></body></html>"#,
+        );
+
+        let error = inspect_epub(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("Invalid EPUB chapter OEBPS/chapter.xhtml"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

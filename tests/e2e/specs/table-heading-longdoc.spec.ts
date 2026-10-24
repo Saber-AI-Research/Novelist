@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 /**
  * [precision] Long-doc table edit must not break on-screen headings.
@@ -20,11 +20,7 @@ import { test, expect } from '../fixtures/app-fixture';
  */
 test.describe('[precision] long-doc table edit keeps headings intact', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
     await app.getByTestId('sidebar-file-Chapter 1.md').click();
     await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
   });
@@ -53,32 +49,35 @@ test.describe('[precision] long-doc table edit keeps headings intact', () => {
       const pos = view.state.doc.toString().indexOf('| 小明');
       view.dispatch({ selection: { anchor: pos, head: pos }, scrollIntoView: true });
     }, doc);
-    await app.waitForTimeout(500);
 
     const headingState = async () => app.evaluate(() => {
       const lines = [...document.querySelectorAll('.cm-content > .cm-line')] as HTMLElement[];
-      return lines
+      const headings = lines
         .map(l => ({ t: l.innerText, h: Math.round(l.getBoundingClientRect().height), vis: getComputedStyle(l).visibility }))
         .filter(x => x.t.includes('节') && x.t.includes('标题'));
+      return {
+        count: headings.length,
+        // No heading may leak its raw `##` marker, be zero-height, or be hidden.
+        leaked: headings.filter(h => h.t.trimStart().startsWith('#')),
+        broken: headings.filter(h => h.vis !== 'visible' || h.h === 0),
+      };
     });
+    await expect.poll(async () => (await headingState()).count).toBeGreaterThan(0);
 
-    // Edit a table cell, then probe after the parser settles.
-    const cellPos = await app.evaluate(() => (window as any).__novelist_view.state.doc.toString().indexOf('小明'));
-    await app.evaluate((p: number) => {
-      const view = (window as any).__novelist_view;
-      view.dispatch({ selection: { anchor: p + 2, head: p + 2 } });
-    }, cellPos);
-    await app.waitForTimeout(150);
-    await app.keyboard.type('强壮');
-    await app.waitForTimeout(600);
+    // Edit a table cell through its rendered widget and leave the table with
+    // Escape, which commits the cell to the document. Then probe once the
+    // background parser has settled: stale decorations never refresh, so the
+    // settled state stays broken.
+    await app.locator('table.cm-novelist-rendered-table td', { hasText: '小明' }).click();
+    await app.keyboard.press('End');
+    await app.keyboard.insertText('强壮');
+    await app.keyboard.press('Escape');
+    await expect.poll(() => app.evaluate(() => (window as any).__novelist_view.state.doc.toString().includes('| 小明强壮 |')))
+      .toBe(true);
 
-    const headings = await headingState();
-    expect(headings.length).toBeGreaterThan(0);
-
-    // No heading may leak its raw `##` marker, be zero-height, or be hidden.
-    const leaked = headings.filter(h => h.t.trimStart().startsWith('#'));
-    const broken = headings.filter(h => h.vis !== 'visible' || h.h === 0);
-    expect(leaked, `headings leaked raw '##': ${JSON.stringify(leaked)}`).toEqual([]);
-    expect(broken, `headings hidden/zero-height: ${JSON.stringify(broken)}`).toEqual([]);
+    await expect.poll(async () => {
+      const { count, leaked, broken } = await headingState();
+      return { onScreen: count > 0, leaked, broken };
+    }).toEqual({ onScreen: true, leaked: [], broken: [] });
   });
 });

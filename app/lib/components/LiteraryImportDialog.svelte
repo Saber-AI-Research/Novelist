@@ -13,6 +13,8 @@
     type ReplaceLiteraryStudyBookResult,
   } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { isImeComposing } from '$lib/utils/ime';
+  import { focusTrap } from './focus-trap';
 
   type SourceChapterDraft = {
     id: string;
@@ -75,6 +77,8 @@
   let selectedChapter = $derived(chapters[selectedIndex] ?? null);
   let canSubmit = $derived(
     inspection !== null
+      && !inspecting
+      && !creating
       && chapters.length > 0
       && chapters.every((chapter) => chapter.title.trim() && chapter.text.trim())
       && (
@@ -265,9 +269,16 @@
     creating = false;
   }
 
+  /** Closing mid-import would still switch projects when the import finishes. */
+  function requestClose() {
+    if (!creating) onClose();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (creating) return;
       if (confirmingReplace) confirmingReplace = false;
       else onClose();
     } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && canSubmit) {
@@ -281,18 +292,23 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}>
+<div class="backdrop" onclick={requestClose}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="dialog"
     class:has-preview={!!inspection}
     data-testid="literary-import-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="literary-import-title"
+    tabindex="-1"
+    use:focusTrap
     onclick={(event) => event.stopPropagation()}
   >
     <header>
-      <h2>{t(mode === 'replace' ? 'literaryImport.replaceTitle' : 'literaryImport.title')}</h2>
-      <button class="icon-button" title={t('newProject.cancel')} aria-label={t('newProject.cancel')} onclick={onClose}>
+      <h2 id="literary-import-title">{t(mode === 'replace' ? 'literaryImport.replaceTitle' : 'literaryImport.title')}</h2>
+      <button class="icon-button" title={t('newProject.cancel')} aria-label={t('newProject.cancel')} disabled={creating} onclick={requestClose}>
         <X size={16} />
       </button>
     </header>
@@ -419,7 +435,8 @@
       <div class="actions">
         <button
           class="secondary-button"
-          onclick={() => confirmingReplace ? confirmingReplace = false : onClose()}
+          disabled={creating}
+          onclick={() => confirmingReplace ? confirmingReplace = false : requestClose()}
         >{confirmingReplace ? t('literaryImport.back') : t('newProject.cancel')}</button>
         <button
           class="primary-button"

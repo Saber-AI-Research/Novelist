@@ -1,0 +1,8 @@
+# Check out text files with LF on every platform, so Windows checkouts cannot
+# shift character offsets in tests, fixtures, or generated bindings.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+*.woff2 binary

@@ -227,6 +227,18 @@ describe('uploadAllInDocument', () => {
       '插图/封面.png',
     ]);
   });
+
+  it('uploads an image referenced twice only once', async () => {
+    mockSettings.hosts = [{ id: 'h', name: 'h', provider: 'imgur', client_id: 'x' } as never];
+    mockSettings.active_host_id = 'h';
+    const { uploadAllInDocument } = await import('$lib/services/image-host');
+    const report = await uploadAllInDocument(
+      '![甲](插图/人物甲.png)\n\n正文\n\n![甲again](插图/人物甲.png)',
+      { baseDir: '/proj' },
+    );
+    expect(report.successes.map(s => s.original)).toEqual(['插图/人物甲.png']);
+    expect(calls.filter(call => call.name === 'readImageBytes')).toHaveLength(1);
+  });
 });
 
 describe('readLocalImageDataUri', () => {

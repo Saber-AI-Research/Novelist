@@ -13,8 +13,9 @@ import {
   type ViewUpdate, WidgetType,
 } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
-import { StateField, type EditorState, type Range } from '@codemirror/state';
+import { StateEffect, StateField, type EditorState, type Range, type Transaction } from '@codemirror/state';
 import { imeComposingField } from './ime-guard';
+import { isBlockContainer } from './markdown-extensions';
 
 interface MathRange {
   from: number;
@@ -32,11 +33,24 @@ let katexModule: typeof import('katex') | null = null;
 let katexLoadPromise: Promise<typeof import('katex')> | null = null;
 let katexCssLoaded = false;
 
+/** Every live editor with the math extension (one per split pane). */
+const mathViews = new Set<EditorView>();
+/** Dispatched to every math view once KaTeX finishes loading. */
+const katexLoadedEffect = StateEffect.define<null>();
+
+function isKatexLoaded(tr: Transaction): boolean {
+  return tr.effects.some((effect) => effect.is(katexLoadedEffect));
+}
+
 async function ensureKatex(): Promise<typeof import('katex')> {
   if (katexModule) return katexModule;
   if (!katexLoadPromise) {
+    // Lazy chunk: KaTeX is only needed once a document contains math.
     katexLoadPromise = import('katex').then((mod) => {
       katexModule = mod;
+      // Widgets built while loading show `$…$` placeholders; rebuild them in
+      // every pane (their `eq` includes the loaded state, so DOM is replaced).
+      for (const view of mathViews) view.dispatch({ effects: katexLoadedEffect.of(null) });
       return mod;
     });
   }
@@ -50,59 +64,46 @@ function ensureKatexCss() {
 }
 
 /**
- * Synchronously render math if KaTeX is loaded, otherwise return null
- * and trigger async load.  The `viewRef` callback is used to dispatch
- * a no-op transaction after KaTeX finishes loading so decorations rebuild.
+ * Render `tex` into `el` if KaTeX is loaded. Returns false (and starts the
+ * load) otherwise; the caller shows a placeholder until `katexLoadedEffect`.
  */
-function renderMathSync(
-  tex: string,
-  displayMode: boolean,
-  viewRef: (() => EditorView | null) | null,
-): string | null {
-  if (katexModule) {
-    try {
-      return katexModule.default.renderToString(tex, {
-        throwOnError: false,
-        displayMode,
-      });
-    } catch {
-      return `<span class="cm-novelist-math-error">Error rendering: ${tex}</span>`;
-    }
+function renderMath(el: HTMLElement, tex: string, displayMode: boolean): boolean {
+  if (!katexModule) {
+    void ensureKatex();
+    return false;
   }
-  // Trigger async load, then request re-measure so decorations rebuild
-  ensureKatex().then(() => {
-    const view = viewRef?.();
-    if (view) {
-      view.dispatch({});
-    }
-  });
-  return null;
+  try {
+    el.innerHTML = katexModule.default.renderToString(tex, { throwOnError: false, displayMode });
+  } catch {
+    const error = document.createElement('span');
+    error.className = 'cm-novelist-math-error';
+    error.textContent = `Error rendering: ${tex}`;
+    el.replaceChildren(error);
+  }
+  return true;
 }
 
 /* ── Inline math widget ($...$) ───────────────────────────── */
 
 class InlineMathWidget extends WidgetType {
-  constructor(private tex: string, private viewRef: () => EditorView | null) {
+  private readonly katexReady = katexModule !== null;
+
+  constructor(private tex: string) {
     super();
   }
 
   toDOM(): HTMLElement {
     const span = document.createElement('span');
     span.className = 'cm-novelist-math-inline';
-
-    const html = renderMathSync(this.tex, false, this.viewRef);
-    if (html) {
-      span.innerHTML = html;
-    } else {
+    if (!renderMath(span, this.tex, false)) {
       span.textContent = `$${this.tex}$`;
       span.classList.add('cm-novelist-math-loading');
     }
-
     return span;
   }
 
   eq(other: InlineMathWidget): boolean {
-    return this.tex === other.tex;
+    return this.tex === other.tex && this.katexReady === other.katexReady;
   }
 
   ignoreEvent(): boolean {
@@ -113,27 +114,24 @@ class InlineMathWidget extends WidgetType {
 /* ── Display math widget ($$...$$) ────────────────────────── */
 
 class DisplayMathWidget extends WidgetType {
-  constructor(private tex: string, private viewRef: () => EditorView | null) {
+  private readonly katexReady = katexModule !== null;
+
+  constructor(private tex: string) {
     super();
   }
 
   toDOM(): HTMLElement {
     const div = document.createElement('div');
     div.className = 'cm-novelist-math-display';
-
-    const html = renderMathSync(this.tex, true, this.viewRef);
-    if (html) {
-      div.innerHTML = html;
-    } else {
+    if (!renderMath(div, this.tex, true)) {
       div.textContent = `$$${this.tex}$$`;
       div.classList.add('cm-novelist-math-loading');
     }
-
     return div;
   }
 
   eq(other: DisplayMathWidget): boolean {
-    return this.tex === other.tex;
+    return this.tex === other.tex && this.katexReady === other.katexReady;
   }
 
   get estimatedHeight(): number { return 60; }
@@ -167,10 +165,6 @@ function selectionTouchesRanges(state: EditorState, ranges: readonly MathRange[]
 
 /* ── Block decorations (StateField) — display math ────────── */
 
-// Weak ref to the active EditorView, used by widgets for lazy KaTeX reload
-let _mathEditorView: EditorView | null = null;
-function getMathEditorView(): EditorView | null { return _mathEditorView; }
-
 function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
   const decos: Range<Decoration>[] = [];
   const ranges: MathRange[] = [];
@@ -178,7 +172,7 @@ function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
 
   syntaxTree(state).iterate({
     enter(node) {
-      if (node.name !== 'DisplayMath') return;
+      if (node.name !== 'DisplayMath') return isBlockContainer(node.name);
       hasMath = true;
       ranges.push({ from: node.from, to: node.to });
 
@@ -191,7 +185,7 @@ function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
       if (tex.length > 0) {
         decos.push(
           Decoration.replace({
-            widget: new DisplayMathWidget(tex, getMathEditorView),
+            widget: new DisplayMathWidget(tex),
             block: true,
           }).range(node.from, node.to)
         );
@@ -203,7 +197,7 @@ function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
 
   if (hasMath) {
     ensureKatexCss();
-    ensureKatex();
+    void ensureKatex();
   }
 
   return { decorations: Decoration.set(decos, true), ranges };
@@ -212,7 +206,7 @@ function buildDisplayMathBlockState(state: EditorState): MathDecorationState {
 const mathBlockDecoField = StateField.define<MathDecorationState>({
   create(state) { return buildDisplayMathBlockState(state); },
   update(value, tr) {
-    if (tr.docChanged) return buildDisplayMathBlockState(tr.state);
+    if (tr.docChanged || isKatexLoaded(tr)) return buildDisplayMathBlockState(tr.state);
     if (tr.state.field(imeComposingField, false)) return value;
     if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
       return buildDisplayMathBlockState(tr.state);
@@ -242,6 +236,9 @@ function buildMathInlineState(view: EditorView): MathDecorationState {
       from,
       to,
       enter(node) {
+        // Code never contains math; skip its (possibly nested-language) subtree.
+        if (node.name === 'FencedCode' || node.name === 'CodeBlock') return false;
+
         // --- Inline math $...$ ---
         if (node.name === 'InlineMath') {
           hasMath = true;
@@ -261,7 +258,7 @@ function buildMathInlineState(view: EditorView): MathDecorationState {
             if (tex.length > 0 && endClamped > node.from && endClamped === node.to) {
               decos.push(
                 Decoration.replace({
-                  widget: new InlineMathWidget(tex, () => view),
+                  widget: new InlineMathWidget(tex),
                 }).range(node.from, endClamped)
               );
             }
@@ -292,10 +289,11 @@ function buildMathInlineState(view: EditorView): MathDecorationState {
           ranges.push({ from: node.from, to: node.to });
           if (!selectionTouchesRange(state, node.from, node.to)) return false;
 
-          // Cursor inside: show raw source with styled background
+          // Cursor inside: show raw source with styled background. Only the
+          // visible part of a long block gets line decorations.
           const lineDeco = Decoration.line({ class: 'cm-novelist-math-block-line' });
-          let pos = node.from;
-          while (pos <= node.to) {
+          const end = Math.min(node.to, to);
+          for (let pos = Math.max(node.from, from); pos <= end;) {
             const line = state.doc.lineAt(pos);
             decos.push(lineDeco.range(line.from));
             pos = line.to + 1;
@@ -323,7 +321,7 @@ function buildMathInlineState(view: EditorView): MathDecorationState {
 
   if (hasMath) {
     ensureKatexCss();
-    ensureKatex();
+    void ensureKatex();
   }
 
   return {
@@ -335,19 +333,15 @@ function buildMathInlineState(view: EditorView): MathDecorationState {
 class MathInlinePluginClass {
   decorations: DecorationSet;
   private ranges: MathRange[];
-  private editorView: EditorView;
 
-  constructor(view: EditorView) {
-    this.editorView = view;
-    _mathEditorView = view;
+  constructor(private view: EditorView) {
+    mathViews.add(view);
     const state = buildMathInlineState(view);
     this.decorations = state.decorations;
     this.ranges = state.ranges;
   }
 
   update(update: ViewUpdate) {
-    this.editorView = update.view;
-    _mathEditorView = update.view;
     const wasComposing = update.startState.field(imeComposingField, false);
     const isComposing = update.state.field(imeComposingField, false);
 
@@ -356,7 +350,10 @@ class MathInlinePluginClass {
     // that inserts a newline inside a `$...$` replace range, the mapped
     // decoration now crosses a line and CM6 throws RangeError on the next
     // render. Rebuilding produces a fresh set consistent with the new doc.
-    if (update.docChanged || update.viewportChanged || (wasComposing && !isComposing)) {
+    if (
+      update.docChanged || update.viewportChanged || (wasComposing && !isComposing) ||
+      update.transactions.some(isKatexLoaded)
+    ) {
       this.rebuild(update.view);
       return;
     }
@@ -384,7 +381,7 @@ class MathInlinePluginClass {
   }
 
   destroy() {
-    if (_mathEditorView === this.editorView) _mathEditorView = null;
+    mathViews.delete(this.view);
   }
 }
 

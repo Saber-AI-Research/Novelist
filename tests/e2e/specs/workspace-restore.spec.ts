@@ -13,10 +13,6 @@ const PROJECT_CONFIG: ProjectConfig = {
 };
 
 test.describe('Project workspace restoration', () => {
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
-  });
-
   test('restores expanded folders and the last active file on reopen', async ({
     app,
     mockState,

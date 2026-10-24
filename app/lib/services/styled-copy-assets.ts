@@ -24,7 +24,6 @@ import type {
 export interface StyledCopyAssetSessionInput {
   readonly assets: readonly LogicalAsset[];
   readonly documentDir: string;
-  readonly projectDir: string | null;
   readonly target: StyledCopyTarget;
   readonly wechatTheme: WechatTheme;
   readonly mermaidScale?: number;
@@ -79,10 +78,6 @@ export function createStyledCopyAssetSession(
   dependencies: StyledCopyAssetSessionDependencies = {},
 ): StyledCopyAssetSession {
   const assets = input.assets.map(copyLogicalAsset);
-  const allowedRoots = Object.freeze([
-    input.documentDir,
-    ...(input.projectDir && input.projectDir !== input.documentDir ? [input.projectDir] : []),
-  ]);
   const rasterizeMermaid = dependencies.rasterizeMermaid ?? defaultRasterizeMermaid;
   const mermaidBackground = publicationBackground(input.target, input.wechatTheme);
   const successfulUploads = new Map<string, string>();
@@ -93,7 +88,6 @@ export function createStyledCopyAssetSession(
     preparation ??= prepareAssets(
       assets,
       input.documentDir,
-      allowedRoots,
       rasterizeMermaid,
       mermaidBackground,
       input.mermaidScale,
@@ -172,14 +166,13 @@ function copyLogicalAsset(asset: LogicalAsset): LogicalAsset {
 async function prepareAssets(
   assets: readonly LogicalAsset[],
   documentDir: string,
-  allowedRoots: readonly string[],
   rasterizeMermaid: MermaidRasterizer,
   mermaidBackground: string,
   mermaidScale: number | undefined,
 ): Promise<StyledCopyResult<PreparedAsset[]>> {
   const results = await Promise.all(assets.map((asset) => (
     asset.kind === 'image'
-      ? prepareImage(asset, documentDir, allowedRoots)
+      ? prepareImage(asset, documentDir)
       : prepareMermaid(asset, rasterizeMermaid, mermaidBackground, mermaidScale)
   )));
   const failures: StyledCopyAssetFailure[] = [];
@@ -224,7 +217,6 @@ async function prepareMermaid(
 async function prepareImage(
   asset: LogicalImageAsset,
   documentDir: string,
-  allowedRoots: readonly string[],
 ): Promise<PreparedAsset | StyledCopyAssetFailure> {
   const classified = classifyImageSource(asset);
   if ('reason' in classified) return classified;
@@ -237,9 +229,11 @@ async function prepareImage(
     };
   }
 
+  // The backend authorizes the read against this window's registered project
+  // and open-document folders; no roots are sent from here.
   const path = absoluteLocalPath(documentDir, classified.path);
   try {
-    const result = await commands.readStyledCopyImage(path, [...allowedRoots]);
+    const result = await commands.readStyledCopyImage(path);
     if (result.status !== 'ok') return assetFailure(asset, 'unresolved_source');
     if (!PREVIEW_IMAGE_MIMES.has(result.data.mime)) {
       return assetFailure(asset, 'unsupported_image_type');

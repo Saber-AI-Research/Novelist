@@ -85,6 +85,20 @@ Second paragraph here.`;
     expect(countWords(text)).toBe(16);
   });
 
+  it("treats the ideographic space U+3000 paragraph indent as whitespace", () => {
+    // 7 ideographs + 。 = 8; the two indent spaces add nothing.
+    expect(countWords("\u3000\u3000落霞与孤鹜齐飞。")).toBe(8);
+    expect(countWords("\u3000\u3000")).toBe(0);
+    expect(countWords("hello\u3000world")).toBe(2);
+  });
+
+  it("counts each kana like an ideograph instead of merging a run into one word", () => {
+    expect(countWords("ひらがな")).toBe(4);
+    expect(countWords("カタカナ")).toBe(4);
+    expect(countWords("日本語のテキスト")).toBe(8);
+    expect(countWords("ㇰㇱ")).toBe(2);
+  });
+
   // Edge cases
   it("handles single character", () => {
     expect(countWords("a")).toBe(1);

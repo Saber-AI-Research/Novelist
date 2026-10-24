@@ -18,23 +18,39 @@ use tauri::{Emitter, Manager};
 // initiated ourselves (which would otherwise cause the open editor to reload
 // and lose its state).
 
-static RENAME_IGNORED: once_cell::sync::Lazy<
-    tokio::sync::Mutex<std::collections::HashSet<String>>,
-> = once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+/// A rename's own events arrive within the 200 ms debounce window. Entries for
+/// a rename that failed, or whose events never arrive (destination outside the
+/// watched folder), expire instead of swallowing a later real event.
+const RENAME_IGNORE_TTL: Duration = Duration::from_secs(5);
+
+static RENAME_IGNORED: std::sync::LazyLock<tokio::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 /// Register both old and new paths as expected rename targets. The next FS
-/// event for either path is consumed without forwarding to listeners.
+/// event for either path within the TTL is consumed without forwarding.
 pub async fn register_rename_ignore(old_path: String, new_path: String) {
+    let now = Instant::now();
     let mut set = RENAME_IGNORED.lock().await;
-    set.insert(old_path);
-    set.insert(new_path);
+    set.retain(|_, registered| registered.elapsed() < RENAME_IGNORE_TTL);
+    set.insert(old_path, now);
+    set.insert(new_path, now);
+}
+
+/// Withdraw a registration whose rename failed, so no real event is hidden.
+pub async fn clear_rename_ignore(old_path: &str, new_path: &str) {
+    let mut set = RENAME_IGNORED.lock().await;
+    set.remove(old_path);
+    set.remove(new_path);
 }
 
 /// Returns true and removes the entry if `path` was registered as a
-/// self-initiated rename target; otherwise returns false.
-pub async fn take_rename_ignored(path: &str) -> bool {
-    let mut set = RENAME_IGNORED.lock().await;
-    set.remove(path)
+/// self-initiated rename target within the TTL; otherwise returns false.
+async fn take_rename_ignored(path: &str) -> bool {
+    RENAME_IGNORED
+        .lock()
+        .await
+        .remove(path)
+        .is_some_and(|registered| registered.elapsed() < RENAME_IGNORE_TTL)
 }
 
 // ── Tracked file ────────────────────────────────────────────────────
@@ -56,8 +72,14 @@ struct TrackedFile {
 
 // ── Ignore set (self-trigger suppression) ───────────────────────────
 
+struct ExpectedWrite {
+    hash: blake3::Hash,
+    registered_at: Instant,
+    owner: Option<String>,
+}
+
 struct IgnoreSet {
-    entries: HashMap<PathBuf, (blake3::Hash, Instant)>,
+    entries: HashMap<PathBuf, ExpectedWrite>,
 }
 
 impl IgnoreSet {
@@ -67,16 +89,26 @@ impl IgnoreSet {
         }
     }
 
-    fn register(&mut self, path: &Path, expected_hash: blake3::Hash) {
-        self.entries
-            .insert(path.to_path_buf(), (expected_hash, Instant::now()));
+    fn register(&mut self, path: &Path, expected_hash: blake3::Hash, owner: Option<&str>) {
+        self.entries.insert(
+            path.to_path_buf(),
+            ExpectedWrite {
+                hash: expected_hash,
+                registered_at: Instant::now(),
+                owner: owner.map(str::to_string),
+            },
+        );
     }
 
-    fn should_ignore(&mut self, path: &Path, observed_hash: blake3::Hash) -> bool {
-        let Some((expected_hash, registered_at)) = self.entries.remove(path) else {
-            return false;
-        };
-        registered_at.elapsed() < Duration::from_secs(2) && expected_hash == observed_hash
+    fn take_owner(&mut self, path: &Path, observed_hash: blake3::Hash) -> Option<String> {
+        let expected = self.entries.remove(path)?;
+        if expected.registered_at.elapsed() < Duration::from_secs(2)
+            && expected.hash == observed_hash
+        {
+            expected.owner
+        } else {
+            None
+        }
     }
 }
 
@@ -224,23 +256,24 @@ fn commit_notify_change(
     key: &Path,
     old_hash: blake3::Hash,
     new_hash: blake3::Hash,
+    new_mtime: SystemTime,
 ) -> Vec<(String, ExternalFileChangePayload)> {
     if inner.tracked_files.get(key).map(|entry| entry.hash) != Some(old_hash) {
         return Vec::new();
     }
-    let suppress = inner.ignore_set.should_ignore(key, new_hash);
+    let saving_owner = inner.ignore_set.take_owner(key, new_hash);
     let Some(entry) = inner.tracked_files.get_mut(key) else {
         return Vec::new();
     };
     revalidate_aliases(key, entry);
     entry.hash = new_hash;
-    entry.mtime = SystemTime::now();
+    // The on-disk mtime of the hashed bytes, so the poll's stat gate matches.
+    entry.mtime = new_mtime;
     entry.deleted = false;
-    if suppress {
-        entry.pending_poll_owners.clear();
-        return Vec::new();
-    }
     entry.pending_poll_owners = tracked_owners(entry);
+    if let Some(owner) = saving_owner {
+        entry.pending_poll_owners.remove(&owner);
+    }
     let mut owners = entry
         .pending_poll_owners
         .iter()
@@ -255,32 +288,32 @@ fn commit_notify_change(
         .collect()
 }
 
-// ── Tauri commands ──────────────────────────────────────────────────
+/// Delivery seam for watcher batches; production emits Tauri events.
+trait WatchEmitter {
+    fn directory_changed(&self, owner: &str, payload: &FileChangedPayload);
+    /// Returns whether the payload reached the window.
+    fn file_changed(&self, owner: &str, payload: &ExternalFileChangePayload) -> bool;
+}
 
-#[tauri::command]
-#[specta::specta]
-pub async fn start_file_watcher(
-    dir_path: String,
-    window: tauri::WebviewWindow,
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, FileWatcherState>,
-    image_capabilities: tauri::State<'_, WindowImageCapabilities>,
-) -> Result<(), AppError> {
-    let dir = PathBuf::from(&dir_path);
-    if !dir.is_dir() {
-        return Err(AppError::NotADirectory(dir_path));
+impl<R: tauri::Runtime> WatchEmitter for tauri::AppHandle<R> {
+    fn directory_changed(&self, owner: &str, payload: &FileChangedPayload) {
+        let _ = self.emit_to(owner, "directory-changed", payload);
     }
 
-    // Channel for raw notify events -> debounce processor
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PendingFsEvent>();
+    fn file_changed(&self, owner: &str, payload: &ExternalFileChangePayload) -> bool {
+        self.emit_to(owner, "file-changed", payload).is_ok()
+    }
+}
 
-    // FSEvents resolves symlinks and reports canonical paths; remember both so
-    // we can rewrite event paths back onto the prefix the frontend uses.
-    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-
-    // Create the notify watcher that sends paths into the channel
-    let dir_for_events = dir.clone();
-    let canonical_for_events = canonical_dir.clone();
+/// The notify watcher for one window: watches the canonical root and rewrites
+/// event paths back onto the prefix the frontend uses.
+fn create_watcher(
+    dir: &Path,
+    canonical_dir: &Path,
+    tx: tokio::sync::mpsc::UnboundedSender<PendingFsEvent>,
+) -> Result<RecommendedWatcher, AppError> {
+    let dir_for_events = dir.to_path_buf();
+    let canonical_for_events = canonical_dir.to_path_buf();
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -319,8 +352,169 @@ pub async fn start_file_watcher(
     // original prefix the frontend knows. (When the two are equal this is a
     // no-op, so non-symlinked /Users projects are unaffected.)
     watcher
-        .watch(&canonical_dir, RecursiveMode::Recursive)
+        .watch(canonical_dir, RecursiveMode::Recursive)
         .map_err(|e| AppError::Custom(format!("Failed to watch directory: {e}")))?;
+    Ok(watcher)
+}
+
+/// Wait for the first event, then collect the rest of its 200 ms burst.
+/// `None` once the window's watcher is cancelled or dropped.
+async fn next_watch_batch(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PendingFsEvent>,
+    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Option<Vec<PendingFsEvent>> {
+    let first = tokio::select! {
+        event = rx.recv() => event?,
+        _ = &mut *cancel_rx => return None,
+    };
+    let mut events = vec![first];
+    let debounce = tokio::time::sleep(Duration::from_millis(200));
+    tokio::pin!(debounce);
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => events.push(event),
+                None => break,
+            },
+            _ = &mut debounce => break,
+        }
+    }
+    Some(events)
+}
+
+/// Handle one debounced batch from `owner`'s watcher: drop self-initiated
+/// renames, refresh the owner's sidebar folders, then hash tracked files off
+/// the lock and the async workers and dispatch real content changes to every
+/// window tracking them, except the window whose own save produced them.
+async fn process_watch_batch(
+    events: Vec<PendingFsEvent>,
+    owner: &str,
+    state: &FileWatcherState,
+    emitter: &impl WatchEmitter,
+) {
+    // Notify may emit a rename as Modify/Create events on either old or new
+    // path depending on the platform (FSEvents vs inotify vs
+    // ReadDirectoryChangesW), so filter every path conservatively.
+    let mut filtered_paths: HashSet<PathBuf> = HashSet::new();
+    let mut refresh_dirs: HashSet<PathBuf> = HashSet::new();
+    for event in events {
+        if take_rename_ignored(&event.path.to_string_lossy()).await {
+            continue;
+        }
+        if let Some(dir) = event.refresh_dir {
+            refresh_dirs.insert(dir);
+        }
+        filtered_paths.insert(event.path);
+    }
+    for dir in refresh_dirs {
+        let payload = FileChangedPayload {
+            path: dir.to_string_lossy().to_string(),
+        };
+        emitter.directory_changed(owner, &payload);
+    }
+
+    // Canonicalizing and stat-ing are blocking filesystem calls.
+    let keys: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        filtered_paths
+            .iter()
+            .map(|path| tracking_key(path))
+            .filter(|key| key.is_file())
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    // Phase 1: under the lock, pick out tracked files and snapshot their hash.
+    let candidates: Vec<(PathBuf, blake3::Hash)> = {
+        let Ok(guard) = state.inner.lock() else {
+            return;
+        };
+        keys.into_iter()
+            .filter_map(|key| {
+                guard
+                    .tracked_files
+                    .get(&key)
+                    .map(|t| t.hash)
+                    .map(|hash| (key, hash))
+            })
+            .collect()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    // Phase 2: read mtime, then hash, off-lock. Reading the mtime first means a
+    // write racing the hash leaves a newer mtime for the poll to notice.
+    let observed: Vec<(PathBuf, blake3::Hash, blake3::Hash, SystemTime)> =
+        tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter_map(|(key, old_hash)| {
+                    let mtime = std::fs::metadata(&key)
+                        .and_then(|meta| meta.modified())
+                        .ok()?;
+                    let new_hash = hash_file(&key).ok()?;
+                    Some((key, old_hash, new_hash, mtime))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+
+    // Phase 3: re-lock briefly to commit and emit. Files unregistered or
+    // changed in the meantime are skipped by the hash comparison.
+    let Ok(mut guard) = state.inner.lock() else {
+        return;
+    };
+    for (key, old_hash, new_hash, mtime) in observed {
+        if new_hash == old_hash {
+            // Same bytes (touch, identical save): adopt the mtime so the poll
+            // does not re-read and re-hash this file every second.
+            if let Some(entry) = guard
+                .tracked_files
+                .get_mut(&key)
+                .filter(|entry| entry.hash == old_hash && !entry.deleted)
+            {
+                entry.mtime = mtime;
+            }
+            continue;
+        }
+        let dispatches = commit_notify_change(&mut guard, &key, old_hash, new_hash, mtime);
+        for (dispatch_owner, payload) in dispatches {
+            if emitter.file_changed(&dispatch_owner, &payload)
+                && guard
+                    .tracked_files
+                    .get(&key)
+                    .is_some_and(|entry| entry.hash == new_hash)
+            {
+                if let Some(entry) = guard.tracked_files.get_mut(&key) {
+                    entry.pending_poll_owners.remove(&dispatch_owner);
+                }
+            }
+        }
+    }
+}
+
+// ── Tauri commands ──────────────────────────────────────────────────
+
+#[tauri::command]
+#[specta::specta]
+pub async fn start_file_watcher(
+    dir_path: String,
+    window: tauri::WebviewWindow,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, FileWatcherState>,
+    image_capabilities: tauri::State<'_, WindowImageCapabilities>,
+) -> Result<(), AppError> {
+    let dir = PathBuf::from(&dir_path);
+    if !dir.is_dir() {
+        return Err(AppError::NotADirectory(dir_path));
+    }
+
+    // Channel for raw notify events -> debounce processor
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PendingFsEvent>();
+    // FSEvents resolves symlinks and reports canonical paths; remember both so
+    // we can rewrite event paths back onto the prefix the frontend uses.
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    let watcher = create_watcher(&dir, &canonical_dir, tx)?;
     let owner = window.label().to_string();
     image_capabilities.replace_project(&owner, &canonical_dir)?;
 
@@ -339,114 +533,12 @@ pub async fn start_file_watcher(
         }
     }
 
-    // Spawn debounce processor: collects events for 200ms then processes unique paths
+    // Ends when `stop_file_watcher_inner` cancels it or drops the watcher
+    // (explicit stop, project switch, or window destruction).
     let app = app_handle.clone();
     tokio::spawn(async move {
-        loop {
-            // Wait for the first event or cancellation
-            let first = tokio::select! {
-                path = rx.recv() => match path {
-                    Some(p) => p,
-                    None => break, // channel closed
-                },
-                _ = &mut cancel_rx => break,
-            };
-
-            // Collect more events during the debounce window
-            let mut events = Vec::new();
-            events.push(first);
-
-            let debounce = tokio::time::sleep(Duration::from_millis(200));
-            tokio::pin!(debounce);
-
-            loop {
-                tokio::select! {
-                    path = rx.recv() => match path {
-                        Some(p) => { events.push(p); },
-                        None => break,
-                    },
-                    _ = &mut debounce => break,
-                }
-            }
-
-            // Suppress paths that were registered as self-initiated rename
-            // targets. We do this BEFORE acquiring the sync mutex because
-            // `take_rename_ignored` is async. Notify may emit a rename as
-            // Modify/Create events on either old or new path depending on the
-            // platform (FSEvents vs inotify vs ReadDirectoryChangesW), so we
-            // filter every path conservatively.
-            let mut filtered_paths: HashSet<PathBuf> = HashSet::new();
-            let mut refresh_dirs: HashSet<PathBuf> = HashSet::new();
-            for event in events {
-                let key = event.path.to_string_lossy().to_string();
-                if take_rename_ignored(&key).await {
-                    continue;
-                }
-                if let Some(dir) = event.refresh_dir {
-                    refresh_dirs.insert(dir);
-                }
-                filtered_paths.insert(event.path);
-            }
-
-            for dir in refresh_dirs {
-                let payload = FileChangedPayload {
-                    path: dir.to_string_lossy().to_string(),
-                };
-                let _ = app.emit("directory-changed", &payload);
-            }
-
-            // Phase 1: under the lock, pick out tracked files and
-            // snapshot their known hash. We do NOT hash on disk here — that's a
-            // blocking read that would stall this Tokio worker and serialize
-            // against register/unregister/stop while the lock is held.
-            let watcher_state = app.state::<FileWatcherState>();
-            let candidates: Vec<(PathBuf, blake3::Hash)> = {
-                let guard = match watcher_state.inner.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                filtered_paths
-                    .into_iter()
-                    .filter_map(|p| {
-                        let key = tracking_key(&p);
-                        if !key.is_file() {
-                            return None;
-                        }
-                        guard.tracked_files.get(&key).map(|t| (key, t.hash))
-                    })
-                    .collect()
-            };
-
-            // Phase 2: hash each candidate off-lock; keep the ones that changed.
-            let changed: Vec<(PathBuf, blake3::Hash, blake3::Hash)> = candidates
-                .into_iter()
-                .filter_map(|(path, old_hash)| match hash_file(&path) {
-                    Ok(new_hash) if new_hash != old_hash => Some((path, old_hash, new_hash)),
-                    _ => None,
-                })
-                .collect();
-
-            // Phase 3: re-lock briefly to commit new hashes and emit events. Skip
-            // any file unregistered in the meantime.
-            if !changed.is_empty() {
-                if let Ok(mut guard) = watcher_state.inner.lock() {
-                    for (key, old_hash, new_hash) in changed {
-                        let dispatches = commit_notify_change(&mut guard, &key, old_hash, new_hash);
-                        for (owner, payload) in dispatches {
-                            if app.emit_to(&owner, "file-changed", &payload).is_ok()
-                                && guard
-                                    .tracked_files
-                                    .get(&key)
-                                    .is_some_and(|entry| entry.hash == new_hash)
-                            {
-                                if let Some(entry) = guard.tracked_files.get_mut(&key) {
-                                    entry.pending_poll_owners.remove(&owner);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        while let Some(events) = next_watch_batch(&mut rx, &mut cancel_rx).await {
+            process_watch_batch(events, &owner, &app.state::<FileWatcherState>(), &app).await;
         }
     });
 
@@ -464,7 +556,12 @@ pub async fn stop_file_watcher(
     stop_file_watcher_inner(window.label(), &state)
 }
 
-fn stop_file_watcher_inner(owner: &str, state: &FileWatcherState) -> Result<(), AppError> {
+/// Release everything a window owns: its notify watcher, debounce task, poll
+/// cursors and tracked aliases. Also runs when the window is destroyed.
+pub(crate) fn stop_file_watcher_inner(
+    owner: &str,
+    state: &FileWatcherState,
+) -> Result<(), AppError> {
     let mut guard = state
         .inner
         .lock()
@@ -613,29 +710,34 @@ pub async fn register_write_ignore(_path: String) -> Result<(), AppError> {
     Ok(())
 }
 
+/// The tracked identity an expected write for `path` is recorded under.
+/// `key` is `tracking_key(path)`, computed before taking the lock.
+fn expected_write_key(inner: &FileWatcherInner, path: &Path, key: PathBuf) -> PathBuf {
+    if inner.tracked_files.contains_key(&key) {
+        return key;
+    }
+    inner
+        .tracked_files
+        .iter()
+        .find_map(|(entry_key, entry)| {
+            (entry.path == path || entry.aliases.contains_key(path)).then(|| entry_key.clone())
+        })
+        .unwrap_or(key)
+}
+
 pub(crate) fn register_expected_write_inner(
     path: &str,
     expected_hash: blake3::Hash,
     state: &FileWatcherState,
+    owner: Option<&str>,
 ) -> Result<(), AppError> {
-    let p = PathBuf::from(&path);
-    let key = tracking_key(&p);
+    let key = tracking_key(Path::new(path));
     let mut guard = state
         .inner
         .lock()
         .map_err(|e| AppError::Custom(e.to_string()))?;
-    let ignore_key = if guard.tracked_files.contains_key(&key) {
-        key
-    } else {
-        guard
-            .tracked_files
-            .iter()
-            .find_map(|(entry_key, entry)| {
-                (entry.path == p || entry.aliases.contains_key(&p)).then(|| entry_key.clone())
-            })
-            .unwrap_or(key)
-    };
-    guard.ignore_set.register(&ignore_key, expected_hash);
+    let ignore_key = expected_write_key(&guard, Path::new(path), key);
+    guard.ignore_set.register(&ignore_key, expected_hash, owner);
     Ok(())
 }
 
@@ -643,25 +745,72 @@ pub(crate) fn clear_expected_write_inner(
     path: &str,
     state: &FileWatcherState,
 ) -> Result<(), AppError> {
-    let p = PathBuf::from(path);
-    let key = tracking_key(&p);
+    let key = tracking_key(Path::new(path));
     let mut guard = state
         .inner
         .lock()
         .map_err(|e| AppError::Custom(e.to_string()))?;
-    let ignore_key = if guard.tracked_files.contains_key(&key) {
-        key
-    } else {
-        guard
-            .tracked_files
-            .iter()
-            .find_map(|(entry_key, entry)| {
-                (entry.path == p || entry.aliases.contains_key(&p)).then(|| entry_key.clone())
-            })
-            .unwrap_or(key)
-    };
+    let ignore_key = expected_write_key(&guard, Path::new(path), key);
     guard.ignore_set.entries.remove(&ignore_key);
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn expected_write_registered(path: &str, state: &FileWatcherState) -> bool {
+    let key = tracking_key(Path::new(path));
+    let guard = state.inner.lock().unwrap();
+    let ignore_key = expected_write_key(&guard, Path::new(path), key);
+    guard.ignore_set.entries.contains_key(&ignore_key)
+}
+
+/// Poison the state lock so every later watcher call fails.
+#[cfg(test)]
+pub(crate) fn poison_for_test(state: &FileWatcherState) {
+    std::thread::scope(|scope| {
+        let _ = scope
+            .spawn(|| {
+                let _guard = state.inner.lock().unwrap();
+                panic!("poison watcher state for test");
+            })
+            .join();
+    });
+}
+
+/// Install a real notify watcher, cancel channel and tracked file for `owner`,
+/// as `start_file_watcher` does, without a Tauri window.
+#[cfg(test)]
+pub(crate) fn install_watcher_for_test(
+    state: &FileWatcherState,
+    owner: &str,
+    dir: &Path,
+    file: &Path,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let watcher = create_watcher(dir, &dir.canonicalize().unwrap(), tx).unwrap();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut guard = state.inner.lock().unwrap();
+        guard.watchers.insert(owner.to_string(), watcher);
+        guard
+            .watching_dirs
+            .insert(owner.to_string(), dir.to_path_buf());
+        guard.cancel_txs.insert(owner.to_string(), cancel_tx);
+    }
+    register_open_file_inner(&file.to_string_lossy(), owner, state).unwrap();
+    cancel_rx
+}
+
+/// Whether `owner` still holds a watcher, debounce task or tracked alias.
+#[cfg(test)]
+pub(crate) fn owns_watcher_resources(state: &FileWatcherState, owner: &str) -> bool {
+    let guard = state.inner.lock().unwrap();
+    guard.watchers.contains_key(owner)
+        || guard.watching_dirs.contains_key(owner)
+        || guard.cancel_txs.contains_key(owner)
+        || guard
+            .tracked_files
+            .values()
+            .any(|entry| entry.aliases.values().any(|owners| owners.contains(owner)))
 }
 
 /// Polling fallback for external-edit detection.
@@ -674,23 +823,29 @@ pub(crate) fn clear_expected_write_inner(
 /// interval regardless of watcher coverage.
 ///
 /// Cheap by design: an mtime stat gates the blake3 hash, so unchanged files
-/// cost one `stat` each. Self-writes are suppressed only when the observed hash
-/// equals the exact encoded hash registered by the Rust write path.
+/// cost one `stat` each. Only the saving window's self-write is suppressed, and
+/// only when its exact encoded hash matches; other owners still receive it.
 #[tauri::command]
 #[specta::specta]
 pub async fn poll_external_changes(
     window: tauri::WebviewWindow,
-    state: tauri::State<'_, FileWatcherState>,
 ) -> Result<Vec<ExternalFileChangePayload>, AppError> {
-    poll_external_changes_inner(&state, window.label())
+    // Stat and hash are blocking reads; keep them off the async workers.
+    let app = window.app_handle().clone();
+    let owner = window.label().to_string();
+    tokio::task::spawn_blocking(move || {
+        poll_external_changes_inner(&app.state::<FileWatcherState>(), &owner)
+    })
+    .await
+    .map_err(|error| AppError::Custom(format!("watcher poll worker: {error}")))?
 }
 
 fn poll_external_changes_inner(
     state: &FileWatcherState,
     owner: &str,
 ) -> Result<Vec<ExternalFileChangePayload>, AppError> {
-    // Snapshot tracked (path, hash, mtime) under the lock; release before IO.
-    let snapshot: Vec<(PathBuf, blake3::Hash, SystemTime, bool)> = {
+    // Snapshot tracked (path, mtime, deleted) under the lock; release before IO.
+    let snapshot: Vec<(PathBuf, SystemTime, bool)> = {
         let mut guard = state
             .inner
             .lock()
@@ -702,14 +857,14 @@ fn poll_external_changes_inner(
         guard
             .tracked_files
             .iter()
-            .map(|(p, t)| (p.clone(), t.hash, t.mtime, t.deleted))
+            .map(|(p, t)| (p.clone(), t.mtime, t.deleted))
             .collect()
     };
 
     // Off-lock: stat-gate, then hash only the files whose mtime moved.
-    let mut candidates: Vec<(PathBuf, blake3::Hash, blake3::Hash, SystemTime)> = Vec::new();
+    let mut candidates: Vec<(PathBuf, blake3::Hash, SystemTime)> = Vec::new();
     let mut deleted_candidates: Vec<PathBuf> = Vec::new();
-    for (path, old_hash, old_mtime, was_deleted) in snapshot {
+    for (path, old_mtime, was_deleted) in snapshot {
         let Ok(meta) = std::fs::metadata(&path) else {
             if !was_deleted {
                 deleted_candidates.push(path);
@@ -723,7 +878,7 @@ fn poll_external_changes_inner(
         let Ok(new_hash) = hash_file(&path) else {
             continue;
         };
-        candidates.push((path, old_hash, new_hash, new_mtime));
+        candidates.push((path, new_hash, new_mtime));
     }
 
     // Re-lock briefly: commit new hash/mtime, suppress self-writes, collect the
@@ -746,28 +901,26 @@ fn poll_external_changes_inner(
         entry.deleted = true;
         entry.pending_poll_owners = tracked_owners(entry);
     }
-    for (path, old_hash, new_hash, new_mtime) in candidates {
-        let Some(current) = guard.tracked_files.get(&path) else {
+    for (path, new_hash, new_mtime) in candidates {
+        let Some(current) = guard.tracked_files.get_mut(&path) else {
             continue;
         };
-        if current.hash != old_hash && current.hash == new_hash && !current.deleted {
+        // Bytes already committed (touch, identical save, or notify got there
+        // first): adopt the mtime so the next poll skips the hash again.
+        if current.hash == new_hash && !current.deleted {
+            current.mtime = new_mtime;
             continue;
         }
-        let content_changed = new_hash != current.hash || current.deleted;
-        if !content_changed {
-            continue; // mtime moved but bytes identical (e.g. touch)
-        }
-        let suppress = guard.ignore_set.should_ignore(&path, new_hash);
+        let saving_owner = guard.ignore_set.take_owner(&path, new_hash);
         let Some(entry) = guard.tracked_files.get_mut(&path) else {
             continue;
         };
         entry.hash = new_hash;
         entry.mtime = new_mtime;
         entry.deleted = false;
-        if suppress {
-            entry.pending_poll_owners.clear();
-        } else {
-            entry.pending_poll_owners = tracked_owners(entry);
+        entry.pending_poll_owners = tracked_owners(entry);
+        if let Some(owner) = saving_owner {
+            entry.pending_poll_owners.remove(&owner);
         }
     }
 
@@ -791,17 +944,52 @@ mod tests {
 
     const TEST_OWNER: &str = "test-window";
 
-    /// End-to-end probe of the OS watcher + debounce + hash pipeline (minus the
-    /// Tauri emit). Mirrors `start_file_watcher`: recursive notify watch on the
-    /// CANONICAL dir → 200ms debounce → `normalize_event_path` back to the
-    /// original prefix → blake3 diff.
+    /// Records what the batch processor would emit to each window.
+    #[derive(Default)]
+    struct RecordingEmitter {
+        directories: Mutex<Vec<(String, String)>>,
+        files: Mutex<Vec<(String, ExternalFileChangePayload)>>,
+    }
+
+    impl WatchEmitter for RecordingEmitter {
+        fn directory_changed(&self, owner: &str, payload: &FileChangedPayload) {
+            self.directories
+                .lock()
+                .unwrap()
+                .push((owner.to_string(), payload.path.clone()));
+        }
+
+        fn file_changed(&self, owner: &str, payload: &ExternalFileChangePayload) -> bool {
+            self.files
+                .lock()
+                .unwrap()
+                .push((owner.to_string(), payload.clone()));
+            true
+        }
+    }
+
+    fn fs_event(path: &Path, watching_dir: &Path) -> PendingFsEvent {
+        PendingFsEvent {
+            path: path.to_path_buf(),
+            refresh_dir: refresh_dir_for_path(path, watching_dir),
+        }
+    }
+
+    fn disk_mtime(path: &Path) -> SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// End-to-end probe of the production watcher pipeline: `create_watcher`
+    /// (recursive notify watch on the CANONICAL dir, events normalized back to
+    /// the original prefix) → `next_watch_batch` (200 ms debounce) →
+    /// `process_watch_batch` (hash diff + owner-scoped dispatch).
     ///
-    /// Critically, the watch root (`original_dir`) is a SYMLINK and all writes
-    /// go through the symlinked path — exactly the macOS case (project under
-    /// /tmp, /var, an external mount, or iCloud "Desktop & Documents") that made
-    /// external edits silently require a manual reload. Before the fix (watching
-    /// the symlinked path), FSEvents delivered canonical paths that notify
-    /// dropped, so ZERO edits were detected. Guards that regression.
+    /// Critically, the watch root is a SYMLINK and all writes go through the
+    /// symlinked path — exactly the macOS case (project under /tmp, /var, an
+    /// external mount, or iCloud "Desktop & Documents") that made external
+    /// edits silently require a manual reload. Before the fix (watching the
+    /// symlinked path), FSEvents delivered canonical paths that notify dropped,
+    /// so ZERO edits were detected. Guards that regression.
     ///
     /// Unix-only: it builds a symlink via `std::os::unix::fs::symlink`, and the
     /// canonical-path/FSEvents issue it guards is a Unix concern (Windows uses
@@ -810,117 +998,237 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_watcher_detects_rapid_external_edits() {
         let tmp = TempDir::new().unwrap();
-        let real_dir = tmp.path().canonicalize().unwrap();
-        // A symlink that points at the real project dir, used as the watch root
-        // and for every write — i.e. the path the frontend passed in.
-        let original_dir = tmp.path().parent().unwrap().join("novelist-link");
-        let _ = fs::remove_file(&original_dir);
+        let real_dir = tmp.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        // The symlinked root the frontend passed in, owned by this test's TempDir.
+        let original_dir = tmp.path().join("link");
         std::os::unix::fs::symlink(&real_dir, &original_dir).unwrap();
-
-        // Production: watch the canonical dir, normalize events back to original.
         let canonical_dir = original_dir.canonicalize().unwrap();
         assert_ne!(canonical_dir, original_dir, "test needs a real symlink");
 
-        let dir = canonical_dir.clone();
         // The file path the frontend tracks is the ORIGINAL (symlinked) form.
         let file = original_dir.join("note.md");
         fs::write(&file, "v0").unwrap();
-        let mut tracked = blake3::hash(b"v0");
+        let state = FileWatcherState::new();
+        track(&state, &file);
+        let emitter = RecordingEmitter::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _watcher = create_watcher(&original_dir, &canonical_dir, tx).unwrap();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
-        let canonical_for_events = canonical_dir.clone();
-        let original_for_events = original_dir.clone();
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    if let notify::EventKind::Any
-                    | notify::EventKind::Modify(_)
-                    | notify::EventKind::Create(_)
-                    | notify::EventKind::Remove(_) = event.kind
-                    {
-                        for path in event.paths {
-                            // Same rewrite as production: canonical → original.
-                            let path = normalize_event_path(
-                                path,
-                                &canonical_for_events,
-                                &original_for_events,
-                            );
-                            let _ = tx.send(path);
-                        }
-                    }
+        let writer = {
+            let file = file.clone();
+            tokio::spawn(async move {
+                // Let the FSEvents stream warm up before the first write.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                // 20 rapid in-place edits, faster than the debounce window, so
+                // many coalesce; only the LAST state must be detected.
+                for i in 1..=20u32 {
+                    fs::write(&file, format!("v{i}")).unwrap();
+                    tokio::time::sleep(Duration::from_millis(30)).await;
                 }
-            },
-            notify::Config::default(),
-        )
-        .unwrap();
-        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-
-        // Collected detections (path, new content).
-        let detections = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let det = detections.clone();
-        let file_for_task = file.clone();
-        let processor = tokio::spawn(async move {
-            // Under heavy parallel test load FSEvents can take well over the
-            // idle window to deliver the *first* event; only start idling out
-            // once the burst has begun, or the processor quits before any
-            // event arrives and the test reports zero detections.
-            let mut seen_any = false;
-            loop {
-                let wait = if seen_any { 1500 } else { 10_000 };
-                let first = match tokio::time::timeout(Duration::from_millis(wait), rx.recv()).await
-                {
-                    Ok(Some(p)) => p,
-                    _ => break, // idle past timeout → burst done
-                };
-                seen_any = true;
-                let mut paths: HashSet<PathBuf> = HashSet::new();
-                paths.insert(first);
-                let debounce = tokio::time::sleep(Duration::from_millis(200));
-                tokio::pin!(debounce);
-                loop {
-                    tokio::select! {
-                        p = rx.recv() => match p { Some(p) => { paths.insert(p); }, None => break },
-                        _ = &mut debounce => break,
-                    }
-                }
-                for p in paths {
-                    if p != file_for_task || !p.is_file() {
-                        continue;
-                    }
-                    if let Ok(new_hash) = hash_file(&p) {
-                        if new_hash != tracked {
-                            tracked = new_hash;
-                            let content = fs::read_to_string(&p).unwrap_or_default();
-                            det.lock().unwrap().push(content);
-                        }
-                    }
-                }
-            }
-        });
-
-        // Let the FSEvents stream warm up before the first write.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // 20 rapid in-place edits, ~30ms apart (faster than the debounce window
-        // so many coalesce — we only require the LAST state to be detected).
-        for i in 1..=20u32 {
-            fs::write(&file, format!("v{i}")).unwrap();
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            })
+        };
+        let key = tracking_key(&file);
+        let final_hash = blake3::hash(b"v20");
+        // Under heavy parallel test load FSEvents can be slow to deliver.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while state.inner.lock().unwrap().tracked_files[&key].hash != final_hash {
+            let batch =
+                tokio::time::timeout_at(deadline, next_watch_batch(&mut rx, &mut cancel_rx))
+                    .await
+                    .expect("final external content not detected — auto-reload would never fire")
+                    .expect("watcher channel closed");
+            process_watch_batch(batch, TEST_OWNER, &state, &emitter).await;
         }
+        writer.await.unwrap();
 
-        // Wait for the processor to drain and idle out.
-        let _ = tokio::time::timeout(Duration::from_secs(15), processor).await;
+        let files = emitter.files.lock().unwrap();
+        assert!(!files.is_empty());
+        let expected = expected_external_change(&key, &[&file]);
+        for (owner, payload) in files.iter() {
+            assert_eq!(owner, TEST_OWNER);
+            assert_eq!(serde_json::to_value(payload).unwrap(), expected);
+        }
+        // Sidebar refreshes use the frontend's (symlinked) prefix.
+        assert!(emitter
+            .directories
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(owner, dir)| owner == TEST_OWNER && Path::new(dir) == original_dir));
+    }
 
-        let seen = detections.lock().unwrap().clone();
-        assert!(
-            !seen.is_empty(),
-            "watcher detected ZERO external edits — auto-reload would never fire"
-        );
+    #[tokio::test]
+    async fn test_watch_batch_dispatches_external_edit_and_stores_disk_mtime() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track_for_owner(&state, &file, "window-a");
+        track_for_owner(&state, &file, "window-b");
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&file, "external").unwrap();
+        let emitter = RecordingEmitter::default();
+
+        process_watch_batch(
+            vec![fs_event(&file, dir.path())],
+            "window-a",
+            &state,
+            &emitter,
+        )
+        .await;
+
+        let owners: Vec<String> = emitter
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        assert_eq!(owners, ["window-a", "window-b"]);
+        // Only the watching window refreshes its sidebar.
         assert_eq!(
-            seen.last().map(String::as_str),
-            Some("v20"),
-            "final external content not detected; saw sequence: {seen:?}"
+            *emitter.directories.lock().unwrap(),
+            [(
+                "window-a".to_string(),
+                dir.path().to_string_lossy().to_string()
+            )]
         );
+        // The baseline keeps the file's real mtime, so the one-second poll's
+        // stat gate skips the file instead of re-reading and re-hashing it.
+        let key = tracking_key(&file);
+        assert_eq!(
+            state.inner.lock().unwrap().tracked_files[&key].mtime,
+            disk_mtime(&file)
+        );
+        for owner in ["window-a", "window-b"] {
+            assert!(poll_external_changes_inner(&state, owner)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_watch_batch_adopts_mtime_when_bytes_are_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("touched.md");
+        fs::write(&file, "same").unwrap();
+        let state = FileWatcherState::new();
+        track(&state, &file);
+        let key = tracking_key(&file);
+        state
+            .inner
+            .lock()
+            .unwrap()
+            .tracked_files
+            .get_mut(&key)
+            .unwrap()
+            .mtime = SystemTime::UNIX_EPOCH;
+        let emitter = RecordingEmitter::default();
+
+        process_watch_batch(
+            vec![fs_event(&file, dir.path())],
+            TEST_OWNER,
+            &state,
+            &emitter,
+        )
+        .await;
+
+        assert!(emitter.files.lock().unwrap().is_empty());
+        assert_eq!(
+            state.inner.lock().unwrap().tracked_files[&key].mtime,
+            disk_mtime(&file)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_batch_suppresses_only_the_saving_window() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("shared.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track_for_owner(&state, &file, "window-a");
+        track_for_owner(&state, &file, "window-b");
+        save_test_file(dir.path(), &file, &state, Some("window-a"), false).await;
+        let emitter = RecordingEmitter::default();
+
+        process_watch_batch(
+            vec![fs_event(&file, dir.path())],
+            "window-a",
+            &state,
+            &emitter,
+        )
+        .await;
+
+        let owners: Vec<String> = emitter
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        assert_eq!(owners, ["window-b"]);
+    }
+
+    #[tokio::test]
+    async fn test_watch_batch_consumes_registered_rename_events_once() {
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("old.md");
+        let new = dir.path().join("new.md");
+        fs::write(&new, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track(&state, &new);
+        register_rename_ignore(
+            old.to_string_lossy().to_string(),
+            new.to_string_lossy().to_string(),
+        )
+        .await;
+        fs::write(&new, "v1").unwrap();
+        let emitter = RecordingEmitter::default();
+
+        let rename_events = vec![fs_event(&old, dir.path()), fs_event(&new, dir.path())];
+        process_watch_batch(rename_events, TEST_OWNER, &state, &emitter).await;
+        assert!(emitter.directories.lock().unwrap().is_empty());
+        assert!(emitter.files.lock().unwrap().is_empty());
+
+        // The registration is consumed: a later real edit is delivered.
+        process_watch_batch(
+            vec![fs_event(&new, dir.path())],
+            TEST_OWNER,
+            &state,
+            &emitter,
+        )
+        .await;
+        assert_eq!(emitter.files.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_stopping_a_window_ends_its_watch_loop() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("open.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = create_watcher(dir.path(), &dir.path().canonicalize().unwrap(), tx).unwrap();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut guard = state.inner.lock().unwrap();
+            guard.watchers.insert("closed".into(), watcher);
+            guard.cancel_txs.insert("closed".into(), cancel_tx);
+        }
+        track_for_owner(&state, &file, "closed");
+
+        stop_file_watcher_inner("closed", &state).unwrap();
+
+        let batch = tokio::time::timeout(
+            Duration::from_secs(5),
+            next_watch_batch(&mut rx, &mut cancel_rx),
+        )
+        .await
+        .expect("stopped watch loop must end");
+        assert!(batch.is_none());
+        assert!(!owns_watcher_resources(&state, "closed"));
     }
 
     fn track(state: &FileWatcherState, path: &Path) {
@@ -941,6 +1249,52 @@ mod tests {
             "identity": identity.to_string_lossy().to_string(),
             "paths": paths,
         })
+    }
+
+    async fn save_test_file(
+        project: &Path,
+        file: &Path,
+        state: &FileWatcherState,
+        owner: Option<&str>,
+        conditional: bool,
+    ) {
+        let enc = crate::commands::file::EncodingState::new();
+        if conditional {
+            let result = crate::commands::file::write_file_if_unchanged_inner(
+                &project.to_string_lossy(),
+                &file.to_string_lossy(),
+                Some("v0"),
+                "saved by app",
+                &enc,
+                state,
+                owner,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                crate::commands::file::WriteFileIfUnchangedResult::Written
+            );
+        } else {
+            crate::commands::file::write_file_with_watcher_inner(
+                &file.to_string_lossy(),
+                "saved by app",
+                &enc,
+                state,
+                owner,
+            )
+            .await
+            .unwrap();
+        }
+        // Make poll coverage independent of the filesystem's timestamp resolution.
+        state
+            .inner
+            .lock()
+            .unwrap()
+            .tracked_files
+            .get_mut(&tracking_key(file))
+            .unwrap()
+            .mtime = SystemTime::UNIX_EPOCH;
     }
 
     /// The polling fallback reports an open file edited on disk — the mechanism
@@ -990,20 +1344,32 @@ mod tests {
         track(&state, &file);
 
         // Simulate the app's own save: register the ignore, then change bytes.
+        state.inner.lock().unwrap().ignore_set.register(
+            &tracking_key(&file),
+            blake3::hash(b"saved by app"),
+            Some(TEST_OWNER),
+        );
+        fs::write(&file, "saved by app").unwrap();
+        // Force the hash path regardless of filesystem timestamp resolution.
         state
             .inner
             .lock()
             .unwrap()
-            .ignore_set
-            .register(&tracking_key(&file), blake3::hash(b"saved by app"));
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&file, "saved by app").unwrap();
+            .tracked_files
+            .get_mut(&tracking_key(&file))
+            .unwrap()
+            .mtime = SystemTime::UNIX_EPOCH;
 
         // Suppressed (within the 2s ignore window) — and the new hash is
         // committed, so the next poll stays quiet too.
         assert!(poll_external_changes_inner(&state, TEST_OWNER)
             .unwrap()
             .is_empty());
+        assert_eq!(
+            state.inner.lock().unwrap().tracked_files[&tracking_key(&file)].hash,
+            blake3::hash(b"saved by app"),
+            "the poll must have re-hashed the self-write"
+        );
         assert!(poll_external_changes_inner(&state, TEST_OWNER)
             .unwrap()
             .is_empty());
@@ -1121,6 +1487,7 @@ mod tests {
             "saved by app",
             &crate::commands::file::EncodingState::new(),
             &state,
+            Some(TEST_OWNER),
         )
         .await
         .unwrap();
@@ -1136,6 +1503,173 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_poll_app_save_suppresses_only_saving_owner() {
+        for conditional in [false, true] {
+            for owners in [["window-a", "window-b"], ["window-b", "window-a"]] {
+                let dir = TempDir::new().unwrap();
+                let file = dir.path().join("shared.md");
+                fs::write(&file, "v0").unwrap();
+                let state = FileWatcherState::new();
+                track_for_owner(&state, &file, "window-a");
+                track_for_owner(&state, &file, "window-b");
+                save_test_file(dir.path(), &file, &state, Some("window-a"), conditional).await;
+
+                for owner in owners {
+                    let changed = poll_external_changes_inner(&state, owner).unwrap();
+                    if owner == "window-a" {
+                        assert!(changed.is_empty());
+                    } else {
+                        assert_eq!(
+                            changed,
+                            vec![ExternalFileChangePayload {
+                                identity: tracking_key(&file).to_string_lossy().to_string(),
+                                paths: vec![file.to_string_lossy().to_string()],
+                            }]
+                        );
+                    }
+                    assert!(poll_external_changes_inner(&state, owner)
+                        .unwrap()
+                        .is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_app_save_suppresses_only_saving_owner() {
+        for conditional in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join("shared.md");
+            fs::write(&file, "v0").unwrap();
+            let state = FileWatcherState::new();
+            track_for_owner(&state, &file, "window-a");
+            track_for_owner(&state, &file, "window-b");
+            save_test_file(dir.path(), &file, &state, Some("window-a"), conditional).await;
+            let key = tracking_key(&file);
+
+            let dispatches = commit_notify_change(
+                &mut state.inner.lock().unwrap(),
+                &key,
+                blake3::hash(b"v0"),
+                blake3::hash(b"saved by app"),
+                SystemTime::now(),
+            );
+            assert_eq!(
+                dispatches,
+                vec![(
+                    "window-b".to_string(),
+                    ExternalFileChangePayload {
+                        identity: key.to_string_lossy().to_string(),
+                        paths: vec![file.to_string_lossy().to_string()],
+                    },
+                )]
+            );
+            // Failed notify delivery keeps only the other window's poll cursor.
+            assert!(poll_external_changes_inner(&state, "window-a")
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                poll_external_changes_inner(&state, "window-b")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(poll_external_changes_inner(&state, "window-b")
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_background_app_save_never_suppresses_any_owner() {
+        for conditional in [false, true] {
+            for notify in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let file = dir.path().join("shared.md");
+                fs::write(&file, "v0").unwrap();
+                let state = FileWatcherState::new();
+                track_for_owner(&state, &file, "window-a");
+                track_for_owner(&state, &file, "window-b");
+                save_test_file(dir.path(), &file, &state, None, conditional).await;
+                if notify {
+                    let dispatches = commit_notify_change(
+                        &mut state.inner.lock().unwrap(),
+                        &tracking_key(&file),
+                        blake3::hash(b"v0"),
+                        blake3::hash(b"saved by app"),
+                        SystemTime::now(),
+                    );
+                    assert_eq!(
+                        dispatches
+                            .iter()
+                            .map(|(owner, _)| owner.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["window-a", "window-b"]
+                    );
+                }
+                for owner in ["window-a", "window-b"] {
+                    assert_eq!(poll_external_changes_inner(&state, owner).unwrap().len(), 1);
+                    assert!(poll_external_changes_inner(&state, owner)
+                        .unwrap()
+                        .is_empty());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_save_preserves_link_and_owner_scoped_delivery() {
+        for notify in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let target_dir = dir.path().join("targets");
+            fs::create_dir(&target_dir).unwrap();
+            let target = target_dir.join("chapter.md");
+            let alias = dir.path().join("linked.md");
+            fs::write(&target, "v0").unwrap();
+            std::os::unix::fs::symlink("targets/chapter.md", &alias).unwrap();
+            let state = FileWatcherState::new();
+            track_for_owner(&state, &alias, "window-a");
+            track_for_owner(&state, &target, "window-b");
+            let key = tracking_key(&target);
+            save_test_file(dir.path(), &alias, &state, Some("window-a"), false).await;
+
+            assert!(alias.is_symlink());
+            assert_eq!(
+                fs::read_link(&alias).unwrap(),
+                PathBuf::from("targets/chapter.md")
+            );
+            assert_eq!(fs::read_to_string(&target).unwrap(), "saved by app");
+            assert_eq!(tracking_key(&alias), key);
+            assert_eq!(state.inner.lock().unwrap().tracked_files.len(), 1);
+            if notify {
+                let dispatches = commit_notify_change(
+                    &mut state.inner.lock().unwrap(),
+                    &key,
+                    blake3::hash(b"v0"),
+                    blake3::hash(b"saved by app"),
+                    SystemTime::now(),
+                );
+                assert_eq!(dispatches.len(), 1);
+                assert_eq!(dispatches[0].0, "window-b");
+                assert_eq!(
+                    dispatches[0].1.paths,
+                    vec![target.to_string_lossy().to_string()]
+                );
+            }
+            assert!(poll_external_changes_inner(&state, "window-a")
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                poll_external_changes_inner(&state, "window-b")
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 
     #[test]
@@ -1164,6 +1698,7 @@ mod tests {
             &key,
             old_hash,
             blake3::hash(b"v1"),
+            SystemTime::now(),
         );
         assert!(result.is_empty());
         assert_eq!(
@@ -1196,6 +1731,7 @@ mod tests {
             &key,
             blake3::hash(b"v0"),
             blake3::hash(b"v1"),
+            SystemTime::now(),
         );
 
         assert_eq!(dispatches.len(), 2);
@@ -1244,6 +1780,7 @@ mod tests {
             "replacement",
             &crate::commands::file::EncodingState::new(),
             &watcher_state,
+            Some(TEST_OWNER),
         )
         .await
         .unwrap();
@@ -1528,6 +2065,7 @@ mod tests {
             &alias_file.to_string_lossy(),
             blake3::hash(b"saved by app after recreation"),
             &state,
+            Some(TEST_OWNER),
         )
         .unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -1561,12 +2099,20 @@ mod tests {
         let mut set = IgnoreSet::new();
         let p = PathBuf::from("/tmp/test.md");
         let expected = blake3::hash(b"expected");
-        assert!(!set.should_ignore(&p, expected));
+        assert_eq!(set.take_owner(&p, expected), None);
 
-        set.register(&p, expected);
-        assert!(!set.should_ignore(&p, blake3::hash(b"external")));
-        set.register(&p, expected);
-        assert!(set.should_ignore(&p, expected));
+        set.register(&p, expected, Some(TEST_OWNER));
+        assert_eq!(set.take_owner(&p, blake3::hash(b"external")), None);
+        assert_eq!(set.take_owner(&p, expected), None);
+        set.register(&p, expected, Some(TEST_OWNER));
+        assert_eq!(set.take_owner(&p, expected).as_deref(), Some(TEST_OWNER));
+        assert_eq!(set.take_owner(&p, expected), None);
+
+        set.register(&p, expected, None);
+        assert_eq!(set.take_owner(&p, expected), None);
+        set.register(&p, expected, Some(TEST_OWNER));
+        set.entries.get_mut(&p).unwrap().registered_at = Instant::now() - Duration::from_secs(3);
+        assert_eq!(set.take_owner(&p, expected), None);
     }
 
     #[test]
@@ -1589,7 +2135,9 @@ mod tests {
                 .watching_dirs
                 .insert(TEST_OWNER.to_string(), PathBuf::from("/tmp"));
             guard.cancel_txs.insert(TEST_OWNER.to_string(), tx);
-            guard.ignore_set.register(&path, blake3::hash(b"content"));
+            guard
+                .ignore_set
+                .register(&path, blake3::hash(b"content"), Some(TEST_OWNER));
             guard.tracked_files.insert(
                 path.clone(),
                 TrackedFile {
@@ -1613,9 +2161,10 @@ mod tests {
         assert!(guard.watching_dirs.is_empty());
         assert!(guard.cancel_txs.is_empty());
         assert!(guard.tracked_files.is_empty());
-        assert!(!guard
-            .ignore_set
-            .should_ignore(&path, blake3::hash(b"content")));
+        assert_eq!(
+            guard.ignore_set.take_owner(&path, blake3::hash(b"content")),
+            None
+        );
     }
 
     #[test]
@@ -1668,10 +2217,17 @@ mod tests {
         assert_eq!(refresh_dir_for_path(&temp, &root), None);
     }
 
+    fn rename_paths(dir: &TempDir) -> (String, String) {
+        (
+            dir.path().join("old.md").to_string_lossy().to_string(),
+            dir.path().join("new.md").to_string_lossy().to_string(),
+        )
+    }
+
     #[tokio::test]
-    async fn test_register_rename_ignore_suppresses_both_paths() {
-        let old = "/tmp/test_register_rename_ignore_foo.md".to_string();
-        let new = "/tmp/test_register_rename_ignore_bar.md".to_string();
+    async fn test_register_rename_ignore_suppresses_both_paths_once() {
+        let dir = TempDir::new().unwrap();
+        let (old, new) = rename_paths(&dir);
         register_rename_ignore(old.clone(), new.clone()).await;
         assert!(take_rename_ignored(&old).await);
         assert!(take_rename_ignored(&new).await);
@@ -1680,10 +2236,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_rename_ignore_unknown_path_returns_false() {
-        let unknown = "/tmp/test_register_rename_ignore_unknown_xyz.md".to_string();
-        // Ensure clean state if a previous test leaked (shared static).
-        let _ = take_rename_ignored(&unknown).await;
-        assert!(!take_rename_ignored(&unknown).await);
+    async fn test_failed_rename_clears_its_ignore_entries() {
+        let dir = TempDir::new().unwrap();
+        let (old, new) = rename_paths(&dir);
+        register_rename_ignore(old.clone(), new.clone()).await;
+        clear_rename_ignore(&old, &new).await;
+        assert!(!take_rename_ignored(&old).await);
+        assert!(!take_rename_ignored(&new).await);
+    }
+
+    #[tokio::test]
+    async fn test_rename_ignore_entries_expire() {
+        let dir = TempDir::new().unwrap();
+        let (old, new) = rename_paths(&dir);
+        register_rename_ignore(old.clone(), new.clone()).await;
+        let expired = Instant::now() - RENAME_IGNORE_TTL - Duration::from_secs(1);
+        RENAME_IGNORED.lock().await.insert(old.clone(), expired);
+        // A stale entry never swallows a later real event.
+        assert!(!take_rename_ignored(&old).await);
+        assert!(take_rename_ignored(&new).await);
     }
 }

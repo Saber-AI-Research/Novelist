@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Handle, Position, NodeResizer } from '@xyflow/svelte';
+  import { isImeComposing } from '$lib/utils/ime';
 
   interface Props {
     data: {
@@ -28,16 +29,18 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') { editing = false; }
     e.stopPropagation();
+    if (isImeComposing(e)) return;
+    if (e.key === 'Escape') { editing = false; }
   }
 </script>
 
 <NodeResizer minWidth={140} minHeight={60} isVisible={selected} lineClass="rs-line" handleClass="rs-handle" onResizeEnd={() => data.onResize?.()} />
-<Handle type="target" position={Position.Left} />
-<Handle type="source" position={Position.Right} />
-<Handle type="target" position={Position.Top} />
-<Handle type="source" position={Position.Bottom} />
+<!-- One handle per JSON Canvas side; the canvas uses loose connections so any side can start or end an edge. -->
+<Handle type="source" id="left" position={Position.Left} />
+<Handle type="source" id="right" position={Position.Right} />
+<Handle type="source" id="top" position={Position.Top} />
+<Handle type="source" id="bottom" position={Position.Bottom} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="node" ondblclick={startEdit}>

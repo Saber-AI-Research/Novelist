@@ -5,7 +5,8 @@ type CommandResult<T> = { status: 'ok'; data: T } | { status: 'error'; error: st
 
 interface StageThemeCssDeps {
   stageCss: (requestId: string, css: string) => Promise<CommandResult<string>>;
-  deleteItem: (path: string) => Promise<CommandResult<null>>;
+  /** Backend discard of the stylesheet staged for `requestId`. */
+  discardStagedCss: (requestId: string) => Promise<CommandResult<null>>;
   requestId: string;
   isCancelled: () => boolean;
   warn?: (message: string) => void;
@@ -45,7 +46,7 @@ img { max-width: 100%; border-radius: 6px; }`;
   const cssPath = cssWrite.data;
 
   if (deps.isCancelled()) {
-    const cleanup = await deps.deleteItem(cssPath);
+    const cleanup = await deps.discardStagedCss(deps.requestId);
     if (cleanup.status !== 'ok') {
       deps.warn?.(EXPORT_CSS_CANCEL_CLEANUP_WARNING);
       return { status: 'cancelled', warning: EXPORT_CSS_CANCEL_CLEANUP_WARNING };

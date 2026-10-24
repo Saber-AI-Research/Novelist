@@ -22,9 +22,9 @@ import {
  * - DOM → markdown serialization of edited cells
  * - Compact source serialization + structural model mutations
  *
- * The interactive CodeMirror widget (contenteditable cells, toolbars,
- * commit-on-blur) is browser-only and covered by E2E tests
- * (tests/e2e/specs/table-edit.spec.ts).
+ * The interactive CodeMirror widget is covered by
+ * tests/integration/editor/table-runtime.test.ts (commit rules, shortcut
+ * propagation) and E2E tests (tests/e2e/specs/table-edit.spec.ts).
  */
 
 // ── Table parsing ──

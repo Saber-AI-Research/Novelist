@@ -1,5 +1,4 @@
-import { describe, it, expect, expectTypeOf, beforeEach, vi } from 'vitest';
-import type { ViewportManager } from '$lib/editor/viewport';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 /**
  * [contract] tabsStore — split-pane management, tab lifecycle, and the
@@ -32,17 +31,10 @@ import {
   deleteSavedEditorState,
   registerEditorView,
   unregisterEditorView,
-  isTabViewportMode,
-  registerViewportSnapshotMetadata,
-  getViewportSnapshotMetadata,
   getEditorView,
   getEditorContent,
 } from '$lib/stores/tabs.svelte';
 import { commands } from '$lib/ipc/commands';
-
-function fakeViewportManager(fileId: string, baseCharOffset: number): ViewportManager {
-  return { fileId, baseCharOffset } as unknown as ViewportManager;
-}
 
 beforeEach(() => {
   localStorage.clear();
@@ -215,13 +207,13 @@ describe('[contract] tabsStore mutators', () => {
     expect(tabsStore.tabs[0].isDirty).toBe(false);
   });
 
-  it('markSavedByPath clears isDirty on every matching path across panes', () => {
+  it('markWritten clears isDirty on every same-path tab across panes holding the written text', () => {
     tabsStore.openTab('/shared.md', 'body');
     tabsStore.toggleSplit();
     tabsStore.openTabInPane('pane-2', '/shared.md', 'body');
     const all = tabsStore.findAllByPath('/shared.md');
     for (const t of all) tabsStore.markDirty(t.id);
-    tabsStore.markSavedByPath('/shared.md');
+    tabsStore.markWritten('/shared.md', 'body');
     expect(tabsStore.findAllByPath('/shared.md').every(t => !t.isDirty)).toBe(true);
   });
 
@@ -444,42 +436,9 @@ describe('[contract] editorView registry + saved EditorState helpers', () => {
     const fakeView = { state: { doc: { toString: () => 'content' } } } as any;
     registerEditorView('tab-1', fakeView);
     expect(getEditorView('tab-1')).toBe(fakeView);
-    expect(isTabViewportMode('tab-1')).toBe(false);
     expect(getEditorContent('tab-1')).toBe('content');
     unregisterEditorView('tab-1');
     expect(getEditorView('tab-1')).toBeUndefined();
-  });
-
-  it('marks viewport mode when registered with the flag (and blocks getEditorContent)', () => {
-    const fakeView = { state: { doc: { toString: () => 'window' } } } as any;
-    registerEditorView('tab-v', fakeView, true);
-    expect(isTabViewportMode('tab-v')).toBe(true);
-    expect(getViewportSnapshotMetadata('tab-v')).toBeUndefined();
-    // Must NOT read from the partial view.
-    expect(getEditorContent('tab-v')).toBeNull();
-    unregisterEditorView('tab-v');
-    expect(isTabViewportMode('tab-v')).toBe(false);
-  });
-
-  it('registers manager-owned viewport metadata and clears it with the view', () => {
-    const fakeView = { state: { doc: { toString: () => 'window' } } } as any;
-    const manager = fakeViewportManager('rope-file-1', 42);
-    registerEditorView('tab-meta', fakeView);
-
-    const contradictoryMetadata = {
-      fileId: 'stale-rope-file',
-      manager,
-    } as Parameters<typeof registerViewportSnapshotMetadata>[1];
-    registerViewportSnapshotMetadata('tab-meta', contradictoryMetadata);
-
-    expectTypeOf<Parameters<typeof registerViewportSnapshotMetadata>[1]>()
-      .toEqualTypeOf<{ manager: ViewportManager }>();
-    expect(isTabViewportMode('tab-meta')).toBe(true);
-    expect(getViewportSnapshotMetadata('tab-meta')).toEqual({ manager });
-
-    unregisterEditorView('tab-meta');
-    expect(isTabViewportMode('tab-meta')).toBe(false);
-    expect(getViewportSnapshotMetadata('tab-meta')).toBeUndefined();
   });
 
   it('save/get/deleteSavedEditorState roundtrip', () => {

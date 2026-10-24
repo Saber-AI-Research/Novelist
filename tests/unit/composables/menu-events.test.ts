@@ -57,7 +57,7 @@ describe('[contract] wireMenuEvents', () => {
     expect(hoisted.listeners.has('menu-command')).toBe(true);
   });
 
-  it('dispatches the payload command ID through commandRegistry.execute', async () => {
+  it('dispatches the payload command ID through commandRegistry.execute as a menu source', async () => {
     const { wireMenuEvents } = await import('$lib/composables/menu-events.svelte');
     wireMenuEvents({ onOpenRecent });
     await Promise.resolve();
@@ -68,9 +68,9 @@ describe('[contract] wireMenuEvents', () => {
     handler({ payload: 'toggle-zen' });
 
     expect(hoisted.execute).toHaveBeenCalledTimes(3);
-    expect(hoisted.execute).toHaveBeenNthCalledWith(1, 'new-file');
-    expect(hoisted.execute).toHaveBeenNthCalledWith(2, 'open-settings');
-    expect(hoisted.execute).toHaveBeenNthCalledWith(3, 'toggle-zen');
+    expect(hoisted.execute).toHaveBeenNthCalledWith(1, 'new-file', 'menu');
+    expect(hoisted.execute).toHaveBeenNthCalledWith(2, 'open-settings', 'menu');
+    expect(hoisted.execute).toHaveBeenNthCalledWith(3, 'toggle-zen', 'menu');
     expect(onOpenRecent).not.toHaveBeenCalled();
   });
 
@@ -96,7 +96,7 @@ describe('[contract] wireMenuEvents', () => {
     // The bridge must not filter — commandRegistry.execute is a no-op
     // for unknown IDs (tested in stores/commands.test), and we don't
     // want to centralise "known commands" in a second place.
-    expect(hoisted.execute).toHaveBeenCalledWith('does-not-exist');
+    expect(hoisted.execute).toHaveBeenCalledWith('does-not-exist', 'menu');
   });
 
   it('routes `open-recent:<path>` IDs to ctx.onOpenRecent, bypassing registry', async () => {

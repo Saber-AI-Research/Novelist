@@ -11,6 +11,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { imeComposingField } from './ime-guard';
+import { rootScale } from './root-scale';
 import { fileManagerLabel } from '$lib/utils/platform-labels';
 import { readLocalImageDataUri } from '$lib/services/image-host';
 import { pathJoin } from '$lib/utils/path';
@@ -43,6 +44,106 @@ function getCachedImage(path: string): string | undefined {
     return undefined;
   }
   return entry.dataUri;
+}
+
+/* ── Positions that outlive an await (file writes, uploads) ── */
+
+interface TrackedRange { from: number; to: number }
+
+const trackRangeEffect = StateEffect.define<{ id: number } & TrackedRange>();
+const untrackRangeEffect = StateEffect.define<number>();
+
+/**
+ * Ranges that must follow the document across an async gap: the source span
+ * of an image link awaiting its upload, or a drop point awaiting the image
+ * file writes. Mapped through every change, so the result lands on the same
+ * text even if the user typed above it meanwhile. A span whose text was
+ * deleted is dropped (the result is discarded); a point (from === to) moves.
+ */
+const trackedRangesField = StateField.define<ReadonlyMap<number, TrackedRange>>({
+  create: () => new Map(),
+  update(value, tr) {
+    let next: Map<number, TrackedRange> | null = null;
+    if (tr.docChanged && value.size > 0) {
+      next = new Map();
+      for (const [id, { from, to }] of value) {
+        const mappedFrom = tr.changes.mapPos(from, 1);
+        const mappedTo = from === to ? mappedFrom : tr.changes.mapPos(to, -1);
+        if (from === to || mappedFrom < mappedTo) next.set(id, { from: mappedFrom, to: mappedTo });
+      }
+    }
+    for (const effect of tr.effects) {
+      if (effect.is(trackRangeEffect)) {
+        next ??= new Map(value);
+        next.set(effect.value.id, { from: effect.value.from, to: effect.value.to });
+      } else if (effect.is(untrackRangeEffect)) {
+        next ??= new Map(value);
+        next.delete(effect.value);
+      }
+    }
+    return next ?? value;
+  },
+});
+
+let trackedRangeSeq = 0;
+
+/** Start tracking [from, to] (in the current document); returns its id. */
+function trackRange(view: EditorView, from: number, to: number): number {
+  const id = ++trackedRangeSeq;
+  view.dispatch({ effects: trackRangeEffect.of({ id, from, to }) });
+  return id;
+}
+
+function trackedRange(view: EditorView, id: number): TrackedRange | undefined {
+  return view.state.field(trackedRangesField, false)?.get(id);
+}
+
+/**
+ * Replace the tracked link source `id` with `url` wherever it is now and
+ * stop tracking it. Without a `url` (upload skipped or failed), or when the
+ * user deleted the link meanwhile, the document is left alone.
+ */
+function settleLinkSource(view: EditorView, id: number, url: string | null): void {
+  const span = trackedRange(view, id);
+  if (!span) return;
+  const effects = untrackRangeEffect.of(id);
+  view.dispatch(url === null ? { effects } : { changes: { from: span.from, to: span.to, insert: url }, effects });
+}
+
+/** Offsets of the URL in the first `![alt](src)` of `text` whose URL is `src`. */
+function findImageSource(text: string, src: string): TrackedRange | null {
+  const re = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m[2] !== src) continue;
+    const from = m.index + 2 + m[1].length + 2; // past `![alt](`
+    return { from, to: from + src.length };
+  }
+  return null;
+}
+
+/**
+ * Insert `![alt](src)` links (each followed by `after`) at `pos` in one
+ * transaction, tracking every link's source span. Returns the ids in order.
+ */
+function insertTrackedImageLinks(
+  view: EditorView,
+  pos: number,
+  links: ReadonlyArray<{ alt: string; src: string }>,
+  after: string,
+  extraEffects: readonly StateEffect<unknown>[] = [],
+): number[] {
+  let text = '';
+  const ids: number[] = [];
+  const effects: StateEffect<unknown>[] = [...extraEffects];
+  for (const { alt, src } of links) {
+    const from = pos + text.length + 2 + alt.length + 2; // past `![alt](`
+    const id = ++trackedRangeSeq;
+    ids.push(id);
+    effects.push(trackRangeEffect.of({ id, from, to: from + src.length }));
+    text += `![${alt}](${src})${after}`;
+  }
+  view.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length }, effects });
+  return ids;
 }
 
 /**
@@ -84,13 +185,14 @@ class ImageWidget extends WidgetType {
 
     if (this.src.startsWith('http://') || this.src.startsWith('https://') || this.src.startsWith('data:')) {
       img.src = this.src;
-    } else {
+    } else if (this.documentDir) {
+      // Without a document directory (only before the editor learns its
+      // file) a relative path cannot be resolved yet; render nothing rather
+      // than a false "Image not found". The widget is rebuilt once it is set.
       const cacheKey = `${this.documentDir}\0${this.src}`;
       const cached = getCachedImage(cacheKey);
       if (cached) {
         img.src = cached;
-      } else if (!this.documentDir) {
-        img.dispatchEvent(new Event('error'));
       } else {
         readLocalImageDataUri(this.src, { baseDir: this.documentDir }).then(dataUri => {
           cacheImage(cacheKey, dataUri);
@@ -127,17 +229,10 @@ class ImageWidget extends WidgetType {
     return wrapper;
   }
 
+  // No `updateDOM`: the DOM (image data, caption, context-menu closure) is
+  // specific to src/alt/dir, so a different widget always gets fresh DOM.
   eq(other: ImageWidget): boolean {
     return this.src === other.src && this.alt === other.alt && this.documentDir === other.documentDir;
-  }
-
-  updateDOM(dom: HTMLElement, view: EditorView): boolean {
-    if (dom.className !== 'cm-novelist-image-widget') return false;
-    const img = dom.querySelector('img');
-    if (!img) return false;
-    // Re-attach onload to update CM6 height map after images load
-    img.onload = () => { view.requestMeasure(); view.dispatch({ effects: [] }); };
-    return true;
   }
 
   get estimatedHeight(): number { return 200; }
@@ -254,18 +349,21 @@ class ImageContextMenu {
       this.dom.appendChild(el);
     }
 
-    this.dom.style.left = `${clientX}px`;
-    this.dom.style.top = `${clientY}px`;
+    // The menu is position: fixed inside the zoomed (scaled) root, so its
+    // offsets are layout coordinates: divide the scaled client coordinates.
+    const scale = rootScale();
+    this.dom.style.left = `${clientX / scale}px`;
+    this.dom.style.top = `${clientY / scale}px`;
     document.body.appendChild(this.dom);
 
     requestAnimationFrame(() => {
       if (!this.dom) return;
       const rect = this.dom.getBoundingClientRect();
       if (rect.bottom > window.innerHeight) {
-        this.dom.style.top = `${clientY - rect.height}px`;
+        this.dom.style.top = `${(clientY - rect.height) / scale}px`;
       }
       if (rect.right > window.innerWidth) {
-        this.dom.style.left = `${clientX - rect.width}px`;
+        this.dom.style.left = `${(clientX - rect.width) / scale}px`;
       }
     });
 
@@ -295,30 +393,22 @@ class ImageContextMenu {
 
   /**
    * Upload the local image referenced by `this.imgSrc` to the active
-   * host and rewrite the Markdown link in place. Caller catches errors.
+   * host and rewrite the Markdown link in place. The link source is tracked
+   * through edits made during the upload. Caller catches errors.
    */
   private async uploadAndReplace(): Promise<void> {
-    const { uploadImage } = await import('$lib/services/image-host');
-    const { url } = await uploadImage(this.imgSrc, {
-      baseDir: this.documentDir,
-    });
-
-    // Replace the URL portion of `![alt](src)` on the line. Match the
-    // current src inside parens; preserve alt and surrounding text.
-    const lineText = this.view.state.doc.sliceString(this.lineFrom, this.lineTo);
-    const re = /!\[([^\]]*)\]\(([^)\s]+)(\s+"[^"]*")?\)/;
-    const m = re.exec(lineText);
-    if (!m) return;
-    const matchStart = m.index;
-    const oldSrcStart = matchStart + 2 + m[1].length + 2; // past `![alt](`
-    const oldSrcEnd = oldSrcStart + m[2].length;
-    this.view.dispatch({
-      changes: {
-        from: this.lineFrom + oldSrcStart,
-        to: this.lineFrom + oldSrcEnd,
-        insert: url,
-      },
-    });
+    const view = this.view;
+    const line = view.state.doc.lineAt(Math.min(this.lineFrom, view.state.doc.length));
+    const src = findImageSource(line.text, this.imgSrc);
+    if (!src) return;
+    const linkId = trackRange(view, line.from + src.from, line.from + src.to);
+    let url: string | null = null;
+    try {
+      const { uploadImage } = await import('$lib/services/image-host');
+      ({ url } = await uploadImage(this.imgSrc, { baseDir: this.documentDir }));
+    } finally {
+      settleLinkSource(view, linkId, url);
+    }
     window.dispatchEvent(
       new CustomEvent('image-host-toast', {
         detail: { kind: 'success', message: `Uploaded to ${url}` },
@@ -456,7 +546,16 @@ export const imageDocumentDirField = StateField.define<string>({
 });
 
 export function setWysiwygImageDocumentDir(view: EditorView, dir: string) {
+  if (view.state.field(imageDocumentDirField, false) === dir) return;
   view.dispatch({ effects: imageDocumentDirEffect.of(dir) });
+}
+
+/**
+ * Initial document directory, set when the state is created so the first
+ * image render can resolve relative paths (no dispatch during construction).
+ */
+export function wysiwygImageDocumentDir(dir: string): Extension {
+  return imageDocumentDirField.init(() => dir);
 }
 
 /** Whether to render inline image previews. Set by Editor.svelte based on settings + project type. */
@@ -514,6 +613,12 @@ export const cursorImageLineField = StateField.define<number | null>({
   },
 });
 
+/** Subtrees that never contain an Image node; the full-document scan skips them. */
+const NO_IMAGE_SUBTREES: Record<string, true> = {
+  FencedCode: true, CodeBlock: true, InlineCode: true, HTMLBlock: true, CommentBlock: true,
+  FrontMatter: true, DisplayMath: true, InlineMath: true, URL: true,
+};
+
 function buildImageBlockDecos(state: EditorState): DecorationSet {
   if (!_renderImages) return Decoration.none;
   const decos: Range<Decoration>[] = [];
@@ -522,10 +627,10 @@ function buildImageBlockDecos(state: EditorState): DecorationSet {
 
   syntaxTree(state).iterate({
     enter(node) {
-      if (node.name !== 'Image') return;
+      if (node.name !== 'Image') return !NO_IMAGE_SUBTREES[node.name];
 
       const line = state.doc.lineAt(node.from);
-      if (skipLine != null && line.number === skipLine) return;
+      if (skipLine != null && line.number === skipLine) return false;
 
       let imgUrl = '';
       let imgAlt = '';
@@ -549,6 +654,7 @@ function buildImageBlockDecos(state: EditorState): DecorationSet {
           block: true,
         }).range(line.from, line.to));
       }
+      return false;
     }
   });
 
@@ -597,6 +703,15 @@ function clampReplaceRange(
   const clamped = Math.min(to, lineEnd);
   if (clamped <= from) return null;
   return { from, to: clamped };
+}
+
+/** One line decoration per line touching [from, to]; callers pass the visible part of a block. */
+function addLineDecos(state: EditorState, deco: Decoration, from: number, to: number, decos: Range<Decoration>[]) {
+  for (let pos = from; pos <= to;) {
+    const line = state.doc.lineAt(pos);
+    decos.push(deco.range(line.from));
+    pos = line.to + 1;
+  }
 }
 
 function buildDecorations(view: EditorView): DecorationSet {
@@ -750,14 +865,9 @@ function buildDecorations(view: EditorView): DecorationSet {
         if (node.name === 'Blockquote') {
           const bqNode = node.node;
 
-          // Apply line decorations using iterRange (avoids repeated line-number lookups)
-          const bqDeco = Decoration.line({ class: 'cm-novelist-blockquote-line' });
-          let pos = node.from;
-          while (pos <= node.to) {
-            const line = state.doc.lineAt(pos);
-            decos.push(bqDeco.range(line.from));
-            pos = line.to + 1;
-          }
+          // Line decorations only for the visible part of a long quote
+          addLineDecos(state, Decoration.line({ class: 'cm-novelist-blockquote-line' }),
+            Math.max(node.from, from), Math.min(node.to, to), decos);
 
           // Find and hide QuoteMark children (including nested)
           // Use a recursive tree cursor walk to find all QuoteMarks
@@ -795,14 +905,9 @@ function buildDecorations(view: EditorView): DecorationSet {
           const fcNode = node.node;
           const fenceMarkerClass = markerClass;
 
-          // Apply line decorations — walk by position to avoid line-number lookups
-          const codeDeco = Decoration.line({ class: 'cm-novelist-codeblock-line' });
-          let codePos = node.from;
-          while (codePos <= node.to) {
-            const line = state.doc.lineAt(codePos);
-            decos.push(codeDeco.range(line.from));
-            codePos = line.to + 1;
-          }
+          // Line decorations only for the visible part of a long code block
+          addLineDecos(state, Decoration.line({ class: 'cm-novelist-codeblock-line' }),
+            Math.max(node.from, from), Math.min(node.to, to), decos);
 
           // Hide the fence markers (``` lines) and CodeInfo
           const cursor = fcNode.cursor();
@@ -956,25 +1061,15 @@ function buildDecorations(view: EditorView): DecorationSet {
 
         // --- Footnote definition [^id]: text ---
         if (node.name === 'FootnoteDefinition') {
-          const fnDefDeco = Decoration.line({ class: 'cm-novelist-footnote-def' });
-          let fnPos = node.from;
-          while (fnPos <= node.to) {
-            const line = state.doc.lineAt(fnPos);
-            decos.push(fnDefDeco.range(line.from));
-            fnPos = line.to + 1;
-          }
+          addLineDecos(state, Decoration.line({ class: 'cm-novelist-footnote-def' }),
+            Math.max(node.from, from), Math.min(node.to, to), decos);
           return false;
         }
 
         // --- YAML Front-matter ---
         if (node.name === 'FrontMatter') {
-          const fmDeco = Decoration.line({ class: 'cm-novelist-frontmatter' });
-          let fmPos = node.from;
-          while (fmPos <= node.to) {
-            const line = state.doc.lineAt(fmPos);
-            decos.push(fmDeco.range(line.from));
-            fmPos = line.to + 1;
-          }
+          addLineDecos(state, Decoration.line({ class: 'cm-novelist-frontmatter' }),
+            Math.max(node.from, from), Math.min(node.to, to), decos);
           return false;
         }
       },
@@ -1147,6 +1242,7 @@ export const markerBoundarySnap = EditorState.transactionFilter.of((tr) => {
 
 export const wysiwygPlugin: Extension = [
   imageDocumentDirField,
+  trackedRangesField,
   cursorImageLineField,
   imageBlockDecoField,
   markerBoundarySnap,
@@ -1195,45 +1291,24 @@ export const linkClickPlugin = EditorView.domEventHandlers({
 
 /**
  * If auto-on-paste is enabled in settings AND an active host is configured,
- * upload the just-inserted local image and rewrite the Markdown link to
- * the remote URL. The local file under `.novelist/images/` is retained.
- *
- * `linkText` is the literal `![alt](path)` string that was inserted at
- * `insertPos`, of length `linkText.length`. We re-derive the URL portion
- * from a regex over that span and replace just it.
+ * upload the just-inserted local image and rewrite the tracked link source
+ * `linkId` to the remote URL. The local file under `.novelist/images/` is
+ * retained.
  */
 async function maybeAutoUpload(
   view: EditorView,
-  insertPos: number,
-  linkText: string,
-  absLocalPath: string,
+  linkId: number,
   filename: string,
   mime: string,
   bytes: Uint8Array,
 ): Promise<void> {
+  let url: string | null = null;
   try {
     const { commands } = await import('$lib/ipc/commands');
     const r = await commands.getImageHostSettings();
-    if (r.status !== 'ok') return;
-    if (!r.data.auto_on_paste) return;
-    if (!r.data.active_host_id) return;
+    if (r.status !== 'ok' || !r.data.auto_on_paste || !r.data.active_host_id) return;
     const { uploadInlineBytes } = await import('$lib/services/image-host');
-    const { url } = await uploadInlineBytes(bytes, filename, mime);
-    // Replace the URL portion of the just-inserted markdown link.
-    const re = /!\[([^\]]*)\]\(([^)\s]+)(\s+"[^"]*")?\)/;
-    const m = re.exec(linkText);
-    if (!m) return;
-    const matchStart = m.index;
-    const oldSrcStart = insertPos + matchStart + 2 + m[1].length + 2;
-    const oldSrcEnd = oldSrcStart + m[2].length;
-    view.dispatch({
-      changes: { from: oldSrcStart, to: oldSrcEnd, insert: url },
-    });
-    window.dispatchEvent(
-      new CustomEvent('image-host-toast', {
-        detail: { kind: 'success', message: `Uploaded to ${url}` },
-      }),
-    );
+    ({ url } = await uploadInlineBytes(bytes, filename, mime));
   } catch (e) {
     console.warn('[ImagePaste] auto-upload failed; keeping local link', e);
     window.dispatchEvent(
@@ -1241,16 +1316,34 @@ async function maybeAutoUpload(
         detail: { kind: 'error', message: e instanceof Error ? e.message : String(e) },
       }),
     );
+  } finally {
+    settleLinkSource(view, linkId, url);
   }
-  // Suppress unused-arg lint when localPath isn't needed in current impl
-  void absLocalPath;
+  if (url !== null) {
+    window.dispatchEvent(
+      new CustomEvent('image-host-toast', {
+        detail: { kind: 'success', message: `Uploaded to ${url}` },
+      }),
+    );
+  }
+}
+
+async function writeProjectImage(projectDir: string, filename: string, bytes: Uint8Array): Promise<void> {
+  await invoke('create_directory', {
+    parentDir: `${projectDir}/.novelist`,
+    name: 'images',
+  }).catch(() => {});
+  await invoke('write_binary_file', {
+    path: `${projectDir}/.novelist/images/${filename}`,
+    base64Data: uint8ToBase64(bytes),
+  });
 }
 
 /**
- * Image paste handler — when user pastes an image from clipboard,
- * save it to .novelist/images/ and insert markdown reference.
+ * Image paste/drop handler — save pasted or dropped images to
+ * .novelist/images/ and insert markdown references.
  */
-export const imagePastePlugin = EditorView.domEventHandlers({
+export const imagePastePlugin: Extension = [trackedRangesField, EditorView.domEventHandlers({
   paste(event: ClipboardEvent, view: EditorView) {
     const items = event.clipboardData?.items;
     if (!items || !_projectDir) return false;
@@ -1271,28 +1364,16 @@ export const imagePastePlugin = EditorView.domEventHandlers({
 
       (async () => {
         try {
-          const arrayBuffer = await file.arrayBuffer();
-          const base64 = uint8ToBase64(new Uint8Array(arrayBuffer));
-
-          const imagesDir = `${projectDir}/.novelist/images`;
-          await invoke('create_directory', {
-            parentDir: `${projectDir}/.novelist`,
-            name: 'images',
-          }).catch(() => {});
-
-          const imgPath = `${imagesDir}/${filename}`;
-          await invoke('write_binary_file', {
-            path: imgPath,
-            base64Data: base64,
-          });
-
-          const pos = view.state.selection.main.head;
-          const mdText = `![pasted image](.novelist/images/${filename})`;
-          view.dispatch({
-            changes: { from: pos, insert: mdText },
-            selection: { anchor: pos + mdText.length },
-          });
-          await maybeAutoUpload(view, pos, mdText, imgPath, filename, file.type, new Uint8Array(arrayBuffer));
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          await writeProjectImage(projectDir, filename, bytes);
+          // The caret has moved along with any typing during the write.
+          const [linkId] = insertTrackedImageLinks(
+            view,
+            view.state.selection.main.head,
+            [{ alt: 'pasted image', src: `.novelist/images/${filename}` }],
+            '',
+          );
+          await maybeAutoUpload(view, linkId, filename, file.type, bytes);
         } catch (err) {
           console.error('[ImagePaste] Failed:', err);
           const reader = new FileReader();
@@ -1322,56 +1403,39 @@ export const imagePastePlugin = EditorView.domEventHandlers({
     if (imageFiles.length === 0) return false;
 
     event.preventDefault();
-    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+    const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+    // Typing during the file writes must not leave the links at a stale offset.
+    const dropId = trackRange(view, dropPos, dropPos);
     const projectDir = _projectDir;
 
     (async () => {
-      let insertText = '';
-      type DropQueued = { mdText: string; filename: string; mime: string; bytes: Uint8Array; imgPath: string };
-      const queued: DropQueued[] = [];
+      const written: Array<{ alt: string; src: string; filename: string; mime: string; bytes: Uint8Array }> = [];
       for (const file of imageFiles) {
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const timestamp = Date.now();
-        const filename = `${timestamp}-${safeName}`;
-
+        const filename = `${Date.now()}-${safeName}`;
         try {
-          const arrayBuffer = await file.arrayBuffer();
-          const base64 = uint8ToBase64(new Uint8Array(arrayBuffer));
-
-          const imagesDir = `${projectDir}/.novelist/images`;
-          await invoke('create_directory', {
-            parentDir: `${projectDir}/.novelist`,
-            name: 'images',
-          }).catch(() => {});
-
-          const imgPath = `${imagesDir}/${filename}`;
-          await invoke('write_binary_file', {
-            path: imgPath,
-            base64Data: base64,
-          });
-
-          const md = `![${file.name}](.novelist/images/${filename})\n`;
-          insertText += md;
-          queued.push({ mdText: md, filename, mime: file.type, bytes: new Uint8Array(arrayBuffer), imgPath });
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          await writeProjectImage(projectDir, filename, bytes);
+          written.push({ alt: file.name, src: `.novelist/images/${filename}`, filename, mime: file.type, bytes });
         } catch (err) {
           console.error('[ImageDrop] Failed:', err);
         }
       }
 
-      if (insertText) {
-        view.dispatch({
-          changes: { from: pos, insert: insertText },
-          selection: { anchor: pos + insertText.length },
-        });
-        // Auto-upload each dropped image (sequentially, after the bulk insert).
-        let runningPos = pos;
-        for (const q of queued) {
-          await maybeAutoUpload(view, runningPos, q.mdText, q.imgPath, q.filename, q.mime, q.bytes);
-          runningPos += q.mdText.length;
-        }
+      const pos = trackedRange(view, dropId)?.from ?? view.state.selection.main.head;
+      const release = untrackRangeEffect.of(dropId);
+      if (written.length === 0) {
+        view.dispatch({ effects: release });
+        return;
+      }
+      const linkIds = insertTrackedImageLinks(view, pos, written, '\n', [release]);
+      // Auto-upload each dropped image (sequentially, after the bulk insert);
+      // every link source is tracked, so earlier rewrites don't shift later ones.
+      for (const [i, image] of written.entries()) {
+        await maybeAutoUpload(view, linkIds[i], image.filename, image.mime, image.bytes);
       }
     })();
 
     return true;
   },
-});
+})];

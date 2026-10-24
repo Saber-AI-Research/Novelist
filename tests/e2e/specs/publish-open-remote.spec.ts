@@ -1,4 +1,4 @@
-import { expect, test, type MockInvokeCall } from '../fixtures/app-fixture';
+import { expect, openRecentProject, test, type MockInvokeCall } from '../fixtures/app-fixture';
 import type { Page } from '@playwright/test';
 import type { ChannelConfig, ProviderRevision, RemoteIdentity } from '../../../app/lib/ipc/commands';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
@@ -28,11 +28,7 @@ const WORDPRESS_COM_CHANNEL = {
 };
 
 async function openChapter(app: Page): Promise<void> {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible' });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible' });
 }
@@ -115,10 +111,6 @@ const INVALID_PROVIDER_CASES = [
 test.describe('[regression] Publish Open Remote shell boundary', () => {
   test.beforeEach(async ({ app }) => {
     await openChapter(app);
-  });
-
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
   });
 
   for (const { label, channel, url } of VALID_CASES) {

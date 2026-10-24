@@ -22,10 +22,10 @@ describe('[contract] stageThemeCssForExport', () => {
   it('removes staged CSS and skips backend ownership when cancellation happens while write is pending', async () => {
     let cancelled = false;
     const write = deferred<{ status: 'ok'; data: string }>();
-    const deleteItem = vi.fn(async () => ({ status: 'ok' as const, data: null }));
+    const discardStagedCss = vi.fn(async () => ({ status: 'ok' as const, data: null }));
     const staging = stageThemeCssForExport(theme, {
       stageCss: vi.fn(() => write.promise),
-      deleteItem,
+      discardStagedCss,
       requestId: 'abc123',
       isCancelled: () => cancelled,
     });
@@ -35,40 +35,40 @@ describe('[contract] stageThemeCssForExport', () => {
     const result = await staging;
 
     expect(result).toEqual({ status: 'cancelled' });
-    expect(deleteItem).toHaveBeenCalledWith('/tmp/novelist-export-theme-abc123.html');
+    expect(discardStagedCss).toHaveBeenCalledWith('abc123');
   });
 
   it('passes staged CSS args to backend ownership on normal themed export', async () => {
-    const deleteItem = vi.fn();
+    const discardStagedCss = vi.fn();
     const result = await stageThemeCssForExport(theme, {
       stageCss: vi.fn(async () => ({ status: 'ok' as const, data: '/tmp/novelist-export-theme-abc123.html' })),
-      deleteItem,
+      discardStagedCss,
       requestId: 'abc123',
       isCancelled: () => false,
     });
 
     expect(result).toEqual({ status: 'ok', args: ['--include-in-header', '/tmp/novelist-export-theme-abc123.html'] });
-    expect(deleteItem).not.toHaveBeenCalled();
+    expect(discardStagedCss).not.toHaveBeenCalled();
   });
 
   it('surfaces bounded CSS write failure and does not delete or produce backend args', async () => {
-    const deleteItem = vi.fn();
+    const discardStagedCss = vi.fn();
     const result = await stageThemeCssForExport(theme, {
       stageCss: vi.fn(async () => ({ status: 'error' as const, error: 'disk full with path details' })),
-      deleteItem,
+      discardStagedCss,
       requestId: 'abc123',
       isCancelled: () => false,
     });
 
     expect(result).toEqual({ status: 'error', message: EXPORT_CSS_STAGE_ERROR });
-    expect(deleteItem).not.toHaveBeenCalled();
+    expect(discardStagedCss).not.toHaveBeenCalled();
   });
 
   it('does not proceed when cancellation cleanup fails', async () => {
     const warn = vi.fn();
     const result = await stageThemeCssForExport(theme, {
       stageCss: vi.fn(async () => ({ status: 'ok' as const, data: '/tmp/novelist-export-theme-abc123.html' })),
-      deleteItem: vi.fn(async () => ({ status: 'error' as const, error: 'permission denied' })),
+      discardStagedCss: vi.fn(async () => ({ status: 'error' as const, error: 'permission denied' })),
       requestId: 'abc123',
       isCancelled: () => true,
       warn,

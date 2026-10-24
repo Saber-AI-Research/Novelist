@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::models::project::{OutlineConfig, ProjectConfig, ProjectMeta, WritingConfig};
 use crate::models::template::{TemplateInfo, TemplateMeta};
 use crate::services::template_scaffold::{self, ScaffoldLocale};
 use std::fs::File;
@@ -168,7 +169,7 @@ fn scaffold_builtin(
         template_scaffold::project_type(template_id),
         &template_scaffold::outline_order(template_id, locale),
         template_scaffold::daily_goal(template_id),
-    );
+    )?;
     std::fs::write(novelist_dir.join("project.toml"), config)?;
 
     Ok(dest.to_string_lossy().to_string())
@@ -179,29 +180,33 @@ fn build_project_toml(
     project_type: &str,
     outline_order: &[String],
     daily_goal: u32,
-) -> String {
-    let outline_block = if outline_order.is_empty() {
-        String::new()
-    } else {
-        let items: Vec<String> = outline_order.iter().map(|s| format!("\"{}\"", s)).collect();
-        format!("\n[outline]\norder = [{}]\n", items.join(", "))
+) -> Result<String, AppError> {
+    let config = ProjectConfig {
+        project: ProjectMeta {
+            name: project_name.to_string(),
+            project_type: project_type.to_string(),
+            version: "0.1.0".to_string(),
+        },
+        outline: OutlineConfig {
+            order: outline_order.to_vec(),
+        },
+        writing: WritingConfig {
+            daily_goal,
+            auto_save_minutes: 5,
+        },
+        view: Default::default(),
+        new_file: Default::default(),
+        plugins: Default::default(),
+        snapshot: None,
+        active_image_host_id: None,
     };
-
-    format!(
-        r#"[project]
-name = "{name}"
-type = "{ptype}"
-version = "0.1.0"
-{outline}
-[writing]
-daily_goal = {goal}
-auto_save_minutes = 5
-"#,
-        name = project_name,
-        ptype = project_type,
-        outline = outline_block,
-        goal = daily_goal,
-    )
+    let mut serialized = toml::Value::try_from(config)?;
+    if outline_order.is_empty() {
+        if let Some(table) = serialized.as_table_mut() {
+            table.remove("outline");
+        }
+    }
+    Ok(toml::to_string(&serialized)?)
 }
 
 #[tauri::command]
@@ -610,6 +615,48 @@ mod tests {
                 .unwrap();
         let project_dir = Path::new(&result);
         assert!(project_dir.join(".novelist").join("project.toml").exists());
+    }
+
+    #[test]
+    fn test_scaffold_preserves_special_project_names_and_outline() {
+        let dir = TempDir::new().unwrap();
+        let project_name = "书名 \"quoted\" \\notes\\new";
+        for template in builtin_templates() {
+            for locale in [ScaffoldLocale::En, ScaffoldLocale::ZhCN] {
+                let dest = dir.path().join(format!("{}-{locale:?}", template.id));
+                scaffold_builtin(&template.id, project_name, &dest, locale).unwrap();
+                let content = std::fs::read_to_string(dest.join(".novelist/project.toml")).unwrap();
+                let config: ProjectConfig = toml::from_str(&content).unwrap();
+                assert_eq!(config.project.name, project_name);
+                assert_eq!(
+                    config.project.project_type,
+                    template_scaffold::project_type(&template.id)
+                );
+                assert_eq!(config.project.version, "0.1.0");
+                let outline = template_scaffold::outline_order(&template.id, locale);
+                assert_eq!(config.outline.order, outline);
+                for entry in &outline {
+                    assert!(dest.join(entry).is_file());
+                }
+                if outline.is_empty() {
+                    let value: toml::Value = toml::from_str(&content).unwrap();
+                    assert!(value.get("outline").is_none());
+                }
+                assert_eq!(
+                    config.writing.daily_goal,
+                    template_scaffold::daily_goal(&template.id)
+                );
+                assert_eq!(config.writing.auto_save_minutes, 5);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_project_toml_preserves_escaped_outline_entries() {
+        let outline = vec!["章节 \"title\" \\notes.md".to_string()];
+        let content = build_project_toml("项目", "novel", &outline, 1500).unwrap();
+        let config: ProjectConfig = toml::from_str(&content).unwrap();
+        assert_eq!(config.outline.order, outline);
     }
 
     #[tokio::test]

@@ -60,10 +60,11 @@
 </script>
 
 <NodeResizer minWidth={180} minHeight={100} isVisible={selected} lineClass="rs-line" handleClass="rs-handle" onResizeEnd={() => data.onResize?.()} />
-<Handle type="target" position={Position.Left} />
-<Handle type="source" position={Position.Right} />
-<Handle type="target" position={Position.Top} />
-<Handle type="source" position={Position.Bottom} />
+<!-- One handle per JSON Canvas side; the canvas uses loose connections so any side can start or end an edge. -->
+<Handle type="source" id="left" position={Position.Left} />
+<Handle type="source" id="right" position={Position.Right} />
+<Handle type="source" id="top" position={Position.Top} />
+<Handle type="source" id="bottom" position={Position.Bottom} />
 
 <div class="node">
   <button type="button" class="header" onclick={handleOpen} ondblclick={handleOpen} onkeydown={onKey} title={data.filePath}>

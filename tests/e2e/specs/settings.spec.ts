@@ -1,12 +1,8 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 
 test.describe('Settings Dialog', () => {
   test.beforeEach(async ({ app }) => {
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
   });
 
   test('Cmd+, opens settings dialog', async ({ app }) => {
@@ -37,25 +33,23 @@ test.describe('Settings Dialog', () => {
 
   test('settings sections are navigable', async ({ app }) => {
     await app.keyboard.press('Meta+,');
-    const settings = app.getByTestId('settings-dialog');
+    await expect(app.getByTestId('settings-dialog')).toBeVisible();
 
-    const sections = ['editor', 'theme', 'shortcuts'];
-    for (const section of sections) {
+    for (const section of ['theme', 'shortcuts', 'editor']) {
       const sectionBtn = app.getByTestId(`settings-section-${section}`);
-      if (await sectionBtn.isVisible()) {
-        await sectionBtn.click();
-        await expect(settings).toBeVisible();
-      }
+      await sectionBtn.click();
+      await expect(sectionBtn).toHaveCSS('font-weight', '600');
     }
+    await expect(app.locator('#settings-size')).toBeVisible();
   });
 
   test('font size dropdown exists and is interactive', async ({ app }) => {
     await app.keyboard.press('Meta+,');
 
     const fontSizeSelect = app.locator('#settings-size');
-    if (await fontSizeSelect.isVisible()) {
-      await expect(fontSizeSelect).toBeEnabled();
-    }
+    await expect(fontSizeSelect).toBeEnabled();
+    await fontSizeSelect.selectOption('20');
+    await expect(fontSizeSelect).toHaveValue('20');
   });
 
   test('plugins: "+" button creates a plugin from template', async ({ app }) => {

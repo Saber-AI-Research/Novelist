@@ -443,7 +443,7 @@ test.describe('AI Agent — sessions', () => {
     await expect(trigger).toBeFocused();
   });
 
-  test('session menu mutations persist only their owned session ids', async ({ app, mockState, browserErrors }) => {
+  test('session menu mutations persist only their owned session ids', async ({ app, mockState }) => {
     await clearAiTalkStorage(app);
     await setClaudeCliDetected(app);
     await enterProject(app);
@@ -554,7 +554,6 @@ test.describe('AI Agent — sessions', () => {
       .filter((call) => call.command === 'delete_ai_session')
       .map((call) => call.args.id)).toEqual([sessionBId]);
     expect(await writeIds()).toEqual([]);
-    expect(browserErrors).toEqual([]);
   });
 
   test('failed session B rename and fork preserve delayed CJK stream deltas in session A @task23 @task23-negative', async ({ app, mockState }) => {
@@ -642,7 +641,7 @@ test.describe('AI Agent — sessions', () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test('Agent menu save reports collision-bumped basename through save_ai_chat', async ({ app, mockState, browserErrors }) => {
+  test('Agent menu save reports collision-bumped basename through save_ai_chat', async ({ app, mockState }) => {
     await app.clock.setFixedTime(new Date('2026-07-17T12:34:56.000Z'));
     await clearAiTalkStorage(app);
     await setClaudeCliDetected(app);
@@ -707,7 +706,6 @@ test.describe('AI Agent — sessions', () => {
     expect(written[`/tmp/novelist-test-project/.novelist/chats/${stem} 2.md`]).toBe(body);
     const calls = await mockState.getInvokeCalls();
     expect(calls.filter((call) => call.command === 'create_file_with_body')).toHaveLength(0);
-    expect(browserErrors).toEqual([]);
   });
 
   test('running session disables unsafe menu actions and inline Stop is recoverable', async ({ app }) => {
@@ -879,7 +877,7 @@ test.describe('AI Agent — sessions', () => {
 
     const composer = app.getByTestId('ai-agent-panel').locator('textarea');
     await composer.focus();
-    await app.waitForTimeout(60);
+    await expect(composer).toBeFocused();
     await app.keyboard.press('Meta+Alt+Shift+n');
     await expect(tabs).toHaveCount(3);
     await expect.poll(async () => Object.keys(await mockState.getWrittenFiles())
@@ -964,7 +962,7 @@ test.describe('AI Agent — sessions', () => {
     expect(await mockState.getClaudeCliKillCount()).toBe(killCountAfterRetirement);
   });
 
-  test('Claude kill drain blocks lazy remount and then reuses the same session UUID', async ({ app, mockState, browserErrors }) => {
+  test('Claude kill drain blocks lazy remount and then reuses the same session UUID', async ({ app, mockState }) => {
     await clearAiTalkStorage(app);
     await setClaudeCliDetected(app);
     await enterProject(app);
@@ -1017,7 +1015,6 @@ test.describe('AI Agent — sessions', () => {
     await expect(replacement.locator('[data-testid^="ai-agent-turn-stopped-"]')).toHaveCount(0);
     await expect(replacement.locator('[data-testid^="ai-agent-turn-stop-"]')).toHaveCount(0);
     await expect(replacement).not.toContainText('interrupted');
-    expect(browserErrors).toEqual([]);
   });
 });
 

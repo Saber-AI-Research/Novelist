@@ -1,9 +1,6 @@
 import { EditorState } from '@codemirror/state';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  EditorPublishDocumentSnapshot,
-  RopePublishDocumentSnapshot,
-} from '$lib/services/publish-document-snapshot';
+import type { EditorPublishDocumentSnapshot } from '$lib/services/publish-document-snapshot';
 import {
   createStyledCopyController,
   verifyFinalStyledCopyPayload,
@@ -53,21 +50,6 @@ function editorSource(
       ? null
       : { from: 0, to: selectionText.length, text: selectionText },
     editorGeneration,
-  };
-}
-
-function ropeSource(selectionText: string | null = null): RopePublishDocumentSnapshot {
-  return {
-    kind: 'rope',
-    paneId: 'pane-1',
-    tabId: 'tab-rope',
-    fileId: 'rope-1',
-    filePath: '/project/large.md',
-    documentDir: '/project',
-    projectDir: '/project',
-    mainSelection: selectionText === null
-      ? null
-      : { from: 4, to: 4 + selectionText.length, text: selectionText },
   };
 }
 
@@ -123,15 +105,6 @@ function createHarness(options: HarnessOptions = {}) {
       order.push(`convert:${markdown}`);
       return { status: 'ok' as const, data: '<p>Pandoc</p>' };
     }),
-    loadRopeSnapshot: vi.fn(async () => ({
-      status: 'ok' as const,
-      data: {
-        text: '# Rope document',
-        generation: 7,
-        total_lines: 1,
-        total_chars: 15,
-      },
-    })),
     getCurrentEditorState: vi.fn(() => currentEditorState),
     normalizePandocHtml: vi.fn((_html: string): StyledCopyResult<SemanticDocument> => {
       order.push('normalize');
@@ -304,19 +277,6 @@ describe('[contract] styled-copy controller preview orchestration', () => {
       assetMode: 'preview',
       resolvedAssets: previewAssetsForAssertion(),
     }));
-  });
-
-  it('loads and freezes Rope full text before conversion', async () => {
-    const harness = createHarness({ semanticDocument: { type: 'document', children: [] } });
-    const controller = createStyledCopyController({ source: ropeSource() }, harness.dependencies);
-
-    await controller.requestPreview();
-
-    expect(harness.dependencies.loadRopeSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ fileId: 'rope-1' }),
-      expect.any(AbortSignal),
-    );
-    expect(harness.order[0]).toBe('convert:# Rope document');
   });
 });
 
@@ -908,85 +868,6 @@ describe('[contract] styled-copy controller invalidation and source freshness', 
       status: 'error',
       error: { code: 'source_stale' },
     });
-    expect(harness.clipboardCalls).toEqual([]);
-  });
-});
-
-describe('[contract] styled-copy controller Rope generations', () => {
-  function ropeSnapshotResult(generation: number, text = '# Rope document') {
-    return {
-      status: 'ok' as const,
-      data: { text, generation, total_lines: 1, total_chars: text.length },
-    };
-  }
-
-  it('loads Rope even for selection scope and converts the frozen selected text', async () => {
-    const harness = createHarness({ semanticDocument: { type: 'document', children: [] } });
-    harness.dependencies.loadRopeSnapshot = vi.fn(async () => ropeSnapshotResult(7));
-    const controller = createStyledCopyController(
-      { source: ropeSource('选中的 Rope 文本') },
-      harness.dependencies,
-    );
-
-    await controller.requestPreview();
-
-    expect(harness.dependencies.loadRopeSnapshot).toHaveBeenCalledTimes(2);
-    expect(harness.dependencies.convertMarkdownToStyledHtml).toHaveBeenCalledWith(
-      '选中的 Rope 文本',
-      expect.any(AbortSignal),
-    );
-  });
-
-  it('blocks a Rope preview whose generation changes during async work', async () => {
-    const harness = createHarness({ semanticDocument: { type: 'document', children: [] } });
-    harness.dependencies.loadRopeSnapshot = vi.fn()
-      .mockResolvedValueOnce(ropeSnapshotResult(7, '# Original'))
-      .mockResolvedValueOnce(ropeSnapshotResult(8, '# Changed'));
-    const controller = createStyledCopyController({ source: ropeSource() }, harness.dependencies);
-
-    await controller.requestPreview();
-
-    expect(controller.getState()).toMatchObject({
-      status: 'error',
-      error: { code: 'source_stale' },
-    });
-    expect(harness.clipboardCalls).toEqual([]);
-  });
-
-  it('checks the retained Rope generation again immediately before clipboard commit', async () => {
-    const harness = createHarness({ semanticDocument: { type: 'document', children: [] } });
-    harness.dependencies.loadRopeSnapshot = vi.fn()
-      .mockResolvedValueOnce(ropeSnapshotResult(7))
-      .mockResolvedValueOnce(ropeSnapshotResult(7))
-      .mockResolvedValueOnce(ropeSnapshotResult(8));
-    const controller = createStyledCopyController({ source: ropeSource() }, harness.dependencies);
-    await controller.requestPreview();
-
-    await controller.copy();
-
-    expect(controller.getState()).toMatchObject({
-      status: 'error',
-      error: { code: 'source_stale' },
-    });
-    expect(harness.clipboardCalls).toEqual([]);
-    expect(harness.dependencies.loadRopeSnapshot).toHaveBeenCalledTimes(3);
-  });
-
-  it('maps unavailable Rope snapshots without exposing native details', async () => {
-    const harness = createHarness();
-    harness.dependencies.loadRopeSnapshot = vi.fn(async () => ({
-      status: 'error' as const,
-      error: '/private/project path and native details',
-    }));
-    const controller = createStyledCopyController({ source: ropeSource() }, harness.dependencies);
-
-    await controller.requestPreview();
-
-    expect(controller.getState()).toMatchObject({
-      status: 'error',
-      error: { code: 'rope_snapshot_unavailable' },
-    });
-    expect(JSON.stringify(controller.getState())).not.toContain('/private/project');
     expect(harness.clipboardCalls).toEqual([]);
   });
 });

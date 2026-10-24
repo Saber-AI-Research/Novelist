@@ -108,6 +108,11 @@ function dispatch(event: UpdateCheckEvent): UpdateCheckState {
 }
 
 function projectAvailableToStore(version: string, notes: string | null) {
+  // A check that lands while an update is downloading, installing, or waiting
+  // for restart must not flip the store back to 'available' — that would
+  // unmount the progress modal and lose the download progress.
+  const phase = updaterState.phase;
+  if (phase === 'downloading' || phase === 'installing' || phase === 'ready') return;
   updaterState.setAvailable(version, notes);
 }
 

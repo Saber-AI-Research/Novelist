@@ -79,8 +79,8 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 | app/lib/stores/tabs.svelte.ts | 36.50 % | tabs-auto-rename.test.ts, tabs-update-path.test.ts | Split-pane logic, open/close ordering, reload paths largely uncovered |
 | app/lib/editor/outline.ts | 0 % | tests/unit/editor/outline.test.ts | Test only exercises the bare regex, not `extractHeadings()` — real fn needs `EditorState` driver |
 | app/lib/editor/markdown-extensions.ts | 53.52 % | tests/integration/editor/* | Lines 165, 186-198, 234 — pure helpers extractable |
-| app/lib/editor/math.ts | 64.62 % | tests/integration/editor/wysiwyg-runtime | Lines 242-253, 263-289 — render-only paths |
-| app/lib/editor/wysiwyg.ts | 42.32 % | tests/integration/editor/wysiwyg-runtime, image-block-deco | Large decoration class, many branches uncovered |
+| app/lib/editor/math.ts | 64.62 % | tests/integration/editor/wysiwyg-runtime, math-runtime | Lines 242-253, 263-289 — render-only paths |
+| app/lib/editor/wysiwyg.ts | 42.32 % | tests/integration/editor/wysiwyg-runtime, image-rendering, table-runtime | Large decoration class, many branches uncovered |
 | app/lib/editor/setup.ts | 40.62 % | tests/integration/editor/* | Lines 95, 567, 591-631 — extension assembly, mostly integration |
 | app/lib/components/ai-agent/host.ts | 66.66 % | tests/unit/components/ai-agent-host.test.ts | Lines 18-62, 133, 144-148 — spawn/stream lifecycle branches |
 | app/lib/utils/wordcount.ts | 62.85 % | tests/unit/utils/wordcount.test.ts | Lines 42-44, 63-76 — emoji/surrogate + boundary paths |
@@ -117,11 +117,7 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 
 ### Integration-only (needs `EditorView` / Svelte render / Tauri runtime)
 
-| File | Rationale | Action |
-|---|---|---|
-| app/lib/editor/viewport.ts | `ViewportManager` drives real `EditorView.dispatch` + scroll; IPC-coupled | Class boundary testable by injecting a fake view, but the value is low (mostly IPC orchestration). Deferred — revisit only if Batch C has spare budget. |
-
-> Other files that require an `EditorView` mount for the remainder of their lines (`editor/setup.ts`, `editor/wysiwyg.ts`, `editor/mermaid.ts`) already have a `.test.ts` / integration test and are classified in **partial** — their Batch G raises target pure-helper extraction, not full `EditorView` wiring.
+> Files that require an `EditorView` mount for the remainder of their lines (`editor/setup.ts`, `editor/wysiwyg.ts`, `editor/mermaid.ts`) already have a `.test.ts` / integration test and are classified in **partial** — their Batch G raises target pure-helper extraction, not full `EditorView` wiring.
 
 ### Waive (not worth testing here)
 
@@ -177,7 +173,7 @@ After Batch-2 waivers land, `coverage.include` is narrowed to `app/lib/**/*.ts`,
 |---|---|---|
 | A — stores | `stores/commands.svelte.ts` (raise), `stores/extensions.svelte.ts`, `stores/templates.svelte.ts`, `stores/ui.svelte.ts`, `stores/project.svelte.ts` (raise), `stores/tabs.svelte.ts` (raise), `stores/settings.svelte.ts` (raise) | Some are `[contract]` (extensions/templates/ui) + some partial raises to ≥ 70 % |
 | B — utils | `utils/chinese.ts`, `utils/go-to-line.ts`, `utils/wordcount.ts` (raise) | `benchmark`/`scroll-edit-test`/`resize-drag`/`startup-timing`/`window-drag` re-classified to waive in this audit |
-| C — editor pure | `editor/viewport.ts` (if budget), `editor/section-move.ts`, `editor/outline.ts` (real `extractHeadings`), `editor/annotations.ts`, `editor/languages.ts`, `editor/zen.ts`; raise `themes.ts` toward ≥ 80 % already covered — skip | Uses `EditorState.create()` with `markdown()` for outline/section-move |
+| C — editor pure | `editor/section-move.ts`, `editor/outline.ts` (real `extractHeadings`), `editor/annotations.ts`, `editor/languages.ts`, `editor/zen.ts`; raise `themes.ts` toward ≥ 80 % already covered — skip | Uses `EditorState.create()` with `markdown()` for outline/section-move |
 | D — composables | `composables/app-events.svelte.ts`, `composables/app-lifecycle.svelte.ts`, `composables/close-tab.svelte.ts`, `composables/editor-context-menu.svelte.ts`, `composables/window-title.svelte.ts` | `$effect.root` harness + `vi.mock` of Tauri API; `app-shortcuts` already covered by user's in-progress work — do not touch |
 | E — services | `services/new-file.ts` | Mock IPC + stub stores |
 | F — app/lib root | `app-commands.ts`, `conflict-handlers.ts`, `i18n/index.svelte.ts` | `event-handlers.ts` does not exist — the coverage row labelled `...t-handlers.ts` is `conflict-handlers.ts` |
@@ -192,7 +188,7 @@ None — every source file landed in a bucket.
 1. **No `event-handlers.ts` exists.** The plan's Batch F mentioned it, but the coverage report abbreviation `...t-handlers.ts` resolves to `conflict-handlers.ts`. Plan will be slightly adjusted in Batch F to cover `app-commands.ts` + `conflict-handlers.ts` + `i18n/index.svelte.ts`.
 2. **`editor/outline.ts` shows 0 % coverage despite having a `.test.ts`.** The existing test only exercises the standalone regex, not `extractHeadings()` — it got classified as **partial** but the real function needs a real test in Batch C.
 3. **`stores/commands.svelte.ts` has no direct test file** yet is 66.66 % covered via `app-shortcuts.test.ts` that happens to import it. A dedicated `[contract]` test will both raise the number and anchor behavior.
-4. **`close-tab.test.ts` does NOT import `composables/close-tab.svelte.ts`** — it builds a shadow `ProjectStore`. The real composable remains uncovered and is in Batch D.
+4. **The shadow-store `tests/unit/stores/close-tab.test.ts` was deleted**; the real composable is covered by `tests/unit/composables/close-tab.test.ts` against the real tabs store.
 5. **`utils/benchmark.ts` + `utils/scroll-edit-test.ts` are dev harnesses**, not product code. Re-classified from the plan's precision-testable bucket to **waive/dev-harness**; this trims the denominator instead of inflating coverage with benchmark-shape tests.
 6. **`utils/resize-drag.ts` + `utils/window-drag.ts` + `utils/startup-timing.ts`** are thin DOM/window glue; listing as waived (Platform / dev instrumentation) avoids shallow "listener wired" tests.
 7. **User's dirty files** (`Settings.svelte`, `app-shortcuts.svelte.ts`, shortcuts store + test, i18n locales) are classified in this audit by their committed state; the campaign must avoid editing these paths until the user has merged.

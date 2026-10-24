@@ -68,6 +68,7 @@ describe('literary commentary engine', () => {
       study('最终，绝对'),
       '最终，【气质出尘】绝对',
       'copy',
+      [],
       false,
       '2026-08-02T00:00:00Z',
     );
@@ -77,6 +78,27 @@ describe('literary commentary engine', () => {
     expect(result.file.insertions).toMatchObject([
       { sourceOffset: 3, kind: 'comment', text: '气质出尘' },
     ]);
+  });
+
+  it('uses corner brackets across committed batches and retains full-width delimiters', () => {
+    const opened = applyDelimitedInput(study('北凉王府'), '北凉「', 'copy');
+    expect(opened.mode).toBe('comment');
+    expect(opened.file.sourceCursor).toBe(2);
+    const closed = applyDelimitedInput(opened.file, '风骨凛然」王府【后注】', opened.mode, opened.brackets);
+    expect(closed.mode).toBe('copy');
+    expect(closed.file.sourceCursor).toBe(4);
+    expect(closed.file.stats.mistakes).toBe(0);
+    expect(closed.file.insertions).toMatchObject([
+      { sourceOffset: 2, kind: 'comment', text: '风骨凛然' },
+      { sourceOffset: 4, kind: 'comment', text: '后注' },
+    ]);
+  });
+
+  it('keeps literal corner-bracket dialogue transcribable when the source expects it', () => {
+    const result = applyDelimitedInput(study('「原文」正文'), '「原文」正文', 'copy');
+    expect(result.mode).toBe('copy');
+    expect(result.file.sourceCursor).toBe(result.file.source.length);
+    expect(result.file.insertions).toEqual([]);
   });
 
   it('transcribes a full-width opening bracket when the source expects it', () => {
@@ -89,7 +111,7 @@ describe('literary commentary engine', () => {
 
   it('keeps comment mode open across committed input batches until a closing bracket', () => {
     const opened = applyDelimitedInput(study('正文'), '【第一句', 'copy');
-    const closed = applyDelimitedInput(opened.file, '，第二句】正文', opened.mode);
+    const closed = applyDelimitedInput(opened.file, '，第二句】正文', opened.mode, opened.brackets);
 
     expect(opened.mode).toBe('comment');
     expect(closed.mode).toBe('copy');
@@ -97,6 +119,57 @@ describe('literary commentary engine', () => {
     expect(closed.file.insertions).toMatchObject([
       { sourceOffset: 0, kind: 'comment', text: '第一句，第二句' },
     ]);
+  });
+
+  it('[regression] keeps 「quotes」 inside a 【comment】 as comment text', () => {
+    const result = applyDelimitedInput(study('此处妙文'), '此处【此处「风骨」妙】妙文', 'copy');
+
+    expect(result.mode).toBe('copy');
+    expect(result.brackets).toEqual([]);
+    expect(result.file.sourceCursor).toBe(result.file.source.length);
+    expect(result.file.stats.mistakes).toBe(0);
+    expect(result.file.insertions).toMatchObject([
+      { sourceOffset: 2, kind: 'comment', text: '此处「风骨」妙' },
+    ]);
+  });
+
+  it('[regression] matches brackets across IME commits and nested same-type quotes', () => {
+    // Each committed IME batch arrives separately; the opener must be carried.
+    let state = applyDelimitedInput(study('正文'), '【此处', 'copy');
+    for (const batch of ['「', '风骨', '」', '妙']) {
+      state = applyDelimitedInput(state.file, batch, state.mode, state.brackets);
+      expect(state.mode).toBe('comment');
+    }
+    state = applyDelimitedInput(state.file, '】正文', state.mode, state.brackets);
+    expect(state.mode).toBe('copy');
+    expect(state.file.insertions).toMatchObject([{ kind: 'comment', text: '此处「风骨」妙' }]);
+    expect(state.file.sourceCursor).toBe(2);
+
+    const nested = applyDelimitedInput(study('正文'), '「他说「好」吧」正文', 'copy');
+    expect(nested.mode).toBe('copy');
+    expect(nested.file.insertions).toMatchObject([{ kind: 'comment', text: '他说「好」吧' }]);
+    expect(nested.file.stats.mistakes).toBe(0);
+  });
+
+  it('treats a stray closer as comment text and still closes on the matching one', () => {
+    const stray = applyDelimitedInput(study('正文'), '【注」释】正文', 'copy');
+    expect(stray.mode).toBe('copy');
+    expect(stray.file.insertions).toMatchObject([{ kind: 'comment', text: '注」释' }]);
+
+    // An unclosed inner quote does not trap the reader inside the comment.
+    const unclosed = applyDelimitedInput(study('正文'), '【注「释】正文', 'copy');
+    expect(unclosed.mode).toBe('copy');
+    expect(unclosed.file.insertions).toMatchObject([{ kind: 'comment', text: '注「释' }]);
+  });
+
+  it('lets either closer end a shortcut comment, but keeps inner quotes literal', () => {
+    const quoted = applyDelimitedInput(study('正文'), '「风骨」妙】正文', 'comment', [null]);
+    expect(quoted.mode).toBe('copy');
+    expect(quoted.file.insertions).toMatchObject([{ kind: 'comment', text: '「风骨」妙' }]);
+
+    const corner = applyDelimitedInput(study('正文'), '注」正文', 'comment');
+    expect(corner.mode).toBe('copy');
+    expect(corner.file.insertions).toMatchObject([{ kind: 'comment', text: '注' }]);
   });
 
   it('keeps mistakes red at the current source offset', () => {
@@ -253,6 +326,19 @@ describe('[regression] literary commentary caret', () => {
     expect(renderedText(result.file)).toBe('最好终，');
   });
 
+  it('opens and closes corner-bracket commentary at a rewound caret', () => {
+    const file = copied('北凉王府', 4);
+    const opened = applyDelimitedInputAtCaret(file, 2, '「', 'copy');
+    expect(opened.mode).toBe('comment');
+    expect(opened.caretIndex).toBe(2);
+    const closed = applyDelimitedInputAtCaret(opened.file, opened.caretIndex, '好」', opened.mode, opened.brackets);
+    expect(closed.mode).toBe('copy');
+    expect(closed.caretIndex).toBe(3);
+    expect(closed.file.sourceCursor).toBe(4);
+    expect(closed.file.stats.mistakes).toBe(0);
+    expect(renderedText(closed.file)).toBe('北凉好王府');
+  });
+
   it('marks rewound plain typing as a mistake rather than consuming source', () => {
     const file = copied('最终，绝对', 3);
     const result = applyDelimitedInputAtCaret(file, 1, '错', 'copy');
@@ -269,19 +355,33 @@ describe('[regression] literary commentary caret', () => {
     expect(second.file.insertions[0].text).toBe('好句');
   });
 
+  it('[regression] keeps 「quotes」 inside a rewound 【comment】', () => {
+    const file = copied('最终，绝对', 3);
+    const opened = applyDelimitedInputAtCaret(file, 1, '【此处「', 'copy');
+    expect(opened.brackets).toEqual(['【', '「']);
+    const closed = applyDelimitedInputAtCaret(
+      opened.file, opened.caretIndex, '风骨」妙】', opened.mode, opened.brackets,
+    );
+    expect(closed.mode).toBe('copy');
+    expect(closed.brackets).toEqual([]);
+    expect(closed.file.insertions).toMatchObject([{ kind: 'comment', text: '此处「风骨」妙', sourceOffset: 1 }]);
+    expect(closed.file.stats.mistakes).toBe(0);
+    expect(renderedText(closed.file)).toBe('最此处「风骨」妙终，');
+  });
+
   it('keeps newline and subsequent typing inside an earlier annotation', () => {
     const now = '2026-08-02T00:00:00Z';
     const original = applyDelimitedInput(
-      study('北凉王府\n龙盘虎踞'), '北凉【风骨凛然】王府【后文评注】', 'copy', false, now,
+      study('北凉王府\n龙盘虎踞'), '北凉【风骨凛然】王府【后文评注】', 'copy', [], false, now,
     ).file;
-    const newline = applyDelimitedInputAtCaret(original, 4, '\n', 'comment', false, now);
+    const newline = applyDelimitedInputAtCaret(original, 4, '\n', 'comment', [], false, now);
 
     expect(newline.caretIndex).toBe(5);
     expect(newline.mode).toBe('comment');
     expect(renderedText(newline.file)).toBe('北凉风骨\n凛然王府后文评注');
 
     const continued = applyDelimitedInputAtCaret(
-      newline.file, newline.caretIndex, '续注', newline.mode, false, now,
+      newline.file, newline.caretIndex, '续注', newline.mode, newline.brackets, false, now,
     );
     expect(continued.caretIndex).toBe(7);
     expect(continued.mode).toBe('comment');
@@ -301,7 +401,7 @@ describe('[regression] literary commentary caret', () => {
   it('transcribes a matching frontier newline and marks an unmatched newline as a mistake', () => {
     const now = '2026-08-02T00:00:00Z';
     const original = copied('首行\n续行', 2);
-    const matched = applyDelimitedInputAtCaret(original, renderedLength(original), '\n', 'copy', false, now);
+    const matched = applyDelimitedInputAtCaret(original, renderedLength(original), '\n', 'copy', [], false, now);
     expect(matched.file.sourceCursor).toBe(3);
     expect(matched.caretIndex).toBe(3);
     expect(matched.mode).toBe('copy');
@@ -309,7 +409,7 @@ describe('[regression] literary commentary caret', () => {
     expect(renderedText(matched.file)).toBe('首行\n');
 
     const unmatched = applyDelimitedInputAtCaret(
-      matched.file, matched.caretIndex, '\n', matched.mode, false, now,
+      matched.file, matched.caretIndex, '\n', matched.mode, matched.brackets, false, now,
     );
     expect(unmatched.file.sourceCursor).toBe(3);
     expect(unmatched.caretIndex).toBe(4);
@@ -321,7 +421,7 @@ describe('[regression] literary commentary caret', () => {
   it('keeps a frontier newline in comment mode even when the source expects a newline', () => {
     const original = copied('首行\n续行', 2);
     const result = applyDelimitedInputAtCaret(
-      original, renderedLength(original), '\n', 'comment', false, '2026-08-02T00:00:00Z',
+      original, renderedLength(original), '\n', 'comment', [], false, '2026-08-02T00:00:00Z',
     );
     expect(result.file.sourceCursor).toBe(2);
     expect(result.caretIndex).toBe(3);

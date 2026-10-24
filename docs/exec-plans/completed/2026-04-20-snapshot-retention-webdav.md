@@ -1,6 +1,6 @@
 # Snapshot Retention + WebDAV Upload — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cap local snapshot disk usage, collapse rapid-fire snapshots, and opt-in upload each new snapshot to WebDAV using a collision-safe `{slug}-{hash8}/project.json` namespace.
 

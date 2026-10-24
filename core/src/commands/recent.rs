@@ -1,8 +1,9 @@
 use crate::error::AppError;
+use crate::services::atomic_file::atomic_write_sync;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::path::PathBuf;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Type)]
 pub struct RecentProject {
@@ -44,25 +45,52 @@ pub fn sort_projects(projects: &mut [RecentProject]) {
     });
 }
 
-async fn read_projects() -> Vec<RecentProject> {
-    let path = recent_projects_path();
-    if !path.exists() {
-        return vec![];
+/// Reads the recent-projects list from `file`. A missing file is an empty list.
+///
+/// An unparseable file is never treated as empty in place: the next write would
+/// overwrite it and silently lose every pin and manual order. It is moved aside
+/// to `<file>.corrupt-<unix-nanos>.bak` first, so the welcome screen keeps
+/// working with an empty list while the original bytes stay recoverable. If the
+/// file cannot be moved aside (or cannot be read at all), the error is returned
+/// and callers write nothing.
+async fn read_projects(file: &Path) -> Result<Vec<RecentProject>, AppError> {
+    let bytes = match tokio::fs::read(file).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let parse_error = match serde_json::from_slice(&bytes) {
+        Ok(projects) => return Ok(projects),
+        Err(error) => error,
+    };
+    let mut backup = file.as_os_str().to_owned();
+    backup.push(format!(
+        ".corrupt-{}.bak",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let backup = PathBuf::from(backup);
+    match tokio::fs::rename(file, &backup).await {
+        Ok(()) => tracing::warn!(
+            error = %parse_error,
+            backup = %backup.display(),
+            "recent projects list was unreadable; preserved it and started a new list"
+        ),
+        // A concurrent call already moved the same corrupt file aside.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => vec![],
-    }
+    Ok(Vec::new())
 }
 
-async fn write_projects(projects: &[RecentProject]) -> Result<(), AppError> {
-    let path = recent_projects_path();
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let json = serde_json::to_string_pretty(projects)?;
-    tokio::fs::write(&path, json).await?;
-    Ok(())
+async fn write_projects(file: &Path, projects: &[RecentProject]) -> Result<(), AppError> {
+    let json = serde_json::to_vec_pretty(projects)?;
+    let file = file.to_path_buf();
+    tokio::task::spawn_blocking(move || atomic_write_sync(&file, &json))
+        .await
+        .map_err(|error| AppError::Custom(format!("Recent projects write failed: {error}")))?
 }
 
 #[tauri::command]
@@ -71,7 +99,8 @@ pub async fn get_recent_projects(app: tauri::AppHandle) -> Result<Vec<RecentProj
     // Fast path: read + sort, no per-project `Path::exists()` stat.
     // Previously this did a blocking stat per entry on every boot (dozens of
     // syscalls for users with many projects), blocking App.svelte's onMount.
-    let mut projects = read_projects().await;
+    let file = recent_projects_path();
+    let mut projects = read_projects(&file).await?;
     sort_projects(&mut projects);
 
     // Fire-and-forget cleanup: verify each path exists off the critical
@@ -84,7 +113,7 @@ pub async fn get_recent_projects(app: tauri::AppHandle) -> Result<Vec<RecentProj
         filtered.retain(|p| std::path::Path::new(&p.path).exists());
         if filtered.len() != before_len {
             sort_projects(&mut filtered);
-            if write_projects(&filtered).await.is_ok() {
+            if write_projects(&file, &filtered).await.is_ok() {
                 use tauri::Emitter;
                 let _ = app.emit("recent-projects-updated", &filtered);
             }
@@ -97,7 +126,11 @@ pub async fn get_recent_projects(app: tauri::AppHandle) -> Result<Vec<RecentProj
 #[tauri::command]
 #[specta::specta]
 pub async fn add_recent_project(path: String, name: String) -> Result<(), AppError> {
-    let mut projects = read_projects().await;
+    add_project_in(&recent_projects_path(), path, name).await
+}
+
+async fn add_project_in(file: &Path, path: String, name: String) -> Result<(), AppError> {
+    let mut projects = read_projects(file).await?;
 
     // Preserve pin / sort_order if the project already exists.
     let existing_pin = projects
@@ -107,7 +140,7 @@ pub async fn add_recent_project(path: String, name: String) -> Result<(), AppErr
     projects.retain(|p| p.path != path);
 
     let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
         .to_string();
@@ -142,35 +175,36 @@ pub async fn add_recent_project(path: String, name: String) -> Result<(), AppErr
     }
 
     sort_projects(&mut projects);
-    write_projects(&projects).await
+    write_projects(file, &projects).await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn remove_recent_project(path: String) -> Result<(), AppError> {
-    let mut projects = read_projects().await;
+    remove_project_in(&recent_projects_path(), &path).await
+}
+
+async fn remove_project_in(file: &Path, path: &str) -> Result<(), AppError> {
+    let mut projects = read_projects(file).await?;
     projects.retain(|p| p.path != path);
-    write_projects(&projects).await
+    write_projects(file, &projects).await
 }
 
 /// Pin or unpin a single project. Pinned projects always sort above unpinned.
 #[tauri::command]
 #[specta::specta]
 pub async fn set_project_pinned(path: String, pinned: bool) -> Result<(), AppError> {
-    let mut projects = read_projects().await;
-    let mut found = false;
-    for p in projects.iter_mut() {
-        if p.path == path {
-            p.pinned = pinned;
-            found = true;
-            break;
-        }
-    }
-    if !found {
+    set_pinned_in(&recent_projects_path(), &path, pinned).await
+}
+
+async fn set_pinned_in(file: &Path, path: &str, pinned: bool) -> Result<(), AppError> {
+    let mut projects = read_projects(file).await?;
+    let Some(project) = projects.iter_mut().find(|p| p.path == path) else {
         return Err(AppError::Custom(format!("Project not in recents: {path}")));
-    }
+    };
+    project.pinned = pinned;
     sort_projects(&mut projects);
-    write_projects(&projects).await
+    write_projects(file, &projects).await
 }
 
 /// Reorder recent projects by the given path list. Each path's index in
@@ -179,17 +213,18 @@ pub async fn set_project_pinned(path: String, pinned: bool) -> Result<(), AppErr
 #[tauri::command]
 #[specta::specta]
 pub async fn reorder_recent_projects(ordered_paths: Vec<String>) -> Result<(), AppError> {
-    let mut projects = read_projects().await;
+    reorder_in(&recent_projects_path(), &ordered_paths).await
+}
+
+async fn reorder_in(file: &Path, ordered_paths: &[String]) -> Result<(), AppError> {
+    let mut projects = read_projects(file).await?;
     for (idx, path) in ordered_paths.iter().enumerate() {
-        for p in projects.iter_mut() {
-            if &p.path == path {
-                p.sort_order = Some(idx as i64);
-                break;
-            }
+        if let Some(project) = projects.iter_mut().find(|p| &p.path == path) {
+            project.sort_order = Some(idx as i64);
         }
     }
     sort_projects(&mut projects);
-    write_projects(&projects).await
+    write_projects(file, &projects).await
 }
 
 #[cfg(test)]
@@ -268,45 +303,127 @@ mod tests {
         assert_eq!(projects[0].sort_order, None);
     }
 
-    #[test]
-    fn add_preserves_existing_pin_state_on_reopen() {
-        // Simulate the add_recent_project code path on the in-memory list.
-        let mut projects = vec![RecentProject {
-            pinned: true,
-            sort_order: Some(3),
-            ..mk("/a", "Old Name", "100")
-        }];
-        let existing_pin = projects
-            .iter()
-            .find(|p| p.path == "/a")
-            .map(|p| (p.pinned, p.sort_order));
-        projects.retain(|p| p.path != "/a");
-        projects.insert(
-            0,
-            RecentProject {
-                path: "/a".into(),
-                name: "New Name".into(),
-                last_opened: "999".into(),
-                pinned: existing_pin.map(|p| p.0).unwrap_or(false),
-                sort_order: existing_pin.and_then(|p| p.1),
-            },
-        );
-        assert!(projects[0].pinned, "pinned state must survive re-open");
-        assert_eq!(projects[0].sort_order, Some(3));
-        assert_eq!(projects[0].name, "New Name");
+    fn recents_file(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path()
+            .join("novelist-home")
+            .join("recent-projects.json")
     }
 
-    #[test]
-    fn pin_filter_skips_unknown_project() {
-        let mut projects = [mk("/a", "A", "100")];
-        // Simulate the set_project_pinned loop for a missing path.
-        let mut found = false;
-        for p in projects.iter_mut() {
-            if p.path == "/missing" {
-                p.pinned = true;
-                found = true;
-            }
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn reopening_a_project_keeps_its_pin_and_rank() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = recents_file(&dir);
+        add_project_in(&file, "/书/甲".into(), "旧名字".into())
+            .await
+            .unwrap();
+        add_project_in(&file, "/b".into(), "B".into())
+            .await
+            .unwrap();
+        set_pinned_in(&file, "/书/甲", true).await.unwrap();
+        reorder_in(&file, &["/书/甲".to_string()]).await.unwrap();
+
+        add_project_in(&file, "/书/甲".into(), "新名字".into())
+            .await
+            .unwrap();
+
+        let projects = read_projects(&file).await.unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].path, "/书/甲");
+        assert!(projects[0].pinned, "pinned state must survive re-open");
+        assert_eq!(projects[0].sort_order, Some(0));
+        assert_eq!(projects[0].name, "新名字");
+        assert_eq!(projects[1].path, "/b");
+        // Atomic writes leave no staging files next to the list.
+        assert_eq!(file_names(file.parent().unwrap()), ["recent-projects.json"]);
+    }
+
+    #[tokio::test]
+    async fn pinning_an_unknown_project_fails_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = recents_file(&dir);
+        add_project_in(&file, "/a".into(), "A".into())
+            .await
+            .unwrap();
+        let before = std::fs::read(&file).unwrap();
+
+        let error = set_pinned_in(&file, "/missing", true).await.unwrap_err();
+
+        assert!(error.to_string().contains("/missing"), "{error}");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn capping_and_removing_history_keeps_pinned_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = recents_file(&dir);
+        add_project_in(&file, "/pinned".into(), "Pinned".into())
+            .await
+            .unwrap();
+        set_pinned_in(&file, "/pinned", true).await.unwrap();
+        for index in 0..25 {
+            add_project_in(&file, format!("/p{index}"), format!("P{index}"))
+                .await
+                .unwrap();
         }
-        assert!(!found);
+
+        let projects = read_projects(&file).await.unwrap();
+        assert_eq!(projects.len(), 20);
+        assert_eq!(projects[0].path, "/pinned");
+        assert!(projects.iter().any(|p| p.path == "/p24"));
+        assert!(!projects.iter().any(|p| p.path == "/p5"));
+
+        remove_project_in(&file, "/p24").await.unwrap();
+        let projects = read_projects(&file).await.unwrap();
+        assert_eq!(projects.len(), 19);
+        assert!(!projects.iter().any(|p| p.path == "/p24"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_list_is_preserved_instead_of_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = recents_file(&dir);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let corrupt = r#"[{"path":"/书/甲","name":"甲","last_opened":"1""#.as_bytes();
+        std::fs::write(&file, corrupt).unwrap();
+
+        add_project_in(&file, "/new".into(), "New".into())
+            .await
+            .unwrap();
+
+        let projects = read_projects(&file).await.unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, "/new");
+        let backups: Vec<String> = file_names(file.parent().unwrap())
+            .into_iter()
+            .filter(|name| {
+                name.starts_with("recent-projects.json.corrupt-") && name.ends_with(".bak")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        assert_eq!(
+            std::fs::read(file.parent().unwrap().join(&backups[0])).unwrap(),
+            corrupt
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_list_is_an_error_not_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = recents_file(&dir);
+        std::fs::create_dir_all(&file).unwrap();
+
+        assert!(add_project_in(&file, "/a".into(), "A".into())
+            .await
+            .is_err());
+        assert!(file.is_dir(), "nothing may replace an unreadable list");
     }
 }

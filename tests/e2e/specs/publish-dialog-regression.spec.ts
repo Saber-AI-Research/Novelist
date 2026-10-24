@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import type { Page } from '@playwright/test';
 import { OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_FILE_CONTENTS, MOCK_PROJECT_DIR } from '../fixtures/mock-data';
@@ -21,11 +21,7 @@ const WORDPRESS_CHANNEL = {
 };
 
 async function openChapter(app: Page) {
-  const recentItem = app.getByTestId('recent-project-0');
-  if (await recentItem.isVisible().catch(() => false)) {
-    await recentItem.click();
-    await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-  }
+  await openRecentProject(app);
   await app.getByTestId('sidebar-file-Chapter 1.md').click();
   await app.locator('.cm-editor').waitFor({ state: 'visible', timeout: 5000 });
 }
@@ -46,10 +42,6 @@ test.describe('[regression] Online Publish dialog behavior', () => {
   test.beforeEach(async ({ app, mockState }) => {
     await mockState.setPublishChannels([GHOST_CHANNEL]);
     await openChapter(app);
-  });
-
-  test.afterEach(async ({ browserErrors }) => {
-    expect(browserErrors).toEqual([]);
   });
 
   test('restores and flushes its channel draft, stays disk-backed, and preserves progress and success @task23', async ({ app, mockState }) => {

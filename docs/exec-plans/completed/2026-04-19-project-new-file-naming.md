@@ -1,6 +1,6 @@
 # Project-mode New File Naming, H1 Auto-rename, and File-tree Sort — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `novelist_scratch_<ts>.md` placeholder names with smart, folder-aware, H1-renaming filenames; add per-project file-tree sort modes including numeric-aware ordering.
 

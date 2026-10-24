@@ -1,12 +1,11 @@
 use crate::error::AppError;
 use crate::services::rename_migration::{
-    acquire_draft_transaction_guard, draft_sidecar_exists, draft_storage_key_has_live_owner,
-    ensure_draft_key_not_reserved, reconcile_draft_sidecar,
+    acquire_draft_transaction_guard, draft_sidecar_exists, ensure_draft_key_not_reserved,
+    reconcile_draft_sidecar,
 };
 use crate::services::sidecar::{
-    atomic_write_bytes_confined, document_key, file_exists_confined, legacy_sidecar_path,
-    open_confined_metadata_dir, read_bytes_confined, remove_file_confined, sidecar_path,
-    MAX_DRAFT_NOTE_BYTES,
+    atomic_write_bytes_confined, document_key, file_exists_confined, open_confined_metadata_dir,
+    read_bytes_confined, remove_file_confined, sidecar_path, MAX_DRAFT_NOTE_BYTES,
 };
 use std::path::{Path, PathBuf};
 
@@ -17,13 +16,18 @@ const RECOVERY_SUFFIX: &str = ".~recovery";
 /// Get the draft note path for a given file.
 /// Draft notes are stored in `.novelist/drafts/{relative_key}.draft.md`
 /// relative to the project root using the shared canonical document key.
-/// Absolute scratch files outside the project retain the legacy basename
-/// fallback used by single-file callers.
+/// Absolute files outside the project (scratch / single-file mode) are keyed
+/// by a hash of their canonical path, so `~/a/notes.md` and `~/b/notes.md`
+/// never share a draft.
 struct DraftLocation {
     path: PathBuf,
     project_scoped: bool,
     storage_key: String,
 }
+
+/// Prefix for outside-project draft keys. Document keys escape `%` as `%25`
+/// and emit only `%XX` hex escapes, so no document key can contain `%e`.
+const EXTERNAL_DRAFT_KEY_PREFIX: &str = "%external-";
 
 fn draft_location(project_dir: &str, file_path: &str) -> Result<DraftLocation, AppError> {
     let project = Path::new(project_dir);
@@ -35,35 +39,28 @@ fn draft_location(project_dir: &str, file_path: &str) -> Result<DraftLocation, A
             storage_key: key,
         }),
         Err(AppError::PathNotAllowed(_)) if file.is_absolute() => {
-            let basename = file.file_name().ok_or_else(|| {
-                AppError::InvalidInput(format!(
-                    "Cannot determine scratch-file basename: {}",
-                    file.display()
-                ))
-            })?;
-            let key = basename.to_string_lossy();
-            if project.is_dir() && draft_storage_key_has_live_owner(project, None, &key)? {
-                return Err(AppError::InvalidInput(format!(
-                    "Scratch draft basename conflicts with a project document: {}",
-                    basename.to_string_lossy()
-                )));
-            }
-            let path = legacy_sidecar_path(project, DRAFT_SUBDIR, &key, DRAFT_SUFFIX)?.ok_or_else(
-                || {
-                    AppError::InvalidInput(format!(
-                        "Scratch draft basename is too long: {}",
-                        basename.to_string_lossy()
-                    ))
-                },
-            )?;
+            let key = external_draft_key(file);
             Ok(DraftLocation {
-                path,
+                path: sidecar_path(project, DRAFT_SUBDIR, &key, DRAFT_SUFFIX)?,
                 project_scoped: false,
-                storage_key: key.into_owned(),
+                storage_key: key,
             })
         }
         Err(error) => Err(error),
     }
+}
+
+/// `%external-<blake3 of the canonical path>`; a missing file is identified
+/// through its canonical parent so the key is stable before it is created.
+fn external_draft_key(file: &Path) -> String {
+    let canonical = file.canonicalize().unwrap_or_else(|_| {
+        match (file.parent().map(Path::canonicalize), file.file_name()) {
+            (Some(Ok(parent)), Some(name)) => parent.join(name),
+            _ => file.to_path_buf(),
+        }
+    });
+    let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+    format!("{EXTERNAL_DRAFT_KEY_PREFIX}{}", digest.to_hex())
 }
 
 #[cfg(test)]
@@ -73,11 +70,13 @@ fn draft_path(project_dir: &str, file_path: &str) -> Result<PathBuf, AppError> {
 
 async fn prepared_draft_path(project_dir: &str, file_path: &str) -> Result<PathBuf, AppError> {
     let location = draft_location(project_dir, file_path)?;
-    let project = Path::new(project_dir);
-    let file = Path::new(file_path);
-    ensure_draft_key_not_reserved(project, file, &location.storage_key).await?;
-    if location.project_scoped && draft_owner_path(file_path).is_file() {
-        reconcile_draft_sidecar(project, file).await?;
+    if location.project_scoped {
+        let project = Path::new(project_dir);
+        let file = Path::new(file_path);
+        ensure_draft_key_not_reserved(project, file, &location.storage_key).await?;
+        if draft_owner_path(file_path).is_file() {
+            reconcile_draft_sidecar(project, file).await?;
+        }
     }
     Ok(location.path)
 }
@@ -205,8 +204,8 @@ pub async fn has_draft_note(project_dir: String, file_path: String) -> Result<bo
     let project = Path::new(&project_dir);
     let file = Path::new(&file_path);
     let location = draft_location(&project_dir, &file_path)?;
-    ensure_draft_key_not_reserved(project, file, &location.storage_key).await?;
     if location.project_scoped {
+        ensure_draft_key_not_reserved(project, file, &location.storage_key).await?;
         return draft_sidecar_exists(project, file).await;
     }
     let Some(storage) = open_confined_metadata_dir(project, DRAFT_SUBDIR, false)? else {
@@ -286,19 +285,39 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_path_outside_project() {
+    fn outside_project_draft_path_is_keyed_by_canonical_path_hash() {
         let root = TempDir::new().unwrap();
         let project = root.path().join("project");
-        let scratch = root.path().join("outside").join("scratch.md");
+        let first = root.path().join("a").join("notes.md");
+        let second = root.path().join("b").join("notes.md");
         fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        let project_dir = project.to_string_lossy();
 
-        // Absolute scratch files outside the project fall back to file name only.
-        let p = draft_path(
-            project.to_string_lossy().as_ref(),
-            scratch.to_string_lossy().as_ref(),
-        )
-        .unwrap();
-        assert_eq!(p, project.join(".novelist/drafts/scratch.md.draft.md"));
+        let first_path = draft_path(&project_dir, &first.to_string_lossy()).unwrap();
+        let second_path = draft_path(&project_dir, &second.to_string_lossy()).unwrap();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            first_path.parent().unwrap(),
+            project.join(".novelist/drafts")
+        );
+        let name = first_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            name.starts_with("%external-") && name.ends_with(".draft.md"),
+            "{name}"
+        );
+        // Stable whether or not the file exists yet.
+        fs::write(&first, "# 笔记").unwrap();
+        assert_eq!(
+            draft_path(&project_dir, &first.to_string_lossy()).unwrap(),
+            first_path
+        );
     }
 
     #[tokio::test]
@@ -588,82 +607,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outside_scratch_uses_exact_legacy_basename_for_compatibility() {
+    async fn outside_files_with_the_same_basename_keep_separate_drafts() {
         let project_dir = TempDir::new().unwrap();
         let outside_dir = TempDir::new().unwrap();
-        let project = project_dir.path();
-        let outside = outside_dir.path().join("%scratch.md");
-        write_fixture(&outside, "# Scratch");
-        let legacy = project.join(".novelist/drafts/%scratch.md.draft.md");
-        write_fixture(&legacy, "scratch note");
+        let project = project_dir.path().display().to_string();
+        let first = outside_dir.path().join("a/notes.md");
+        let second = outside_dir.path().join("b/notes.md");
+        write_fixture(&first, "# A");
+        write_fixture(&second, "# B");
 
-        assert_eq!(
-            read_draft_note(project.display().to_string(), outside.display().to_string())
-                .await
-                .unwrap(),
-            Some("scratch note".to_string())
-        );
-        assert!(legacy.exists());
-    }
-
-    #[tokio::test]
-    async fn outside_scratch_cannot_alias_existing_root_document_note() {
-        let project_dir = TempDir::new().unwrap();
-        let outside_dir = TempDir::new().unwrap();
-        let project = project_dir.path();
-        let root = project.join("same.md");
-        let outside = outside_dir.path().join("same.md");
-        write_fixture(&root, "# Root");
-        write_fixture(&outside, "# Outside");
         write_draft_note(
-            project.display().to_string(),
-            root.display().to_string(),
-            "root note".to_string(),
+            project.clone(),
+            first.display().to_string(),
+            "a 的草稿".to_string(),
         )
         .await
         .unwrap();
-
-        let error = read_draft_note(project.display().to_string(), outside.display().to_string())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, AppError::InvalidInput(_)));
         assert_eq!(
-            read_draft_note(project.display().to_string(), root.display().to_string())
+            read_draft_note(project.clone(), second.display().to_string())
                 .await
                 .unwrap(),
-            Some("root note".to_string())
+            None,
+            "b must not be offered a's recovery text"
+        );
+        assert!(
+            !has_draft_note(project.clone(), second.display().to_string())
+                .await
+                .unwrap()
+        );
+
+        // Discarding b's draft must leave a's intact.
+        delete_draft_note(project.clone(), second.display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_draft_note(project, first.display().to_string())
+                .await
+                .unwrap(),
+            Some("a 的草稿".to_string())
         );
     }
 
     #[tokio::test]
-    async fn outside_scratch_cannot_alias_nested_documents_canonical_key() {
+    async fn outside_file_never_aliases_a_project_document_draft() {
         let project_dir = TempDir::new().unwrap();
         let outside_dir = TempDir::new().unwrap();
         let project = project_dir.path();
-        let nested = project.join("a/b.md");
-        let outside = outside_dir.path().join("a%2Fb.md");
-        write_fixture(&nested, "# Nested");
-        write_fixture(&outside, "# Outside");
-        write_draft_note(
-            project.display().to_string(),
-            nested.display().to_string(),
-            "nested note".to_string(),
-        )
-        .await
-        .unwrap();
-
-        let error = read_draft_note(project.display().to_string(), outside.display().to_string())
+        for (inside, outside) in [
+            (project.join("same.md"), outside_dir.path().join("same.md")),
+            (project.join("a/b.md"), outside_dir.path().join("a%2Fb.md")),
+        ] {
+            write_fixture(&inside, "# Inside");
+            write_fixture(&outside, "# Outside");
+            write_draft_note(
+                project.display().to_string(),
+                inside.display().to_string(),
+                "inside note".to_string(),
+            )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, AppError::InvalidInput(_)));
-        assert_eq!(
-            read_draft_note(project.display().to_string(), nested.display().to_string())
-                .await
-                .unwrap(),
-            Some("nested note".to_string())
-        );
+            assert_eq!(
+                read_draft_note(project.display().to_string(), outside.display().to_string())
+                    .await
+                    .unwrap(),
+                None
+            );
+            write_draft_note(
+                project.display().to_string(),
+                outside.display().to_string(),
+                "outside note".to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read_draft_note(project.display().to_string(), inside.display().to_string())
+                    .await
+                    .unwrap(),
+                Some("inside note".to_string())
+            );
+        }
     }
 
     #[tokio::test]
@@ -1084,7 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_rename_journal_blocks_stale_delete_and_scratch_alias() {
+    async fn pending_rename_journal_blocks_stale_delete_but_not_unrelated_outside_file() {
         let project_dir = TempDir::new().unwrap();
         let outside_dir = TempDir::new().unwrap();
         let project = project_dir.path();
@@ -1110,13 +1133,13 @@ mod tests {
             delete_draft_note(project.display().to_string(), old.display().to_string())
                 .await
                 .unwrap_err();
-        let scratch_error =
+        let outside_draft =
             read_draft_note(project.display().to_string(), outside.display().to_string())
                 .await
-                .unwrap_err();
+                .unwrap();
 
         assert!(matches!(delete_error, AppError::InvalidInput(_)));
-        assert!(matches!(scratch_error, AppError::InvalidInput(_)));
+        assert_eq!(outside_draft, None);
         assert_eq!(
             fs::read_to_string(canonical_draft(project, &old)).unwrap(),
             "pending migration"

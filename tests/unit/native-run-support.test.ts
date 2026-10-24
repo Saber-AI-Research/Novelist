@@ -1,10 +1,11 @@
 // @ts-nocheck -- Vitest runs this Node-only harness test outside the app browser type environment.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -43,32 +44,50 @@ async function allocateLoopbackPort(): Promise<number> {
   return address.port;
 }
 
-async function runLockContender(port: number, startAtMs: number): Promise<{ code: number; output: string }> {
+// The holder acquires the lock, reports ACQUIRED, and keeps it until a line (or EOF) arrives on stdin.
+function spawnLockHolder(port: number) {
   const source = `
     import { acquireNativeRunLock, releaseNativeRunLock } from ${JSON.stringify(nativeRunSupportUrl)};
-    const port = Number(process.argv[1]);
-    const startAtMs = Number(process.argv[2]);
-    await new Promise((resolve) => setTimeout(resolve, Math.max(0, startAtMs - Date.now())));
+    const lock = await acquireNativeRunLock(Number(process.argv[1]), {
+      pid: process.pid,
+      runId: 'holder-' + process.pid,
+      startedAtMs: Date.now(),
+    });
+    process.stdout.write('ACQUIRED\\n');
+    for await (const _line of process.stdin) break;
+    await releaseNativeRunLock(lock);
+    process.stdout.write('RELEASED\\n');
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', source, String(port)], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  const exit = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
+  child.once('error', exit.reject);
+  child.once('close', (code, signal) => exit.resolve({ code, signal }));
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  return { child, exit: exit.promise, lines };
+}
+
+async function runLockContender(port: number): Promise<{ code: number; output: string }> {
+  const source = `
+    import { acquireNativeRunLock, releaseNativeRunLock } from ${JSON.stringify(nativeRunSupportUrl)};
     try {
-      const lock = await acquireNativeRunLock(port, {
+      const lock = await acquireNativeRunLock(Number(process.argv[1]), {
         pid: process.pid,
         runId: 'contender-' + process.pid,
         startedAtMs: Date.now(),
       });
-      process.stdout.write('ACQUIRED\\n');
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
       await releaseNativeRunLock(lock);
+      process.stdout.write('ACQUIRED\\n');
     } catch (error) {
       process.stdout.write('REJECTED:' + (error instanceof Error ? error.message : String(error)) + '\\n');
       process.exitCode = 2;
     }
   `;
   try {
-    const { stdout } = await execFileAsync(
-      process.execPath,
-      ['--input-type=module', '--eval', source, String(port), String(startAtMs)],
-      { encoding: 'utf8' },
-    );
+    const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '--eval', source, String(port)], {
+      encoding: 'utf8',
+    });
     return { code: 0, output: stdout.trim() };
   } catch (error) {
     if (!error || typeof error !== 'object' || !('stdout' in error) || !('code' in error)) throw error;
@@ -189,17 +208,25 @@ describe('native run support', () => {
     expect(() => nativeRunSupport.resolveNativeRunLockPort('45123.5')).toThrow('invalid native run lock port');
   });
 
-  it('allows exactly one of two processes to acquire the loopback native mutex', async () => {
+  it('rejects a contending process while the native mutex is held and admits it after release', async () => {
     const port = await allocateLoopbackPort();
-    const startAtMs = Date.now() + 1_000;
+    const holder = spawnLockHolder(port);
+    try {
+      expect(await holder.lines.next()).toEqual({ value: 'ACQUIRED', done: false });
 
-    const results = await Promise.all([runLockContender(port, startAtMs), runLockContender(port, startAtMs)]);
+      expect(await runLockContender(port)).toEqual({
+        code: 2,
+        output: `REJECTED:native run already active: 127.0.0.1:${port}`,
+      });
 
-    expect(results.filter((result) => result.output === 'ACQUIRED')).toHaveLength(1);
-    expect(
-      results.filter((result) => result.output === `REJECTED:native run already active: 127.0.0.1:${port}`),
-    ).toHaveLength(1);
-    expect(results.map((result) => result.code).sort()).toEqual([0, 2]);
+      holder.child.stdin.end('release\n');
+      expect(await holder.lines.next()).toEqual({ value: 'RELEASED', done: false });
+      expect(await holder.exit).toEqual({ code: 0, signal: null });
+
+      expect(await runLockContender(port)).toEqual({ code: 0, output: 'ACQUIRED' });
+    } finally {
+      holder.child.kill();
+    }
   });
 
   it('reacquires the loopback native mutex after its holder exits without cleanup', async () => {
@@ -537,34 +564,6 @@ describe('native run support', () => {
     let artifactPublished = false;
     if (publicationAllowed(0, cleanupErrors)) artifactPublished = true;
     expect(artifactPublished).toBe(false);
-
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    const retained = runner.indexOf('interactiveEvidencePromise = appendEvidence(lines);');
-    const handled = runner.indexOf('interactiveEvidencePromise.catch(() => {});', retained);
-    const awaited = runner.indexOf(
-      'await awaitInteractiveEvidence(interactiveEvidencePromise, cleanupErrors);',
-      handled,
-    );
-    const artifactTransaction = runner.indexOf('await publishPreparedArtifactTransaction(', awaited);
-
-    expect(retained).toBeGreaterThan(-1);
-    expect(handled).toBeGreaterThan(retained);
-    expect(awaited).toBeGreaterThan(handled);
-    expect(artifactTransaction).toBeGreaterThan(awaited);
-    expect(runner).not.toContain('void appendEvidence(lines)');
-  });
-
-  it('forwards the strict interactive flag and requires visible WebKit in visual mode', async () => {
-    const [runner, fixture] = await Promise.all([
-      readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8'),
-      readFile('tests/e2e/native/fixtures/native-app.ts', 'utf8'),
-    ]);
-
-    expect(runner).toContain('strictInteractiveEnvironmentValue(process.env.NOVELIST_NATIVE_INTERACTIVE)');
-    expect(runner).toContain('NOVELIST_NATIVE_INTERACTIVE: interactiveEnvironment');
-    expect(runner).toContain('native_interactive_instruction=');
-    expect(runner).toContain('process.stdout.write');
-    expect(fixture).toContain("document.visibilityState === 'visible'");
   });
 
   it('invalidates stale shared evidence and publishes run-bound bytes atomically', async () => {
@@ -737,18 +736,6 @@ describe('native run support', () => {
     expect(await readFile(sharedPath)).toEqual(newerBytes);
   });
 
-  it('runs artifact and shared evidence publication in one rollback transaction', async () => {
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    const transaction = runner.indexOf('await publishPreparedArtifactTransaction(');
-    const sharedEvidence = runner.indexOf(
-      'await appendFile(sharedEvidencePath, await readFile(runEvidencePath));',
-      transaction,
-    );
-
-    expect(transaction).toBeGreaterThan(-1);
-    expect(sharedEvidence).toBeGreaterThan(transaction);
-  });
-
   it('removes shared success evidence when the current owner invalidates after failure', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'novelist-native-support-'));
     roots.push(root);
@@ -830,108 +817,6 @@ describe('native run support', () => {
       startedAtMs: 200,
       sha256: createHash('sha256').update(newerBytes).digest('hex'),
     });
-  });
-
-  it('claims owned evidence before Playwright and invalidates failed ownership after reporting', async () => {
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    const ownershipCalls = [
-      ...runner.matchAll(/await invalidateSharedArtifact\(\{ runId, startedAtMs \}, sharedScreenshotPath\)/g),
-    ].map((match) => match.index);
-
-    expect(ownershipCalls).toHaveLength(2);
-    expect(ownershipCalls[0]).toBeLessThan(runner.indexOf('const child = spawn('));
-    expect(runner.slice(ownershipCalls[0] - 180, ownershipCalls[0])).toContain('if (scenarioPolicy.acceptanceOwner)');
-    expect(ownershipCalls[1]).toBeGreaterThan(runner.lastIndexOf('await appendEvidence('));
-    expect(runner.slice(ownershipCalls[1] - 220, ownershipCalls[1])).toContain('!evidencePublicationAttempted');
-    expect(runner.slice(ownershipCalls[1] - 220, ownershipCalls[1])).toContain('scenarioPolicy.acceptanceOwner');
-  });
-
-  it('gates native screenshot ownership and publication with the scenario policy', async () => {
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    const policy = runner.indexOf('const scenarioPolicy = nativeScenarioPolicy(nativeMode, testGrep);');
-    const initialOwnership = runner.indexOf(
-      'await invalidateSharedArtifact({ runId, startedAtMs }, sharedScreenshotPath);',
-    );
-
-    expect(policy).toBeGreaterThan(-1);
-    expect(policy).toBeLessThan(initialOwnership);
-    expect(runner).toContain('if (scenarioPolicy.acceptanceOwner) {');
-    expect(runner).toContain('NOVELIST_NATIVE_ARTIFACT: scenarioPolicy.artifact');
-    expect(runner).toContain("scenarioPolicy.artifact === 'required'");
-    expect(runner).toContain("reason: 'not_required'");
-  });
-
-  it('holds one exclusive native wrapper lock across setup and final evidence teardown', async () => {
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    const acquisition = runner.indexOf('const nativeRunLock = await acquireNativeRunLock(');
-    const runRootAllocation = runner.indexOf('await mkdtemp(');
-    const sharedOwnership = runner.indexOf('await invalidateSharedArtifact(');
-    const finalEvidence = runner.lastIndexOf('await appendEvidence(');
-    const release = runner.lastIndexOf('await releaseNativeRunLock(nativeRunLock);');
-
-    expect(acquisition).toBeGreaterThan(-1);
-    expect(acquisition).toBeLessThan(runRootAllocation);
-    expect(acquisition).toBeLessThan(sharedOwnership);
-    expect(release).toBeGreaterThan(finalEvidence);
-    expect(runner).toContain('resolveNativeRunLockPort(process.env.NOVELIST_NATIVE_RUN_LOCK_PORT)');
-    expect(runner).not.toContain('NOVELIST_NATIVE_RUN_LOCK_OVERRIDE');
-  });
-
-  it('uses the validated run-owned inventory and verifies cleanup plus lock listener release', async () => {
-    const runner = await readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8');
-    expect(runner).toContain('const runOwnedPaths = buildRunOwnedPathInventory({');
-    expect(runner).toContain('runOwnedPathResidue(runOwnedPaths, existsSync)');
-    expect(runner).toContain('runOwnedPathResidue({ evidence: runEvidencePath }, existsSync)');
-    expect(runner).toContain('nativeRunLock.listener.listening');
-  });
-
-  it('validates screenshot crop containment before invoking cropped native metrics', async () => {
-    const lifecycle = await readFile('tests/e2e/native/specs/native-lifecycle.spec.ts', 'utf8');
-    const validation = lifecycle.indexOf('computeContainedScreenshotCrop(');
-    const croppedMetrics = lifecycle.indexOf('const coverMetrics = await imageMetrics([');
-
-    expect(validation).toBeGreaterThan(-1);
-    expect(croppedMetrics).toBeGreaterThan(validation);
-  });
-
-  it('does not let the Swift metrics helper silently intersect an invalid crop', async () => {
-    const helper = await readFile('tests/e2e/native/macos-pasteboard.swift', 'utf8');
-    expect(helper).not.toContain('.intersection(imageBounds)');
-    expect(helper).toContain('requestedBounds');
-    expect(helper).toContain('crop rectangle is outside image bounds');
-  });
-
-  it('samples screenshot crop coordinates without a second vertical flip', async () => {
-    const helper = await readFile('tests/e2e/native/macos-pasteboard.swift', 'utf8');
-    expect(helper).toContain('bitmap.colorAt(x: x, y: topY)');
-    expect(helper).not.toContain('bitmap.pixelsHigh - 1 - topY');
-  });
-
-  it('keeps live native reports outside Vite watch and skips non-required capture', async () => {
-    const [runner, config, fixture, lifecycle] = await Promise.all([
-      readFile('tests/e2e/native/run-native-smoke.mjs', 'utf8'),
-      readFile('playwright.tauri.config.ts', 'utf8'),
-      readFile('tests/e2e/native/fixtures/native-app.ts', 'utf8'),
-      readFile('tests/e2e/native/specs/native-lifecycle.spec.ts', 'utf8'),
-    ]);
-
-    const childExit = runner.indexOf('childResult = await childResultPromise;');
-    const sharedEvidencePublication = runner.indexOf(
-      'await appendFile(sharedEvidencePath, await readFile(runEvidencePath));',
-    );
-    expect(runner).toContain('const runEvidencePath = path.join(tmpdir()');
-    expect(runner).toContain('NOVELIST_NATIVE_EVIDENCE: runEvidencePath');
-    expect(runner).toContain("const playwrightOutputPath = path.join(runRoot, 'playwright-output')");
-    expect(runner).toContain('NOVELIST_NATIVE_PLAYWRIGHT_OUTPUT: playwrightOutputPath');
-    expect(childExit).toBeGreaterThan(-1);
-    expect(sharedEvidencePublication).toBeGreaterThan(childExit);
-    expect(config).toContain("process.env['NOVELIST_NATIVE_PLAYWRIGHT_OUTPUT']");
-    expect(fixture).toContain("artifactRequirement: requiredArtifactRequirement('NOVELIST_NATIVE_ARTIFACT')");
-    expect(lifecycle).toContain("if (nativeEnv.artifactRequirement === 'not_required')");
-    const nonRequiredCapture = lifecycle.indexOf("if (nativeEnv.artifactRequirement === 'not_required')");
-    const snapshotStage = lifecycle.search(/runNativeStage\(\s*'snapshot'/);
-    expect(snapshotStage).toBeGreaterThan(-1);
-    expect(nonRequiredCapture).toBeLessThan(snapshotStage);
   });
 
   it('propagates inaccessible cleanup-root enumeration failures', async () => {

@@ -1,7 +1,7 @@
 [plugin]
 id = "canvas"
 name = "Canvas Editor"
-version = "1.0.0"
+version = "1.0.1"
 description = "Visual canvas editor for .canvas files with drag-and-drop nodes"
 author = "Novelist Team"
 permissions = ["read", "write", "ui"]

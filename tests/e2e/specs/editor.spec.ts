@@ -1,14 +1,10 @@
-import { test, expect } from '../fixtures/app-fixture';
+import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
 test.describe('Editor', () => {
   test.beforeEach(async ({ app }) => {
     // Open project and a file
-    const recentItem = app.getByTestId('recent-project-0');
-    if (await recentItem.isVisible().catch(() => false)) {
-      await recentItem.click();
-      await app.getByTestId('sidebar').waitFor({ state: 'visible', timeout: 5000 });
-    }
+    await openRecentProject(app);
 
     const fileItem = app.getByTestId('sidebar-file-Chapter 1.md');
     await fileItem.click();
@@ -109,7 +105,14 @@ test.describe('Editor', () => {
   });
 
   test('external reload is deferred while IME composition is active', async ({ app, mockState }) => {
+    // External changes are delivered only after app-events' 1_050 ms debounce.
+    // Drive time explicitly so the assertions below run after that delivery
+    // point, while composition is still active.
+    const pastExternalChangeDebounceMs = 2_000;
+    await app.clock.install();
     const filePath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    const externalReads = async () => (await mockState.getInvokeCalls())
+      .filter(call => call.command === 'read_file' && call.args.path === filePath).length;
     const initialContent = await app.evaluate(() => (window as any).__novelist_view.state.doc.toString());
     const pos = await app.evaluate(() => {
       const view = (window as any).__novelist_view;
@@ -122,8 +125,14 @@ test.describe('Editor', () => {
 
     const cleanExternal = '# 第一章\n\n外部合成结束版本。\n';
     await mockState.setFileContent(filePath, cleanExternal);
+    const readsBeforeChange = await externalReads();
+    await app.clock.pauseAt(await app.evaluate(() => Date.now() + 10));
     await mockState.emitEvent('file-changed', { path: filePath });
-    await app.waitForTimeout(150);
+    await app.clock.runFor(pastExternalChangeDebounceMs);
+
+    // Deferred, not merely not yet delivered: the debounce has elapsed, yet the
+    // composing tab's file was never read.
+    expect(await externalReads()).toBe(readsBeforeChange);
 
     const duringComposition = await app.evaluate(({ expectedPos, expectedContent }) => {
       const view = (window as any).__novelist_view;
@@ -146,6 +155,7 @@ test.describe('Editor', () => {
       view.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
       delete (window as any).__ime_test_view;
     });
+    await app.clock.resume();
 
     await expect.poll(() => app.evaluate(() => (window as any).__novelist_view.state.doc.toString()))
       .toBe(cleanExternal);
@@ -158,8 +168,12 @@ test.describe('Editor', () => {
     const dirtyLocal = `${cleanExternal}\n本地未保存内容。`;
     const dirtyExternal = '# 第一章\n\n外部冲突内容。\n';
     await mockState.setFileContent(filePath, dirtyExternal);
+    const readsBeforeConflict = await externalReads();
+    await app.clock.pauseAt(await app.evaluate(() => Date.now() + 10));
     await mockState.emitEvent('file-changed', { path: filePath });
-    await app.waitForTimeout(150);
+    await app.clock.runFor(pastExternalChangeDebounceMs);
+
+    expect(await externalReads()).toBe(readsBeforeConflict);
 
     await expect(app.getByRole('dialog')).toHaveCount(0);
     expect(await app.evaluate(() => (window as any).__novelist_view.state.doc.toString())).toBe(dirtyLocal);
@@ -168,6 +182,7 @@ test.describe('Editor', () => {
       const view = (window as any).__novelist_view;
       view.contentDOM.dispatchEvent(new Event('compositionend', { bubbles: true }));
     });
+    await app.clock.resume();
     const conflict = app.getByRole('dialog');
     await expect(conflict).toBeVisible();
     await expect(conflict).toContainText('Chapter 1.md');
@@ -175,5 +190,31 @@ test.describe('Editor', () => {
     await expect(conflict.getByRole('button', { name: 'Load Theirs' })).toBeVisible();
     expect(await app.evaluate(() => (window as any).__novelist_view.state.doc.toString())).toBe(dirtyLocal);
     await app.screenshot({ path: '.sisyphus/evidence/task-11-ime-conflict.png' });
+  });
+
+  test('[regression] Keep Mine writes the typed editor text and marks the tab clean', async ({ app, mockState }) => {
+    const filePath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    await app.evaluate(() => {
+      const view = (window as any).__novelist_view;
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      view.focus();
+    });
+    // Real typing only marks the tab dirty; the store's copy of the text is
+    // still the last save until something syncs it from the view.
+    await app.keyboard.type(' 本地修改尚未保存');
+    await expect(app.locator('.dirty-dot')).toBeVisible();
+    const editorText = await app.evaluate(() => (window as any).__novelist_view.state.doc.toString());
+    expect(editorText).toContain('本地修改尚未保存');
+
+    await mockState.setFileContent(filePath, '# 第一章\n\n外部修改。\n');
+    await mockState.emitEvent('file-changed', { path: filePath });
+    const conflict = app.getByRole('dialog');
+    await expect(conflict).toBeVisible();
+    await conflict.getByRole('button', { name: 'Keep Mine' }).click();
+
+    await expect(conflict).toHaveCount(0);
+    await expect.poll(async () => (await mockState.getWrittenFiles())[filePath]).toBe(editorText);
+    await expect(app.locator('.dirty-dot')).toHaveCount(0);
+    expect(await app.evaluate(() => (window as any).__novelist_view.state.doc.toString())).toBe(editorText);
   });
 });
