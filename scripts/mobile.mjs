@@ -39,10 +39,13 @@ const ANDROID = {
   project: path.join(CORE, 'gen', 'android'),
 };
 
+const IOS_MIN_OS = '16.0';
 const IOS = {
-  minOs: '16.0',
-  device: { tauri: 'aarch64', triple: 'aarch64-apple-ios', sdk: 'iphoneos', out: 'arm64' },
-  simulator: { tauri: 'aarch64-sim', triple: 'aarch64-apple-ios-sim', sdk: 'iphonesimulator', out: 'arm64-sim' },
+  minOs: IOS_MIN_OS,
+  // `clang` is the clang spelling of the Rust triple: rquickjs hands the Rust
+  // triple to bindgen, and clang 17+ rejects `aarch64-apple-ios-sim`.
+  device: { tauri: 'aarch64', triple: 'aarch64-apple-ios', clang: `arm64-apple-ios${IOS_MIN_OS}`, sdk: 'iphoneos', out: 'arm64' },
+  simulator: { tauri: 'aarch64-sim', triple: 'aarch64-apple-ios-sim', clang: `arm64-apple-ios${IOS_MIN_OS}-simulator`, sdk: 'iphonesimulator', out: 'arm64-sim' },
   // App Store Connect only accepts uploads built with Xcode 26+ since 2026-04-28.
   minUploadXcode: 26,
   project: path.join(CORE, 'gen', 'apple'),
@@ -273,6 +276,11 @@ function run(command, args, { cwd = ROOT, env = process.env, capture = false, in
 
 function tail(text, lines = 15) {
   return text.trim().split('\n').slice(-lines).join('\n');
+}
+
+/** Quote one argument for consumers that split with shell rules (bindgen uses shlex). */
+function shellWord(value) {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 // ── Arguments ─────────────────────────────────────────────────────────────
@@ -590,7 +598,10 @@ function resolveLibclang() {
 
 function androidBuildTools(sdk) {
   const root = path.join(sdk, 'build-tools');
-  const versions = isDir(root) ? fs.readdirSync(root).filter((name) => /^\d+(\.\d+)*$/.test(name)).sort(compareVersions).reverse() : [];
+  const installed = isDir(root) ? fs.readdirSync(root).filter((name) => /^\d+(\.\d+)*$/.test(name)).sort(compareVersions).reverse() : [];
+  // Prefer the pinned versions CI installs, so tool output stays the same.
+  const pinned = [...ANDROID.buildTools].sort(compareVersions).reverse();
+  const versions = [...pinned.filter((version) => installed.includes(version)), ...installed.filter((version) => !pinned.includes(version))];
   for (const version of versions) {
     const dir = path.join(root, version);
     const apksigner = path.join(dir, process.platform === 'win32' ? 'apksigner.bat' : 'apksigner');
@@ -645,7 +656,7 @@ async function androidEnvironment({ targets, cargo = false, drop = [] }) {
   };
   for (const target of targets) {
     const key = target.triple.replaceAll('-', '_');
-    env[`BINDGEN_EXTRA_CLANG_ARGS_${key}`] = `--sysroot=${path.join(toolchain, 'sysroot')}`;
+    env[`BINDGEN_EXTRA_CLANG_ARGS_${key}`] = shellWord(`--sysroot=${path.join(toolchain, 'sysroot')}`);
     if (cargo) {
       const clang = path.join(toolchain, 'bin', `${target.triple}${ANDROID.minSdk}-clang${exe}`);
       if (!isFile(clang)) fail(`NDK compiler missing: ${clang}`);
@@ -723,12 +734,19 @@ async function verifyApkSignature(tools, apk, env, expectedSha256) {
   const output = `${result.stdout}\n${result.stderr}`;
   if (result.code !== 0 || !/^Verifies$/m.test(output)) fail(`apksigner rejected ${rel(apk)}`, [tail(output)]);
   if (!/Verified using v[23] scheme \(APK Signature Scheme v[23]\): true/.test(output)) fail(`${rel(apk)} is not signed with APK Signature Scheme v2 or v3`);
-  const signers = [...output.matchAll(/^Signer #\d+ certificate SHA-256 digest: ([0-9a-f]{64})$/gm)].map((match) => match[1]);
-  if (signers.length !== 1) fail(`${rel(apk)} has ${signers.length} signers; expected exactly one`);
-  if (expectedSha256 && signers[0] !== expectedSha256) {
-    fail(`${rel(apk)} is signed by certificate ${signers[0]}, not the release certificate ${expectedSha256}`, ['an APK signed with another key cannot upgrade installed copies']);
+  // apksigner <= 36 prints "Signer #1 certificate SHA-256 digest: …"; 37+
+  // prints one line per signature scheme ("V2 Signer: certificate SHA-256
+  // digest: …"). Either way: exactly one signer and one distinct certificate.
+  const count = Number(/^Number of signers: (\d+)$/m.exec(output)?.[1]);
+  const digests = new Set([...output.matchAll(/^(?:Signer #\d+|V\d+(?:\.\d+)? Signer(?: #\d+)?:) certificate SHA-256 digest: ([0-9a-f]{64})$/gm)].map((match) => match[1]));
+  if (count !== 1 || digests.size !== 1) {
+    fail(`${rel(apk)}: apksigner reports ${Number.isNaN(count) ? 'an unknown number of' : count} signer(s) and ${digests.size} distinct certificate(s); expected exactly one of each`, [tail(output)]);
   }
-  return signers[0];
+  const [signer] = digests;
+  if (expectedSha256 && signer !== expectedSha256) {
+    fail(`${rel(apk)} is signed by certificate ${signer}, not the release certificate ${expectedSha256}`, ['an APK signed with another key cannot upgrade installed copies']);
+  }
+  return signer;
 }
 
 function normalizeSha256(value, source) {
@@ -963,8 +981,10 @@ async function iosEnvironment({ minXcode, needSimulatorRuntime = false, drop = [
   await requireRustTargets([IOS.device.triple, IOS.simulator.triple]);
   const env = {
     IPHONEOS_DEPLOYMENT_TARGET: IOS.minOs,
-    [`BINDGEN_EXTRA_CLANG_ARGS_${IOS.device.triple.replaceAll('-', '_')}`]: `--sysroot=${sdks[IOS.device.sdk]}`,
-    [`BINDGEN_EXTRA_CLANG_ARGS_${IOS.simulator.triple.replaceAll('-', '_')}`]: `--sysroot=${sdks[IOS.simulator.sdk]}`,
+    // bindgen appends these after rquickjs's own `--target=<rust triple>`;
+    // clang uses the last --target, so the clang spelling wins.
+    [`BINDGEN_EXTRA_CLANG_ARGS_${IOS.device.triple.replaceAll('-', '_')}`]: `${shellWord(`--sysroot=${sdks[IOS.device.sdk]}`)} --target=${IOS.device.clang}`,
+    [`BINDGEN_EXTRA_CLANG_ARGS_${IOS.simulator.triple.replaceAll('-', '_')}`]: `${shellWord(`--sysroot=${sdks[IOS.simulator.sdk]}`)} --target=${IOS.simulator.clang}`,
   };
   return { developerDir: developer.stdout.trim(), xcodeVersion, xcodeMajor: Number(match[1]), sdks, env: childEnv(env, { drop }) };
 }

@@ -8,13 +8,13 @@ supported. Product scope and architecture live in
 the self-hosted sync server runbook lives in
 [../selfhost/nextcloud/README.md](../selfhost/nextcloud/README.md).
 
-**Status.** The scripts and workflows below exist and their local checks were
-exercised (argument/environment validation, `actionlint`, `docker compose
-config`). No signed iOS build, TestFlight upload, Beta App Review result or
-signed release APK has been produced yet: each needs the external credentials
-listed in [Pending external prerequisites](#pending-external-prerequisites).
-Nothing in this document claims that Apple has approved, or will approve, a
-build.
+**Status.** Local frontend/Rust/browser gates and an actual signed universal
+Android release are verified. Both Android ABIs pass the 16 KiB ELF/ZIP checks;
+the signed release starts on Android hardware and imports an exported CJK
+project. Native account/sync/share/background-save behavior was exercised on
+the device with real Rust IPC and a real WebDAV server. iOS device Rust checks
+have run on GitHub; simulator/app acceptance is tracked by the draft PR's
+Mobile CI. No TestFlight upload or Beta App Review approval is claimed.
 
 ## Distribution model
 
@@ -88,6 +88,11 @@ Requirements:
   platform and a simulator runtime (`xcodebuild -downloadPlatform iOS`).
   App Store Connect only accepts uploads built with Xcode 26 or later
   (since 2026-04-28), so `publish` and `upload` refuse older Xcode.
+  rquickjs passes the Rust triple (`aarch64-apple-ios-sim`) to bindgen and
+  clang 17+ rejects it, so the scripts append the clang spelling
+  (`--target=arm64-apple-ios16.0-simulator`, `arm64-apple-ios16.0` for
+  devices) plus the SDK `--sysroot` through `BINDGEN_EXTRA_CLANG_ARGS_<target>`;
+  clang uses the last `--target`.
 - `tauri ios build` rewrites tracked files under `core/gen/apple` (bundle id,
   team, signing style, merged `Info.plist`). The scripts warn when that
   happens; never commit a team ID or signing identity from a local publish.
@@ -141,7 +146,12 @@ files, and manually. No secrets.
   16 KiB page alignment). Manual runs upload the debug APK as a 7-day artifact.
 - **iOS** (`macos-26`, Xcode 26.6 selected explicitly): `ios doctor`, clippy
   for device and simulator targets, unsigned simulator app, then `Info.plist`
-  checks (bundle id, iOS 16.0 minimum, iPhone + iPad family).
+  checks (bundle id, iOS 16.0 minimum, iPhone + iPad family). After the build,
+  `node scripts/mobile-ios-smoke.mjs --out <empty evidence directory>` creates
+  fresh iPhone and iPad simulators, waits for native frontend-startup markers,
+  captures screenshots/logs, and removes only its own devices. The
+  `novelist-ios-simulator-smoke` artifact is retained for 7 days, including
+  failure diagnostics when possible. A skipped/failed smoke is not acceptance.
 
 ### Mobile Release (`.github/workflows/mobile-release.yml`)
 
@@ -481,9 +491,26 @@ For server-side checks run `pnpm mobile:webdav:conformance -- --url
 echoing). Ask users for app version, build number, OS version and the error
 text; never ask them to send passwords, app passwords or project files.
 
+## Initial Android signing identity
+
+The maintainer approved creating the initial release key locally. Its private
+keystore and password environment are under ignored `.local/android-signing/`
+with restricted permissions; neither is committed. The public certificate
+SHA-256 is:
+
+```text
+1375315e6861ebb3e46dca6231db34c1bc3c29aafa0c3833a73ab7a4b002d3f5
+```
+
+The first locally verified signed artifact uses build number 10000. The
+repository variable `MOBILE_BUILD_NUMBER_BASE` is reserved at 10000, so the
+first CI release starts above it. Before distribution, take two offline backups
+of the key **and its password**. Do not generate another key for updates.
+
 ## Pending external prerequisites
 
-Nothing below exists yet; each item needs a person with the relevant account.
+The following inputs still need to be supplied or confirmed by a maintainer;
+none of the Apple publishing steps is inferred from a simulator build.
 
 - [ ] Apple Developer Program membership and team roles; Team ID recorded.
 - [ ] Explicit App ID `com.novelist.app`; App Store Connect app record (name,
@@ -494,8 +521,9 @@ Nothing below exists yet; each item needs a person with the relevant account.
       TestFlight Test Information.
 - [ ] GitHub environment `mobile-release` with the secrets and variables above
       (optionally with required reviewers).
-- [ ] Android release keystore generated, backed up offline twice,
-      fingerprint published.
+- [x] Initial Android release key generated locally; public fingerprint recorded
+      above and a signed universal APK verified.
+- [ ] Two offline backups of the Android keystore and password confirmed.
 - [ ] First run of Mobile Release (signed APK attached, TestFlight upload),
       internal testing, then Beta App Review for external testing. No result of
       these steps is known until they run.
