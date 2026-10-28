@@ -445,7 +445,7 @@ mod tests {
             assert!(!key.contains(tmp.path().to_str().unwrap()));
 
             let new_path = after.library_root().join(relative);
-            assert_eq!(after.resolve(&key), new_path.to_string_lossy());
+            assert_eq!(Path::new(&*after.resolve(&key)), new_path);
             assert_eq!(after.storage_key(new_path.to_str().unwrap()), key);
         }
     }

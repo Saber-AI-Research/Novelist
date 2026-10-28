@@ -1430,8 +1430,9 @@ mod tests {
         let layout = layout(&tmp, "A");
         let project = layout.library_root().join("书");
         let markdown = "---\ntitle: x\n---\n# 第一章 <雪>\n\n「你好」<script>alert(1)</script>\n";
-        write(&project, "a<b>&\"c\".md", markdown.as_bytes());
-        let file = project.join("a<b>&\"c\".md");
+        // `&` is valid in file names on every platform and must be escaped in the title.
+        write(&project, "旧稿&档案.md", markdown.as_bytes());
+        let file = project.join("旧稿&档案.md");
 
         let exported = export_document_in(&layout, file.to_str().unwrap(), "markdown").unwrap();
         assert_eq!(std::fs::read(&exported).unwrap(), markdown.as_bytes());
@@ -1439,10 +1440,7 @@ mod tests {
 
         let html_path = export_document_in(&layout, file.to_str().unwrap(), "html").unwrap();
         let html = std::fs::read_to_string(&html_path).unwrap();
-        assert!(
-            html.contains("<title>a&lt;b&gt;&amp;&quot;c&quot;</title>"),
-            "{html}"
-        );
+        assert!(html.contains("<title>旧稿&amp;档案</title>"), "{html}");
         assert!(
             html.contains("第一章 &lt;雪&gt;") && html.contains("「你好」"),
             "{html}"
