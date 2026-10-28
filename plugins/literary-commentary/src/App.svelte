@@ -6,12 +6,18 @@
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import MessageSquareText from '@lucide/svelte/icons/message-square-text';
+  import StepForward from '@lucide/svelte/icons/step-forward';
+  import FastForward from '@lucide/svelte/icons/fast-forward';
+  import ArrowDownToLine from '@lucide/svelte/icons/arrow-down-to-line';
+  import Undo2 from '@lucide/svelte/icons/undo-2';
+  import Redo2 from '@lucide/svelte/icons/redo-2';
   import {
     applyDeleteBackwardAtCaret,
     applyDelimitedInputAtCaret,
     applyInput,
     buildRenderPieces,
     clampCaret,
+    commentCloser,
     moveCaret,
     normalizeStudyFile,
     renderedLength,
@@ -69,9 +75,9 @@
   const messages = {
     en: {
       commentShortcut: 'Comment mode (Cmd/Ctrl + Shift + Enter)',
-      commentHint: 'Type 【 or 「 to add a comment',
+      commentHint: 'Type 【, 「 or [ to add a comment',
       commentActive: 'Writing comment',
-      commentEndHint: 'Type 】 or 」 to finish',
+      commentEndHint: 'Type 】, 」 or ] to finish',
       commentEndHintBracket: 'Type {closer} to finish',
       autoTypeShortcut: 'Tab types the next source character · Shift+Tab finishes the sentence',
       autoTypeHint: 'Tab next character',
@@ -88,12 +94,19 @@
       saved: 'Saved',
       saveFailed: 'Save failed',
       opening: 'Opening literary commentary chapter...',
+      touchActions: 'Transcription actions',
+      toggleComment: 'Comment',
+      nextCharacter: 'Next character',
+      fillSentence: 'Finish sentence',
+      returnToEnd: 'Back to end',
+      undo: 'Undo',
+      redo: 'Redo',
     },
     'zh-CN': {
       commentShortcut: '评注模式（Cmd/Ctrl + Shift + Enter）',
-      commentHint: '输入【或「开始评注',
+      commentHint: '输入【、「或 [ 开始评注',
       commentActive: '正在评注',
-      commentEndHint: '输入】或」结束',
+      commentEndHint: '输入】、」或 ] 结束',
       commentEndHintBracket: '输入{closer}结束',
       autoTypeShortcut: 'Tab 自动录入下一字 · Shift+Tab 补完整句',
       autoTypeHint: 'Tab 跟打下一字',
@@ -110,6 +123,13 @@
       saved: '已保存',
       saveFailed: '保存失败',
       opening: '正在打开文学评注章节...',
+      touchActions: '录入操作',
+      toggleComment: '评注',
+      nextCharacter: '下一字',
+      fillSentence: '补完整句',
+      returnToEnd: '回到末尾',
+      undo: '撤销',
+      redo: '重做',
     },
   } as const;
 
@@ -129,7 +149,7 @@
     : 0);
   let commentEndHint = $derived(
     commentBrackets[0]
-      ? text('commentEndHintBracket').replace('{closer}', commentBrackets[0] === '【' ? '】' : '」')
+      ? text('commentEndHintBracket').replace('{closer}', commentCloser(commentBrackets[0]))
       : text('commentEndHint'),
   );
 
@@ -315,6 +335,34 @@
     // A shortcut-opened comment has no bracket of its own: either closer ends it.
     commentBrackets = next === 'comment' ? [null] : [];
     focusCapture();
+  }
+
+  type TouchAction = 'comment' | 'next' | 'sentence' | 'end' | 'undo' | 'redo';
+
+  /**
+   * On-screen equivalents of the keyboard-only shortcuts for touch devices
+   * without a hardware keyboard (Cmd/Ctrl+Shift+Enter, Tab, Shift+Tab, Esc,
+   * Cmd/Ctrl+Z). Each reuses the shortcut's handler, refuses to run while an
+   * IME composes (like the keydown path), and refocuses the capture inside
+   * the tap so the soft keyboard stays up at the caret.
+   */
+  function runTouchAction(action: TouchAction) {
+    if (!file || composing) return;
+    if (action === 'comment') {
+      setMode(mode === 'copy' ? 'comment' : 'copy');
+      return;
+    }
+    if (action === 'next') typeNextSourceCharacter();
+    else if (action === 'sentence') typeNextSourceSentence();
+    else if (action === 'end') setCaret(renderedLength(file));
+    else if (action === 'undo') restoreHistory(undoStack, redoStack);
+    else restoreHistory(redoStack, undoStack);
+    focusCapture();
+  }
+
+  /** Tapping an action must not move focus off the capture textarea. */
+  function keepCaptureFocus(event: MouseEvent) {
+    event.preventDefault();
   }
 
   function cloneFile(value: LiteraryStudyFile): LiteraryStudyFile {
@@ -787,6 +835,7 @@
       aria-label={mode === 'comment' ? text('inputComment') : text('inputSource')}
       autocomplete="off"
       autocapitalize="off"
+      autocorrect="off"
       spellcheck="false"
       onbeforeinput={handleBeforeInput}
       oninput={handleInput}
@@ -822,6 +871,59 @@
         {#each pieces as piece}{#if piece.type === 'source'}<span class:copied={piece.copied} class:pending={!piece.copied} data-caret-start={piece.start ?? undefined}>{piece.text}</span>{:else if piece.type === 'insertion'}<span class:comment={piece.insertion.kind === 'comment'} class:mistake={piece.insertion.kind === 'mistake'} data-caret-start={piece.start}>{piece.text}</span>{:else}<span bind:this={caret} class="typing-caret" class:comment-caret={mode === 'comment'} class:composing class:rewound={!atFrontier}></span>{/if}{/each}
       </article>
     </main>
+
+    <!-- Touch devices have no Tab/Esc/shortcut keys: the same actions as
+         buttons, shown only for coarse/hover-less pointers. -->
+    <div class="touch-actions" role="toolbar" aria-label={text('touchActions')}>
+      <button
+        type="button"
+        class="touch-action"
+        class:active={mode === 'comment'}
+        aria-pressed={mode === 'comment'}
+        disabled={composing}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('comment')}
+      ><MessageSquareText size={16} /><span>{text('toggleComment')}</span></button>
+      <button
+        type="button"
+        class="touch-action"
+        disabled={composing || file.sourceCursor >= file.source.length}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('next')}
+      ><StepForward size={16} /><span>{text('nextCharacter')}</span></button>
+      <button
+        type="button"
+        class="touch-action"
+        disabled={composing || file.sourceCursor >= file.source.length}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('sentence')}
+      ><FastForward size={16} /><span>{text('fillSentence')}</span></button>
+      <button
+        type="button"
+        class="touch-action"
+        disabled={composing || atFrontier}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('end')}
+      ><ArrowDownToLine size={16} /><span>{text('returnToEnd')}</span></button>
+      <button
+        type="button"
+        class="touch-action icon-only"
+        title={text('undo')}
+        aria-label={text('undo')}
+        disabled={composing}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('undo')}
+      ><Undo2 size={16} /></button>
+      <button
+        type="button"
+        class="touch-action icon-only"
+        title={text('redo')}
+        aria-label={text('redo')}
+        disabled={composing}
+        onmousedown={keepCaptureFocus}
+        onclick={() => runTouchAction('redo')}
+      ><Redo2 size={16} /></button>
+    </div>
 
     <footer>
       <span class="progress-status" title={text('autoTypeShortcut')}>
@@ -1133,6 +1235,79 @@
   @keyframes blink {
     0%, 48% { opacity: 1; }
     49%, 100% { opacity: 0; }
+  }
+  .touch-actions {
+    display: none;
+  }
+  /* Touch: 44px targets, a wrapping header so chapter navigation never falls
+     off a phone, and the on-screen shortcut bar just above the footer (which
+     sits right above the soft keyboard when the host shrinks the frame). */
+  @media (hover: none), (pointer: coarse) {
+    header {
+      flex-wrap: wrap;
+      row-gap: 6px;
+    }
+    .chapter-heading {
+      /* Long titles truncate instead of pushing the toolbar to a new row. */
+      flex: 1 1 160px;
+    }
+    .toolbar {
+      flex-wrap: wrap;
+      row-gap: 6px;
+    }
+    .icon-button {
+      width: 44px;
+      height: 44px;
+    }
+    main {
+      overscroll-behavior: contain;
+    }
+    .touch-actions {
+      flex: 0 0 auto;
+      display: flex;
+      gap: 6px;
+      padding: 6px 10px;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      scrollbar-width: none;
+      background: var(--novelist-bg, #fff);
+      border-top: 1px solid var(--novelist-border, #e6e6e6);
+    }
+    .touch-action {
+      min-width: 44px;
+      min-height: 44px;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 0 12px;
+      color: var(--novelist-text-secondary, #555);
+      background: var(--novelist-bg-secondary, #f5f5f5);
+      border: 1px solid var(--novelist-border, #e2e2e2);
+      border-radius: 8px;
+      font-size: 0.78rem;
+      white-space: nowrap;
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .touch-action.icon-only {
+      padding: 0;
+    }
+    .touch-action.active {
+      color: #2d6f9f;
+      background: color-mix(in srgb, #d8efff 62%, var(--novelist-bg, #fff));
+      border-color: color-mix(in srgb, #87bee3 52%, var(--novelist-border, #e2e2e2));
+    }
+    .touch-action:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    footer {
+      min-height: 32px;
+    }
   }
   @media (max-width: 680px) {
     header { padding: 8px 10px; }
