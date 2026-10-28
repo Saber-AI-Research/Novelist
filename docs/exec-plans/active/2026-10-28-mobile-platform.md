@@ -104,10 +104,10 @@ pub struct PlatformCapabilities {
 ### M0 工具链与原生工程
 
 - [x] 安装四个 Rust targets：`aarch64-apple-ios`、`aarch64-apple-ios-sim`、`aarch64-linux-android`、`x86_64-linux-android`；安装 Android SDK 36、NDK 27.2、JDK 17、CocoaPods、XcodeGen。
-- [ ] 在 GitHub `macos-26` / Xcode 26.6 验证 iOS device/simulator 与 iPhone/iPad 启动截图；用户已批准推送专用分支并创建草稿 PR，本机不伪造 iPhoneOS SDK。
+- [x] GitHub `macos-26` / Xcode 26.6 Mobile CI（PR #6，run 40723119422）：iOS device/simulator Clippy、模拟器 `.app` 构建，以及全新 iPhone 17e 与 iPad 模拟器启动截图均通过。
 - [x] 实际运行 `pnpm tauri ios init --ci --skip-targets-install` / `pnpm tauri android init --ci --skip-targets-install` 生成原生工程；将源码与 iPad 目标配置入库，排除机器路径/签名密钥/构建产物。
 - [x] Android arm64 / x86_64 实际 Clippy 检查通过；两种 ABI 的 Release APK 已链接、R8 打包，并通过 16 KiB ELF/ZIP 对齐校验。
-- [ ] iOS device / simulator 实际编译与启动门禁待 GitHub CI 结果。
+- [x] iOS 模拟器真实 Rust IPC 门禁在 iPhone 与 iPad 上均通过：内置资源、新建 Novel 项目（落盘 `Documents/Projects`）、WebKit 输入 CJK 并保存（磁盘字节一致）、文学评注 asset iframe 像素检查、Keychain 账号重启后仍在线、真实 Apache WebDAV 同步 5 个文件且服务端字节一致。
 - [x] Android 真机验证主界面、沙盒项目库、CJK 保存、后台 flush、杀进程恢复、Keystore 升级保留、真实 WebDAV 双向传输、原生分享取消与评注 iframe。
 - [ ] 真机 IME 冒烟：iOS 拼音/注音/日文、Android Gboard/搜狗/百度，在 CM6 中输入段落、`「」`/`【】`、中文标点。
 
@@ -157,9 +157,10 @@ pub struct PlatformCapabilities {
 
 - [x] 原生 canvas / kanban / mindmap 保留已有手势引擎，补齐触控编辑/删除/重命名与可见控件；canvas 项目内引用可跨根迁移，移动端不读取项目外路径。
 - [x] 文学评注触控操作栏与书籍翻译窄屏上下布局已实现；原生 Android 评注输入与保存已验证。
-- [ ] iOS 原生插件 iframe、Keychain、分享/iPad popover 随模拟器/设备门禁验证；UI-only 插件按声明式 iframe 激活，不要求不存在的 QuickJS 脚本。
+- [x] iOS 原生插件 iframe 与 Keychain 已在 iPhone/iPad 模拟器门禁中验证；UI-only 插件按声明式 iframe 激活，不要求不存在的 QuickJS 脚本。
+- [ ] iOS 原生分享面板与 iPad popover 锚点需在真机上确认（模拟器门禁不弹出系统分享面板）。
 - [x] iOS 仅内置插件限制已同时在 UI 与 Rust 执行，Android 保留既有插件流程。
-- [ ] 模板面板与 `$|$` caret anchor 在移动编辑器中工作。
+- [x] 模板面板与 `$|$` caret anchor 在移动编辑器中工作（`mobile-shell.spec.ts` 在 iphone / ipad / ipad-landscape / android-phone 上覆盖）。
 
 **验收：** 五个内置插件在 iPad 与 Android 平板上通过各自的冒烟清单。
 

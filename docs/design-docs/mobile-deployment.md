@@ -12,9 +12,11 @@ the self-hosted sync server runbook lives in
 Android release are verified. Both Android ABIs pass the 16 KiB ELF/ZIP checks;
 the signed release starts on Android hardware and imports an exported CJK
 project. Native account/sync/share/background-save behavior was exercised on
-the device with real Rust IPC and a real WebDAV server. iOS device Rust checks
-have run on GitHub; simulator/app acceptance is tracked by the draft PR's
-Mobile CI. No TestFlight upload or Beta App Review approval is claimed.
+the device with real Rust IPC and a real WebDAV server. iOS device and
+simulator Rust checks, the simulator app build and the iPhone + iPad simulator
+smoke (real IPC: create project, CJK edit and save, literary plugin iframe,
+Keychain account across relaunch, WebDAV sync) pass in Mobile CI. No
+TestFlight upload or Beta App Review approval is claimed.
 
 ## Distribution model
 

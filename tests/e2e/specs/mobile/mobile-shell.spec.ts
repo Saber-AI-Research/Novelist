@@ -135,6 +135,21 @@ test.describe('mobile shell', () => {
     await expect(app.getByTestId('ai-talk-panel')).toHaveCount(0);
   });
 
+  test('a bundled template inserted from the panel lands in the open chapter without the caret anchor', async ({ app }) => {
+    await openLibraryProject(app);
+    await openChapter(app);
+    await setActiveDocument(app, '# 第一章\n\n', 7, 7);
+    await blurEditor(app);
+
+    await app.getByTestId('toggle-template').tap();
+    await expect(app.getByTestId('template-panel')).toBeVisible();
+    await app.getByTestId('template-row-bundled-chapter-skeleton').tap();
+
+    await expect.poll(() => activeFilePath(app)).toBe(CHAPTER_1);
+    await expect.poll(() => activeDocument(app)).toMatch(/^# 第一章\n\n[\s\S]*场景[\s\S]*冲突[\s\S]*转折/);
+    expect(await activeDocument(app)).not.toContain('$|$');
+  });
+
   test('the command palette hides desktop-only commands', async ({ app }) => {
     await openLibraryProject(app);
     await blurEditor(app);
