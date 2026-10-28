@@ -47,16 +47,12 @@ function renderPlatformError(target: HTMLElement, error: unknown) {
   target.append(box);
 }
 
-// DEBUG: Mirror every startup phase to Rust tracing (`log_startup_phase`)
-// so we can see progress in terminal logs even when devtools is unreachable.
-// Remove once the startup path is confirmed healthy.
+// Phases are mirrored to the Rust log once, by `startupReport()` at first
+// paint. Boot failures below are forwarded immediately instead.
 function logPhase(name: string, extra?: unknown) {
   startupMark(name);
   const payload = extra === undefined ? "" : ` ${JSON.stringify(extra)}`;
   console.log(`[startup] ${name}${payload}`);
-  invoke("log_startup_phase", { name, sinceStartMs: performance.now() }).catch(
-    (err) => console.error("[startup] invoke(log_startup_phase) failed", err),
-  );
 }
 
 logPhase("frontend.main.start");
@@ -84,6 +80,11 @@ window.addEventListener("unhandledrejection", (e) => {
 const forceShowTimer = setTimeout(() => {
   if (!manageNativeWindow()) return;
   logPhase("frontend.main.force-show-timeout");
+  // A stalled boot never reaches `startupReport()`; record the stall now.
+  invoke("log_startup_phase", {
+    name: "frontend.main.force-show-timeout",
+    sinceStartMs: performance.now(),
+  }).catch(() => {});
   getCurrentWindow()
     .show()
     .catch((err) => console.error("[startup] force show() failed", err));

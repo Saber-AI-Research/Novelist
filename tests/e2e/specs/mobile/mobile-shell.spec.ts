@@ -34,6 +34,8 @@ type ShellTestWindow = Window & {
     setActiveEditorDocument(content: string, selection: { anchor: number; head: number }): Promise<void>;
   };
   __TAURI_MOCK_STATE__: { sharedFiles: Array<{ path: string; mimeType: string }> };
+  /** Android system Back seam (App.svelte). */
+  __novelistBack(): boolean;
 };
 
 /** Viewports below 1024px wide use the sidebar drawer and overlay panels. */
@@ -170,12 +172,53 @@ test.describe('mobile shell', () => {
     const input = app.getByTestId('palette-input');
     await expect(input).toBeVisible();
 
-    for (const desktopOnly of ['New Window', 'Toggle Split View', 'Open Directory', 'Check for Updates']) {
+    // Desktop-only commands, plus diagnostics outside Developer Mode.
+    for (const desktopOnly of ['New Window', 'Toggle Split View', 'Open Directory', 'Check for Updates', 'Run Performance Benchmark', 'Run Scroll+Edit Stability Test']) {
       await input.fill(desktopOnly);
       await expect(app.locator('[data-testid^="palette-result-"]')).toHaveCount(0);
     }
     await input.fill('Import File into Project');
     await expect(app.getByTestId('palette-result-0')).toBeVisible();
+  });
+
+  test('on phones the palette input sits at the top, clear of the keyboard', async ({ app }) => {
+    test.skip(app.viewportSize()!.width >= 768, 'phone layout only');
+    await openLibraryProject(app);
+    await blurEditor(app);
+    await app.getByTestId('mobile-palette').tap();
+    const box = await app.getByTestId('palette-input').boundingBox();
+    expect(box!.y).toBeLessThan(app.viewportSize()!.height / 3);
+  });
+
+  test('system Back closes the top-most layer before leaving the app', async ({ app }) => {
+    const back = () => app.evaluate(() => (window as unknown as ShellTestWindow).__novelistBack());
+    await openLibraryProject(app);
+    await openChapter(app);
+    await blurEditor(app);
+
+    await app.getByTestId('mobile-palette').tap();
+    await expect(app.getByTestId('command-palette')).toBeVisible();
+    expect(await back()).toBe(true);
+    await expect(app.getByTestId('command-palette')).toHaveCount(0);
+
+    if (isCompact(app)) {
+      await app.getByTestId('toggle-snapshot').tap();
+      await expect(app.getByTestId('panel-sheet')).toBeVisible();
+      expect(await back()).toBe(true);
+      await expect(app.getByTestId('panel-sheet')).toHaveCount(0);
+
+      await app.getByTestId('mobile-files-button').tap();
+      await expect(app.getByTestId('sidebar-drawer-scrim')).toBeVisible();
+      expect(await back()).toBe(true);
+      await expect(app.getByTestId('sidebar-drawer-scrim')).toHaveCount(0);
+    }
+
+    await app.getByTestId('mobile-settings').tap();
+    await expect(app.getByTestId('settings-overlay')).toBeVisible();
+    expect(await back()).toBe(true);
+    await expect(app.getByTestId('settings-overlay')).toHaveCount(0);
+
+    expect(await back()).toBe(false);
   });
 
   test('backgrounding the app flushes the edited chapter', async ({ app, mockState }) => {

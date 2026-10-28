@@ -137,7 +137,7 @@
     align-items: center;
     gap: 6px;
     padding: 0 6px;
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 500;
   }
   .mobile-toolbar-title-text {

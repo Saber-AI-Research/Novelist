@@ -188,20 +188,30 @@
     height: var(--novelist-vv-height, 100vh);
   }
 
-  /* Phone: bottom sheet. */
+  /* Phone: top sheet. Anchored under the status bar so the input can never
+     sit behind an on-screen keyboard, even while the IME animates in or on
+     WebViews that report the keyboard late; only the list tail shortens. */
   :global(html[data-layout='phone']) .palette-backdrop {
-    align-items: flex-end;
+    align-items: flex-start;
     padding-top: 0;
   }
   :global(html[data-layout='phone']) .palette-container {
     width: 100%;
-    max-height: calc(var(--novelist-vv-height, 100vh) * 0.7);
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    max-height: calc(var(--novelist-vv-height, 100vh) - 56px);
+    border-top: none;
+    border-radius: 0 0 14px 14px;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
   }
-  :global(html[data-layout='phone'][data-keyboard='open']) .palette-container {
-    padding-bottom: 0;
+  /* Shortcut hints are noise without a hardware keyboard. */
+  :global(html[data-layout='phone']) .shortcut {
+    display: none;
+  }
+  :global(html[data-layout='phone']) .palette-item {
+    font-size: 16px;
+    padding: 10px 16px;
+  }
+  :global(html[data-layout='phone']) .palette-secondary {
+    font-size: 12px;
   }
 
   :global(html[data-layout='tablet']) .palette-container {

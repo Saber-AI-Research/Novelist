@@ -2,6 +2,8 @@ package com.novelist.app
 
 import android.os.Bundle
 import android.view.View
+import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -22,5 +24,22 @@ class MainActivity : TauriActivity() {
       WindowInsetsCompat.CONSUMED
     }
     ViewCompat.requestApplyInsets(root)
+  }
+
+  // System Back first closes the top-most web layer (palette, dialog, sheet,
+  // drawer) via `window.__novelistBack()`; only when nothing is open does it
+  // fall through to the default behaviour (leave the app).
+  override fun onWebViewCreate(webView: WebView) {
+    val callback = object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        webView.evaluateJavascript("window.__novelistBack ? window.__novelistBack() : false") { result ->
+          if (result == "true") return@evaluateJavascript
+          isEnabled = false
+          onBackPressedDispatcher.onBackPressed()
+          isEnabled = true
+        }
+      }
+    }
+    onBackPressedDispatcher.addCallback(this, callback)
   }
 }

@@ -312,13 +312,15 @@ export function registerAppCommands(ctx: AppCommandContext) {
     view.focus();
   }});
 
-  // Diagnostics
-  reg({ id: 'run-benchmark', labelKey: 'command.runBenchmark', handler: async () => {
+  // Diagnostics: phones only list them in Developer Mode (the 150K-line
+  // benchmark is a stress tool, not a writing command).
+  const diagnosticsAvailable = () => !platform.isMobile || uiStore.developerMode;
+  reg({ id: 'run-benchmark', labelKey: 'command.runBenchmark', available: diagnosticsAvailable, handler: async () => {
     const { runBenchmark } = await import('$lib/utils/benchmark');
     const result = await runBenchmark(150000);
     alert(result);
   }});
-  reg({ id: 'run-scroll-test', labelKey: 'command.runScrollTest', handler: async () => {
+  reg({ id: 'run-scroll-test', labelKey: 'command.runScrollTest', available: diagnosticsAvailable, handler: async () => {
     const { runScrollEditTest } = await import('$lib/utils/scroll-edit-test');
     const result = await runScrollEditTest();
     alert(result);

@@ -270,20 +270,21 @@
     height: var(--novelist-vv-height, 100vh);
   }
 
-  /* Phone: bottom sheet. */
+  /* Phone: top sheet, so the input never sits behind the on-screen keyboard. */
   :global(html[data-layout='phone']) .palette-backdrop {
-    align-items: flex-end;
+    align-items: flex-start;
     padding-top: 0;
   }
   :global(html[data-layout='phone']) .palette-container {
     width: 100%;
-    max-height: calc(var(--novelist-vv-height, 100vh) * 0.7);
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    max-height: calc(var(--novelist-vv-height, 100vh) - 56px);
+    border-top: none;
+    border-radius: 0 0 14px 14px;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
   }
-  :global(html[data-layout='phone'][data-keyboard='open']) .palette-container {
-    padding-bottom: 0;
+  :global(html[data-layout='phone']) .palette-item,
+  :global(html[data-layout='phone']) .palette-subject {
+    font-size: 16px;
   }
 
   :global(html[data-layout='tablet']) .palette-container {

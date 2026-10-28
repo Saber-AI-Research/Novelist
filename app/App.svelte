@@ -315,6 +315,32 @@
     closePanelSheet();
     if (!wasOpen) extensionStore.openPanel(pluginId);
   }
+  /**
+   * Android system Back (MainActivity calls `window.__novelistBack()`): close
+   * the top-most layer. `false` lets Android leave the app as usual.
+   */
+  function handleSystemBack(): boolean {
+    if (paletteOpen) { paletteOpen = false; return true; }
+    if (movePaletteOpen) { movePaletteOpen = false; return true; }
+    if (projectSearchOpen) { projectSearchOpen = false; return true; }
+    if (exportDialogOpen || newProjectDialogOpen || translationImportDialogOpen || literaryImportDialogOpen || uiStore.settingsOpen) {
+      // These own their close path (unsaved-input confirmation, Settings
+      // section page → section list), all bound to Escape on window.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return true;
+    }
+    if (mindmapOverlayOpen) { mindmapOverlayOpen = false; return true; }
+    if (sheetPanel || (rightPanelAsSheet && extensionStore.activePanelId)) { closePanelSheet(); return true; }
+    if (uiStore.sidebarDrawerOpen) { uiStore.closeSidebarDrawer(); return true; }
+    if (uiStore.zenMode) { uiStore.toggleZen(); return true; }
+    return false;
+  }
+  $effect(() => {
+    if (!platform.isMobile) return;
+    const host = window as typeof window & { __novelistBack?: () => boolean };
+    host.__novelistBack = handleSystemBack;
+    return () => { delete host.__novelistBack; };
+  });
   // Same data-testids as the desktop rail; only one of the two renders.
   // The drawer overlays the panel area, so a chip tap dismisses it first.
   let touchPanelEntries = $derived<PanelBarEntry[]>([

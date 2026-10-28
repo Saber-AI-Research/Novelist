@@ -66,7 +66,7 @@
     border-radius: 18px;
     background: transparent;
     color: var(--novelist-text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     letter-spacing: 0.02em;
     white-space: nowrap;
     cursor: pointer;

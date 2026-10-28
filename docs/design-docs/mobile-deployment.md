@@ -102,6 +102,18 @@ Requirements:
 - `tauri ios build` rewrites tracked files under `core/gen/apple` (bundle id,
   team, signing style, merged `Info.plist`). The scripts warn when that
   happens; never commit a team ID or signing identity from a local publish.
+- App icons: the iOS app icon set and the Android launcher/adaptive icons in
+  `core/gen` are generated from `core/icons/mobile-source/` (full-bleed logo,
+  transparent adaptive foreground, `#1e293b` background). Regenerate with
+  `pnpm tauri icon core/icons/mobile-source/icon-manifest.json -o <tmp>` and
+  copy only `<tmp>/android/*` into `core/gen/android/app/src/main/res/` and
+  `<tmp>/ios/*.png` into the `AppIcon.appiconset`; the desktop icons in
+  `core/icons` keep their own padded artwork.
+- Android `MainActivity` declares every user-triggerable `configChanges`
+  (including `fontScale` and `density`): the Tauri WebView crashes
+  (RenderThread SIGSEGV) if the activity is recreated. System Back calls
+  `window.__novelistBack()` (App.svelte) to close the top-most layer and only
+  leaves the app when nothing is open.
 
 Outputs: release artifacts go to `core/target/mobile-release/`
 (`Novelist_<version>_<build>_android-universal.apk`,

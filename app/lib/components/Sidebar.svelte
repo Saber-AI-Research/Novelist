@@ -930,7 +930,7 @@
   ondragend={handleDragEnd}
 />
 
-<aside class="sidebar" data-testid="sidebar" style="--novelist-sidebar-file-font-size: {projectStore.sidebarFontSize}px;">
+<aside class="sidebar" data-testid="sidebar" style="--novelist-sidebar-file-font-size: calc({projectStore.sidebarFontSize}px * var(--novelist-touch-text-scale, 1));">
   <!-- Project header -->
   <div class="sidebar-header" data-tauri-drag-region>
     {#if projectStore.isOpen}

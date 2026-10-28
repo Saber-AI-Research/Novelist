@@ -147,6 +147,19 @@ html[data-layout='phone'] .cm-editor .cm-content {
 html[data-layout='phone'][data-keyboard='open'] [data-testid='status-bar'] {
   display: none;
 }
+/* Phone screens are read at arm's length: user-chosen editor and sidebar
+   sizes render this much larger (16px → 18px) without changing the stored
+   setting. Narrow desktop windows keep their sizes. */
+html[data-mobile='true'][data-layout='phone'] {
+  --novelist-touch-text-scale: 1.125;
+}
+html[data-mobile='true'][data-layout='phone'] [data-testid='status-bar'] {
+  font-size: 12px !important;
+}
+/* Line numbers cost a fifth of a phone's width and mean little in prose. */
+html[data-mobile='true'][data-layout='phone'] .cm-editor .cm-gutters {
+  display: none;
+}
 
 /* App-owned overlay scrollbars: thin, rounded, themed, and AUTO-HIDING.
    Transparent at rest; the thumb fades in only while the pointer is over the

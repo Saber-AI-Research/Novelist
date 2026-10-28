@@ -220,6 +220,8 @@ pub struct PlatformCapabilities {
 
 - Android 13 真机：原生 IPC 与沙盒文件、账号 Keystore、升级保留、项目下载身份/基线、CJK 上传与远端返写、打开文件自动刷新、后台保存/force-stop 恢复、Markdown 分享取消均有实际结果。
 - Android 手机流程（OnePlus 8 Pro / Android 13，签名 build 10002→10003 覆盖安装）：百度输入法新建中文名小说项目 → 写一章 → 重命名 → 快照 → 绑定真实 Apache WebDAV 同步、远端改动下载、双端冲突「两者都保留」均通过。实测修复两处：抽屉打开时点面板标签，面板被抽屉遮挡（现先关抽屉）；首次绑定同步后云端项目列表不含刚上传的项目（现自动刷新）。
+- Android 第二轮（build 10004）：修复更改系统字体大小/显示大小即崩溃（Activity 重建致 WebView RenderThread SIGSEGV，现声明 `fontScale|density` 等 configChanges，同一进程存活）；系统返回键先关闭命令面板/设置/面板/抽屉/思维导图，无可关闭层时才退出；手机命令面板/移动/搜索改为顶部弹出，输入框不再被键盘遮挡；手机正文与侧栏字号 ×1.125、隐藏行号与快捷键提示、诊断命令仅开发者模式可见；启动日志不再重复；启用 OnBackInvokedCallback 消除告警；Android/iOS 图标换为 Novelist 图标。以 `wm density 216` 模拟 800px 平板竖屏（抽屉 + 停靠面板 + 思维导图）与横屏宽布局，均正常。
+- 未覆盖：Gboard/搜狗（用户决定不安装）、系统语音输入、真实 Android 平板、iPad 真机（本机检测不到 iPad 且无完整 Xcode，无法安装）。
 - 评注真机：输入 `[` 与 `「` 实际进入“正在评注”，结束后正文 JSON 落盘为 comment insertion；不是仅在 mock 上转发输入事件。
 - 通用 Android Release：arm64-v8a + x86_64 实际编译/R8 打包，约 45 MiB；16 KiB ELF 与 ZIP 对齐通过。版本未 bump，仍为 Cargo 中的 0.6.1。
 - Apache mod_dav_fs 实际协议检查通过（17 pass / 4 warning / 0 fail）；fresh ETag 可暂时为 weak，客户端等待下一次有效基线，不放宽条件写入。stock WsgiDAV 4.4 未通过，被明确列为不支持，不能以延迟重试掩盖强 ETag 重用。

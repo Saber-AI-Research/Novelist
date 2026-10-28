@@ -9,10 +9,14 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.novelist"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- The Tauri WebView cannot survive activity recreation (RenderThread
+             SIGSEGV): handle every user-triggerable config change in place,
+             including system font size (fontScale) and display size (density). -->
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density|fontScale|layoutDirection|navigation|touchscreen|colorMode"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
