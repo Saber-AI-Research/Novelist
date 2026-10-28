@@ -135,6 +135,19 @@ test.describe('mobile shell', () => {
     await expect(app.getByTestId('ai-talk-panel')).toHaveCount(0);
   });
 
+  test('a panel chip tapped with the file drawer open dismisses the drawer', async ({ app }) => {
+    test.skip(!isCompact(app), 'wide iPads dock the sidebar; there is no drawer');
+    await openLibraryProject(app);
+    await openChapter(app);
+    await blurEditor(app);
+
+    await app.getByTestId('mobile-files-button').tap();
+    await expect(app.getByTestId('sidebar-drawer-scrim')).toBeVisible();
+    await app.getByTestId('toggle-snapshot').tap();
+    await expect(app.getByTestId('sidebar-drawer-scrim')).toHaveCount(0);
+    await expect(app.getByTestId('panel-sheet')).toBeVisible();
+  });
+
   test('a bundled template inserted from the panel lands in the open chapter without the caret anchor', async ({ app }) => {
     await openLibraryProject(app);
     await openChapter(app);

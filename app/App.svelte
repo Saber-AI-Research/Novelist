@@ -316,6 +316,7 @@
     if (!wasOpen) extensionStore.openPanel(pluginId);
   }
   // Same data-testids as the desktop rail; only one of the two renders.
+  // The drawer overlays the panel area, so a chip tap dismisses it first.
   let touchPanelEntries = $derived<PanelBarEntry[]>([
     { key: 'outline', label: t('mobile.panel.outline'), testId: 'toggle-outline', active: rightPanelAsSheet ? sheetPanel === 'outline' : uiStore.outlineVisible, onSelect: toggleTouchOutline },
     { key: 'draft', label: t('mobile.panel.draft'), testId: 'toggle-draft', active: uiStore.draftVisible, onSelect: () => toggleTouchBuiltin('draft') },
@@ -333,7 +334,13 @@
       onSelect: () => toggleTouchExtension(panel.pluginId),
     })),
     { key: 'mindmap', label: t('mobile.panel.mindmap'), testId: 'mobile-panel-mindmap', active: mindmapOverlayOpen, onSelect: () => { mindmapOverlayOpen = !mindmapOverlayOpen; } },
-  ]);
+  ].map((entry) => ({
+    ...entry,
+    onSelect: () => {
+      uiStore.closeSidebarDrawer();
+      entry.onSelect();
+    },
+  })));
   let showFormatBar = $derived(
     platform.touchShell && !!activeEditorRef && (editorFocused || platform.layout !== 'phone'),
   );

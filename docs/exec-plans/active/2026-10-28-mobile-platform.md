@@ -109,7 +109,7 @@ pub struct PlatformCapabilities {
 - [x] Android arm64 / x86_64 实际 Clippy 检查通过；两种 ABI 的 Release APK 已链接、R8 打包，并通过 16 KiB ELF/ZIP 对齐校验。
 - [x] iOS 模拟器真实 Rust IPC 门禁在 iPhone 与 iPad 上均通过：内置资源、新建 Novel 项目（落盘 `Documents/Projects`）、WebKit 输入 CJK 并保存（磁盘字节一致）、文学评注 asset iframe 像素检查、Keychain 账号重启后仍在线、真实 Apache WebDAV 同步 5 个文件且服务端字节一致。
 - [x] Android 真机验证主界面、沙盒项目库、CJK 保存、后台 flush、杀进程恢复、Keystore 升级保留、真实 WebDAV 双向传输、原生分享取消与评注 iframe。
-- [ ] 真机 IME 冒烟：iOS 拼音/注音/日文、Android Gboard/搜狗/百度，在 CM6 中输入段落、`「」`/`【】`、中文标点。
+- [ ] 真机 IME 冒烟：iOS 拼音/注音/日文、Android Gboard/搜狗/百度，在 CM6 中输入段落、`「」`/`【】`、中文标点。Android 百度输入法（OnePlus 8 Pro / Android 13）已完成：屏幕键盘拼音选词、`，` `。`、符号面板 `【】` / `「」` 成对插入并在其内输入、组字中点格式栏不破坏组字；Gboard/搜狗与 iOS 待测。
 
 **验收：** `docs/exec-plans/active/` 本文追加「M0 实测阻塞表」，替换全部 **[推断]** 条目；给出 IME 是否需要 CM6 层改造的结论。
 
@@ -219,9 +219,10 @@ pub struct PlatformCapabilities {
 ## 8. 当前验收记录与发布前置
 
 - Android 13 真机：原生 IPC 与沙盒文件、账号 Keystore、升级保留、项目下载身份/基线、CJK 上传与远端返写、打开文件自动刷新、后台保存/force-stop 恢复、Markdown 分享取消均有实际结果。
+- Android 手机流程（OnePlus 8 Pro / Android 13，签名 build 10002→10003 覆盖安装）：百度输入法新建中文名小说项目 → 写一章 → 重命名 → 快照 → 绑定真实 Apache WebDAV 同步、远端改动下载、双端冲突「两者都保留」均通过。实测修复两处：抽屉打开时点面板标签，面板被抽屉遮挡（现先关抽屉）；首次绑定同步后云端项目列表不含刚上传的项目（现自动刷新）。
 - 评注真机：输入 `[` 与 `「` 实际进入“正在评注”，结束后正文 JSON 落盘为 comment insertion；不是仅在 mock 上转发输入事件。
 - 通用 Android Release：arm64-v8a + x86_64 实际编译/R8 打包，约 45 MiB；16 KiB ELF 与 ZIP 对齐通过。版本未 bump，仍为 Cargo 中的 0.6.1。
 - Apache mod_dav_fs 实际协议检查通过（17 pass / 4 warning / 0 fail）；fresh ETag 可暂时为 weak，客户端等待下一次有效基线，不放宽条件写入。stock WsgiDAV 4.4 未通过，被明确列为不支持，不能以延迟重试掩盖强 ETag 重用。
-- GitHub iOS native 构建/截图：用户已批准新分支与草稿 PR；结果待实际 CI，不以本机 Swift 语法检查替代 SDK 编译。
+- GitHub iOS native 构建/截图：草稿 PR 的 Mobile CI（iOS device + simulator targets、模拟器 app 启动）已通过。
 - 发布账号材料、Apple Beta Review、隐私 URL/支持邮箱、真实 TestFlight 邀请与最终下载页仍是外部发布前置。Android 新发布密钥只在忽略的 `.local/android-signing/`，不得提交；正式分发前需两个离线备份。
 

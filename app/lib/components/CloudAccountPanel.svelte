@@ -189,6 +189,8 @@
     binding = result.data;
     announceSyncConfig(dir);
     await runSync();
+    // The first sync creates the remote project; show it in the cloud list.
+    if (projectDir === dir && syncStatus) await loadProjects();
   }
 
   async function unlink() {
