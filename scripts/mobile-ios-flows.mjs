@@ -358,8 +358,11 @@ async function bundledResources(flow, ctx) {
 async function createProject(flow, ctx) {
   await flow.waitFor(flow.visible('[data-testid="welcome-library-empty"]'), 'the empty Welcome library');
   await flow.click('[data-testid="welcome-new-project"]', 'Welcome "New Project"');
-  await flow.waitFor(flow.visible('#np-name'), 'the New Project dialog');
+  // The dialog opens on the Literary Commentary template, whose footer has no
+  // name field; pick Novel first, then the name field appears.
+  await flow.waitFor(flow.visible('[data-testid="new-project-template-novel"]'), 'the New Project dialog');
   await flow.click('[data-testid="new-project-template-novel"]', 'the Novel template');
+  await flow.waitFor(flow.visible('#np-name'), 'the project name field');
   await flow.page.fill('#np-name', ctx.projectName, { timeout: 10_000 });
   await flow.click('.btn-create:not(:disabled)', 'the enabled Create button');
 
