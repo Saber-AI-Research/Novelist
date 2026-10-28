@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Plugin-private provider: exposes only cache/exports/, independent of
+             the app's own FileProvider configuration. Not exported; access is
+             granted per share intent with a temporary read grant. -->
+        <provider
+            android:name="com.novelist.mobilesupport.ShareFileProvider"
+            android:authorities="${applicationId}.mobilesupport.share"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/mobile_support_share_paths" />
+        </provider>
+    </application>
+</manifest>

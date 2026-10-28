@@ -4,7 +4,7 @@ import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-set
 describe('pluginSettings registry', () => {
   it('has() reports true only for registered built-in plugins', () => {
     expect(pluginSettings.has('ai-talk')).toBe(true);
-    expect(pluginSettings.has('ai-agent')).toBe(true);
+    expect(pluginSettings.has('book-translation')).toBe(true);
   });
 
   it('has() returns false for unknown plugin ids', () => {
@@ -28,7 +28,7 @@ describe('pluginSettings registry', () => {
   it('list() includes every registered plugin exactly once', () => {
     const ids = pluginSettings.list().map((e) => e.pluginId);
     expect(ids).toContain('ai-talk');
-    expect(ids).toContain('ai-agent');
+    expect(ids).toContain('book-translation');
     // No duplicates.
     expect(new Set(ids).size).toBe(ids.length);
   });
@@ -53,9 +53,9 @@ describe('requestOpenPanelSettings', () => {
 
   it('uses a panel-specific key so multiple panels do not collide', () => {
     requestOpenPanelSettings('ai-talk');
-    requestOpenPanelSettings('ai-agent');
+    requestOpenPanelSettings('mindmap');
     expect(sessionStorage.getItem('novelist:ai-talk:open-settings')).toBe('1');
-    expect(sessionStorage.getItem('novelist:ai-agent:open-settings')).toBe('1');
+    expect(sessionStorage.getItem('novelist:mindmap:open-settings')).toBe('1');
   });
 
   it('swallows sessionStorage failures silently', () => {

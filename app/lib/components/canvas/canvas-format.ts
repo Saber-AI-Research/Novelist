@@ -1,4 +1,5 @@
 import type { Edge, Node } from '@xyflow/svelte';
+import { resolveCanvasFileRef, toCanvasFileRef } from './file-ref';
 
 /**
  * `.canvas` on-disk format: JSON Canvas (https://jsoncanvas.org), the format
@@ -211,7 +212,15 @@ interface CanvasEdgeData extends Record<string, unknown> {
   implicitToSide?: boolean;
 }
 
-export function canvasToFlow(data: CanvasDiskData, handlers: CanvasFlowHandlers): { nodes: Node[]; edges: Edge[] } {
+/**
+ * `projectRoot` resolves project-relative file-card references (see
+ * `file-ref.ts`); `null` keeps every reference exactly as stored.
+ */
+export function canvasToFlow(
+  data: CanvasDiskData,
+  handlers: CanvasFlowHandlers,
+  projectRoot: string | null = null,
+): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = data.nodes.map((node) => {
     const common = {
       id: node.id,
@@ -238,7 +247,7 @@ export function canvasToFlow(data: CanvasDiskData, handlers: CanvasFlowHandlers)
         ...common,
         type: 'file',
         data: {
-          filePath: node.file,
+          filePath: resolveCanvasFileRef(node.file, projectRoot),
           extra: node.extra,
           onOpen: handlers.onOpenFile,
           onResize: handlers.onResize,
@@ -288,7 +297,13 @@ function sideForDisk(handle: string | null | undefined, implicit: boolean | unde
   return side;
 }
 
-export function flowToCanvas(nodes: readonly Node[], edges: readonly Edge[], extra: Extra): CanvasDiskData {
+/** Notes inside `projectRoot` are written project-relative, including links loaded as absolute paths. */
+export function flowToCanvas(
+  nodes: readonly Node[],
+  edges: readonly Edge[],
+  extra: Extra,
+  projectRoot: string | null = null,
+): CanvasDiskData {
   const diskNodes: CanvasDiskNode[] = nodes.map((node) => {
     const data = node.data as Record<string, unknown>;
     const base: CanvasNodeBase = {
@@ -300,7 +315,7 @@ export function flowToCanvas(nodes: readonly Node[], edges: readonly Edge[], ext
       extra: asObject(data.extra) ?? {},
     };
     if (node.type === 'file') {
-      return { ...base, type: 'file', file: typeof data.filePath === 'string' ? data.filePath : '' };
+      return { ...base, type: 'file', file: typeof data.filePath === 'string' ? toCanvasFileRef(data.filePath, projectRoot) : '' };
     }
     if (node.type === 'group') {
       return {

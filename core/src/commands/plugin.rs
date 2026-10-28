@@ -1,13 +1,14 @@
 use crate::error::AppError;
 use crate::models::plugin::{PluginInfo, PluginManifest, PluginMeta, RegisteredCommandInfo};
 use crate::services::atomic_file::atomic_write_sync;
+use crate::services::platform::PlatformOs;
 use crate::services::plugin_host::sandbox::PluginHostState;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Manager, State};
+use tauri::State;
 
 fn novelist_dir() -> PathBuf {
     // `NOVELIST_PLUGIN_DATA_DIR` is a test seam (used by unit tests that need
@@ -192,11 +193,53 @@ async fn bundled_plugin_ids(bundled_dir: &Path) -> HashSet<String> {
 }
 
 fn bundled_plugins_dir(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
-    app_handle
-        .path()
-        .resource_dir()
+    crate::services::bundled_resources::root(app_handle)
         .ok()
         .map(|dir| dir.join("bundled-plugins"))
+}
+
+// --- Platform Plugin Policy ---
+
+/// Feature reported as unsupported where only bundled plugins may run.
+const THIRD_PARTY_PLUGINS: &str = "Running third-party plugins";
+
+/// Which plugin folders may be enabled or loaded. iOS (capability
+/// `plugin_install: false`) runs only the plugins shipped in the app bundle,
+/// whatever the frontend asks; other folders are ignored, never deleted.
+enum PluginPolicy {
+    Any,
+    BundledOnly(HashSet<String>),
+}
+
+impl PluginPolicy {
+    async fn for_app(app_handle: &tauri::AppHandle) -> Self {
+        if PlatformOs::CURRENT.plugin_install() {
+            return Self::Any;
+        }
+        let bundled = match bundled_plugins_dir(app_handle) {
+            Some(dir) => bundled_plugin_ids(&dir).await,
+            None => HashSet::new(),
+        };
+        Self::BundledOnly(bundled)
+    }
+
+    fn check(&self, plugin_id: &str) -> Result<(), AppError> {
+        match self {
+            Self::BundledOnly(bundled) if !bundled.contains(plugin_id) => {
+                Err(AppError::Unsupported(THIRD_PARTY_PLUGINS))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A scaffolded plugin is always a third-party plugin.
+fn ensure_plugin_authoring(os: PlatformOs) -> Result<(), AppError> {
+    if os.plugin_install() {
+        Ok(())
+    } else {
+        Err(AppError::Unsupported(THIRD_PARTY_PLUGINS))
+    }
 }
 
 /// Install or update bundled plugins in ~/.novelist/plugins/.
@@ -360,7 +403,8 @@ async fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Scan ~/.novelist/plugins/ and return info for each plugin found.
+/// Scan ~/.novelist/plugins/ and return info for each plugin found. Where only
+/// bundled plugins may run (iOS), third-party folders are not reported.
 #[tauri::command]
 #[specta::specta]
 pub async fn list_plugins(
@@ -377,7 +421,11 @@ pub async fn list_plugins(
         }
         None => HashSet::new(),
     };
-    scan_plugins(state.inner(), &bundled).await
+    let mut plugins = scan_plugins(state.inner(), &bundled).await?;
+    if !PlatformOs::CURRENT.plugin_install() {
+        plugins.retain(|plugin| plugin.builtin);
+    }
+    Ok(plugins)
 }
 
 async fn scan_plugins(
@@ -457,8 +505,23 @@ pub async fn set_plugin_enabled(
     plugin_id: String,
     enabled: bool,
     state: State<'_, PluginHostState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    set_plugin_enabled_inner(plugin_id, enabled, state.inner()).await
+    let policy = PluginPolicy::for_app(&app_handle).await;
+    set_plugin_enabled_with_policy(plugin_id, enabled, &policy, state.inner()).await
+}
+
+/// Disabling is always allowed so a plugin can be switched off anywhere.
+async fn set_plugin_enabled_with_policy(
+    plugin_id: String,
+    enabled: bool,
+    policy: &PluginPolicy,
+    state: &PluginHostState,
+) -> Result<(), AppError> {
+    if enabled {
+        policy.check(&plugin_id)?;
+    }
+    set_plugin_enabled_inner(plugin_id, enabled, state).await
 }
 
 async fn set_plugin_enabled_inner(
@@ -490,8 +553,19 @@ async fn set_plugin_enabled_inner(
 pub async fn load_plugin(
     plugin_id: String,
     state: State<'_, PluginHostState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    load_plugin_from_disk(&plugin_id, state.inner()).await
+    let policy = PluginPolicy::for_app(&app_handle).await;
+    load_allowed_plugin(&plugin_id, &policy, state.inner()).await
+}
+
+async fn load_allowed_plugin(
+    plugin_id: &str,
+    policy: &PluginPolicy,
+    state: &PluginHostState,
+) -> Result<(), AppError> {
+    policy.check(plugin_id)?;
+    load_plugin_from_disk(plugin_id, state).await
 }
 
 async fn load_plugin_from_disk(plugin_id: &str, state: &PluginHostState) -> Result<(), AppError> {
@@ -523,8 +597,9 @@ pub async fn unload_plugin(
 pub async fn reload_plugin(
     plugin_id: String,
     state: State<'_, PluginHostState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    load_plugin(plugin_id, state).await
+    load_plugin(plugin_id, state, app_handle).await
 }
 
 /// Get all commands registered by active plugins.
@@ -599,6 +674,7 @@ pub async fn get_plugins_dir() -> Result<String, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn scaffold_plugin(id: String, display_name: Option<String>) -> Result<String, AppError> {
+    ensure_plugin_authoring(PlatformOs::CURRENT)?;
     validate_plugin_id(&id)?;
 
     let plugins = plugins_dir();
@@ -1195,6 +1271,62 @@ novelist.registerCommand("new-command", "New", function() {
             .collect();
         hidden.sort();
         assert_eq!(hidden, vec![".bundled-version"]);
+
+        restore_data_dir(old);
+    }
+
+    // iOS (`plugin_install: false`) must refuse third-party code natively even
+    // when the frontend asks directly, and must leave the folder alone.
+    #[tokio::test]
+    async fn bundled_only_policy_refuses_third_party_plugins_without_deleting_them() {
+        let _guard = lock_data_dir();
+        let tmp = TempDir::new().unwrap();
+        let old = set_data_dir(tmp.path());
+        let plugins = plugins_dir();
+        let source = r#"novelist.registerCommand("x", "X", function() {});"#;
+        write_plugin(
+            &plugins,
+            "canvas",
+            &manifest_toml("canvas", "1.0.0", None),
+            Some(source),
+        );
+        let community = write_plugin(
+            &plugins,
+            "community",
+            &manifest_toml("community", "1.0.0", None),
+            Some(source),
+        );
+        let host = PluginHostState::new();
+        let policy = PluginPolicy::BundledOnly(HashSet::from(["canvas".to_string()]));
+
+        assert!(matches!(
+            load_allowed_plugin("community", &policy, &host).await,
+            Err(AppError::Unsupported(_))
+        ));
+        assert!(matches!(
+            set_plugin_enabled_with_policy("community".into(), true, &policy, &host).await,
+            Err(AppError::Unsupported(_))
+        ));
+        assert!(host.list_loaded_plugins().is_empty());
+        assert!(read_plugin_settings().await.enabled.is_empty());
+        assert!(community.join("index.js").is_file());
+        set_plugin_enabled_with_policy("community".into(), false, &policy, &host)
+            .await
+            .unwrap();
+
+        set_plugin_enabled_with_policy("canvas".into(), true, &policy, &host)
+            .await
+            .unwrap();
+        assert_eq!(host.list_loaded_plugins().len(), 1);
+
+        assert!(matches!(
+            ensure_plugin_authoring(PlatformOs::Ios),
+            Err(AppError::Unsupported(_))
+        ));
+        assert!(ensure_plugin_authoring(PlatformOs::Android).is_ok());
+        load_allowed_plugin("community", &PluginPolicy::Any, &host)
+            .await
+            .unwrap();
 
         restore_data_dir(old);
     }

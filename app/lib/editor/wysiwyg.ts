@@ -13,6 +13,7 @@ import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { imeComposingField } from './ime-guard';
 import { rootScale } from './root-scale';
 import { fileManagerLabel } from '$lib/utils/platform-labels';
+import { platform } from '$lib/stores/platform.svelte';
 import { readLocalImageDataUri } from '$lib/services/image-host';
 import { pathJoin } from '$lib/utils/path';
 
@@ -270,14 +271,18 @@ class ImageContextMenu {
     ];
 
     if (this.isLocal && this.documentDir) {
-      items.push({
-        label: fileManagerLabel(),
-        action: () => {
-          const fullPath = pathJoin(this.documentDir, this.imgSrc);
-          invoke('reveal_in_file_manager', { path: fullPath }).catch(console.error);
-          this.destroy();
-        },
-      });
+      // Mobile has no file manager to reveal into (`reveal_in_file_manager`
+      // is unsupported there); the rest of the menu stays available.
+      if (!platform.isMobile) {
+        items.push({
+          label: fileManagerLabel(),
+          action: () => {
+            const fullPath = pathJoin(this.documentDir, this.imgSrc);
+            invoke('reveal_in_file_manager', { path: fullPath }).catch(console.error);
+            this.destroy();
+          },
+        });
+      }
       items.push({
         label: 'Upload to host',
         action: () => {
@@ -341,7 +346,9 @@ class ImageContextMenu {
       const el = document.createElement('div');
       el.className = 'cm-image-context-menu-item' + (item.danger ? ' cm-image-context-menu-item-danger' : '');
       el.textContent = item.label;
-      el.addEventListener('mousedown', (e) => {
+      // pointerdown covers mouse, pen and touch (Android opens this menu on
+      // long-press); cancelling it keeps the editor focus and selection.
+      el.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
         item.action();

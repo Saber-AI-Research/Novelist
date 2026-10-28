@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { commands } from '$lib/ipc/commands';
   import {
@@ -38,6 +38,13 @@
   import { fileManagerLabelKey } from '$lib/utils/platform-labels';
   import { pathBasename, pathDirname, pathStartsWithChild, pathsEqual } from '$lib/utils/path';
   import { isImeComposing } from '$lib/utils/ime';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { commandRegistry } from '$lib/stores/commands.svelte';
+  import { longPress, type LongPressEvent } from '$lib/actions/long-press';
+  import { clampToViewport } from '$lib/actions/clamp-to-viewport';
+  import { portal } from '$lib/actions/portal';
+  import { requestMovePalette } from '$lib/components/move-file-palette';
+  import { START_RENAME_EVENT, type StartRenameDetail } from '$lib/components/sidebar-events';
 
   // --- Project switcher popup (Notion-style) ---
   let switcherOpen = $state(false);
@@ -91,14 +98,15 @@
 
   $effect(() => {
     if (!sortMenuOpen) return;
-    function onDoc(e: MouseEvent) {
+    // pointerdown (not mousedown) so a tap outside closes it on touch too.
+    function onDoc(e: PointerEvent) {
       const target = e.target as HTMLElement;
       if (!target.closest('[data-testid="sidebar-sort-menu"], [data-testid="sidebar-sort-button"]')) {
         sortMenuOpen = false;
       }
     }
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
+    document.addEventListener('pointerdown', onDoc);
+    return () => document.removeEventListener('pointerdown', onDoc);
   });
 
   interface Props {
@@ -157,6 +165,37 @@
 
   async function openProjectFromPath(dirPath: string) {
     await onOpenProjectFromPath(dirPath);
+  }
+
+  // Mobile has no folder picker: projects live in the sandboxed library, so
+  // the switcher lists library projects and offers "New Project" instead of
+  // desktop recents + "Open Folder…".
+  const libraryMode = $derived(!platform.can('pick_directory'));
+
+  interface LibraryProjectRow {
+    path: string;
+    name: string;
+  }
+  let libraryProjects = $state<LibraryProjectRow[]>([]);
+
+  async function loadLibraryProjects() {
+    const result = await commands.listLibraryProjects();
+    if (result.status === 'ok') {
+      libraryProjects = result.data.map(({ path, name }) => ({ path, name }));
+    } else {
+      window.dispatchEvent(new CustomEvent('novelist-operation-error', {
+        detail: { message: t('touch.libraryLoadFailed', { error: result.error }) },
+      }));
+    }
+  }
+
+  $effect(() => {
+    if (switcherOpen && libraryMode) void loadLibraryProjects();
+  });
+
+  function startNewProject() {
+    switcherOpen = false;
+    commandRegistry.execute('new-project');
   }
 
   const textExtensions = ['.md', '.markdown', '.txt', '.canvas', '.kanban', '.json', '.jsonl', '.csv', '.novtrans'];
@@ -508,15 +547,6 @@
     }
   }
 
-  function portal(node: HTMLElement) {
-    document.body.appendChild(node);
-    return {
-      destroy() {
-        node.remove();
-      }
-    };
-  }
-
   // --- Blank-area view menu (right-click on empty sidebar space) ---
   let viewMenu = $state<{ x: number; y: number } | null>(null);
 
@@ -527,9 +557,19 @@
     const target = e.target as HTMLElement;
     if (target.closest('.sidebar-input-row, .tree-row')) return;
     e.preventDefault();
+    openViewMenu(e.clientX, e.clientY);
+  }
+
+  /** Touch long-press on the blank area (rows claim their own long-press). */
+  function handleViewLongPress(e: LongPressEvent) {
+    if (e.target instanceof Element && e.target.closest('.sidebar-input-row, .tree-row')) return;
+    openViewMenu(e.clientX, e.clientY);
+  }
+
+  function openViewMenu(clientX: number, clientY: number) {
     closeContextMenu();
     const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
-    viewMenu = { x: e.clientX / zoom, y: e.clientY / zoom };
+    viewMenu = { x: clientX / zoom, y: clientY / zoom };
   }
 
   function closeViewMenu() {
@@ -555,12 +595,16 @@
 
   function handleContextMenu(e: MouseEvent, entry: FileNode) {
     e.preventDefault();
+    openContextMenu(e.clientX, e.clientY, entry);
+  }
+
+  function openContextMenu(clientX: number, clientY: number, entry: FileNode) {
     if (!selectedPaths.some(path => pathsEqual(path, entry.path))) {
       selectedPaths = [entry.path];
       selectionAnchorPath = entry.path;
     }
     const zoom = parseFloat(document.documentElement.style.transform.match(/scale\(([^)]+)\)/)?.[1] || '1');
-    contextMenu = { x: e.clientX / zoom, y: e.clientY / zoom, entry };
+    contextMenu = { x: clientX / zoom, y: clientY / zoom, entry };
     contextManagedName = null;
     if (!entry.is_dir && projectStore.dirPath && isTextFile(entry.name)) {
       void loadManagedName(projectStore.dirPath, entry.path).then((state) => {
@@ -611,6 +655,27 @@
     renameValue = entry.name;
   }
 
+  /** `START_RENAME_EVENT`: reveal the entry (expanding its folders) and rename it inline. */
+  async function startRenameAtPath(path: string) {
+    const root = projectStore.dirPath;
+    if (!root || !pathStartsWithChild(path, root)) return;
+    const ancestors: string[] = [];
+    for (let dir = pathDirname(path); dir && !pathsEqual(dir, root); dir = pathDirname(dir)) {
+      ancestors.unshift(dir);
+    }
+    for (const dir of ancestors) await projectStore.expandFolder(dir);
+    const entry = findTreeNodeByPath(path);
+    if (entry) startRename(entry);
+  }
+
+  onMount(() => {
+    const onStartRename = (e: Event) => {
+      void startRenameAtPath((e as CustomEvent<StartRenameDetail>).detail.path);
+    };
+    window.addEventListener(START_RENAME_EVENT, onStartRename);
+    return () => window.removeEventListener(START_RENAME_EVENT, onStartRename);
+  });
+
   async function confirmRename() {
     const entry = renaming;
     const name = renameValue.trim();
@@ -651,6 +716,8 @@
 
   async function revealInFinder(entry: FileNode) {
     closeContextMenu();
+    // Unsupported on mobile (no file manager); the menu item is hidden there too.
+    if (platform.isMobile) return;
     await commands.revealInFileManager(entry.path);
   }
 
@@ -668,6 +735,12 @@
     } else {
       await navigator.clipboard.writeText(entry.path);
     }
+  }
+
+  /** Touch replacement for drag-drop: App opens MoveFilePalette for this entry. */
+  function moveEntry(entry: FileNode) {
+    closeContextMenu();
+    requestMovePalette(entry.path);
   }
 
   async function handleDuplicate(entry: FileNode) {
@@ -923,7 +996,11 @@
         </button>
       </div>
     {:else}
-      <button class="sidebar-open-btn" data-testid="sidebar-open-folder" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
+      {#if libraryMode}
+        <button class="sidebar-open-btn" data-testid="sidebar-new-project" onclick={startNewProject}>{t('welcome.newProject')}</button>
+      {:else}
+        <button class="sidebar-open-btn" data-testid="sidebar-open-folder" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
+      {/if}
     {/if}
   </div>
 
@@ -942,6 +1019,7 @@
       ondragleave={handleDragLeaveRoot}
       ondrop={handleDropOnRoot}
       oncontextmenu={handleViewContextMenu}
+      use:longPress={{ onLongPress: handleViewLongPress }}
     >
       {#if creatingFile || creatingFolder}
         <div class="sidebar-input-row">
@@ -962,6 +1040,7 @@
           node={entry}
           depth={0}
           onContextMenu={handleContextMenu}
+          onLongPress={(e, node) => openContextMenu(e.clientX, e.clientY, node)}
           onSelect={selectEntry}
           onFileOpen={openFile}
           onRenameRequest={startRename}
@@ -995,49 +1074,76 @@
           <div class="project-switcher-header">
             <span>{t('sidebar.projects')}</span>
           </div>
-          {#each recentProjects as project, i (project.path)}
-            <div
-              class="project-switcher-row"
-              class:project-switcher-row-active={project.path === projectStore.dirPath}
-            >
-              <button
-                class="project-switcher-item"
-                onclick={() => switchToProject(project.path)}
+          {#if libraryMode}
+            {#each libraryProjects as project, i (project.path)}
+              <div
+                class="project-switcher-row"
+                class:project-switcher-row-active={project.path === projectStore.dirPath}
               >
-                <span class="project-switcher-num">{i < 9 ? i + 1 : '·'}</span>
-                <span class="project-switcher-name">{project.name}</span>
-                {#if project.path === projectStore.dirPath}
-                  <span class="project-switcher-check">&#x2713;</span>
-                {/if}
-              </button>
-              <button
-                class="project-switcher-action-btn"
-                class:active={project.pinned}
-                data-testid="project-switcher-pin-{i}"
-                onclick={(e) => togglePinProject(e, project)}
-                title={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
-                aria-label={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
+                <button
+                  class="project-switcher-item"
+                  data-testid="project-switcher-library-{i}"
+                  onclick={() => switchToProject(project.path)}
+                >
+                  <span class="project-switcher-name">{project.name}</span>
+                  {#if project.path === projectStore.dirPath}
+                    <span class="project-switcher-check">&#x2713;</span>
+                  {/if}
+                </button>
+              </div>
+            {/each}
+          {:else}
+            {#each recentProjects as project, i (project.path)}
+              <div
+                class="project-switcher-row"
+                class:project-switcher-row-active={project.path === projectStore.dirPath}
               >
-                <svg width="11" height="11" viewBox="0 0 16 16" fill={project.pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10 2l4 4-3 1-1 4-4-4 4-1 0-4zM6 10l-3 4"/>
-                </svg>
-              </button>
-              <button
-                class="project-switcher-action-btn project-switcher-remove-btn"
-                onclick={(e) => removeProject(e, project.path)}
-                title={t('sidebar.removeProject')}
-                aria-label={t('sidebar.removeProject')}
-              >
-                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
-              </button>
-            </div>
-          {/each}
+                <button
+                  class="project-switcher-item"
+                  onclick={() => switchToProject(project.path)}
+                >
+                  <span class="project-switcher-num">{i < 9 ? i + 1 : '·'}</span>
+                  <span class="project-switcher-name">{project.name}</span>
+                  {#if project.path === projectStore.dirPath}
+                    <span class="project-switcher-check">&#x2713;</span>
+                  {/if}
+                </button>
+                <button
+                  class="project-switcher-action-btn"
+                  class:active={project.pinned}
+                  data-testid="project-switcher-pin-{i}"
+                  onclick={(e) => togglePinProject(e, project)}
+                  title={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
+                  aria-label={project.pinned ? t('welcome.unpinProject') : t('welcome.pinProject')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill={project.pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 2l4 4-3 1-1 4-4-4 4-1 0-4zM6 10l-3 4"/>
+                  </svg>
+                </button>
+                <button
+                  class="project-switcher-action-btn project-switcher-remove-btn"
+                  onclick={(e) => removeProject(e, project.path)}
+                  title={t('sidebar.removeProject')}
+                  aria-label={t('sidebar.removeProject')}
+                >
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+              </div>
+            {/each}
+          {/if}
           <div class="project-switcher-divider"></div>
           <div class="project-switcher-row">
-            <button class="project-switcher-item" onclick={() => { switcherOpen = false; openDirectory(); }}>
-              <span class="project-switcher-num">+</span>
-              <span class="project-switcher-name">{t('sidebar.openFolderEllipsis')}</span>
-            </button>
+            {#if libraryMode}
+              <button class="project-switcher-item" data-testid="project-switcher-new-project" onclick={startNewProject}>
+                <span class="project-switcher-num">+</span>
+                <span class="project-switcher-name">{t('welcome.newProject')}</span>
+              </button>
+            {:else}
+              <button class="project-switcher-item" onclick={() => { switcherOpen = false; openDirectory(); }}>
+                <span class="project-switcher-num">+</span>
+                <span class="project-switcher-name">{t('sidebar.openFolderEllipsis')}</span>
+              </button>
+            {/if}
           </div>
         </div>
       {/if}
@@ -1045,7 +1151,11 @@
   {:else}
     <div class="sidebar-empty">
       <p>{t('sidebar.noProject')}</p>
-      <button class="sidebar-open-btn" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
+      {#if libraryMode}
+        <button class="sidebar-open-btn" onclick={startNewProject}>{t('welcome.newProject')}</button>
+      {:else}
+        <button class="sidebar-open-btn" onclick={openDirectory}>{t('sidebar.openFolder')}</button>
+      {/if}
     </div>
   {/if}
 </aside>
@@ -1059,6 +1169,7 @@
     class="context-menu"
     data-testid="sidebar-view-menu"
     use:portal
+    use:clampToViewport={{ enabled: platform.touchShell, x: viewMenu.x, y: viewMenu.y }}
     style="left: {viewMenu.x}px; top: {viewMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
@@ -1117,6 +1228,7 @@
     class="context-menu"
     data-testid="context-menu"
     use:portal
+    use:clampToViewport={{ enabled: platform.touchShell, x: contextMenu.x, y: contextMenu.y }}
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
@@ -1139,12 +1251,17 @@
         <button role="menuitem" class="context-menu-item" data-testid="context-menu-collapse-all" onclick={() => collapseAllAt(contextMenu!.entry.path)}>{t('sidebar.menu.collapseAll')}</button>
         <div class="context-menu-separator"></div>
       {/if}
-      {#if !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
+      {#if platform.splitAvailable && !contextMenu.entry.is_dir && isTextFile(contextMenu.entry.name)}
         <button role="menuitem" class="context-menu-item" onclick={() => openInOtherPane(contextMenu!.entry)}>{t('sidebar.openInOtherPane')}</button>
       {/if}
-      <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t(revealInFileManagerLabelKey)}</button>
-      <button role="menuitem" class="context-menu-item" onclick={() => copyPath(contextMenu!.entry)}>{t('sidebar.copyPath')}</button>
-      <button role="menuitem" class="context-menu-item" onclick={() => copyRelativePath(contextMenu!.entry)}>{t('sidebar.copyRelativePath')}</button>
+      {#if !platform.isMobile}
+        <button role="menuitem" class="context-menu-item" onclick={() => revealInFinder(contextMenu!.entry)}>{t(revealInFileManagerLabelKey)}</button>
+        <button role="menuitem" class="context-menu-item" onclick={() => copyPath(contextMenu!.entry)}>{t('sidebar.copyPath')}</button>
+        <button role="menuitem" class="context-menu-item" onclick={() => copyRelativePath(contextMenu!.entry)}>{t('sidebar.copyRelativePath')}</button>
+      {:else}
+        <!-- Touch has no drag-drop in the tree (see FileTreeNode); move via the palette. -->
+        <button role="menuitem" class="context-menu-item" data-testid="context-menu-move-to" onclick={() => moveEntry(contextMenu!.entry)}>{t('touch.moveTo')}</button>
+      {/if}
       {#if !contextMenu.entry.is_dir}
         <button role="menuitem" class="context-menu-item" onclick={() => handleDuplicate(contextMenu!.entry)}>{t('sidebar.duplicate')}</button>
       {/if}
@@ -1498,5 +1615,43 @@
     height: 1px;
     margin: 4px 8px;
     background: var(--novelist-border-subtle, var(--novelist-border));
+  }
+
+  /* Mobile: no traffic lights. The drawer sits under the touch shell's top
+     toolbar, which already clears the safe area. */
+  :global(html[data-mobile='true']) .sidebar-header {
+    padding-top: 0.5rem;
+  }
+
+  @media (pointer: coarse) {
+    .sidebar-icon-btn {
+      width: 44px;
+      height: 44px;
+    }
+    .sidebar-sort-item,
+    .sidebar-switch-btn,
+    .project-switcher-item {
+      min-height: 44px;
+    }
+    .project-switcher-action-btn {
+      width: 44px;
+      height: 44px;
+    }
+    .context-menu-item {
+      display: flex;
+      align-items: center;
+      min-height: 44px;
+    }
+    /* ≥16px keeps iOS from zooming the page when the input gains focus. */
+    .sidebar-input {
+      font-size: max(16px, var(--novelist-sidebar-file-font-size, 14px));
+    }
+  }
+
+  /* No hover on touch: show the hover-revealed row actions. */
+  @media (hover: none) {
+    .project-switcher-action-btn {
+      opacity: 1;
+    }
   }
 </style>

@@ -4,6 +4,8 @@
   import { fileMetaStore, formatRelativeTime } from '$lib/stores/file-meta.svelte';
   import { i18n, t } from '$lib/i18n';
   import { compareByMode } from '$lib/utils/file-sort';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { longPress, type LongPressEvent } from '$lib/actions/long-press';
   // Self-import replaces <svelte:self> (deprecated in Svelte 5).
   import FileTreeNode from './FileTreeNode.svelte';
 
@@ -11,6 +13,8 @@
     node: FileNode;
     depth: number;
     onContextMenu: (e: MouseEvent, node: FileNode) => void;
+    /** Touch/pen long-press: same menu as `onContextMenu`. */
+    onLongPress: (e: LongPressEvent, node: FileNode) => void;
     onSelect: (e: MouseEvent, node: FileNode) => void;
     onFileOpen: (node: FileNode) => void | Promise<void>;
     onRenameRequest: (node: FileNode) => void;
@@ -31,6 +35,7 @@
     node,
     depth,
     onContextMenu,
+    onLongPress,
     onSelect,
     onFileOpen,
     onRenameRequest,
@@ -58,6 +63,9 @@
   }
 
   const indentPx = $derived(depth * 12 + 6);
+  // iOS lifts a draggable element on long-press, which would steal the
+  // long-press menu; touch moves go through the menu's "Move to…" instead.
+  const rowDraggable = $derived(platform.isMobile ? 'false' : 'true');
 
   // "2,233 字 · 8 分钟前" under text files (OpenFic-style chapter list).
   const wordCount = $derived(fileMetaStore.showFileMeta ? fileMetaStore.wordCounts[node.path] : undefined);
@@ -118,10 +126,11 @@
     data-testid="sidebar-folder-{node.name}"
     data-tree-path={node.path}
     oncontextmenu={(e) => onContextMenu(e, node)}
+    use:longPress={{ onLongPress: (e) => onLongPress(e, node) }}
     ondragover={(e) => onDragOver(e, node)}
     ondragleave={(e) => onDragLeave(e, node)}
     ondrop={(e) => onDrop(e, node)}
-    draggable="true"
+    draggable={rowDraggable}
     ondragstart={(e) => onDragStart(e, node)}
     onclick={(e) => {
       // Single click on the row toggles folder; the chevron stops propagation
@@ -158,6 +167,7 @@
         node={child}
         depth={depth + 1}
         {onContextMenu}
+        {onLongPress}
         {onSelect}
         {onFileOpen}
         {onRenameRequest}
@@ -186,7 +196,7 @@
     style="padding-left: {indentPx + 16}px;"
     data-testid="sidebar-file-{node.name}"
     data-tree-path={node.path}
-    draggable="true"
+    draggable={rowDraggable}
     ondragstart={(e) => onDragStart(e, node)}
     onclick={(e) => {
       onSelect(e, node);
@@ -194,6 +204,7 @@
     }}
     ondblclick={(e) => { e.preventDefault(); onRenameRequest(node); }}
     oncontextmenu={(e) => onContextMenu(e, node)}
+    use:longPress={{ onLongPress: (e) => onLongPress(e, node) }}
   >
     <svg class="tree-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
       <path d="M4 2h5l3 3v9H4z" />
@@ -225,6 +236,7 @@
     data-tree-path={node.path}
     oncontextmenu={(e) => onContextMenu(e, node)}
     ondblclick={(e) => { e.preventDefault(); onRenameRequest(node); }}
+    use:longPress={{ onLongPress: (e) => onLongPress(e, node) }}
   >
     <svg class="tree-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
       <path d="M4 2h5l3 3v9H4z" />
@@ -370,5 +382,18 @@
     background: color-mix(in srgb, var(--novelist-accent) 18%, transparent) !important;
     outline: 1px dashed var(--novelist-accent);
     outline-offset: -1px;
+  }
+  @media (pointer: coarse) {
+    /* Rows are chrome: no text selection / iOS callout on long-press. */
+    .tree-row {
+      min-height: 44px;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    /* ≥16px keeps iOS from zooming the page when the rename input gains focus. */
+    .tree-input {
+      font-size: max(16px, var(--novelist-sidebar-file-font-size, 14px));
+    }
   }
 </style>

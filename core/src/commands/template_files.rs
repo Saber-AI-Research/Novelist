@@ -3,7 +3,8 @@
 //! into a new file. Distinct from `template.rs` (whole-project scaffolds).
 //!
 //! Storage:
-//!   * bundled (read-only):   `<resource_dir>/bundled-templates/*.md`
+//!   * bundled (read-only):   `<bundled resources>/bundled-templates/*.md`
+//!     (see `services::bundled_resources`)
 //!   * project  (user-owned): `<project>/.novelist/templates/*.md`
 //!
 //! File format: YAML front-matter (string values only) + markdown body.
@@ -22,7 +23,6 @@ use specta::Type;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tauri::Manager;
 use tempfile::TempPath;
 
 const MAX_ID_LEN: usize = 64;
@@ -270,11 +270,7 @@ fn project_templates_dir(project_dir: &Path) -> PathBuf {
 }
 
 fn bundled_templates_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, AppError> {
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|e| AppError::Custom(format!("resource_dir: {e}")))?;
-    Ok(resource_dir.join("bundled-templates"))
+    Ok(crate::services::bundled_resources::root(app_handle)?.join("bundled-templates"))
 }
 
 fn validate_project_dir(project_dir: &Path) -> Result<(), AppError> {

@@ -182,7 +182,7 @@
     {:else}
       <ul class="space-y-2 mb-4">
         {#each settings.hosts as host (host.id)}
-          <li class="flex items-center justify-between gap-3 p-2 rounded" style="border: 1px solid var(--novelist-border);">
+          <li class="host-row flex items-center justify-between gap-3 p-2 rounded" style="border: 1px solid var(--novelist-border);">
             <div class="flex items-center gap-2 flex-1">
               <input
                 type="radio"
@@ -235,7 +235,7 @@
       <div class="modal" role="dialog" tabindex="-1">
         <h4 class="text-sm font-semibold mb-3">{editing.isNew ? 'Add' : 'Edit'} {providerLabel(editing.host.provider)} host</h4>
 
-        <div class="flex items-center justify-between mb-3 gap-2">
+        <div class="field-row flex items-center justify-between mb-3 gap-2">
           <label class="text-xs w-32" for="host-name">Name</label>
           <input
             id="host-name"
@@ -248,7 +248,7 @@
 
         {#each fieldsFor(editing.host) as f}
           {@const shown = f.secret && revealedFields.has(f.key)}
-          <div class="flex items-center justify-between mb-3 gap-2">
+          <div class="field-row flex items-center justify-between mb-3 gap-2">
             <label class="text-xs w-32 shrink-0" for="host-{f.key}">
               {f.label}{#if f.optional} <span style="color: var(--novelist-text-secondary);">(opt)</span>{/if}
             </label>
@@ -323,5 +323,35 @@
     max-width: 90vw;
     max-height: 80vh;
     overflow-y: auto;
+  }
+
+  /* Phone: stack label above field; the edit sheet follows the visible
+     viewport so the on-screen keyboard never covers it. */
+  :global(html[data-layout='phone']) .host-row {
+    flex-wrap: wrap;
+  }
+  :global(html[data-layout='phone']) .field-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  :global(html[data-layout='phone']) .field-row > label {
+    width: auto;
+  }
+  :global(html[data-mobile='true']) .modal-backdrop,
+  :global(html[data-layout='phone']) .modal-backdrop {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+    padding: max(16px, env(safe-area-inset-top, 0px)) 16px max(16px, env(safe-area-inset-bottom, 0px));
+  }
+  :global(html[data-mobile='true']) .modal,
+  :global(html[data-layout='phone']) .modal {
+    max-height: 100%;
+    overscroll-behavior: contain;
+  }
+  :global(html[data-layout='phone']) .modal {
+    width: 100%;
+    max-width: none;
   }
 </style>

@@ -305,4 +305,49 @@
     border-radius: 2px;
     padding: 0 1px;
   }
+
+  /* Mobile layouts: lay the backdrop over the visual viewport so the panel
+     stays above the on-screen keyboard. */
+  :global(html[data-layout='phone']) .project-search-backdrop,
+  :global(html[data-layout='tablet']) .project-search-backdrop {
+    bottom: auto;
+    top: var(--novelist-vv-top, 0px);
+    height: var(--novelist-vv-height, 100vh);
+  }
+
+  /* Phone: bottom sheet. */
+  :global(html[data-layout='phone']) .project-search-backdrop {
+    align-items: flex-end;
+    padding-top: 0;
+  }
+  :global(html[data-layout='phone']) .project-search-panel {
+    width: 100%;
+    max-height: calc(var(--novelist-vv-height, 100vh) * 0.7);
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  :global(html[data-layout='phone'][data-keyboard='open']) .project-search-panel {
+    padding-bottom: 0;
+  }
+
+  :global(html[data-layout='tablet']) .project-search-panel {
+    width: min(560px, calc(100vw - 32px));
+    max-height: calc(var(--novelist-vv-height, 100vh) - 76px);
+  }
+
+  @media (pointer: coarse) {
+    .result-item {
+      min-height: 44px;
+      align-items: center;
+    }
+    .search-close {
+      min-width: 44px;
+      min-height: 44px;
+    }
+    /* ≥16px keeps iOS from zooming the page when the input gains focus. */
+    .search-input {
+      font-size: 16px;
+    }
+  }
 </style>

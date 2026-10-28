@@ -1,11 +1,4 @@
-import {
-  buildContextPack,
-  contextPackToPrompt,
-  stripMentionTokens,
-  stripSkillTokens,
-  type AiContextItem,
-  type AiContextKind,
-} from './context';
+import type { AiContextItem, AiContextKind } from './context';
 
 export type AiContextAttachmentKind =
   | 'selection'
@@ -16,7 +9,6 @@ export type AiContextAttachmentKind =
   | 'folder-summary'
   | 'memory'
   | 'skill'
-  | 'command'
   | 'session';
 
 export type AiContextAttachment = {
@@ -31,15 +23,8 @@ export type AiContextAttachment = {
   truncated: boolean;
 };
 
-export type PackedAttachmentPrompt = {
-  visibleText: string;
-  outboundText: string;
-  attachments: AiContextAttachment[];
-  estimatedChars: number;
-};
-
 const EDITOR_KINDS = new Set<AiContextAttachmentKind>(['selection', 'current-file', 'outline', 'open-tab']);
-const ASSET_KINDS = new Set<AiContextAttachmentKind>(['memory', 'skill', 'command']);
+const ASSET_KINDS = new Set<AiContextAttachmentKind>(['memory', 'skill']);
 
 function sourceForKind(kind: AiContextAttachmentKind): AiContextAttachment['source'] {
   if (EDITOR_KINDS.has(kind)) return 'editor';
@@ -57,7 +42,7 @@ function modeForKind(kind: AiContextAttachmentKind): AiContextAttachment['mode']
 
 export function createAttachmentFromContext(item: AiContextItem): AiContextAttachment {
   const kind: AiContextAttachmentKind = item.kind === 'manual-note'
-    ? item.id === 'memory' ? 'memory' : item.id.startsWith('command:') ? 'command' : 'skill'
+    ? item.id === 'memory' ? 'memory' : 'skill'
     : item.kind;
   return {
     id: item.id,
@@ -75,7 +60,6 @@ export function createAttachmentFromContext(item: AiContextItem): AiContextAttac
 export function attachmentToContextItem(attachment: AiContextAttachment): AiContextItem {
   const kind: AiContextKind = attachment.kind === 'memory'
     || attachment.kind === 'skill'
-    || attachment.kind === 'command'
     || attachment.kind === 'session'
     ? 'manual-note'
     : attachment.kind;
@@ -125,24 +109,4 @@ function scoreCandidate(item: AiContextAttachment, query: string): number {
   if (path.includes(query)) return 3;
   if (kind.includes(query)) return 4;
   return Number.POSITIVE_INFINITY;
-}
-
-export function displayTextFromInput(input: string): string {
-  return stripSkillTokens(stripMentionTokens(input)).replace(/\s+/g, ' ').trim();
-}
-
-export function buildPromptFromAttachments(
-  userText: string,
-  attachments: readonly AiContextAttachment[],
-  limit?: number,
-): PackedAttachmentPrompt {
-  const visibleText = userText.trim();
-  const contextItems = dedupeAttachments(attachments).map(attachmentToContextItem);
-  const pack = buildContextPack(visibleText, contextItems, limit);
-  return {
-    visibleText,
-    outboundText: pack.items.length > 0 ? contextPackToPrompt(pack) : visibleText,
-    attachments: pack.items.map(createAttachmentFromContext),
-    estimatedChars: pack.estimatedChars,
-  };
 }

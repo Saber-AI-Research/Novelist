@@ -10,4 +10,3 @@ export { default as IconClose } from './IconClose.svelte';
 export { default as IconGear } from './IconGear.svelte';
 export { default as IconWarning } from './IconWarning.svelte';
 export { default as IconMap } from './IconMap.svelte';
-export { default as IconTool } from './IconTool.svelte';

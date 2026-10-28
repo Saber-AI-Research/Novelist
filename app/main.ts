@@ -2,7 +2,9 @@ import App from "./App.svelte";
 import { mount } from "svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
-import { i18n } from "$lib/i18n";
+import { i18n, t } from "$lib/i18n";
+import { initPlatform, platform } from "$lib/stores/platform.svelte";
+import { uiStore } from "$lib/stores/ui.svelte";
 import { startupMark } from "$lib/utils/startup-timing";
 import "./app.css";
 
@@ -13,6 +15,37 @@ const scheduleFirstFrame = (callback: FrameRequestCallback) => {
     requestAnimationFrame(callback);
   }
 };
+
+/** Mobile has a single native-managed window; nothing to show/focus. */
+const manageNativeWindow = () => !(platform.ready && platform.isMobile);
+
+/**
+ * Explicit, non-desktop-fallback failure screen for a platform probe error.
+ * Running the desktop shell on a phone (or vice versa) would call commands
+ * that do not exist there, so the app refuses to mount instead.
+ */
+function renderPlatformError(target: HTMLElement, error: unknown) {
+  const message = (error as Error)?.message ?? String(error);
+  target.replaceChildren();
+  const box = document.createElement("div");
+  box.setAttribute("role", "alert");
+  box.dataset.testid = "platform-init-error";
+  box.style.cssText = "box-sizing:border-box;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));text-align:center;font-size:15px;";
+  const title = document.createElement("h1");
+  title.style.cssText = "margin:0;font-size:18px;font-weight:600;";
+  title.textContent = t("platform.initFailedTitle");
+  const detail = document.createElement("p");
+  detail.style.cssText = "margin:0;max-width:420px;color:var(--novelist-text-secondary);word-break:break-word;";
+  detail.textContent = t("platform.initFailedMessage", { error: message });
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "novelist-btn novelist-btn-primary";
+  retry.style.minHeight = "44px";
+  retry.textContent = t("platform.retry");
+  retry.addEventListener("click", () => window.location.reload());
+  box.append(title, detail, retry);
+  target.append(box);
+}
 
 // DEBUG: Mirror every startup phase to Rust tracing (`log_startup_phase`)
 // so we can see progress in terminal logs even when devtools is unreachable.
@@ -49,6 +82,7 @@ window.addEventListener("unhandledrejection", (e) => {
 // Protects against an awaited step hanging (e.g. a bad dynamic import) or
 // requestAnimationFrame never firing for some reason.
 const forceShowTimer = setTimeout(() => {
+  if (!manageNativeWindow()) return;
   logPhase("frontend.main.force-show-timeout");
   getCurrentWindow()
     .show()
@@ -67,8 +101,24 @@ void (async () => {
     void i18n.preloadAll();
 
     const target = document.getElementById("app");
-    logPhase("frontend.main.before-mount", { hasTarget: !!target });
     if (!target) throw new Error("#app target not found");
+
+    // Capabilities decide which shell and commands exist. No fallback: a
+    // failed probe renders an explicit error instead of a guessed platform.
+    logPhase("frontend.main.before-platform");
+    try {
+      await initPlatform();
+    } catch (err) {
+      console.error("[startup] platform capabilities unavailable", err);
+      renderPlatformError(target, err);
+      throw err;
+    }
+    // Re-apply the persisted zoom now that the platform is known (mobile
+    // WebViews must not get the root zoom transform).
+    uiStore.setZoom(uiStore.zoomLevel);
+    logPhase("frontend.main.platform-ready", { os: platform.os, mobile: platform.isMobile });
+
+    logPhase("frontend.main.before-mount", { hasTarget: true });
     mount(App, { target });
     logPhase("frontend.main.mounted");
   } catch (err) {
@@ -82,9 +132,11 @@ void (async () => {
   } finally {
     scheduleFirstFrame(() => {
       clearTimeout(forceShowTimer);
-      const win = getCurrentWindow();
-      win.show().catch((err) => console.error("[startup] window.show failed", err));
-      win.setFocus().catch((err) => console.error("[startup] window.setFocus failed", err));
+      if (manageNativeWindow()) {
+        const win = getCurrentWindow();
+        win.show().catch((err) => console.error("[startup] window.show failed", err));
+        win.setFocus().catch((err) => console.error("[startup] window.setFocus failed", err));
+      }
       logPhase("frontend.main.window-shown");
     });
   }

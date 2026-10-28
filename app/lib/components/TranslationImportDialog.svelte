@@ -12,6 +12,8 @@
     type LiterarySourceInspection,
   } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { pickBrowserFile, stageBrowserFile } from '$lib/services/mobile-files';
   import {
     TRANSLATION_LANGUAGE_OPTIONS,
     isKnownTranslationLanguageCode,
@@ -30,6 +32,8 @@
   let inspection = $state<LiterarySourceInspection | null>(null);
   let chapters = $state<LiteraryChapterDraft[]>([]);
   let sourcePath = $state('');
+  /** Display name of a browser-picked (mobile) source; its path is a cache copy. */
+  let sourceName = $state('');
   let title = $state('');
   let author = $state('');
   let projectName = $state('');
@@ -41,6 +45,8 @@
   let inspecting = $state(false);
   let creating = $state(false);
   let error = $state('');
+  /** Mobile: sources come from the browser picker, projects go into the library. */
+  const useLibrary = platform.isMobile;
 
   const OTHER_LANGUAGE = '__other__';
 
@@ -72,6 +78,12 @@
   );
 
   onMount(async () => {
+    if (useLibrary) {
+      const result = await commands.getLibraryPath();
+      if (result.status === 'ok') parentDir = result.data;
+      else error = t('library.locationFailed', { error: result.error });
+      return;
+    }
     try {
       const home = await homeDir();
       parentDir = `${home.replace(/[\\/]$/, '')}/Documents`;
@@ -81,12 +93,35 @@
   });
 
   async function chooseSource() {
+    if (useLibrary) {
+      await chooseBrowserSource();
+      return;
+    }
     const selected = await openDialog({
       multiple: false,
       filters: [{ name: 'EPUB / TXT', extensions: ['epub', 'txt'] }],
     });
     if (typeof selected !== 'string') return;
     sourcePath = selected;
+    await inspectSource();
+  }
+
+  /** Mobile: browser picker → staged cache copy, which then stands in for the picked path. */
+  async function chooseBrowserSource() {
+    const file = await pickBrowserFile('.epub,.txt,application/epub+zip,text/plain');
+    if (!file) return;
+    inspecting = true;
+    error = '';
+    let staged: string;
+    try {
+      staged = await stageBrowserFile(file);
+    } catch (cause) {
+      error = t('library.sourceFailed', { error: cause instanceof Error ? cause.message : String(cause) });
+      inspecting = false;
+      return;
+    }
+    sourcePath = staged;
+    sourceName = file.name;
     await inspectSource();
   }
 
@@ -139,6 +174,7 @@
   }
 
   async function chooseDestination() {
+    if (useLibrary) return;
     const selected = await openDialog({
       directory: true,
       multiple: false,
@@ -225,7 +261,7 @@
         <FileUp size={14} />
         {inspecting ? t('translationImport.inspecting') : t('translationImport.chooseSource')}
       </button>
-      <div class="source-path" title={sourcePath}>{sourcePath || t('translationImport.noSource')}</div>
+      <div class="source-path" title={sourceName || sourcePath}>{sourceName || sourcePath || t('translationImport.noSource')}</div>
     </div>
 
     {#if inspection}
@@ -287,15 +323,22 @@
             <span>{t('translationImport.projectName')}</span>
             <input bind:value={projectName} data-testid="translation-import-project-name" />
           </label>
-          <label>
-            <span>{t('translationImport.destination')}</span>
-            <div class="destination-field">
-              <input bind:value={parentDir} data-testid="translation-import-parent-dir" />
-              <button type="button" onclick={chooseDestination} title={t('newProject.browse')}>
-                <FolderOpen size={14} />
-              </button>
+          {#if useLibrary}
+            <div class="destination-static">
+              <span>{t('translationImport.destination')}</span>
+              <div class="library-location" data-testid="translation-import-library-location">{t('library.location')}</div>
             </div>
-          </label>
+          {:else}
+            <label>
+              <span>{t('translationImport.destination')}</span>
+              <div class="destination-field">
+                <input bind:value={parentDir} data-testid="translation-import-parent-dir" />
+                <button type="button" onclick={chooseDestination} title={t('newProject.browse')}>
+                  <FolderOpen size={14} />
+                </button>
+              </div>
+            </label>
+          {/if}
         </div>
 
         {#if chapters[0]}
@@ -492,6 +535,22 @@
     border-radius: 5px;
     background: var(--novelist-bg-secondary);
   }
+  .destination-static {
+    display: flex;
+    flex: 1;
+    min-width: 160px;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.75rem;
+    color: var(--novelist-text-secondary);
+  }
+  .library-location {
+    display: flex;
+    align-items: center;
+    min-height: 30px;
+    color: var(--novelist-text);
+    font-size: 0.8rem;
+  }
   .preview {
     margin-top: 14px;
     padding: 10px 12px;
@@ -535,5 +594,69 @@
     gap: 8px;
     padding: 12px 18px 16px;
     border-top: 1px solid var(--novelist-border);
+  }
+
+  /* Mobile: the backdrop tracks the visual viewport so the keyboard never covers the dialog. */
+  :global(html[data-mobile='true']) .backdrop {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+  }
+  :global(html[data-layout='tablet']) .dialog {
+    max-height: 100%;
+  }
+
+  /* Phone: full-screen sheet; every field takes a full row. */
+  :global(html[data-layout='phone']) .backdrop {
+    padding: 0;
+  }
+  :global(html[data-layout='phone']) .dialog {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  :global(html[data-layout='phone']) main,
+  :global(html[data-layout='phone']) .empty-state {
+    flex: 1 1 auto;
+  }
+  :global(html[data-layout='phone']) main {
+    padding: 12px;
+    overscroll-behavior: contain;
+  }
+  :global(html[data-layout='phone']) label,
+  :global(html[data-layout='phone']) .destination-static {
+    min-width: 100%;
+  }
+  :global(html[data-layout='phone']) .language-other {
+    width: 100%;
+  }
+  :global(html[data-layout='phone']) footer {
+    padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+  }
+  :global(html[data-layout='phone']) footer button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  /* Touch targets on phones and tablets (16px text avoids iOS focus zoom). */
+  :global(html[data-mobile='true']) .icon-button {
+    width: 44px;
+    height: 44px;
+  }
+  :global(html[data-mobile='true']) .command-button,
+  :global(html[data-mobile='true']) .cancel-button,
+  :global(html[data-mobile='true']) .submit-button,
+  :global(html[data-mobile='true']) .library-location {
+    min-height: 44px;
+  }
+  :global(html[data-mobile='true']) input,
+  :global(html[data-mobile='true']) select {
+    min-height: 44px;
+    font-size: 16px;
   }
 </style>

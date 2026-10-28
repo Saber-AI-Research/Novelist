@@ -178,4 +178,44 @@
     font-weight: 500;
     letter-spacing: 0.02em;
   }
+
+  /* Mobile layouts: lay the backdrop over the visual viewport so the palette
+     stays above the on-screen keyboard. */
+  :global(html[data-layout='phone']) .palette-backdrop,
+  :global(html[data-layout='tablet']) .palette-backdrop {
+    bottom: auto;
+    top: var(--novelist-vv-top, 0px);
+    height: var(--novelist-vv-height, 100vh);
+  }
+
+  /* Phone: bottom sheet. */
+  :global(html[data-layout='phone']) .palette-backdrop {
+    align-items: flex-end;
+    padding-top: 0;
+  }
+  :global(html[data-layout='phone']) .palette-container {
+    width: 100%;
+    max-height: calc(var(--novelist-vv-height, 100vh) * 0.7);
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  :global(html[data-layout='phone'][data-keyboard='open']) .palette-container {
+    padding-bottom: 0;
+  }
+
+  :global(html[data-layout='tablet']) .palette-container {
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(400px, calc(var(--novelist-vv-height, 100vh) - 96px));
+  }
+
+  @media (pointer: coarse) {
+    .palette-item {
+      min-height: 44px;
+    }
+    /* ≥16px keeps iOS from zooming the page when the input gains focus. */
+    .palette-input {
+      font-size: 16px;
+    }
+  }
 </style>

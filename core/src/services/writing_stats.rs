@@ -100,9 +100,11 @@ struct DailyEntry {
 
 type StatsMap = BTreeMap<String, DailyEntry>;
 
-/// Get stats directory for a project, using a blake3 hash of the project path.
+/// Get stats directory for a project, using a blake3 hash of the project's
+/// storage key (path on desktop, library-relative path on mobile).
 fn stats_dir(project_dir: &str) -> PathBuf {
-    let hash = blake3::hash(project_dir.as_bytes());
+    let key = crate::services::portable::project_storage_key(project_dir);
+    let hash = blake3::hash(key.as_bytes());
     let hex = hash.to_hex();
     let short = &hex[..16];
     let base = data_root();

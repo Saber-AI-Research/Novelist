@@ -1,4 +1,5 @@
 import { loadThemeId, saveThemeId, resolveTheme, applyTheme, type Theme } from '$lib/themes';
+import { platform } from '$lib/stores/platform.svelte';
 
 const SETTINGS_KEY = 'novelist-settings';
 const SIDEBAR_WIDTH_KEY = 'novelist-sidebar-width';
@@ -60,7 +61,10 @@ function readNumber(key: string, fallback: number, min: number, max: number): nu
 }
 
 class UiStore {
+  /** Docked sidebar visibility (desktop/wide layouts). */
   sidebarVisible = $state(true);
+  /** Overlay sidebar drawer (phone / tablet-portrait layouts). Never persisted. */
+  sidebarDrawerOpen = $state(false);
   outlineVisible = $state(false);
   /** Which right panel is active. Draft/Snapshot/Stats are mutually exclusive. */
   activeRightPanel = $state<RightPanel>(null);
@@ -69,6 +73,8 @@ class UiStore {
   splitRatio = $state(readNumber(SPLIT_RATIO_KEY, 0.5, 0.2, 0.8));
   zenMode = $state(false);
   settingsOpen = $state(false);
+  /** Section Settings should show when it next opens (consumed by Settings). */
+  settingsInitialSection = $state<string | null>(null);
   /** When on, F12 opens the native WebView DevTools. Persisted per-machine. */
   developerMode = $state<boolean>(localStorage.getItem(DEVELOPER_MODE_KEY) === 'true');
   editorSettings = $state<EditorSettings>(loadSettings());
@@ -98,7 +104,22 @@ class UiStore {
   get statsVisible(): boolean { return this.activeRightPanel === 'stats'; }
   get templateVisible(): boolean { return this.activeRightPanel === 'template'; }
   get literaryVisible(): boolean { return this.activeRightPanel === 'literary'; }
-  toggleSidebar() { this.sidebarVisible = !this.sidebarVisible; }
+  /** True when the sidebar is a drawer for the current shell layout. */
+  get sidebarIsDrawer(): boolean { return platform.ready && platform.sidebarDrawer; }
+  /** Whether the sidebar is currently shown in whichever form the layout uses. */
+  get sidebarShown(): boolean {
+    return this.sidebarIsDrawer ? this.sidebarDrawerOpen : this.sidebarVisible;
+  }
+  toggleSidebar() {
+    if (this.sidebarIsDrawer) this.sidebarDrawerOpen = !this.sidebarDrawerOpen;
+    else this.sidebarVisible = !this.sidebarVisible;
+  }
+  /** Show the project sidebar (docked) or open the drawer (compact layouts). */
+  revealSidebar() {
+    if (this.sidebarIsDrawer) this.sidebarDrawerOpen = true;
+    else this.sidebarVisible = true;
+  }
+  closeSidebarDrawer() { this.sidebarDrawerOpen = false; }
   toggleOutline() { this.outlineVisible = !this.outlineVisible; }
 
   /** Toggle a right panel. If it's already active, close it. Otherwise switch to it. */
@@ -112,7 +133,15 @@ class UiStore {
   toggleTemplate() { this.toggleRightPanel('template'); }
   toggleLiterary() { this.toggleRightPanel('literary'); }
   toggleZen() { this.zenMode = !this.zenMode; }
-  toggleSettings() { this.settingsOpen = !this.settingsOpen; }
+  toggleSettings() {
+    if (this.settingsOpen) this.settingsInitialSection = null;
+    this.settingsOpen = !this.settingsOpen;
+  }
+  /** Open Settings, optionally on a specific section id (e.g. 'sync'). */
+  openSettings(section: string | null = null) {
+    this.settingsInitialSection = section;
+    this.settingsOpen = true;
+  }
   setDeveloperMode(on: boolean) {
     this.developerMode = on;
     localStorage.setItem(DEVELOPER_MODE_KEY, String(on));
@@ -138,8 +167,18 @@ class UiStore {
   resetZoom() { this.setZoom(1.0, { userInitiated: true }); }
   setZoom(level: number, options: { userInitiated?: boolean } = {}) {
     const safeLevel = Number.isFinite(level) ? level : 1;
-    this.zoomLevel = Math.round(Math.max(0.5, Math.min(2.0, safeLevel)) * 10) / 10;
     const root = document.documentElement;
+    // Mobile WebViews own zoom (pinch / system text size). A root transform
+    // on top of that double-scales the UI and breaks fixed overlays and the
+    // keyboard-aware viewport, so the app-level zoom stays at 1 there.
+    if (platform.ready && platform.isMobile) {
+      this.zoomLevel = 1;
+      root.style.transform = '';
+      root.style.width = '';
+      root.style.height = '';
+      return;
+    }
+    this.zoomLevel = Math.round(Math.max(0.5, Math.min(2.0, safeLevel)) * 10) / 10;
     root.style.transform = this.zoomLevel === 1 ? '' : `scale(${this.zoomLevel})`;
     root.style.transformOrigin = 'top left';
     root.style.width = this.zoomLevel === 1 ? '' : `${100 / this.zoomLevel}%`;

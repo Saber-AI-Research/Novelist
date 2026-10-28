@@ -168,6 +168,11 @@
   textarea {
     resize: vertical;
   }
+  /* iOS zooms the page when focusing a field under 16px. */
+  :global(html[data-mobile='true']) input,
+  :global(html[data-mobile='true']) textarea {
+    font-size: 16px;
+  }
   .hint {
     grid-column: 1 / -1;
     margin: 0;

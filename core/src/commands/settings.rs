@@ -17,7 +17,7 @@ use crate::models::settings::{
 };
 use crate::services::sidecar::{atomic_write_bytes, atomic_write_json_private, read_json};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
@@ -182,6 +182,62 @@ pub async fn get_resolved_snapshot_config(project_dir: &str) -> ResolvedSnapshot
     resolve(&global, None, None, None, project_snap.as_ref()).snapshot
 }
 
+/// Mobile stores project new-file directories relative to the project: the
+/// absolute iOS container prefix changes on app updates. Directories outside
+/// the project stay as given.
+fn store_new_file_dirs_relative(new_file: &mut NewFileConfig, project_spellings: &[&Path]) {
+    for dir in [&mut new_file.default_dir, &mut new_file.last_used_dir]
+        .into_iter()
+        .flatten()
+    {
+        let path = Path::new(dir.as_str());
+        let relative = project_spellings
+            .iter()
+            .find_map(|project| path.strip_prefix(project).ok())
+            .filter(|relative| {
+                relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+            })
+            .map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    ".".to_owned()
+                } else {
+                    relative.to_string_lossy().into_owned()
+                }
+            });
+        if let Some(relative) = relative {
+            *dir = relative;
+        }
+    }
+}
+
+/// Resolves project-relative new-file directories (written on mobile, possibly
+/// synced to desktop) against the caller's spelling of the project path.
+fn resolve_new_file_dirs(new_file: &mut NewFileConfig, project: &Path) {
+    for dir in [&mut new_file.default_dir, &mut new_file.last_used_dir]
+        .into_iter()
+        .flatten()
+    {
+        let relative = Path::new(dir.as_str());
+        if dir.is_empty()
+            || relative.is_absolute()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            continue;
+        }
+        let resolved = relative
+            .components()
+            .fold(project.to_path_buf(), |path, component| match component {
+                Component::Normal(name) => path.join(name),
+                _ => path,
+            });
+        *dir = resolved.to_string_lossy().into_owned();
+    }
+}
+
 /// Return effective settings, merging global defaults with an optional
 /// project overlay. `dir_path = None` returns global-only (scratch mode).
 #[tauri::command]
@@ -199,7 +255,11 @@ pub async fn get_effective_settings(
         Some(d) => {
             let project = read_project_config_if_any(&d).await;
             match project {
-                Some(p) => (Some(p.view), Some(p.new_file), Some(p.plugins), p.snapshot),
+                Some(p) => {
+                    let mut new_file = p.new_file;
+                    resolve_new_file_dirs(&mut new_file, Path::new(&d));
+                    (Some(p.view), Some(new_file), Some(p.plugins), p.snapshot)
+                }
                 None => (None, None, None, None),
             }
         }
@@ -254,6 +314,12 @@ pub async fn write_project_settings(
     snapshot: Option<SnapshotConfig>,
 ) -> Result<(), AppError> {
     let project = tokio::fs::canonicalize(&dir_path).await?;
+    let mut new_file = new_file;
+    if cfg!(mobile) {
+        if let Some(new_file) = new_file.as_mut() {
+            store_new_file_dirs_relative(new_file, &[Path::new(&dir_path), &project]);
+        }
+    }
     let guard = acquire_settings_guard(project.clone()).await?;
     tokio::spawn(async move {
         let _guard = guard;
@@ -375,6 +441,52 @@ show_hidden_files = true
             .unwrap();
         assert!(eff.view.show_hidden_files);
         assert!(eff.is_project_scoped);
+    }
+
+    #[tokio::test]
+    #[serial(settings_data_dir)]
+    async fn mobile_new_file_dirs_follow_a_relocated_project() {
+        let global_tmp = TempDir::new().unwrap();
+        let _settings_dir = SettingsDataDirGuard::set(global_tmp.path());
+        let old_project =
+            Path::new("/var/mobile/Containers/Data/Application/8F1C/Documents/Projects/书");
+        let mut stored = NewFileConfig {
+            default_dir: Some(
+                old_project
+                    .join("正文/第一卷")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            last_used_dir: Some(old_project.to_string_lossy().into_owned()),
+            ..NewFileConfig::default()
+        };
+        store_new_file_dirs_relative(&mut stored, &[old_project]);
+        assert_eq!(stored.default_dir.as_deref(), Some("正文/第一卷"));
+        assert_eq!(stored.last_used_dir.as_deref(), Some("."));
+
+        // After an app update the same project lives under a new container.
+        let dir = TempDir::new().unwrap();
+        write_minimal_project(
+            &dir,
+            &format!("[new_file]\n{}", toml::to_string(&stored).unwrap()),
+        );
+        let eff = get_effective_settings(Some(dir.path().to_string_lossy().into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            eff.new_file.default_dir.as_deref(),
+            Some(
+                dir.path()
+                    .join("正文")
+                    .join("第一卷")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            eff.new_file.last_used_dir.as_deref(),
+            Some(dir.path().to_string_lossy().as_ref())
+        );
     }
 
     #[tokio::test]

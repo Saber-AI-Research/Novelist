@@ -222,6 +222,7 @@ pub async fn verify_publish_channel(config: PlatformConfig) -> Result<String, Ap
 /// `navigator.clipboard.read()`) avoids the WebKit/macOS "Paste"
 /// permission prompt that otherwise pops up next to the cursor.
 #[derive(serde::Serialize, serde::Deserialize, specta::Type)]
+#[cfg_attr(mobile, allow(dead_code))] // only the desktop clipboard reader builds it
 pub struct ClipboardImage {
     pub bytes: Vec<u8>,
     pub mime: String,
@@ -232,6 +233,18 @@ pub struct ClipboardImage {
 #[tauri::command]
 #[specta::specta]
 pub async fn read_clipboard_image() -> Result<ClipboardImage, AppError> {
+    #[cfg(mobile)]
+    {
+        Err(AppError::Unsupported("Native clipboard image read"))
+    }
+    #[cfg(desktop)]
+    {
+        read_desktop_clipboard_image().await
+    }
+}
+
+#[cfg(desktop)]
+async fn read_desktop_clipboard_image() -> Result<ClipboardImage, AppError> {
     // arboard is sync and may take a few ms on the OS clipboard read
     // (especially on macOS when bridging across processes). Run it on
     // a blocking thread so we don't stall the Tokio runtime.
@@ -272,6 +285,7 @@ pub async fn read_clipboard_image() -> Result<ClipboardImage, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn convert_markdown_to_html(markdown: String) -> Result<String, AppError> {
+    crate::services::platform::require_external_processes("Pandoc HTML conversion")?;
     Ok(pandoc_html::markdown_to_html(&markdown).await?)
 }
 

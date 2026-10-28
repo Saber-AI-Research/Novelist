@@ -45,8 +45,15 @@
         <span class="opacity-50">·</span>
         <span>{fileSize}</span>
       {/if}
-      <span class="opacity-50">·</span>
+      <span class="status-cursor-sep opacity-50">·</span>
     {/if}
-    <span data-testid="status-cursor-pos">{t('status.lineCol', { line: cursorLine, col: cursorCol })}</span>
+    <span class="status-cursor" data-testid="status-cursor-pos">{t('status.lineCol', { line: cursorLine, col: cursorCol })}</span>
   </span>
 </div>
+
+<style>
+  :global(html[data-layout='phone']) .status-cursor,
+  :global(html[data-layout='phone']) .status-cursor-sep {
+    display: none;
+  }
+</style>

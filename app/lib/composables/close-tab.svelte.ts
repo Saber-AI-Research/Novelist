@@ -1,6 +1,13 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 import { projectStore } from '$lib/stores/project.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+
+/** Desktop closes the window; a mobile app has one OS-owned window. */
+function closeWindow() {
+  if (platform.isMobile) return;
+  void getCurrentWindow().destroy();
+}
 
 /**
  * Close-tab pipeline with a guard against double-fire from both Cmd+W
@@ -24,7 +31,7 @@ export function createCloseTab() {
         if (tabsStore.panes.length > 1) {
           tabsStore.removePane(tabsStore.activePaneId);
         } else {
-          getCurrentWindow().destroy();
+          closeWindow();
         }
         return;
       }
@@ -37,7 +44,7 @@ export function createCloseTab() {
       if (projectStore.singleFileMode) {
         await projectStore.close();
       } else if (!projectStore.dirPath) {
-        getCurrentWindow().destroy();
+        closeWindow();
       }
     } finally {
       closingTab = false;

@@ -168,6 +168,13 @@
   .act.accept:not(:disabled):hover {
     background: color-mix(in srgb, var(--novelist-accent) 85%, black);
   }
+  @media (pointer: coarse) {
+    .act {
+      justify-content: center;
+      height: 44px;
+      min-width: 44px;
+    }
+  }
   .status {
     font-size: 11px;
     color: var(--novelist-text-secondary);

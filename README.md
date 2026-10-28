@@ -111,9 +111,9 @@ First-class support for **Chinese, Japanese, and Korean** — designed in from t
 
 ### Extend with Plugins · 通过插件扩展
 
-QuickJS-sandboxed plugins, in-app scaffolding, native panels for AI Talk and AI Agent (Claude CLI). Browse the marketplace or write your own.
+QuickJS-sandboxed plugins, in-app scaffolding, and a native AI Talk chat panel. Browse the marketplace or write your own.
 
-QuickJS 沙箱的插件系统，应用内一键脚手架，原生 AI Talk / AI Agent 面板（Claude CLI）。浏览市场或自己写一个。
+QuickJS 沙箱的插件系统，应用内一键脚手架，原生 AI Talk 对话面板。浏览市场或自己写一个。
 
 ### Details That Matter · 值得留意的细节
 
@@ -183,17 +183,15 @@ Issues, plugins, themes, and translations are all welcome. See [CONTRIBUTING.md]
 
 ## Acknowledgements / 致谢
 
-Novelist's two AI panels (AI Talk and AI Agent) were inspired by
-[claudian](https://github.com/YishenTu/claudian) and
+Novelist's AI Talk panel was inspired by
 [obsidian-yolo](https://github.com/Lapis0x0/obsidian-yolo) — thanks to
-their authors for showing how an embedded AI agent can fit naturally
+its author for showing how an embedded AI assistant can fit naturally
 inside a writing tool. A full list of design references and bundled
 third-party software is in [CREDITS.md](CREDITS.md).
 
-Novelist 的两个 AI 面板受
-[claudian](https://github.com/YishenTu/claudian) 与
+Novelist 的 AI Talk 面板受
 [obsidian-yolo](https://github.com/Lapis0x0/obsidian-yolo)
-启发,感谢这些项目的作者。完整的设计参考与第三方依赖清单见
+启发,感谢该项目的作者。完整的设计参考与第三方依赖清单见
 [CREDITS.md](CREDITS.md)。
 
 ## License / 许可

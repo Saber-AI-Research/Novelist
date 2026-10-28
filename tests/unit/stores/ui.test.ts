@@ -17,6 +17,13 @@ import {
   autoInitZoomFromScreen,
   migrateLegacyAutoZoomFromScreen,
 } from '$lib/stores/ui.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+
+const IOS_CAPABILITIES = {
+  os: 'ios', is_mobile: true, native_menu: false, multi_window: false, pick_directory: false,
+  external_processes: false, self_update: false, cli_shim: false, file_watcher: false,
+  plugin_install: false, export_formats: [],
+} as const;
 
 function resetStore() {
   localStorage.clear();
@@ -28,7 +35,10 @@ function resetStore() {
   uiStore.splitRatio = 0.5;
   uiStore.zenMode = false;
   uiStore.settingsOpen = false;
+  uiStore.settingsInitialSection = null;
+  uiStore.sidebarDrawerOpen = false;
   uiStore.zoomLevel = 1;
+  platform.viewportWidth = 1280;
   // Reset any inline transforms from previous test runs.
   document.documentElement.style.transform = '';
   document.documentElement.style.width = '';
@@ -58,6 +68,40 @@ describe('[contract] uiStore — sidebar + outline toggles', () => {
     expect(uiStore.zenMode).toBe(true);
     uiStore.toggleSettings();
     expect(uiStore.settingsOpen).toBe(true);
+  });
+});
+
+describe('[contract] uiStore — touch shell', () => {
+  beforeEach(resetStore);
+
+  it('toggleSidebar drives the drawer (not the docked state) on phone layouts', () => {
+    platform.viewportWidth = 390;
+    expect(uiStore.sidebarIsDrawer).toBe(true);
+    uiStore.toggleSidebar();
+    expect(uiStore.sidebarDrawerOpen).toBe(true);
+    expect(uiStore.sidebarVisible).toBe(true);
+    expect(uiStore.sidebarShown).toBe(true);
+    uiStore.closeSidebarDrawer();
+    expect(uiStore.sidebarShown).toBe(false);
+    uiStore.revealSidebar();
+    expect(uiStore.sidebarDrawerOpen).toBe(true);
+  });
+
+  it('openSettings records the requested section; closing clears it', () => {
+    uiStore.openSettings('sync');
+    expect(uiStore.settingsOpen).toBe(true);
+    expect(uiStore.settingsInitialSection).toBe('sync');
+    uiStore.toggleSettings();
+    expect(uiStore.settingsOpen).toBe(false);
+    expect(uiStore.settingsInitialSection).toBeNull();
+  });
+
+  it('never applies the root zoom transform on mobile', () => {
+    platform.setCapabilities({ ...IOS_CAPABILITIES, export_formats: [] });
+    uiStore.setZoom(1.5, { userInitiated: true });
+    expect(uiStore.zoomLevel).toBe(1);
+    expect(document.documentElement.style.transform).toBe('');
+    expect(localStorage.getItem('novelist-zoom')).toBeNull();
   });
 });
 

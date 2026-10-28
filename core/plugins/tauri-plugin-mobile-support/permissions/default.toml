@@ -1,0 +1,9 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+Allows the webview to open the native share sheet for a file staged in the
+app cache `exports/` directory. The credential vault has no command and no
+permission: it is reachable from Rust only.
+"""
+permissions = ["allow-share-file"]

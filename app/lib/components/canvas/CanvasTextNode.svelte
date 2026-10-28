@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { flushSync } from 'svelte';
   import { Handle, Position, NodeResizer } from '@xyflow/svelte';
   import { isImeComposing } from '$lib/utils/ime';
+  import { isTapOnSelected, recordPress, type NodePress } from './node-tap';
 
   interface Props {
     data: {
@@ -14,10 +16,19 @@
 
   let editing = $state(false);
   let editValue = $state<string>('');
+  let nodeEl = $state<HTMLDivElement | undefined>(undefined);
+  let press: NodePress | null = null;
 
   function startEdit() {
     editValue = data.text ?? '';
     editing = true;
+    // Render now and focus inside the gesture (mobile keyboards only open
+    // then), caret at the end.
+    flushSync();
+    const textarea = nodeEl?.querySelector('textarea');
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
   }
 
   function finishEdit() {
@@ -33,6 +44,13 @@
     if (isImeComposing(e)) return;
     if (e.key === 'Escape') { editing = false; }
   }
+
+  // Touch and pen have no reliable dblclick: tapping an already selected card
+  // edits it. The first tap only selects, so dragging never opens the editor.
+  function onClick(e: MouseEvent) {
+    if (!editing && isTapOnSelected(press, e)) startEdit();
+    press = null;
+  }
 </script>
 
 <NodeResizer minWidth={140} minHeight={60} isVisible={selected} lineClass="rs-line" handleClass="rs-handle" onResizeEnd={() => data.onResize?.()} />
@@ -43,7 +61,14 @@
 <Handle type="source" id="bottom" position={Position.Bottom} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="node" ondblclick={startEdit}>
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div
+  class="node"
+  bind:this={nodeEl}
+  onpointerdown={(e) => { press = recordPress(e, selected); }}
+  onclick={onClick}
+  ondblclick={startEdit}
+>
   {#if editing}
     <textarea
       class="edit nowheel nodrag"

@@ -5,8 +5,8 @@ import { uiStore } from '$lib/stores/ui.svelte';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 import { projectStore } from '$lib/stores/project.svelte';
 import { extensionStore } from '$lib/stores/extensions.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 import { aiTalkSessions } from '$lib/components/ai-talk/sessions.svelte';
-import { requestAiAgentNewSession } from '$lib/components/ai-agent/new-session-requests';
 import * as fmt from '$lib/editor/formatting';
 import { applyBlockTransform, type BlockTransformTarget } from '$lib/editor/block-transform';
 import { deleteCurrentParagraph } from '$lib/editor/delete-paragraph';
@@ -49,6 +49,8 @@ export type AppCommandContext = {
   handleOpenDirectory: () => void;
   handleOpenContainingFolder: () => void;
   handleCloseTab: () => void;
+  /** Mobile: copy a picked .md/.txt into the open library project. */
+  handleImportFileIntoProject: () => void;
   handleGoToLine: () => void;
   saveCurrentFileAsTemplate: () => void;
   // Dialog/palette toggles (own component-local $state)
@@ -81,6 +83,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
     labelKey?: string;
     label?: string;
     shortcut?: string;
+    available?: () => boolean;
     handler: () => void;
   }) {
     if (opts.labelKey) {
@@ -96,6 +99,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
           return alt !== key && alt !== tFn(key) ? alt : undefined;
         },
         shortcut: opts.shortcut,
+        available: opts.available,
         handler: opts.handler,
       });
       return;
@@ -104,6 +108,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
       id: opts.id,
       label: opts.label ?? opts.id,
       shortcut: opts.shortcut,
+      available: opts.available,
       handler: opts.handler,
     });
   }
@@ -111,7 +116,10 @@ export function registerAppCommands(ctx: AppCommandContext) {
   // future register call that wants the active-locale label only.
   void t;
 
-  reg({ id: 'new-window', labelKey: 'command.newWindow', shortcut: 'Cmd+Shift+N', handler: ctx.openNewWindow });
+  // Desktop-only commands are gated by native capabilities: hidden from the
+  // palette and ignored by every dispatcher (shortcuts, menu, touch bars).
+  const desktopOnly = () => !platform.isMobile;
+  reg({ id: 'new-window', labelKey: 'command.newWindow', shortcut: 'Cmd+Shift+N', available: () => platform.can('multi_window'), handler: ctx.openNewWindow });
   reg({ id: 'toggle-sidebar', labelKey: 'command.toggleSidebar', shortcut: shortcutsStore.get('toggle-sidebar'), handler: () => uiStore.toggleSidebar() });
   reg({ id: 'toggle-outline', labelKey: 'command.toggleOutline', shortcut: shortcutsStore.get('toggle-outline'), handler: () => uiStore.toggleOutline() });
   reg({ id: 'toggle-zen', labelKey: 'command.toggleZen', shortcut: shortcutsStore.get('toggle-zen'), handler: () => uiStore.toggleZen() });
@@ -132,15 +140,25 @@ export function registerAppCommands(ctx: AppCommandContext) {
       void uploadAllLocalImagesCommand(getActiveEditorView());
     },
   });
-  reg({ id: 'toggle-split', labelKey: 'command.toggleSplit', shortcut: shortcutsStore.get('toggle-split'), handler: () => tabsStore.toggleSplit() });
+  reg({ id: 'toggle-split', labelKey: 'command.toggleSplit', shortcut: shortcutsStore.get('toggle-split'), available: () => platform.splitAvailable, handler: () => tabsStore.toggleSplit() });
   reg({ id: 'new-file', labelKey: 'command.newFile', shortcut: shortcutsStore.get('new-file'), handler: () => {
-    projectStore.dirPath ? ctx.handleNewFile() : ctx.handleNewScratchFile();
+    if (projectStore.dirPath) ctx.handleNewFile();
+    // Scratch files need a desktop Save As dialog; mobile files live in
+    // library projects, so start one instead.
+    else if (platform.isMobile) ctx.openNewProjectDialog();
+    else ctx.handleNewScratchFile();
   }});
   reg({ id: 'new-project', labelKey: 'command.newProject', handler: ctx.openNewProjectDialog });
   reg({ id: 'switch-project', labelKey: 'command.switchProject', handler: ctx.requestProjectSwitcher });
-  reg({ id: 'open-file', labelKey: 'command.openFile', shortcut: shortcutsStore.get('open-file'), handler: ctx.handleOpenFile });
-  reg({ id: 'open-directory', labelKey: 'command.openDirectory', shortcut: shortcutsStore.get('open-directory'), handler: ctx.handleOpenDirectory });
-  reg({ id: 'open-containing-folder', labelKey: 'command.openContainingFolder', handler: ctx.handleOpenContainingFolder });
+  reg({ id: 'open-file', labelKey: 'command.openFile', shortcut: shortcutsStore.get('open-file'), available: desktopOnly, handler: ctx.handleOpenFile });
+  reg({ id: 'open-directory', labelKey: 'command.openDirectory', shortcut: shortcutsStore.get('open-directory'), available: () => platform.can('pick_directory'), handler: ctx.handleOpenDirectory });
+  reg({ id: 'open-containing-folder', labelKey: 'command.openContainingFolder', available: () => platform.can('pick_directory'), handler: ctx.handleOpenContainingFolder });
+  reg({
+    id: 'import-file-into-project',
+    labelKey: 'command.importFileIntoProject',
+    available: () => platform.isMobile && !!projectStore.dirPath,
+    handler: ctx.handleImportFileIntoProject,
+  });
   reg({ id: 'export-project', labelKey: 'command.exportProject', shortcut: shortcutsStore.get('export-project'), handler: ctx.openExportDialog });
   reg({ id: 'close-tab', labelKey: 'command.closeTab', shortcut: shortcutsStore.get('close-tab'), handler: ctx.handleCloseTab });
   reg({ id: 'rename-file', labelKey: 'command.renameFile', shortcut: shortcutsStore.get('rename-file'), handler: ctx.renameCurrentFile });
@@ -160,27 +178,12 @@ export function registerAppCommands(ctx: AppCommandContext) {
     handler: () => extensionStore.togglePanel('ai-talk'),
   });
   reg({
-    id: 'toggle-ai-agent',
-    labelKey: 'command.toggleAiAgent',
-    shortcut: shortcutsStore.get('toggle-ai-agent'),
-    handler: () => extensionStore.togglePanel('ai-agent'),
-  });
-  reg({
     id: 'ai-talk-new-session',
     labelKey: 'command.aiTalkNewSession',
     shortcut: shortcutsStore.get('ai-talk-new-session'),
     handler: () => {
       if (extensionStore.activePanelId !== 'ai-talk') extensionStore.openPanel('ai-talk');
       aiTalkSessions.requestNewSession();
-    },
-  });
-  reg({
-    id: 'ai-agent-new-session',
-    labelKey: 'command.aiAgentNewSession',
-    shortcut: shortcutsStore.get('ai-agent-new-session'),
-    handler: () => {
-      if (extensionStore.activePanelId !== 'ai-agent') extensionStore.openPanel('ai-agent');
-      requestAiAgentNewSession(projectStore.dirPath);
     },
   });
   reg({
@@ -214,6 +217,24 @@ export function registerAppCommands(ctx: AppCommandContext) {
   }});
   reg({ id: 'editor-delete-paragraph', labelKey: 'command.deleteParagraph', handler: () => {
     const view = getActiveEditorView(); if (view) deleteCurrentParagraph(view);
+  }});
+  // Touch format bar actions (keyboards keep CodeMirror's own keymap).
+  // `@codemirror/commands` is loaded lazily: this module is in the
+  // first-paint chunk while CodeMirror lives in the editor chunk.
+  reg({ id: 'editor-undo', labelKey: 'command.undo', handler: async () => {
+    const view = getActiveEditorView();
+    if (!view) return;
+    const { undo } = await import('@codemirror/commands');
+    undo(view);
+  }});
+  reg({ id: 'editor-redo', labelKey: 'command.redo', handler: async () => {
+    const view = getActiveEditorView();
+    if (!view) return;
+    const { redo } = await import('@codemirror/commands');
+    redo(view);
+  }});
+  reg({ id: 'editor-cjk-quotes', labelKey: 'command.cjkQuotes', handler: () => {
+    const view = getActiveEditorView(); if (view) fmt.wrapSelection(view, '「', '」');
   }});
   for (const command of BLOCK_TRANSFORM_COMMANDS) {
     reg({
@@ -306,12 +327,15 @@ export function registerAppCommands(ctx: AppCommandContext) {
   // handler-time — a no-op until the user enables Developer Mode in
   // Settings, so the command/shortcut stays registered without leaking
   // the inspector to ordinary users.
-  reg({ id: 'toggle-devtools', labelKey: 'command.toggleDevtools', shortcut: shortcutsStore.get('toggle-devtools'), handler: async () => {
+  reg({ id: 'toggle-devtools', labelKey: 'command.toggleDevtools', shortcut: shortcutsStore.get('toggle-devtools'), available: desktopOnly, handler: async () => {
     if (!uiStore.developerMode) return;
     const { commands } = await import('$lib/ipc/commands');
-    await commands.openDevtools();
+    const result = await commands.openDevtools();
+    if (result.status === 'error') {
+      window.dispatchEvent(new CustomEvent('novelist-operation-error', { detail: { message: result.error } }));
+    }
   }});
-  reg({ id: 'check-for-updates', labelKey: 'command.checkForUpdates', handler: async () => {
+  reg({ id: 'check-for-updates', labelKey: 'command.checkForUpdates', available: () => platform.can('self_update'), handler: async () => {
     const { checkForUpdates } = await import('$lib/updater');
     try {
       await checkForUpdates(false);
@@ -319,7 +343,7 @@ export function registerAppCommands(ctx: AppCommandContext) {
       console.warn('[updater] manual check dispatch failed:', e);
     }
   }});
-  reg({ id: 'install-cli-shim', labelKey: 'command.installCliShim', handler: async () => {
+  reg({ id: 'install-cli-shim', labelKey: 'command.installCliShim', available: () => platform.can('cli_shim'), handler: async () => {
     const { runInstallCliShim } = await import('$lib/services/cli-shim');
     await runInstallCliShim(t);
   }});

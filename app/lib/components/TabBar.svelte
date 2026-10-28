@@ -4,6 +4,7 @@
   import { t } from '$lib/i18n';
   import EditorShareMenu from './EditorShareMenu.svelte';
   import { SIDEBAR_PATH_MIME, hasSidebarPath, openPathInPane } from '$lib/services/pane-drop';
+  import { platform } from '$lib/stores/platform.svelte';
 
   interface Props {
     paneId?: string;
@@ -119,7 +120,7 @@
     height: 2.35rem;
     background: transparent;
     border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border));
-    padding-left: env(titlebar-area-x, 78px);
+    padding-left: {platform.isMobile ? 'env(safe-area-inset-left)' : 'env(titlebar-area-x, 78px)'};
   "
 >
 <div
@@ -144,7 +145,7 @@
       role="tab"
       tabindex="0"
       aria-selected={tab.id === paneActiveTabId}
-      draggable="true"
+      draggable={platform.isMobile ? 'false' : 'true'}
       ondragstart={(e) => handleDragStart(e, tab.id)}
       ondragend={handleDragEnd}
       style="
@@ -257,5 +258,33 @@
   }
   .tab-item.drop-after {
     box-shadow: inset -2px 0 0 0 var(--novelist-accent);
+  }
+  /* No hover on touch: keep the close button visible. */
+  @media (hover: none) {
+    .close-btn {
+      opacity: 0.5 !important;
+    }
+  }
+  @media (pointer: coarse) {
+    /* !important: the row/button sizes are inline styles. */
+    .tab-bar-row {
+      height: 44px !important;
+    }
+    .tab-bar {
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+    }
+    .tab-item {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .close-btn {
+      width: 44px !important;
+      height: 44px !important;
+      margin-left: 0 !important;
+      margin-right: -0.75rem;
+      font-size: 0.75rem !important;
+    }
   }
 </style>

@@ -4,7 +4,6 @@
   import AiMentionMenu from './AiMentionMenu.svelte';
   import AiCommandMenu from './AiCommandMenu.svelte';
   import type { AiContextAttachment } from './attachments';
-  import type { AiPromptAsset } from './persistence';
   import { attachmentToContextItem } from './attachments';
   import { filterMentionItems, filterSlashCommands } from './menu-items';
   import { getCaretCoordinates } from './caret-coordinates';
@@ -26,7 +25,6 @@
     mentionQuery: string;
     commandVisible: boolean;
     commandQuery: string;
-    commandAssets?: readonly AiPromptAsset[];
     suggestedSelection?: SuggestedSelection;
     busy?: boolean;
     canSend: boolean;
@@ -44,8 +42,6 @@
     onAttachSelection?: () => void;
     onDismissSelection?: () => void;
     onDropPaths?: (paths: string[]) => void;
-    /** Right side of the footer, before the send button. */
-    actions?: Snippet;
     /** Left side of the footer (mode / model chips). */
     footer?: Snippet;
     /** Hint shown under the box (e.g. keyboard shortcuts). */
@@ -61,7 +57,6 @@
     mentionQuery,
     commandVisible,
     commandQuery,
-    commandAssets = [],
     suggestedSelection = null,
     busy = false,
     canSend,
@@ -79,7 +74,6 @@
     onAttachSelection,
     onDismissSelection,
     onDropPaths,
-    actions,
     footer,
     hint,
   }: Props = $props();
@@ -100,7 +94,7 @@
   // ---- Menu keyboard selection (ArrowUp/Down to move, Tab/Enter to pick) ----
   // The composer owns the filtered lists and the active index; the menu
   // components are pure renderers, so mouse and keyboard stay in sync.
-  let commandItems = $derived(commandVisible ? filterSlashCommands(commandQuery, commandAssets) : []);
+  let commandItems = $derived(commandVisible ? filterSlashCommands(commandQuery) : []);
   let mentionItems = $derived(mentionVisible ? filterMentionItems(mentionQuery, mentionCandidates) : []);
   let menuLength = $derived(commandItems.length || mentionItems.length);
   let menuIndex = $state(0);
@@ -232,9 +226,6 @@
       <div class="footer-start">{@render footer()}</div>
     {/if}
     <div class="footer-end">
-      {#if actions}
-        {@render actions()}
-      {/if}
       {#if busy}
         <button
           class="send-btn stop"
@@ -405,5 +396,24 @@
     color: var(--novelist-text-secondary);
     padding: 5px 8px;
     cursor: pointer;
+  }
+  @media (pointer: coarse) {
+    .send-btn {
+      width: 44px;
+      height: 44px;
+    }
+    .suggestion-main { min-height: 44px; }
+    .suggestion-close {
+      justify-content: center;
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+  /* iOS zooms the page when focusing a field under 16px. */
+  :global(html[data-mobile='true']) textarea { font-size: 16px; }
+  /* A keyboard-shrunk viewport (phone landscape) must still show the transcript
+     and the whole composer; the textarea scrolls instead of growing to 240px. */
+  :global(html[data-keyboard='open']) textarea {
+    max-height: max(52px, calc(var(--novelist-vv-height) * 0.3));
   }
 </style>

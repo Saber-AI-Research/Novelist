@@ -69,9 +69,11 @@ export async function cancelAiStream(streamId: string): Promise<void> {
 /**
  * Async iterator over a started AI stream. Subscribes to the per-stream Tauri
  * event channel and yields each `{kind, ...}` event the Rust bridge emits.
- * Ends after `done` or `error`. Cleans up the listener on completion.
+ * Ends after `done` or `error`, or as soon as `signal` aborts — the caller can
+ * stop consuming even when the bridge never reports back (e.g. the WebView
+ * was suspended). Cleans up the listener on completion.
  */
-export async function* aiStream(streamId: string): AsyncGenerator<AiStreamEvent> {
+export async function* aiStream(streamId: string, signal?: AbortSignal): AsyncGenerator<AiStreamEvent> {
   const channel = `ai-stream://${streamId}`;
   const queue: AiStreamEvent[] = [];
   let waiter: ((v: void) => void) | null = null;
@@ -82,22 +84,28 @@ export async function* aiStream(streamId: string): AsyncGenerator<AiStreamEvent>
     waiter?.();
     waiter = null;
   });
+  const onAbort = () => {
+    waiter?.();
+    waiter = null;
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
-    while (!done) {
+    while (!done && !signal?.aborted) {
       if (queue.length === 0) {
         await new Promise<void>((resolve) => {
           waiter = resolve;
         });
       }
       const ev = queue.shift();
-      if (!ev) continue;
+      if (!ev || signal?.aborted) continue;
       yield ev;
       if (ev.kind === 'done' || ev.kind === 'error') {
         done = true;
       }
     }
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     unlisten();
   }
 }

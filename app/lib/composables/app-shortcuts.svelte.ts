@@ -39,7 +39,6 @@ function isNonEditorTextInput(e: KeyboardEvent): boolean {
  */
 const INPUT_ALLOWED_COMMANDS = new Set<string>([
   'ai-talk-new-session',
-  'ai-agent-new-session',
   'ai-talk-save-chat',
 ]);
 

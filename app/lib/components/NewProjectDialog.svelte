@@ -7,6 +7,7 @@
   import { commands } from '$lib/ipc/commands';
   import type { TemplateInfo } from '$lib/ipc/commands';
   import { i18n, t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
   import { categoryLabel, templateName, templateDescription } from '$lib/utils/templateI18n';
   import { isImeComposing } from '$lib/utils/ime';
   import { focusTrap } from './focus-trap';
@@ -42,6 +43,8 @@
   let selectedTemplate = $state<TemplateInfo | null>(LITERARY_TEMPLATE);
   let projectName = $state('My Project');
   let parentDir = $state('');
+  /** Mobile projects always live in the sandbox library (no directory picker). */
+  const useLibrary = platform.isMobile;
   let creating = $state(false);
   let error = $state('');
   let nameInput = $state<HTMLInputElement | null>(null);
@@ -79,12 +82,14 @@
   }
 
   onMount(async () => {
-    const [homeResult, templatesResult] = await Promise.allSettled([
-      homeDir(),
+    const [parentResult, templatesResult] = await Promise.allSettled([
+      useLibrary ? libraryParentDir() : homeDir().then((home) => `${home.replace(/[\\/]$/, '')}/Documents`),
       commands.listTemplates(),
     ]);
-    if (homeResult.status === 'fulfilled') {
-      parentDir = `${homeResult.value.replace(/[\\/]$/, '')}/Documents`;
+    if (parentResult.status === 'fulfilled') {
+      parentDir = parentResult.value;
+    } else if (useLibrary) {
+      error = parentResult.reason instanceof Error ? parentResult.reason.message : String(parentResult.reason);
     }
 
     const available = templatesResult.status === 'fulfilled'
@@ -106,7 +111,14 @@
     });
   });
 
+  async function libraryParentDir(): Promise<string> {
+    const result = await commands.getLibraryPath();
+    if (result.status === 'error') throw new Error(t('library.locationFailed', { error: result.error }));
+    return result.data;
+  }
+
   async function chooseDirectory() {
+    if (useLibrary) return;
     const selected = await openDialog({ directory: true, multiple: false });
     if (selected) {
       parentDir = selected as string;
@@ -256,16 +268,21 @@
           />
         </div>
         <div class="field-row">
-          <label class="field-label" for="np-location">{t('newProject.location')}</label>
-          <div class="field-input-group">
-            <input
-              id="np-location"
-              bind:value={parentDir}
-              class="field-input field-input-path"
-              placeholder={t('newProject.locationPlaceholder')}
-            />
-            <button class="field-browse-btn" onclick={chooseDirectory}>{t('newProject.browse')}</button>
-          </div>
+          {#if useLibrary}
+            <span class="field-label">{t('newProject.location')}</span>
+            <span class="field-static" data-testid="new-project-library-location">{t('library.location')}</span>
+          {:else}
+            <label class="field-label" for="np-location">{t('newProject.location')}</label>
+            <div class="field-input-group">
+              <input
+                id="np-location"
+                bind:value={parentDir}
+                class="field-input field-input-path"
+                placeholder={t('newProject.locationPlaceholder')}
+              />
+              <button class="field-browse-btn" onclick={chooseDirectory}>{t('newProject.browse')}</button>
+            </div>
+          {/if}
         </div>
         </div>
       {/if}
@@ -574,5 +591,102 @@
   .btn-create:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .field-static {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.85rem;
+    color: var(--novelist-text);
+  }
+
+  /* Mobile: the backdrop tracks the visual viewport so the keyboard never covers the dialog. */
+  :global(html[data-mobile='true']) .dialog-backdrop {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+  }
+  :global(html[data-layout='tablet']) .dialog {
+    width: min(680px, calc(100vw - 32px));
+    max-height: calc(var(--novelist-vv-height, 100vh) - 32px);
+  }
+
+  /* Phone: full-screen sheet; the category column becomes a chip strip. */
+  :global(html[data-layout='phone']) .dialog {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  :global(html[data-layout='phone']) .dialog-body {
+    flex-direction: column;
+  }
+  :global(html[data-layout='phone']) .category-sidebar {
+    width: auto;
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--novelist-border);
+    scrollbar-width: none;
+  }
+  :global(html[data-layout='phone']) .category-item {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    border: 1px solid var(--novelist-border);
+    border-radius: 999px;
+  }
+  :global(html[data-layout='phone']) .category-active {
+    border-color: var(--novelist-accent);
+  }
+  :global(html[data-layout='phone']) .template-grid-wrapper {
+    min-height: 0;
+    padding: 12px;
+  }
+  :global(html[data-layout='phone']) .template-grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+  :global(html[data-layout='phone']) .dialog-footer {
+    padding: 10px 12px 12px;
+  }
+  :global(html[data-layout='phone']) .field-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  :global(html[data-layout='phone']) .field-label {
+    width: auto;
+    text-align: left;
+  }
+  :global(html[data-layout='phone']) .btn-cancel,
+  :global(html[data-layout='phone']) .btn-create {
+    flex: 1;
+  }
+
+  /* Touch targets on phones and tablets (16px inputs avoid iOS focus zoom). */
+  :global(html[data-mobile='true']) .dialog-close-btn {
+    width: 44px;
+    height: 44px;
+  }
+  :global(html[data-mobile='true']) .category-item,
+  :global(html[data-mobile='true']) .btn-cancel,
+  :global(html[data-mobile='true']) .btn-create {
+    min-height: 44px;
+  }
+  :global(html[data-mobile='true']) .field-input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+  :global(html[data-mobile='true']) .field-static {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
   }
 </style>

@@ -18,25 +18,24 @@ Novelist 自身遵循 MIT 协议,见 [`LICENSE`](LICENSE)。
 
 ## 1. Design Inspiration / 设计灵感
 
-The two AI panels in Novelist (AI Talk and AI Agent) — including the
-shared command/mention scaffolding shipped in v0.2.2 — were directly
-inspired by the following projects. We thank their authors for showing
-how an embedded AI agent can fit naturally inside a writing tool.
+The AI Talk panel in Novelist — including the shared command/mention
+scaffolding shipped in v0.2.2 — was directly inspired by the following
+project. We thank its author for showing how an embedded AI assistant
+can fit naturally inside a writing tool.
 
-Novelist 的两个 AI 面板(AI Talk 与 AI Agent),以及在 v0.2.2 中加入的共享
-命令 / @-mention / 内联编辑脚手架,在设计上直接参考了以下项目。感谢这些
-项目的作者展示了"嵌入式 AI agent 与写作工具自然融合"的可能。
+Novelist 的 AI Talk 面板,以及在 v0.2.2 中加入的共享命令 / @-mention /
+内联编辑脚手架,在设计上直接参考了以下项目。感谢该项目的作者展示了
+"嵌入式 AI 助手与写作工具自然融合"的可能。
 
 | Project | Author | License | Inspired |
 |---|---|---|---|
-| [claudian](https://github.com/YishenTu/claudian) | YishenTu | MIT | Embedded coding-agent UX inside an editor host (Claude Code / Codex panel design) |
-| [obsidian-yolo](https://github.com/Lapis0x0/obsidian-yolo) | Lapis0x0 | MIT | Agent-native chat + writing assistant integrated into a notes app (slash commands, knowledge-base mentions) |
+| [obsidian-yolo](https://github.com/Lapis0x0/obsidian-yolo) | Lapis0x0 | MIT | AI chat + writing assistant integrated into a notes app (slash commands, knowledge-base mentions) |
 
-These are design references only. Novelist does not vendor or
-fork code from either project; both are MIT-licensed and credited
+This is a design reference only. Novelist does not vendor or
+fork code from this project; it is MIT-licensed and credited
 here as good-faith acknowledgement.
 
-仅为设计参考。Novelist 未直接复用或 fork 这两个项目的代码;它们均为 MIT
+仅为设计参考。Novelist 未直接复用或 fork 该项目的代码;它采用 MIT
 协议,此处出于诚信原则进行致谢。
 
 ---

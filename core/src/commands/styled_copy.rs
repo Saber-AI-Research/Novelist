@@ -15,7 +15,9 @@ static BEFORE_IMAGE_OPEN_HOOKS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 pub const MAX_STYLED_COPY_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+#[cfg(desktop)]
 pub const MAX_STYLED_CLIPBOARD_HTML_BYTES: usize = styled_copy_pandoc::MAX_HTML_BYTES;
+#[cfg(desktop)]
 pub const MAX_STYLED_CLIPBOARD_PLAIN_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, serde::Serialize, specta::Type)]
@@ -27,6 +29,7 @@ pub struct StyledCopyImage {
 #[tauri::command]
 #[specta::specta]
 pub async fn convert_markdown_to_styled_html(markdown: String) -> Result<String, AppError> {
+    crate::services::platform::require_external_processes("Styled copy")?;
     styled_copy_pandoc::styled_markdown_to_html(&markdown).await
 }
 
@@ -96,18 +99,27 @@ fn read_styled_copy_image_blocking(file: CapabilityFile) -> Result<StyledCopyIma
 #[tauri::command]
 #[specta::specta]
 pub async fn write_styled_clipboard(html: String, plain_text: String) -> Result<(), AppError> {
-    tokio::task::spawn_blocking(move || {
-        write_styled_clipboard_with(&html, &plain_text, |actual_html, actual_plain| {
-            let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
-            clipboard
-                .set_html(actual_html, Some(actual_plain))
-                .map_err(|_| ())
+    #[cfg(mobile)]
+    {
+        let _ = (html, plain_text);
+        Err(AppError::Unsupported("Styled copy"))
+    }
+    #[cfg(desktop)]
+    {
+        tokio::task::spawn_blocking(move || {
+            write_styled_clipboard_with(&html, &plain_text, |actual_html, actual_plain| {
+                let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
+                clipboard
+                    .set_html(actual_html, Some(actual_plain))
+                    .map_err(|_| ())
+            })
         })
-    })
-    .await
-    .map_err(|_| AppError::Custom("clipboard_write_failed".to_string()))?
+        .await
+        .map_err(|_| AppError::Custom("clipboard_write_failed".to_string()))?
+    }
 }
 
+#[cfg(desktop)]
 fn write_styled_clipboard_with<F>(html: &str, plain_text: &str, writer: F) -> Result<(), AppError>
 where
     F: FnOnce(&str, &str) -> Result<(), ()>,

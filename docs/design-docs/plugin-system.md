@@ -196,18 +196,35 @@ transcript behind it cannot move; `literary-plugin-render.spec.ts` asserts
 that the pending text's bounding box is pixel-identical before and after a
 composition starts.
 
-Transcription is the default interaction; committed `【` or `「` enters inline
-comment input, and only the matching closer returns to transcription: `】` for
-a comment opened with `【`, `」` for one opened with `「`. Brackets opened
-inside a comment nest and stay comment text, so `【此处「风骨」妙】` is one
-comment; the open-bracket stack (`CommentBrackets`) is carried across IME
-commits and undo snapshots. A comment toggled on by the shortcut ends at either
-closer. If the source itself expects an opening bracket at the frontier, it
-remains transcribable as source; `Cmd/Ctrl+Shift+Enter` can explicitly toggle
-commentary at that position. Both delimiter pairs work when the caret is
-rewound into earlier text. IME duplicate suppression compares the committed
-content, not merely `insertFromComposition`, so a distinct punctuation commit
-immediately following composition is retained.
+Transcription is the default interaction; a committed opening bracket enters
+inline comment input, and only the matching closer returns to transcription.
+Four pairs delimit comments (`CLOSER_FOR_OPENER` in `engine.ts`): `【】` and
+`「」`, which Chinese IMEs emit for the bracket keys in full-width punctuation
+mode, plus full-width `［］` and ASCII `[]` — what macOS Pinyin labels 中括号,
+and what the same key yields in half-width punctuation mode or on an English
+keyboard. Before square brackets were delimiters, that keystroke was recorded
+as a red mistake. The `.litstudy` transcript is
+plain text, so square brackets carry no Markdown meaning there; the main
+Markdown editor has no comment mode and keeps `[text](url)` untouched.
+
+Brackets opened inside a comment nest and stay comment text, so
+`【此处「风骨」妙】` and `[见[链接](https://example.com)]` are each one comment;
+the open-bracket stack (`CommentBrackets`) is carried across IME commits and
+undo snapshots. A comment toggled on by the shortcut ends at any closer. A
+commit that ends with a freshly opened empty pair (`「」`, as inserted by IMEs
+and symbol keyboards that pair brackets with the caret between them) keeps the
+comment open for the next input; an empty pair mid-commit, or a closer
+committed on its own, still closes it. If the source itself expects an opening
+bracket at the frontier, it remains transcribable as source; the check runs
+after the earlier characters of the same commit have been transcribed, so
+phrase and speech commits such as `「好」「妙」` see the right source position.
+`Cmd/Ctrl+Shift+Enter` can explicitly toggle commentary at that position.
+Every delimiter pair works when the caret is rewound into earlier text. IME
+duplicate suppression compares the committed content, not merely
+`insertFromComposition`, so a distinct punctuation commit immediately following
+composition is retained. In WKWebView an IME commit arrives as an
+`insertFromComposition` input while still composing, followed by
+`compositionend`, which is the authoritative commit.
 
 ### The caret model
 
@@ -299,6 +316,72 @@ bodies are reduced to their `error.message`; and requests are aborted
 (`aiFetchStreamCancel`) when the requesting iframe unmounts or reloads.
 Results arriving after an in-place `file-sync` are delivered under the
 iframe's current token.
+
+## Touch and narrow layouts
+
+Core plugin surfaces (native canvas/kanban, the mindmap overlay and the
+book-translation/literary iframes) keep mouse and hardware-keyboard behaviour
+unchanged; touch rules live under `@media (hover: none), (pointer: coarse)`
+and narrow rules under width queries. Touch controls are at least 44px and
+text fields at least 16px (iOS zooms the page when focusing a smaller field).
+
+- **Gesture surfaces only** get `touch-action: none`: `.svelte-flow` and the
+  markmap svg. Editable text never does; node textareas are their own scroll
+  containers and keep native scrolling, caret placement and selection.
+- **Focus inside the gesture.** Mobile keyboards open only for a focus made
+  while the tap is being handled, so editors that appear on tap render with
+  `flushSync()` and focus synchronously (canvas cards and group labels,
+  kanban rename/add-card) instead of relying on `autofocus`.
+- **Canvas**: a tap selects; a touch/pen tap on an already selected text card
+  or group header edits it (`canvas/node-tap.ts`, unit-tested), while mouse
+  editing stays on dblclick so a drag never opens an editor. With a selection
+  the toolbar shows Delete, which goes through SvelteFlow `deleteElements`
+  like the Delete key (connected edges too, saved by `ondelete`). Coarse
+  pointers get `connectionRadius` 40 and 44px hit areas around connection and
+  resize handles. Narrow rules are container queries on the canvas pane: below
+  740px the minimap hides (it would sit under the toolbar), below 480px toolbar
+  labels become accessible names only. New cards land at the centre of the
+  canvas pane, not of the window. On mobile (`platform.isMobile`) "Link a
+  note" never opens the system picker, whose sandbox copies or `content://`
+  URIs are unreadable from the project: `CanvasNotePicker` browses
+  `list_directory` from the project root (folders plus `.md`/`.markdown`/
+  `.txt`, breadcrumb, up, cancel), reads the note first and creates no card
+  when that fails (`tests/e2e/specs/mobile/canvas-note-picker.spec.ts`).
+- **Canvas file references are project-relative.** Every note inside the open
+  project (mobile picker, desktop dialog, sidebar drop) is stored in the card's
+  `file` string relative to the project root with `/` separators, the JSON
+  Canvas convention, and resolved against the current root at load
+  (`canvas/file-ref.ts`). The same `.canvas` therefore works after an iOS
+  container relocation, on another device's library root and in a synced or
+  archived copy. Opening a canvas migrates absolute links into the current
+  project to relative ones and saves. Paths outside the project (a desktop
+  dialog pick elsewhere, URIs, an old device's root) stay verbatim as
+  external references; they are never reinterpreted. Relative refs that climb
+  out of the root (`..`) are never resolved. Because canvases arrive through
+  sync, mobile reads only notes inside the open project
+  (`canReadCanvasFile`): external paths, URIs and traversals show as
+  unavailable without any `read_file`; desktop still reads external links.
+- **Kanban**: both dnd zones use `delayTouchStart` (200 ms): moving sooner
+  scrolls the board or column natively, holding lifts the card/column; mouse
+  drags start immediately. svelte-dnd-action skips drag detection only when
+  the press lands on the button itself, so button icons have
+  `pointer-events: none`. Delete buttons are always visible on touch (focus
+  reveals them on desktop), a touch tap on a column title renames it, and the
+  board contains horizontal overscroll.
+- **Mindmap overlay**: safe-area padding, a close button outside the
+  wrapping action row, the minimap hidden by default at 600px and below, a
+  touch/pen tap on a node label folds it (markmap's own target is a ~6px
+  circle), and a refit on orientation change only.
+- **Iframe plugins** cannot see the app's safe areas (`env()` is 0 inside a
+  frame); the host pads and sizes the frame. Book translation stacks each
+  segment at 719px and below with the original above the translation box;
+  its DOM order is source-first and wide layouts place the translation in the
+  left grid column. Literary commentary shows a touch action bar (comment
+  mode, next character, finish sentence, back to end, undo, redo) that calls
+  the same handlers as the shortcuts, refuses to run during IME composition,
+  and keeps the capture textarea focused (`mousedown` default prevented).
+- UI changes to bundled iframe plugins bump their manifest version, or the
+  version-gated installer never updates existing installations.
 
 ## Plugin scaffolding
 

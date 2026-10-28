@@ -47,7 +47,6 @@ Vitest cannot follow without a full CM6 environment.
 | `lib/composables`  | 93.0 % | `window-title` `$effect` needs Svelte runtime. |
 | `lib/stores`       | 90.7 % | Hot paths covered; residual is edge-case branches. |
 | `lib/editor`       | 61.9 % | `wysiwyg.ts` / `setup.ts` / `mermaid.ts` — large CM6-coupled modules best tested via E2E. |
-| `ai-agent` panel   | 45.9 % | `sessions.svelte.ts` — Svelte runtime / Tauri event round-trip. |
 | `ai-talk` panel    | 88.8 % | — |
 
 See `tests/COVERAGE.md` for the per-category waiver table.

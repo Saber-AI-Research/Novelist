@@ -1,7 +1,6 @@
 {
   "name": "novelist",
   "private": true,
-  "version": "0.6.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,6 +33,21 @@
     "verify:native-smoke": "bash scripts/harness.sh native-smoke",
     "verify:rust": "bash scripts/harness.sh rust",
     "verify:ci": "bash scripts/harness.sh ci",
+    "mobile:android:doctor": "node scripts/mobile.mjs android doctor",
+    "mobile:android:init": "node scripts/mobile.mjs android init",
+    "mobile:android:dev": "node scripts/mobile.mjs android dev",
+    "mobile:android:check": "node scripts/mobile.mjs android check",
+    "mobile:android:build": "node scripts/mobile.mjs android build",
+    "mobile:android:publish": "node scripts/mobile.mjs android publish",
+    "mobile:android:verify": "node scripts/mobile.mjs android verify",
+    "mobile:ios:doctor": "node scripts/mobile.mjs ios doctor",
+    "mobile:ios:init": "node scripts/mobile.mjs ios init",
+    "mobile:ios:dev": "node scripts/mobile.mjs ios dev",
+    "mobile:ios:check": "node scripts/mobile.mjs ios check",
+    "mobile:ios:build": "node scripts/mobile.mjs ios build",
+    "mobile:ios:publish": "node scripts/mobile.mjs ios publish",
+    "mobile:ios:upload": "node scripts/mobile.mjs ios upload",
+    "mobile:webdav:conformance": "node scripts/mobile-webdav-conformance.mjs",
     "tauri": "dotenv -- tauri"
   },
   "devDependencies": {

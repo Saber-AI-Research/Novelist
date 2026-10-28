@@ -1,4 +1,5 @@
 import { pathJoin } from '$lib/utils/path';
+import { platform } from '$lib/stores/platform.svelte';
 
 const STORAGE_PREFIX = 'novelist:project-workspace:v1:';
 const MAX_EXPANDED_PATHS = 512;
@@ -13,7 +14,16 @@ function emptyState(): ProjectWorkspaceState {
   return { version: 1, expandedPaths: [], lastOpenPath: null };
 }
 
+/**
+ * Desktop keys by the absolute project path (unchanged format). Mobile
+ * library projects key by their path relative to the library root: the iOS
+ * app container path changes across updates, which would orphan absolute
+ * keys. Entry paths inside the state are always project-relative.
+ */
 function storageKey(projectDir: string): string {
+  const libraryRoot = platform.ready && platform.isMobile ? platform.libraryRoot : null;
+  const libraryRelative = libraryRoot ? toProjectRelativePath(libraryRoot, projectDir) : null;
+  if (libraryRelative) return `${STORAGE_PREFIX}library:${encodeURIComponent(libraryRelative)}`;
   return `${STORAGE_PREFIX}${encodeURIComponent(normalizeAbsolutePath(projectDir))}`;
 }
 

@@ -159,6 +159,40 @@ fn request_error(method: &str, error: reqwest::Error) -> AppError {
     AppError::Custom(format!("WebDAV {method} failed: {}", error.without_url()))
 }
 
+/// Largest project file one sync download holds in memory.
+pub(crate) const MAX_FILE_BYTES: usize = 256 << 20;
+/// Largest PROPFIND body accepted for one collection.
+pub(crate) const MAX_LISTING_BYTES: usize = 32 << 20;
+
+/// Read a response body, failing as soon as it would exceed `limit` bytes,
+/// so an untrusted server cannot exhaust memory.
+pub(crate) async fn read_body_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+    method: &str,
+) -> Result<Vec<u8>, AppError> {
+    let too_large =
+        || AppError::InvalidInput(format!("WebDAV {method} response exceeds its size limit"));
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| request_error(&format!("{method} body"), error))?
+    {
+        if chunk.len() > limit - bytes.len() {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 pub(crate) struct RemoteFile {
     pub bytes: Vec<u8>,
     pub etag: Option<String>,
@@ -170,6 +204,24 @@ pub(crate) async fn get_file(
     remote_path: &str,
     auth: &WebDavAuth,
 ) -> Result<RemoteFile, AppError> {
+    get_file_if_exists(client, base_url, remote_path, auth, MAX_FILE_BYTES)
+        .await?
+        .ok_or_else(|| {
+            AppError::Custom(format!(
+                "WebDAV GET returned {}",
+                reqwest::StatusCode::NOT_FOUND
+            ))
+        })
+}
+
+/// Download at most `limit` bytes; a missing file is `None`.
+pub(crate) async fn get_file_if_exists(
+    client: &Client,
+    base_url: &str,
+    remote_path: &str,
+    auth: &WebDavAuth,
+    limit: usize,
+) -> Result<Option<RemoteFile>, AppError> {
     let response = client
         .get(remote_url(base_url, remote_path)?)
         .timeout(REQUEST_TIMEOUT)
@@ -177,6 +229,9 @@ pub(crate) async fn get_file(
         .send()
         .await
         .map_err(|error| request_error("GET", error))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !response.status().is_success() {
         return Err(AppError::Custom(format!(
             "WebDAV GET returned {}",
@@ -188,12 +243,8 @@ pub(crate) async fn get_file(
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
         .and_then(strong_etag);
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| request_error("GET body", error))?
-        .to_vec();
-    Ok(RemoteFile { bytes, etag })
+    let bytes = read_body_bounded(response, limit, "GET").await?;
+    Ok(Some(RemoteFile { bytes, etag }))
 }
 
 pub(crate) enum PutCondition<'a> {
@@ -300,11 +351,14 @@ pub async fn list_remote(
             response.status()
         )));
     }
-    let xml = response
-        .text()
-        .await
-        .map_err(|error| request_error("PROPFIND body", error))?;
-    parse_propfind_response(&xml)
+    let xml = read_body_bounded(response, MAX_LISTING_BYTES, "PROPFIND").await?;
+    parse_listing(&xml)
+}
+
+pub(crate) fn parse_listing(xml: &[u8]) -> Result<Vec<DavEntry>, AppError> {
+    let xml = std::str::from_utf8(xml)
+        .map_err(|_| AppError::Custom("Invalid WebDAV listing XML".into()))?;
+    parse_propfind_response(xml)
 }
 
 /// List a collection that may not exist yet; a missing collection is empty.
@@ -313,6 +367,18 @@ pub(crate) async fn list_remote_if_exists(
     base_url: &str,
     remote_path: &str,
     auth: &WebDavAuth,
+) -> Result<Option<Vec<DavEntry>>, AppError> {
+    list_collection(client, base_url, remote_path, auth, MAX_LISTING_BYTES).await
+}
+
+/// Depth-1 listing of a collection that may not exist, reading at most `limit`
+/// bytes of XML.
+pub(crate) async fn list_collection(
+    client: &Client,
+    base_url: &str,
+    remote_path: &str,
+    auth: &WebDavAuth,
+    limit: usize,
 ) -> Result<Option<Vec<DavEntry>>, AppError> {
     let response = client.request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), remote_url(base_url, remote_path)?)
         .timeout(REQUEST_TIMEOUT)
@@ -329,11 +395,8 @@ pub(crate) async fn list_remote_if_exists(
             response.status()
         )));
     }
-    let xml = response
-        .text()
-        .await
-        .map_err(|error| request_error("PROPFIND body", error))?;
-    parse_propfind_response(&xml).map(Some)
+    let xml = read_body_bounded(response, limit, "PROPFIND").await?;
+    parse_listing(&xml).map(Some)
 }
 
 pub async fn create_collection(
@@ -531,6 +594,13 @@ pub(crate) mod test_server {
         pub fail_after: BTreeMap<(String, String), usize>,
         pub stall: HashSet<(String, String)>,
         pub edit_local: Option<(String, String, PathBuf, Vec<u8>)>,
+        /// When set, every request must carry these Basic credentials, else 401.
+        pub credentials: Option<(String, String)>,
+        /// Raw status and body served instead of the simulated DAV state.
+        pub canned: BTreeMap<(String, String), (u16, Vec<u8>)>,
+        /// Every request read, recorded before any stall (`requests` records
+        /// a request only once it is answered).
+        pub received: Vec<(String, String)>,
     }
 
     pub(crate) struct DavServer {
@@ -574,6 +644,7 @@ pub(crate) mod test_server {
                                     || stream.set_write_timeout(Some(Duration::from_secs(2))).is_err()
                                 { return; }
                                 let Some(request) = read_request(&mut stream) else { return; };
+                                shared.lock().unwrap().received.push((request.method.clone(), request.path.clone()));
                                 loop {
                                     if stopped.load(Ordering::Relaxed) { return; }
                                     let stalled = shared.lock().unwrap().stall.contains(&(request.method.clone(), request.path.clone()));
@@ -674,7 +745,20 @@ pub(crate) mod test_server {
                 std::fs::write(local, bytes).unwrap();
             }
         }
+        if let Some((username, password)) = &state.credentials {
+            use base64::Engine;
+            let expected = format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+            );
+            if request.headers.get("authorization") != Some(&expected) {
+                return (401, Vec::new(), None);
+            }
+        }
         let key = (request.method.clone(), request.path.clone());
+        if let Some((code, body)) = state.canned.get(&key) {
+            return (*code, body.clone(), None);
+        }
         if state.fail.contains(&key) {
             return (500, Vec::new(), None);
         }
