@@ -92,6 +92,8 @@ Platform-specific commands:
                    packages and delete every other NDK from $ANDROID_HOME/ndk.
   ios upload       Upload the published IPA to App Store Connect (TestFlight)
                    with an App Store Connect API key.
+  ios xcode-script Xcode "Build Rust Code" phase only: sets the bindgen
+                   target/sysroot, then runs \`tauri ios xcode-script\`.
 
 Options:
   --build-number N   Mobile build number (also MOBILE_BUILD_NUMBER). Required
@@ -1259,6 +1261,34 @@ async function iosUpload(ctx) {
   console.log('Upload accepted by altool. App Store Connect processing, TestFlight availability and Beta App Review happen afterwards and are not verified by this script.');
 }
 
+/**
+ * Entry point of the Xcode "Build Rust Code" phase (core/gen/apple/project.yml).
+ * tauri-cli starts xcodebuild with a cleared environment, so the bindgen
+ * variables set by `ios build`/`dev` never reach this phase. Recreate them from
+ * what Xcode passes (platform, SDK root), then run `tauri ios xcode-script`
+ * with the arguments unchanged. Never calls back into this script.
+ */
+async function iosXcodeScript(args) {
+  const valueAfter = (flag) => {
+    const index = args.indexOf(flag);
+    return index >= 0 ? args[index + 1] : undefined;
+  };
+  const platform = valueAfter('--platform');
+  const sdkRoot = valueAfter('--sdk-root');
+  if (!platform || !sdkRoot) fail('`ios xcode-script` is the Xcode build phase entry point and needs --platform and --sdk-root');
+  if (!isDir(sdkRoot)) fail(`--sdk-root ${sdkRoot} is not a directory`);
+  // Same rule as tauri-cli: the unquoted $PLATFORM_DISPLAY_NAME splits "iOS Simulator".
+  const simulator = platform === 'iOS Simulator' || args.includes('Simulator');
+  const sdkName = path.basename(sdkRoot);
+  if (simulator !== sdkName.startsWith('iPhoneSimulator') || (!simulator && !sdkName.startsWith('iPhoneOS'))) {
+    fail(`platform ${simulator ? 'iOS Simulator' : platform} does not match SDK ${sdkName}`);
+  }
+  const target = simulator ? IOS.simulator : IOS.device;
+  const env = childEnv({ [`BINDGEN_EXTRA_CLANG_ARGS_${target.triple.replaceAll('-', '_')}`]: `${shellWord(`--sysroot=${sdkRoot}`)} --target=${target.clang}` });
+  console.log(`bindgen for ${target.triple}: --target=${target.clang} --sysroot=${sdkRoot}`);
+  await run('pnpm', ['tauri', 'ios', 'xcode-script', ...args], { cwd: process.cwd(), env, display: `pnpm tauri ios xcode-script (${target.triple})` });
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────
 
 const COMMANDS = {
@@ -1267,6 +1297,11 @@ const COMMANDS = {
 };
 
 async function main(argv) {
+  if (argv[0] === 'ios' && argv[1] === 'xcode-script') {
+    // Xcode passes tauri's own flags; hand them through without our parser.
+    await iosXcodeScript(argv.slice(2));
+    return;
+  }
   const { positional, options, passthrough } = parseArgs(argv);
   if (options.help || positional.length === 0) {
     console.log(USAGE);

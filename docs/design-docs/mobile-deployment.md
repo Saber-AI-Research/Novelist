@@ -92,7 +92,11 @@ Requirements:
   clang 17+ rejects it, so the scripts append the clang spelling
   (`--target=arm64-apple-ios16.0-simulator`, `arm64-apple-ios16.0` for
   devices) plus the SDK `--sysroot` through `BINDGEN_EXTRA_CLANG_ARGS_<target>`;
-  clang uses the last `--target`.
+  clang uses the last `--target`. Cargo runs inside the Xcode "Build Rust
+  Code" phase, and tauri-cli starts xcodebuild with a cleared environment, so
+  that phase calls `node scripts/mobile.mjs ios xcode-script …`: it derives
+  the target and sysroot from the platform and SDK root Xcode passes, then
+  runs `pnpm tauri ios xcode-script` with the arguments unchanged.
 - `tauri ios build` rewrites tracked files under `core/gen/apple` (bundle id,
   team, signing style, merged `Info.plist`). The scripts warn when that
   happens; never commit a team ID or signing identity from a local publish.
