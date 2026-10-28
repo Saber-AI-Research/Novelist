@@ -41,7 +41,7 @@ static LIBRARY: OnceLock<LibraryLayout> = OnceLock::new();
 static TEST_LIBRARY: std::sync::Mutex<Option<std::sync::Arc<LibraryLayout>>> =
     std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_test_library(layout: Option<LibraryLayout>) {
     *TEST_LIBRARY
         .lock()
@@ -488,8 +488,10 @@ mod tests {
     }
 
     /// Resets the process-wide test library even when an assertion fails.
+    #[cfg(unix)]
     struct TestLibrary;
 
+    #[cfg(unix)]
     impl TestLibrary {
         fn install(layout: LibraryLayout) -> Self {
             set_test_library(Some(layout));
@@ -497,6 +499,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TestLibrary {
         fn drop(&mut self) {
             set_test_library(None);

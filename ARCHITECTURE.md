@@ -32,10 +32,11 @@ flowchart LR
   WebView --> IPC["tauri-specta typed IPC"]
   IPC --> Rust["Rust command layer"]
   Rust --> Files["Atomic file I/O"]
-  Rust --> Watcher["Notify watcher + BLAKE3"]
-  Rust --> Rope["Ropey large-file service"]
-  Rust --> Plugins["QuickJS plugin host"]
-  Rust --> Export["Pandoc export"]
+  Rust --> Watcher["BLAKE3 change detection"]
+  Rust --> Plugins["Plugin host"]
+  Rust --> Sync["WebDAV reconciliation"]
+  Rust --> Native["Native sharing + credential vault"]
+  Rust --> Export["Desktop Pandoc export"]
 ```
 
 ## Load-Bearing Boundaries

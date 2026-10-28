@@ -1,9 +1,10 @@
 name: Mobile CI
 
 # Compile and package checks for iOS and Android. Needs no secrets: Android
-# produces a debug-signed APK, iOS an unsigned simulator app that is launched
-# on fresh iPhone and iPad simulators (scripts/mobile-ios-smoke.mjs). Signed
-# builds live in mobile-release.yml.
+# produces a debug-signed APK, iOS an unsigned debug simulator app with the
+# e2e-testing bridge (tauri-plugin-playwright; never in release builds) that
+# scripts/mobile-ios-smoke.mjs drives on fresh iPhone and iPad simulators
+# against a loopback WebDAV server. Signed builds live in mobile-release.yml.
 
 on:
   pull_request:
@@ -158,15 +159,15 @@ jobs:
       - name: Clippy (device + simulator, default features)
         run: node scripts/mobile.mjs ios check
 
-      - name: Simulator app without signing
+      - name: Simulator app without signing (e2e bridge, debug)
         id: ios-build
-        run: node scripts/mobile.mjs ios build --skip-frontend
+        run: node scripts/mobile.mjs ios build --skip-frontend --e2e
 
       # Also after a failed build: the evidence then records what it left behind.
-      - name: Simulator smoke (fresh iPhone + iPad, launch, screenshots)
+      - name: Simulator smoke (fresh iPhone + iPad, real UI, files, plugins, Keychain, WebDAV sync)
         id: ios-smoke
         if: ${{ !cancelled() && steps.ios-build.outcome != 'skipped' }}
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: node scripts/mobile-ios-smoke.mjs --out "$RUNNER_TEMP/novelist-ios-smoke"
 
       - name: Upload simulator smoke evidence

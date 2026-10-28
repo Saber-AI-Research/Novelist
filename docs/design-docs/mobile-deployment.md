@@ -54,9 +54,9 @@ All entry points are `scripts/mobile.mjs` (run `node scripts/mobile.mjs --help`)
 | `pnpm mobile:<android\|ios>:doctor` | Validate SDK/NDK/JDK/libclang or Xcode/SDKs/simulator runtime and Rust targets; list which release inputs are set (names only) | none |
 | `pnpm mobile:<android\|ios>:init` | `rustup target add` for the platform, verify the committed native project (`ios init --regenerate-xcodeproj` reruns xcodegen on `core/gen/apple/project.yml`) | none |
 | `pnpm mobile:<android\|ios>:dev [-- <device/flags>]` | `tauri <platform> dev` with the validated environment | none |
-| `pnpm mobile:<android\|ios>:check` | `cargo clippy --locked --lib -D warnings`, one cargo run per target (Tauri plugin build scripts share an output directory, so concurrent targets collide): `aarch64-linux-android` then `x86_64-linux-android`, or `aarch64-apple-ios` then `aarch64-apple-ios-sim`; default features only, never `--all-features` (that pulls the macOS-only `e2e-testing` stack) | none |
+| `pnpm mobile:<android\|ios>:check` | `cargo clippy --locked --lib -D warnings`, one cargo run per target (Tauri plugin build scripts share an output directory, so concurrent targets collide): `aarch64-linux-android` then `x86_64-linux-android`, or `aarch64-apple-ios` then `aarch64-apple-ios-sim`; default features only, never `--all-features` (that would also compile the `e2e-testing` Playwright bridge and the dev-only codegen) | none |
 | `pnpm mobile:android:build` | Universal debug APK, debug-signed, both ABIs by default (`-- --target aarch64` for one ABI; the ABI check follows the selection); `--release` gives an unsigned release APK; `--skip-frontend` reuses a current `dist/` | removed from the child environment |
-| `pnpm mobile:ios:build` | Simulator `.app` (`aarch64-sim`), not code signed; `--release` for the release profile; `--skip-frontend` reuses a current `dist/` | removed from the child environment |
+| `pnpm mobile:ios:build` | Simulator `.app` (`aarch64-sim`), not code signed; `--release` for the release profile; `--skip-frontend` reuses a current `dist/`; `--e2e` (debug only, refused with `--release`, unknown to `publish`) adds the `e2e-testing` feature and an inline `playwright-ios-e2e` capability (iOS, window `main`, only `playwright:allow-pw-result`) next to `mobile`, for the simulator smoke's real eval/IPC bridge. Its macOS-only parts (native capture, `commands::e2e`) are `cfg(target_os = "macos")` and are not compiled for iOS | removed from the child environment |
 | `pnpm mobile:android:publish` | Signed universal release APK, verified with `apksigner`, `aapt2`, `zipalign` and `llvm-readelf` | Android signing |
 | `pnpm mobile:android:verify -- --apk <path>` | Check an existing APK: package, `minSdkVersion`, ABIs (`--target` narrows), 16 KiB page alignment, signer (must be `ANDROID_SIGNING_CERT_SHA256` when set) | none |
 | `pnpm mobile:ios:publish` | App Store Connect export (IPA), manual signing, verified with `codesign` | iOS signing |
@@ -368,8 +368,20 @@ and is not expired, and that the profile is an unexpired App Store profile for
 
 ## Android release signing
 
-No Google Play Console account is needed; the APK is signed with a
-self-managed key and attached to the GitHub release.
+No Google Play Console account is required for this GitHub-only release channel;
+the APK uses a self-managed signing key. This is distinct from Android's evolving
+developer-verification and OEM installation requirements.
+
+Before widening distribution, review the official
+[Android developer verification timeline](https://developer.android.com/developer-verification)
+and [outside-Play account guide](https://developer.android.com/developer-verification/guides/android-developer-console).
+Google's first protections began on September 30, 2026 for participating stores
+in Brazil, Indonesia, Singapore and Thailand; broader rollout is scheduled for
+2027. GitHub distribution is not a promise that every device/region will accept
+an unregistered publisher. Eligible open-source projects also have an
+[open-source registration route](https://developer.android.com/developer-verification/guides/open-source-app-registration).
+Confirm the applicable route for the actual audience without uploading the
+private signing key; verification uses the published app/certificate identity.
 
 ### Create the release key (once)
 

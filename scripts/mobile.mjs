@@ -103,6 +103,9 @@ Options:
   --release          build: produce release-profile artifacts (still unsigned).
   --skip-frontend    build: reuse the existing dist/ instead of running the
                      beforeBuildCommand (\`pnpm build\`); dist/ must be current.
+  --e2e              ios build (debug simulator only; refused with --release):
+                     compile the e2e-testing Playwright bridge and grant
+                     playwright:allow-pw-result to the main window.
   --ipa PATH         ios upload: IPA to upload (default: the publish output
                      for the current version and build number).
   --apk PATH         android verify: APK to check.
@@ -288,7 +291,7 @@ function shellWord(value) {
 // ── Arguments ─────────────────────────────────────────────────────────────
 
 const VALUE_OPTIONS = new Set(['build-number', 'target', 'ipa', 'apk']);
-const FLAG_OPTIONS = new Set(['help', 'release', 'regenerate-xcodeproj', 'skip-frontend']);
+const FLAG_OPTIONS = new Set(['help', 'release', 'regenerate-xcodeproj', 'skip-frontend', 'e2e']);
 
 function parseArgs(argv) {
   const positional = [];
@@ -1163,20 +1166,35 @@ async function iosCheck(ctx) {
   await clippyEachTarget(targets, found.env);
 }
 
+/**
+ * `ios build --e2e`: debug simulator builds only. Compiles the `e2e-testing`
+ * feature (tauri-plugin-playwright's real eval/IPC bridge) and grants its one
+ * command to the main window next to the regular `mobile` capability; a
+ * non-empty `app.security.capabilities` replaces the capabilities/ directory,
+ * so `mobile` must be listed again. Never reachable from `publish`.
+ */
+function e2eBuildArgs(ctx, release) {
+  if (ctx.options.e2e !== true) return [];
+  if (release) fail('--e2e is for debug simulator builds only; drop --release');
+  const capabilities = ['mobile', { identifier: 'playwright-ios-e2e', description: 'Debug simulator e2e builds only: the Playwright result bridge.', platforms: ['iOS'], windows: ['main'], permissions: ['playwright:allow-pw-result'] }];
+  return ['--features', 'e2e-testing', '--config', JSON.stringify({ app: { security: { capabilities } } })];
+}
+
 async function iosBuild(ctx) {
-  rejectOptions(ctx, ['release', 'build-number', 'skip-frontend']);
+  rejectOptions(ctx, ['release', 'build-number', 'skip-frontend', 'e2e']);
   const release = ctx.options.release === true;
+  const e2e = e2eBuildArgs(ctx, release);
   const buildNumber = resolveBuildNumber(ctx.options['build-number'], { required: false });
   const found = await iosEnvironment({ needSimulatorRuntime: true, drop: [...ENV.iosSigning, ...ENV.tauriAppleApiKey] });
   const outDir = path.join(IOS.project, 'build', IOS.simulator.out);
   fs.rmSync(outDir, { recursive: true, force: true });
   const before = gitStatus(IOS.project);
-  step(`Building the ${release ? 'release' : 'debug'} simulator app without signing credentials`);
-  await run('pnpm', ['tauri', 'ios', 'build', '--ci', '--target', IOS.simulator.tauri, ...(release ? [] : ['--debug']), ...tauriVersionConfig(buildNumber), ...frontendConfig(ctx)], { env: found.env });
+  step(`Building the ${release ? 'release' : 'debug'}${e2e.length > 0 ? ' e2e' : ''} simulator app without signing credentials`);
+  await run('pnpm', ['tauri', 'ios', 'build', '--ci', '--target', IOS.simulator.tauri, ...(release ? [] : ['--debug']), ...tauriVersionConfig(buildNumber), ...frontendConfig(ctx), ...e2e], { env: found.env });
   reportNativeProjectChanges(IOS.project, before);
   const app = findSingle(outDir, (name) => name.endsWith('.app'), 'simulator .app');
   await verifyIosInfoPlist(path.join(app, 'Info.plist'), { version: appVersion(), buildNumber, label: rel(app) });
-  console.log(`app          ${rel(app)} (iPhone + iPad, iOS ${IOS.minOs}+, unsigned simulator build)`);
+  console.log(`app          ${rel(app)} (iPhone + iPad, iOS ${IOS.minOs}+, unsigned simulator build${e2e.length > 0 ? ', e2e-testing bridge: never ship' : ''})`);
 }
 
 async function iosPublish(ctx) {

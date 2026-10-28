@@ -623,8 +623,18 @@ import {
     }
     setWysiwygImageDocumentDir(view, pathDirname(tab.filePath));
     registerEditorView(tab.id, view);
-    // Auto-focus the editor so the user can type immediately
-    requestAnimationFrame(() => view?.focus());
+    // Auto-focus the editor so the user can type immediately — unless they
+    // already moved on to a text field. The view mounts after an async read
+    // and a lazy chunk load, so it can land after e.g. a sidebar double-click
+    // has opened the inline rename input; taking focus would blur (commit)
+    // that rename and send the next keystrokes into the document instead.
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      const typingElsewhere = active instanceof HTMLElement
+        && (active.isContentEditable || active.matches('input, textarea, select'))
+        && !view?.dom.contains(active);
+      if (!typingElsewhere) view?.focus();
+    });
 
     (window as any).__novelist_view = view;
     (window as any).__novelist_save = saveCurrentFile;

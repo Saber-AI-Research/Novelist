@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open for the text typed between the brackets, and a source bracket in the
   middle of a multi-character commit is checked against the up-to-date
   transcription position.
+- Double-clicking a sidebar file to rename it no longer loses the rename
+  input when the editor for that file finishes opening afterwards (slow disk
+  or first editor load). An opening editor no longer takes focus from a text
+  field the user has already moved to, so typed names stay out of the
+  document.
 
 ## [0.6.1] - 2026-10-24
 

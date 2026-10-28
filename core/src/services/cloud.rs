@@ -1945,8 +1945,10 @@ mod tests {
     }
 
     /// Installs a project library for one test; removed on drop.
+    #[cfg(unix)]
     struct TestLibrary;
 
+    #[cfg(unix)]
     impl Drop for TestLibrary {
         fn drop(&mut self) {
             crate::services::portable::set_test_library(None);
