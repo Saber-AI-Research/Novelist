@@ -825,6 +825,12 @@ export const en: TranslationMap = {
   'settings.sync.legacyAcknowledged': 'If a legacy project-name folder exists on WebDAV, I have backed up and reconciled its files and want to use a new isolated namespace. Legacy remote data will not be imported or deleted automatically.',
   'settings.sync.adoptPrompt': "Another device already moved this project's legacy WebDAV folder into its own sync namespace. Join that namespace so both devices keep syncing the same remote copy. Files that differ on both sides are reported as conflicts; nothing is overwritten.",
   'settings.sync.adoptButton': 'Join existing sync namespace',
+  'settings.sync.copyConfig': 'Copy config string',
+  'settings.sync.pasteConfig': 'Paste config from clipboard',
+  'settings.sync.configWorking': 'Working…',
+  'settings.sync.configSuccess': 'Config copied or restored.',
+  'settings.sync.configError': 'Config restore failed: {error}',
+  'settings.sync.configHint': 'Includes AI Talk profiles and this project’s WebDAV settings. The string contains credentials; treat it like a password.',
 
   // --- Settings · Plugins (AI native) ---
   'settings.plugins.section.pluginSettings': 'Plugin settings',

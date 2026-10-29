@@ -77,6 +77,36 @@ fn resolve_masked_password(
 pub async fn get_sync_config(project_dir: String) -> Result<SyncConfigMasked, AppError> {
     blocking(move || sync::read_sync_config(&project_dir).map(Into::into)).await
 }
+/// Return the unmasked project sync configuration only after an explicit user export.
+/// The frontend immediately packages it into the user-visible clipboard payload.
+#[tauri::command]
+#[specta::specta]
+pub async fn export_sync_config(project_dir: String) -> Result<SyncConfig, AppError> {
+    blocking(move || sync::read_sync_config(&project_dir)).await
+}
+
+/// Import a user-provided sync configuration through the same URL and platform checks
+/// used by the ordinary settings form. Mobile still rejects inline passwords.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_sync_config(
+    project_dir: String,
+    mut config: SyncConfig,
+) -> Result<(), AppError> {
+    blocking(move || {
+        #[cfg(mobile)]
+        if !config.password.is_empty() {
+            return Err(AppError::InvalidInput(
+                "Passwords are kept only in this device's keychain: connect a cloud account in Settings → Sync instead".into(),
+            ));
+        }
+        if config.cloud_account {
+            config.password.clear();
+        }
+        sync::save_sync_config_to_disk(&project_dir, &config)
+    })
+    .await
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -93,12 +123,6 @@ pub async fn save_sync_config(project_dir: String, mut config: SyncConfig) -> Re
                 std::mem::take(&mut config.password),
             )
         };
-        #[cfg(mobile)]
-        if !config.password.is_empty() {
-            return Err(AppError::InvalidInput(
-                "Passwords are kept only in this device's keychain: connect a cloud account in Settings → Sync instead".into(),
-            ));
-        }
         sync::save_sync_config_to_disk(&project_dir, &config)
     })
     .await

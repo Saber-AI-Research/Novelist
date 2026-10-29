@@ -825,6 +825,12 @@ export const zhCN: TranslationMap = {
   'settings.sync.legacyAcknowledged': '如果 WebDAV 上存在以项目名命名的旧目录，我已备份并核对其中的数据，确认改用新的独立同步空间。旧远端数据不会被自动导入或删除。',
   'settings.sync.adoptPrompt': '另一台设备已将此项目的旧版 WebDAV 文件夹迁移到它自己的同步命名空间。加入该命名空间，两台设备才会继续同步同一份远程副本。两边内容不同的文件会报告为冲突，不会被覆盖。',
   'settings.sync.adoptButton': '加入现有同步命名空间',
+  'settings.sync.copyConfig': '复制配置字符串',
+  'settings.sync.pasteConfig': '从剪贴板粘贴配置',
+  'settings.sync.configWorking': '处理中…',
+  'settings.sync.configSuccess': '配置已复制或恢复。',
+  'settings.sync.configError': '配置恢复失败：{error}',
+  'settings.sync.configHint': '包含 AI Talk 配置和当前项目的 WebDAV 设置。字符串中包含凭据，请像密码一样保管。',
 
   // --- Settings · Plugins (AI native) ---
   'settings.plugins.section.pluginSettings': '插件设置',

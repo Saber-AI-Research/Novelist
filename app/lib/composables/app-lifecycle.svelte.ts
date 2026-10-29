@@ -41,17 +41,18 @@ const COMPOSITION_SETTLE_TIMEOUT_MS = 150;
  */
 export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
   let unlistenCloseRequested: (() => void) | null = null;
-  let syncIntervalId: ReturnType<typeof setInterval> | null = null;
-  // Bumped by every clear so a `get_sync_config` that resolves after a newer
-  // project switch (or teardown) can't install a stale, leaked interval.
+  let syncIntervalId: number | undefined;
+  let syncRealtimeTimer: number | undefined;
+  let syncInFlight: Promise<void> | null = null;
   let syncTimerGeneration = 0;
+  let lifecycleDisposed = false;
   /** WebDAV sync enabled for the open project (read with the timer config). */
   let syncEnabledFor: string | null = null;
-
   function clearSyncTimer() {
     syncTimerGeneration++;
     syncEnabledFor = null;
-    if (syncIntervalId) { clearInterval(syncIntervalId); syncIntervalId = null; }
+    clearInterval(syncIntervalId);
+    syncIntervalId = undefined;
   }
 
   async function configureSyncTimer(dirPath: string) {
@@ -62,11 +63,11 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
         enabled: boolean;
         interval_minutes: number;
       };
-      if (generation !== syncTimerGeneration) return;
+      if (lifecycleDisposed || generation !== syncTimerGeneration) return;
       if (config.enabled) syncEnabledFor = dirPath;
       if (config.enabled && config.interval_minutes > 0) {
         syncIntervalId = setInterval(async () => {
-          if (projectStore.dirPath !== dirPath) return;
+          if (lifecycleDisposed || projectStore.dirPath !== dirPath) return;
           try {
             await invoke('sync_now', { projectDir: dirPath });
           } catch (e) {
@@ -152,10 +153,24 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
 
   function syncIfEnabled(dirPath: string | null) {
     if (!dirPath || syncEnabledFor !== dirPath || !navigator.onLine) return;
-    invoke('sync_now', { projectDir: dirPath }).catch((e) => {
-      console.error('Background sync failed:', e);
-    });
+    if (syncInFlight) return;
+    syncInFlight = invoke('sync_now', { projectDir: dirPath })
+      .then(() => undefined)
+      .catch((e) => console.error('Background sync failed:', e))
+      .finally(() => { syncInFlight = null; });
   }
+
+  function handleFileSaved(event: Event) {
+    const filePath = (event as CustomEvent<{ filePath?: string }>).detail?.filePath;
+    if (!filePath || !projectStore.dirPath || !filePath.startsWith(projectStore.dirPath)) return;
+    if (syncRealtimeTimer) clearTimeout(syncRealtimeTimer);
+    syncRealtimeTimer = setTimeout(() => {
+      syncRealtimeTimer = undefined;
+      syncIfEnabled(projectStore.dirPath);
+    }, 800);
+  }
+  window.addEventListener('novelist-file-saved', handleFileSaved);
+
 
   /**
    * Mobile persistence: debounce an auto-save after edits (typing, dictation
@@ -254,10 +269,14 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
   window.addEventListener('beforeunload', handleBeforeUnload);
 
   return () => {
+    lifecycleDisposed = true;
     unlistenCloseRequested?.();
     window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.removeEventListener('novelist-file-saved', handleFileSaved);
     window.removeEventListener('novelist-sync-config-changed', handleSyncConfigChanged);
     window.removeEventListener('online', handleOnline);
+    clearTimeout(syncRealtimeTimer);
+    syncRealtimeTimer = undefined;
     clearSyncTimer();
     disposeSyncEffect();
     disposeMobile();

@@ -1,0 +1,13 @@
+[plugin]
+id = "canvas"
+name = "Canvas Editor"
+version = "1.0.1"
+description = "Visual canvas editor for .canvas files with drag-and-drop nodes"
+author = "Novelist Team"
+permissions = ["read", "write", "ui"]
+
+[ui]
+type = "file-handler"
+entry = "index.html"
+file_extensions = [".canvas"]
+label = "Canvas"

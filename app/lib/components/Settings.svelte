@@ -4,6 +4,8 @@
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
   import { commands, type SyncConfigMasked } from '$lib/ipc/commands';
+  import { aiTalkSettings } from '$lib/components/ai-talk/settings.svelte';
+  import { decodeConfigTransfer, encodeConfigTransfer, isTransferSyncConfig } from '$lib/services/config-transfer';
   import { shortcutsStore, editorCommandIds, formatShortcut, buildShortcutString, matchesShortcutQuery } from '$lib/stores/shortcuts.svelte';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
@@ -677,6 +679,48 @@
   function setSyncEnabled(checked: boolean) {
     syncConfig.enabled = checked;
     void saveSyncConfig();
+  }
+
+  let configTransferStatus = $state<'idle' | 'copying' | 'pasting' | 'success' | 'error'>('idle');
+  let configTransferError = $state('');
+
+  async function copyConfigToClipboard() {
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) return;
+    configTransferStatus = 'copying';
+    configTransferError = '';
+    try {
+      const exportedSync: unknown = await invoke('export_sync_config', { projectDir });
+      if (!isTransferSyncConfig(exportedSync)) throw new Error('同步配置格式无效');
+      const payload = await encodeConfigTransfer({
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        aiTalk: aiTalkSettings.value,
+        sync: exportedSync,
+      });
+      await navigator.clipboard.writeText(payload);
+      configTransferStatus = 'success';
+    } catch (error) {
+      configTransferStatus = 'error';
+      configTransferError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function pasteConfigFromClipboard() {
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) return;
+    configTransferStatus = 'pasting';
+    configTransferError = '';
+    try {
+      const payload = await decodeConfigTransfer(await navigator.clipboard.readText());
+      await invoke('import_sync_config', { projectDir, config: payload.sync });
+      aiTalkSettings.update(payload.aiTalk);
+      await loadSyncConfig(projectDir);
+      configTransferStatus = 'success';
+    } catch (error) {
+      configTransferStatus = 'error';
+      configTransferError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   // Shortcut recording state
@@ -1732,6 +1776,21 @@
             >{syncInProgress ? t('settings.sync.syncing') : t('settings.sync.syncNow')}</button>
           </div>
 
+          <div class="settings-config-transfer" data-testid="settings-config-transfer">
+            <button type="button" class="text-xs px-3 py-1.5 rounded cursor-pointer" onclick={copyConfigToClipboard} aria-busy={configTransferStatus === 'copying'} disabled={configTransferStatus === 'copying' || configTransferStatus === 'pasting'}>
+              {configTransferStatus === 'copying' ? t('settings.sync.configWorking') : t('settings.sync.copyConfig')}
+            </button>
+            <button type="button" class="text-xs px-3 py-1.5 rounded cursor-pointer" onclick={pasteConfigFromClipboard} aria-busy={configTransferStatus === 'pasting'} disabled={configTransferStatus === 'copying' || configTransferStatus === 'pasting'}>
+              {configTransferStatus === 'pasting' ? t('settings.sync.configWorking') : t('settings.sync.pasteConfig')}
+            </button>
+          </div>
+          <p class="settings-config-transfer-hint">{t('settings.sync.configHint')}</p>
+          {#if configTransferStatus === 'success'}
+            <div class="text-xs mb-2" role="status" aria-live="polite" style="color: #22c55e;">{t('settings.sync.configSuccess')}</div>
+          {:else if configTransferStatus === 'error'}
+            <div class="text-xs mb-2" role="alert" aria-live="assertive" style="color: #ef4444;">{t('settings.sync.configError', { error: configTransferError })}</div>
+          {/if}
+
           {#if syncTestResult === 'success'}
             <div class="text-xs mb-2" style="color: #22c55e;">{t('settings.sync.connectionSuccess')}</div>
           {:else if syncTestResult === 'fail'}
@@ -1844,8 +1903,16 @@
 
 /* Tablets keep the two-column dialog, clamped to the visible viewport. */
 .settings-dialog-mobile:not(.settings-dialog-phone) {
-  max-width: min(680px, calc(100vw - 32px));
-  height: min(520px, calc(var(--novelist-vv-height, 100dvh) - 32px));
+  max-width: min(820px, calc(100vw - 32px));
+  height: min(640px, calc(var(--novelist-vv-height, 100dvh) - 32px));
+}
+.settings-dialog-mobile:not(.settings-dialog-phone) .settings-nav {
+  width: 190px;
+}
+.settings-dialog-mobile .settings-nav-item,
+.settings-dialog-mobile .settings-row-label,
+.settings-dialog-mobile .settings-group-title {
+  font-size: 16px;
 }
 
 /* Phone: full-screen sheet, section list → section page. */
@@ -2142,4 +2209,35 @@
   cursor: pointer;
 }
 .help-copy-btn:hover { border-color: var(--novelist-accent); color: var(--novelist-accent); }
+.settings-config-transfer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--novelist-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--novelist-bg-secondary) 72%, transparent);
+}
+.settings-config-transfer-hint {
+  margin: -4px 0 12px;
+  color: var(--novelist-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.settings-config-transfer button {
+  border: 1px solid var(--novelist-border);
+  background: var(--novelist-bg-secondary);
+  color: var(--novelist-text);
+}
+.settings-config-transfer button:hover:not(:disabled) {
+  border-color: var(--novelist-accent);
+  color: var(--novelist-accent);
+}
+@media (pointer: coarse) {
+  .settings-config-transfer button {
+    flex: 1 1 180px;
+    min-height: 44px;
+  }
+}
 </style>

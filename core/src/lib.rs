@@ -94,8 +94,8 @@ use commands::styled_copy::{
 };
 #[cfg(feature = "sync")]
 use commands::sync::{
-    adopt_sync_identity, get_sync_config, resolve_sync_conflict, save_sync_config, sync_now,
-    test_sync_connection,
+    adopt_sync_identity, export_sync_config, get_sync_config, import_sync_config,
+    resolve_sync_conflict, save_sync_config, sync_now, test_sync_connection,
 };
 use commands::template::{
     create_project_from_template, delete_template, import_template_zip, list_templates,
@@ -528,6 +528,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
         builder.commands(app_commands![
             get_sync_config,
             save_sync_config,
+            export_sync_config,
+            import_sync_config,
             sync_now,
             test_sync_connection,
             adopt_sync_identity,
@@ -714,12 +716,27 @@ pub fn run() {
             "plugin.configure socket={:?}",
             std::env::var("TAURI_PLAYWRIGHT_SOCKET")
         ));
-        let plugin = match std::env::var("TAURI_PLAYWRIGHT_SOCKET") {
-            Ok(path) if !path.trim().is_empty() => tauri_plugin_playwright::init_with_config(
-                tauri_plugin_playwright::PluginConfig::new().socket_path(path),
-            ),
-            _ => tauri_plugin_playwright::init(),
+        let config = match std::env::var("TAURI_PLAYWRIGHT_SOCKET") {
+            Ok(path) if !path.trim().is_empty() => {
+                tauri_plugin_playwright::PluginConfig::new().socket_path(path)
+            }
+            _ => tauri_plugin_playwright::PluginConfig::new(),
         };
+        // Physical iOS devices cannot share a Unix socket with the test host.
+        // Opt-in debug builds can use the plugin's loopback TCP listener over USB.
+        #[cfg(all(target_os = "ios", debug_assertions))]
+        let config = match std::env::var("TAURI_PLAYWRIGHT_TCP_PORT") {
+            Ok(value) => match value.parse::<std::num::NonZeroU16>() {
+                Ok(port) => tauri_plugin_playwright::PluginConfig {
+                    socket_path: None,
+                    tcp_port: Some(port.get()),
+                    ..config
+                },
+                Err(_) => config,
+            },
+            Err(_) => config,
+        };
+        let plugin = tauri_plugin_playwright::init_with_config(config);
         app_builder = app_builder.plugin(plugin);
     }
 

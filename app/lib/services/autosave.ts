@@ -38,6 +38,8 @@ export function createAutoSave(options: AutoSaveOptions = {}): AutoSave {
         window.dispatchEvent(new CustomEvent('novelist-operation-error', {
           detail: { message: t('autosave.failed', { name, error: result.error }) },
         }));
+      } else {
+        window.dispatchEvent(new CustomEvent('novelist-file-saved', { detail: { filePath: tab.filePath } }));
       }
     }
   }

@@ -153,6 +153,14 @@ html[data-layout='phone'][data-keyboard='open'] [data-testid='status-bar'] {
 html[data-mobile='true'][data-layout='phone'] {
   --novelist-touch-text-scale: 1.125;
 }
+/* iPads, including wide landscape layouts, need a reading-sized UI rather
+   than the desktop's dense 14px baseline. Keep saved editor sizes intact. */
+html[data-mobile='true']:not([data-layout='phone']),
+html[data-mobile='true']:not([data-layout='phone']) body,
+html[data-mobile='true']:not([data-layout='phone']) #app {
+  font-size: 17px;
+  --novelist-touch-text-scale: 1.125;
+}
 html[data-mobile='true'][data-layout='phone'] [data-testid='status-bar'] {
   font-size: 12px !important;
 }

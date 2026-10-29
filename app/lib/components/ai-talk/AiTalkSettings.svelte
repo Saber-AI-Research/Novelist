@@ -299,7 +299,11 @@
   @container (max-width: 420px) {
     label { grid-column: 1 / -1; }
   }
-  :global(html[data-mobile='true']) button { min-height: 44px; }
+  :global(html[data-mobile='true']) button { min-height: 44px; font-size: 16px; }
   :global(html[data-mobile='true']) input { min-height: 44px; }
+  :global(html[data-mobile='true']) label,
+  :global(html[data-mobile='true']) .section-label { font-size: 16px; }
+  :global(html[data-mobile='true']) .hint,
+  :global(html[data-mobile='true']) .delete-confirm p { font-size: 14px; }
 
 </style>

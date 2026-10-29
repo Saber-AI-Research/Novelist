@@ -23,107 +23,107 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		04E592FD21BCDD9633ADF5E6 /* bundled_resources.rs */ = {isa = PBXFileReference; path = bundled_resources.rs; sourceTree = "<group>"; };
-		05C188997CB66A375D8E59CC /* cli_shim.rs */ = {isa = PBXFileReference; path = cli_shim.rs; sourceTree = "<group>"; };
-		0699E0497AAA7C62A46DE0BD /* binding.rs */ = {isa = PBXFileReference; path = binding.rs; sourceTree = "<group>"; };
-		070CA41A52D88D6826DA83F7 /* naming.rs */ = {isa = PBXFileReference; path = naming.rs; sourceTree = "<group>"; };
-		091EC3569DF890F1DF17B298 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		0B22AD791AE1555235B374E8 /* export.rs */ = {isa = PBXFileReference; path = export.rs; sourceTree = "<group>"; };
+		04E592FD21BCDD9633ADF5E6 /* bundled_resources.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = bundled_resources.rs; sourceTree = "<group>"; };
+		05C188997CB66A375D8E59CC /* cli_shim.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = cli_shim.rs; sourceTree = "<group>"; };
+		0699E0497AAA7C62A46DE0BD /* binding.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = binding.rs; sourceTree = "<group>"; };
+		070CA41A52D88D6826DA83F7 /* naming.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = naming.rs; sourceTree = "<group>"; };
+		091EC3569DF890F1DF17B298 /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		0B22AD791AE1555235B374E8 /* export.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = export.rs; sourceTree = "<group>"; };
 		0E301F0DD4D5F27AB13FB736 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0E312E1585A2674FDEE6CE9E /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
-		134022F657B1F2126CE6C5F3 /* bench.rs */ = {isa = PBXFileReference; path = bench.rs; sourceTree = "<group>"; };
-		1353A512723D2742DB7EE510 /* project_files.rs */ = {isa = PBXFileReference; path = project_files.rs; sourceTree = "<group>"; };
+		134022F657B1F2126CE6C5F3 /* bench.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = bench.rs; sourceTree = "<group>"; };
+		1353A512723D2742DB7EE510 /* project_files.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = project_files.rs; sourceTree = "<group>"; };
 		16090976CB146A0D50955072 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
-		172B660D5F619E2CB46E1B12 /* platform.rs */ = {isa = PBXFileReference; path = platform.rs; sourceTree = "<group>"; };
+		172B660D5F619E2CB46E1B12 /* platform.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = platform.rs; sourceTree = "<group>"; };
 		1C0D3D215F34886894D49191 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
-		1DB4F0994A02DA4CDA5FB110 /* template_scaffold.rs */ = {isa = PBXFileReference; path = template_scaffold.rs; sourceTree = "<group>"; };
+		1DB4F0994A02DA4CDA5FB110 /* template_scaffold.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = template_scaffold.rs; sourceTree = "<group>"; };
 		206618C16AFED9855B860A25 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		208EFA6A30C462E67E53110E /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
-		217B543866FCAF178335394C /* settings.rs */ = {isa = PBXFileReference; path = settings.rs; sourceTree = "<group>"; };
-		25D39AE2B5F9DA1E2F45A5BA /* file.rs */ = {isa = PBXFileReference; path = file.rs; sourceTree = "<group>"; };
-		26091DA0FC114FF1B69806B3 /* template.rs */ = {isa = PBXFileReference; path = template.rs; sourceTree = "<group>"; };
-		2791AA0818578765B7DD0D13 /* literary_study.rs */ = {isa = PBXFileReference; path = literary_study.rs; sourceTree = "<group>"; };
-		28F3E03FC4F3BDF799BF7158 /* s3.rs */ = {isa = PBXFileReference; path = s3.rs; sourceTree = "<group>"; };
-		2BE2335C6D5DFF8F5FBB9C8F /* atomic_file.rs */ = {isa = PBXFileReference; path = atomic_file.rs; sourceTree = "<group>"; };
-		2C0FBD8B855955E40A43C846 /* template_files.rs */ = {isa = PBXFileReference; path = template_files.rs; sourceTree = "<group>"; };
-		2CF6ED0FA262ADD39A031348 /* portable.rs */ = {isa = PBXFileReference; path = portable.rs; sourceTree = "<group>"; };
-		2D3D59232F695C54A4C1BA25 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
-		300B352E336280551A6582B4 /* naming.rs */ = {isa = PBXFileReference; path = naming.rs; sourceTree = "<group>"; };
-		35A55E3284FC081EEF26694C /* menu.rs */ = {isa = PBXFileReference; path = menu.rs; sourceTree = "<group>"; };
-		3686C9B188B504FD6CCA4E5A /* novelist_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = novelist_iOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		37DAC387231467645DA8AA9E /* error.rs */ = {isa = PBXFileReference; path = error.rs; sourceTree = "<group>"; };
-		3D969841353893749078B179 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		40799E442A75087F7FF20A85 /* styled_copy_pandoc.rs */ = {isa = PBXFileReference; path = styled_copy_pandoc.rs; sourceTree = "<group>"; };
-		447692203C60BFDAA376B14B /* ai_bridge.rs */ = {isa = PBXFileReference; path = ai_bridge.rs; sourceTree = "<group>"; };
-		462D723389D271A596F1BFED /* writing_stats.rs */ = {isa = PBXFileReference; path = writing_stats.rs; sourceTree = "<group>"; };
-		4661B61AD628E604D0EE8A9A /* smms.rs */ = {isa = PBXFileReference; path = smms.rs; sourceTree = "<group>"; };
-		4CF6D5EE4F93BE1E5A21DA18 /* sandbox.rs */ = {isa = PBXFileReference; path = sandbox.rs; sourceTree = "<group>"; };
+		217B543866FCAF178335394C /* settings.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = settings.rs; sourceTree = "<group>"; };
+		25D39AE2B5F9DA1E2F45A5BA /* file.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = file.rs; sourceTree = "<group>"; };
+		26091DA0FC114FF1B69806B3 /* template.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = template.rs; sourceTree = "<group>"; };
+		2791AA0818578765B7DD0D13 /* literary_study.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = literary_study.rs; sourceTree = "<group>"; };
+		28F3E03FC4F3BDF799BF7158 /* s3.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = s3.rs; sourceTree = "<group>"; };
+		2BE2335C6D5DFF8F5FBB9C8F /* atomic_file.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = atomic_file.rs; sourceTree = "<group>"; };
+		2C0FBD8B855955E40A43C846 /* template_files.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = template_files.rs; sourceTree = "<group>"; };
+		2CF6ED0FA262ADD39A031348 /* portable.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = portable.rs; sourceTree = "<group>"; };
+		2D3D59232F695C54A4C1BA25 /* main.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = main.rs; sourceTree = "<group>"; };
+		300B352E336280551A6582B4 /* naming.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = naming.rs; sourceTree = "<group>"; };
+		35A55E3284FC081EEF26694C /* menu.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = menu.rs; sourceTree = "<group>"; };
+		3686C9B188B504FD6CCA4E5A /* Novelist.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Novelist.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		37DAC387231467645DA8AA9E /* error.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = error.rs; sourceTree = "<group>"; };
+		3D969841353893749078B179 /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		40799E442A75087F7FF20A85 /* styled_copy_pandoc.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = styled_copy_pandoc.rs; sourceTree = "<group>"; };
+		447692203C60BFDAA376B14B /* ai_bridge.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = ai_bridge.rs; sourceTree = "<group>"; };
+		462D723389D271A596F1BFED /* writing_stats.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = writing_stats.rs; sourceTree = "<group>"; };
+		4661B61AD628E604D0EE8A9A /* smms.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = smms.rs; sourceTree = "<group>"; };
+		4CF6D5EE4F93BE1E5A21DA18 /* sandbox.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = sandbox.rs; sourceTree = "<group>"; };
 		500E6686EEEA776A9A772C29 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
-		5023CB95ED1BE57EFAF72D7A /* settings.rs */ = {isa = PBXFileReference; path = settings.rs; sourceTree = "<group>"; };
-		52F363EE4568A6E4848E5A3E /* library.rs */ = {isa = PBXFileReference; path = library.rs; sourceTree = "<group>"; };
+		5023CB95ED1BE57EFAF72D7A /* settings.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = settings.rs; sourceTree = "<group>"; };
+		52F363EE4568A6E4848E5A3E /* library.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = library.rs; sourceTree = "<group>"; };
 		549367D46DA59437D81B0B0B /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		5512BF38768602C04B2CDC36 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
-		58E62C3A39877290C7D05D85 /* webdav.rs */ = {isa = PBXFileReference; path = webdav.rs; sourceTree = "<group>"; };
-		59DA8E19EF0318CA5D652D42 /* menu.rs */ = {isa = PBXFileReference; path = menu.rs; sourceTree = "<group>"; };
+		58E62C3A39877290C7D05D85 /* webdav.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = webdav.rs; sourceTree = "<group>"; };
+		59DA8E19EF0318CA5D652D42 /* menu.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = menu.rs; sourceTree = "<group>"; };
 		5EA09FBA4E190E682EB98882 /* novelist_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = novelist_iOS.entitlements; sourceTree = "<group>"; };
-		667771963DFDD8284A0C4830 /* recent.rs */ = {isa = PBXFileReference; path = recent.rs; sourceTree = "<group>"; };
-		6801CB8EA68E49383B7EFE46 /* image_host.rs */ = {isa = PBXFileReference; path = image_host.rs; sourceTree = "<group>"; };
-		6A245720326A51FE942789D8 /* wordpress.rs */ = {isa = PBXFileReference; path = wordpress.rs; sourceTree = "<group>"; };
-		6E6A5DB47F4E65B2F94B1B0F /* sync.rs */ = {isa = PBXFileReference; path = sync.rs; sourceTree = "<group>"; };
-		6FDFA15056F50AC192F109F3 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		7023231FB1B381C9A4F7B2D5 /* portable.rs */ = {isa = PBXFileReference; path = portable.rs; sourceTree = "<group>"; };
-		70A6819A86A2F72D49662775 /* project.rs */ = {isa = PBXFileReference; path = project.rs; sourceTree = "<group>"; };
-		7C5F6571D0324E0DF084A09B /* sidecar.rs */ = {isa = PBXFileReference; path = sidecar.rs; sourceTree = "<group>"; };
-		7C8A4410F2F9F54F3B826FD1 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		82C724511D72398B07865880 /* custom.rs */ = {isa = PBXFileReference; path = custom.rs; sourceTree = "<group>"; };
-		8369CA3AE52E72864DF4C976 /* project.rs */ = {isa = PBXFileReference; path = project.rs; sourceTree = "<group>"; };
-		863FD6EABDE6CFD1575DB5BA /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		89D15834D6680B84AB14626F /* sync.rs */ = {isa = PBXFileReference; path = sync.rs; sourceTree = "<group>"; };
-		8C0FF56E7997B29B9806BDEF /* file_routing.rs */ = {isa = PBXFileReference; path = file_routing.rs; sourceTree = "<group>"; };
-		8CF2FBE485885C764997EDCC /* file_watcher.rs */ = {isa = PBXFileReference; path = file_watcher.rs; sourceTree = "<group>"; };
-		8D4FBAD21C5B0BD5EC1B1E2D /* logcat.rs */ = {isa = PBXFileReference; path = logcat.rs; sourceTree = "<group>"; };
-		8FD655BA48E5B5F3AC56E20E /* plugin.rs */ = {isa = PBXFileReference; path = plugin.rs; sourceTree = "<group>"; };
-		9083892175E549EF91F99519 /* stats.rs */ = {isa = PBXFileReference; path = stats.rs; sourceTree = "<group>"; };
-		92A7DCD0AD6131C16251369F /* cloud.rs */ = {isa = PBXFileReference; path = cloud.rs; sourceTree = "<group>"; };
-		98269A41FE94AE57A31DB309 /* pandoc_html.rs */ = {isa = PBXFileReference; path = pandoc_html.rs; sourceTree = "<group>"; };
-		98E1A40CF402149E8ADD64DD /* book_translation.rs */ = {isa = PBXFileReference; path = book_translation.rs; sourceTree = "<group>"; };
-		99F71C0E82A9DD50407317E8 /* image_host.rs */ = {isa = PBXFileReference; path = image_host.rs; sourceTree = "<group>"; };
-		9C62B771389826A07C2251F5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		9DEC57D3CDB84422FD27A778 /* window.rs */ = {isa = PBXFileReference; path = window.rs; sourceTree = "<group>"; };
-		A28A76DC5D25FF9AC3C9C2E8 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
-		A4C81750DFD868821041F2C2 /* snapshot_webdav.rs */ = {isa = PBXFileReference; path = snapshot_webdav.rs; sourceTree = "<group>"; };
+		667771963DFDD8284A0C4830 /* recent.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = recent.rs; sourceTree = "<group>"; };
+		6801CB8EA68E49383B7EFE46 /* image_host.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = image_host.rs; sourceTree = "<group>"; };
+		6A245720326A51FE942789D8 /* wordpress.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = wordpress.rs; sourceTree = "<group>"; };
+		6E6A5DB47F4E65B2F94B1B0F /* sync.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = sync.rs; sourceTree = "<group>"; };
+		6FDFA15056F50AC192F109F3 /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		7023231FB1B381C9A4F7B2D5 /* portable.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = portable.rs; sourceTree = "<group>"; };
+		70A6819A86A2F72D49662775 /* project.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = project.rs; sourceTree = "<group>"; };
+		7C5F6571D0324E0DF084A09B /* sidecar.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = sidecar.rs; sourceTree = "<group>"; };
+		7C8A4410F2F9F54F3B826FD1 /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		82C724511D72398B07865880 /* custom.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = custom.rs; sourceTree = "<group>"; };
+		8369CA3AE52E72864DF4C976 /* project.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = project.rs; sourceTree = "<group>"; };
+		863FD6EABDE6CFD1575DB5BA /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		89D15834D6680B84AB14626F /* sync.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = sync.rs; sourceTree = "<group>"; };
+		8C0FF56E7997B29B9806BDEF /* file_routing.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = file_routing.rs; sourceTree = "<group>"; };
+		8CF2FBE485885C764997EDCC /* file_watcher.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = file_watcher.rs; sourceTree = "<group>"; };
+		8D4FBAD21C5B0BD5EC1B1E2D /* logcat.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = logcat.rs; sourceTree = "<group>"; };
+		8FD655BA48E5B5F3AC56E20E /* plugin.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = plugin.rs; sourceTree = "<group>"; };
+		9083892175E549EF91F99519 /* stats.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = stats.rs; sourceTree = "<group>"; };
+		92A7DCD0AD6131C16251369F /* cloud.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = cloud.rs; sourceTree = "<group>"; };
+		98269A41FE94AE57A31DB309 /* pandoc_html.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = pandoc_html.rs; sourceTree = "<group>"; };
+		98E1A40CF402149E8ADD64DD /* book_translation.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = book_translation.rs; sourceTree = "<group>"; };
+		99F71C0E82A9DD50407317E8 /* image_host.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = image_host.rs; sourceTree = "<group>"; };
+		9C62B771389826A07C2251F5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		9DEC57D3CDB84422FD27A778 /* window.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = window.rs; sourceTree = "<group>"; };
+		A28A76DC5D25FF9AC3C9C2E8 /* mod.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = mod.rs; sourceTree = "<group>"; };
+		A4C81750DFD868821041F2C2 /* snapshot_webdav.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = snapshot_webdav.rs; sourceTree = "<group>"; };
 		A65C2AE73DB6472B7F794B21 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
-		A893A24F13FDD56B61C5DBA4 /* draft.rs */ = {isa = PBXFileReference; path = draft.rs; sourceTree = "<group>"; };
+		A893A24F13FDD56B61C5DBA4 /* draft.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = draft.rs; sourceTree = "<group>"; };
 		AAEBFBC747E218C826B9682C /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
-		AF2143F39E6D840C9F77082A /* cli.rs */ = {isa = PBXFileReference; path = cli.rs; sourceTree = "<group>"; };
-		AFE8CE0E9AAD8FE0773C73C6 /* qiniu.rs */ = {isa = PBXFileReference; path = qiniu.rs; sourceTree = "<group>"; };
-		B4BE73E855D54C4BD526B45E /* file_state.rs */ = {isa = PBXFileReference; path = file_state.rs; sourceTree = "<group>"; };
-		B4EA47DCBD26092B615B138D /* ai_files.rs */ = {isa = PBXFileReference; path = ai_files.rs; sourceTree = "<group>"; };
-		B57E0534C7A2CC4E0EB05692 /* e2e.rs */ = {isa = PBXFileReference; path = e2e.rs; sourceTree = "<group>"; };
+		AF2143F39E6D840C9F77082A /* cli.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = cli.rs; sourceTree = "<group>"; };
+		AFE8CE0E9AAD8FE0773C73C6 /* qiniu.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = qiniu.rs; sourceTree = "<group>"; };
+		B4BE73E855D54C4BD526B45E /* file_state.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = file_state.rs; sourceTree = "<group>"; };
+		B4EA47DCBD26092B615B138D /* ai_files.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = ai_files.rs; sourceTree = "<group>"; };
+		B57E0534C7A2CC4E0EB05692 /* e2e.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = e2e.rs; sourceTree = "<group>"; };
 		BB5FB393F1DE23B347C68FC5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		BC8DC83F6288F76322580524 /* sidecar.rs */ = {isa = PBXFileReference; path = sidecar.rs; sourceTree = "<group>"; };
-		BCF5C374C5D96A82F3C6F19F /* permissions.rs */ = {isa = PBXFileReference; path = permissions.rs; sourceTree = "<group>"; };
-		C19564FC63333EFBB4E16DA1 /* types.rs */ = {isa = PBXFileReference; path = types.rs; sourceTree = "<group>"; };
+		BC8DC83F6288F76322580524 /* sidecar.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = sidecar.rs; sourceTree = "<group>"; };
+		BCF5C374C5D96A82F3C6F19F /* permissions.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = permissions.rs; sourceTree = "<group>"; };
+		C19564FC63333EFBB4E16DA1 /* types.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = types.rs; sourceTree = "<group>"; };
 		C66A2BEEB26EC9B02AE4479B /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
-		C79D19085B84A2959FC4D2C3 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
-		CA0F7E1C7BBBFA2D8362E361 /* plugin.rs */ = {isa = PBXFileReference; path = plugin.rs; sourceTree = "<group>"; };
-		CE9126C8CBE7F0180BE6CE6B /* styled_copy.rs */ = {isa = PBXFileReference; path = styled_copy.rs; sourceTree = "<group>"; };
-		D70DF076E9AF937FD3829500 /* types.rs */ = {isa = PBXFileReference; path = types.rs; sourceTree = "<group>"; };
-		D8122EEFCFB00E7D35AF6536 /* rename_migration.rs */ = {isa = PBXFileReference; path = rename_migration.rs; sourceTree = "<group>"; };
-		D87D9BEB50B1F55CDD00342C /* publish.rs */ = {isa = PBXFileReference; path = publish.rs; sourceTree = "<group>"; };
-		D8D835321CF588814D4E70E9 /* imgur.rs */ = {isa = PBXFileReference; path = imgur.rs; sourceTree = "<group>"; };
-		DCA7BC413CE9918B107A652F /* cloud.rs */ = {isa = PBXFileReference; path = cloud.rs; sourceTree = "<group>"; };
-		E6B98624F4083D377F52CEDC /* wordpress_com.rs */ = {isa = PBXFileReference; path = wordpress_com.rs; sourceTree = "<group>"; };
-		E6FDF78FCD462F289A3AFBA1 /* cover_assets.rs */ = {isa = PBXFileReference; path = cover_assets.rs; sourceTree = "<group>"; };
-		EA48D99E90AFCA71B93587BE /* snapshots.rs */ = {isa = PBXFileReference; path = snapshots.rs; sourceTree = "<group>"; };
-		F15EA6E51321B991DE1A31C9 /* pandoc.rs */ = {isa = PBXFileReference; path = pandoc.rs; sourceTree = "<group>"; };
-		F22593D2C71BF2417C85A276 /* aliyun_oss.rs */ = {isa = PBXFileReference; path = aliyun_oss.rs; sourceTree = "<group>"; };
-		F33511A46746EFF42C2C486D /* medium.rs */ = {isa = PBXFileReference; path = medium.rs; sourceTree = "<group>"; };
+		C79D19085B84A2959FC4D2C3 /* lib.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = lib.rs; sourceTree = "<group>"; };
+		CA0F7E1C7BBBFA2D8362E361 /* plugin.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = plugin.rs; sourceTree = "<group>"; };
+		CE9126C8CBE7F0180BE6CE6B /* styled_copy.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = styled_copy.rs; sourceTree = "<group>"; };
+		D70DF076E9AF937FD3829500 /* types.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = types.rs; sourceTree = "<group>"; };
+		D8122EEFCFB00E7D35AF6536 /* rename_migration.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = rename_migration.rs; sourceTree = "<group>"; };
+		D87D9BEB50B1F55CDD00342C /* publish.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = publish.rs; sourceTree = "<group>"; };
+		D8D835321CF588814D4E70E9 /* imgur.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = imgur.rs; sourceTree = "<group>"; };
+		DCA7BC413CE9918B107A652F /* cloud.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = cloud.rs; sourceTree = "<group>"; };
+		E6B98624F4083D377F52CEDC /* wordpress_com.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = wordpress_com.rs; sourceTree = "<group>"; };
+		E6FDF78FCD462F289A3AFBA1 /* cover_assets.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = cover_assets.rs; sourceTree = "<group>"; };
+		EA48D99E90AFCA71B93587BE /* snapshots.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = snapshots.rs; sourceTree = "<group>"; };
+		F15EA6E51321B991DE1A31C9 /* pandoc.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = pandoc.rs; sourceTree = "<group>"; };
+		F22593D2C71BF2417C85A276 /* aliyun_oss.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = aliyun_oss.rs; sourceTree = "<group>"; };
+		F33511A46746EFF42C2C486D /* medium.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = medium.rs; sourceTree = "<group>"; };
 		F3E60A0BE3E850712CA1A38B /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
-		F5C62C4CD5BAB0F2EABCF776 /* publish.rs */ = {isa = PBXFileReference; path = publish.rs; sourceTree = "<group>"; };
-		F5CE0F9AA750FF637B49CDFB /* snapshot.rs */ = {isa = PBXFileReference; path = snapshot.rs; sourceTree = "<group>"; };
-		F791405B359406A1971683D0 /* ghost.rs */ = {isa = PBXFileReference; path = ghost.rs; sourceTree = "<group>"; };
-		FC80D74DE4AC4850D0A2A576 /* template.rs */ = {isa = PBXFileReference; path = template.rs; sourceTree = "<group>"; };
+		F5C62C4CD5BAB0F2EABCF776 /* publish.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = publish.rs; sourceTree = "<group>"; };
+		F5CE0F9AA750FF637B49CDFB /* snapshot.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = snapshot.rs; sourceTree = "<group>"; };
+		F791405B359406A1971683D0 /* ghost.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = ghost.rs; sourceTree = "<group>"; };
+		FC80D74DE4AC4850D0A2A576 /* template.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = template.rs; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -200,7 +200,7 @@
 		2939A5098E9D1DA6D0B4DECC /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				3686C9B188B504FD6CCA4E5A /* novelist_iOS.app */,
+				3686C9B188B504FD6CCA4E5A /* Novelist.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -385,7 +385,7 @@
 			packageProductDependencies = (
 			);
 			productName = novelist_iOS;
-			productReference = 3686C9B188B504FD6CCA4E5A /* novelist_iOS.app */;
+			productReference = 3686C9B188B504FD6CCA4E5A /* Novelist.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -396,8 +396,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = F685CEBD8656579D4AF4DD09 /* Build configuration list for PBXProject "novelist" */;
 			developmentRegion = en;
@@ -452,7 +450,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "node \"${SRCROOT:?}/../../../scripts/mobile.mjs\" ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}";
+			shellScript = "/bin/sh \"${SRCROOT:?}/../../../scripts/mobile-xcode.sh\" -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -472,12 +470,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
-				ARCHS = (
-					arm64,
-				);
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = novelist_iOS/novelist_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "UN5YR5JATX";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -489,10 +486,22 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.novelist.app;
-				PRODUCT_NAME = Novelist;
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chivier.novelist.ipaddev;
+				PRODUCT_NAME = "Novelist";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -623,12 +632,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
-				ARCHS = (
-					arm64,
-				);
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = novelist_iOS/novelist_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "UN5YR5JATX";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -640,10 +648,22 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.novelist.app;
-				PRODUCT_NAME = Novelist;
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.chivier.novelist.ipaddev;
+				PRODUCT_NAME = "Novelist";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
