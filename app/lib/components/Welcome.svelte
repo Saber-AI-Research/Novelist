@@ -2,8 +2,12 @@
   import { onMount } from 'svelte';
   import { commands } from '$lib/ipc/commands';
   import type { RecentProject } from '$lib/ipc/commands';
-  import { t } from '$lib/i18n';
+  import { i18n, t } from '$lib/i18n';
   import { formatShortcut, shortcutsStore } from '$lib/stores/shortcuts.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { uiStore } from '$lib/stores/ui.svelte';
+  import { formatRelativeTime } from '$lib/stores/file-meta.svelte';
+  import { pickBrowserFile, stageBrowserFile } from '$lib/services/mobile-files';
 
   interface Props {
     onOpenFile: () => void;
@@ -11,21 +15,52 @@
     onOpenRecent: (path: string) => void;
     onNewFile: () => void;
     onNewProject?: () => void;
+    /** Mobile "Download from cloud" opens this Settings section ('sync'). */
+    onOpenSettingsSection?: (section: string) => void;
   }
-  let { onOpenFile, onOpenDirectory, onOpenRecent, onNewFile, onNewProject }: Props = $props();
+  let {
+    onOpenFile,
+    onOpenDirectory,
+    onOpenRecent,
+    onNewFile,
+    onNewProject,
+    onOpenSettingsSection = (section: string) => uiStore.openSettings(section),
+  }: Props = $props();
+
+  type LibraryProject = { path: string; name: string; modified_at: number | null };
 
   const MAX_RECENT_DISPLAY = 7;
+  /** Mobile has no arbitrary directories: the welcome screen lists the sandbox library. */
+  const isMobile = platform.isMobile;
 
   let recentProjects = $state<RecentProject[]>([]);
   let draggingPath = $state<string | null>(null);
   let dragOverPath = $state<string | null>(null);
 
+  let libraryProjects = $state<LibraryProject[]>([]);
+  let libraryLoaded = $state(false);
+  let libraryNow = $state(Date.now());
+  let libraryLoadError = $state('');
+  let importError = $state('');
+  let importingProject = $state(false);
+  let libraryGeneration = 0;
+
   let visibleProjects = $derived(recentProjects.slice(0, MAX_RECENT_DISPLAY));
   let overflowCount = $derived(Math.max(0, recentProjects.length - MAX_RECENT_DISPLAY));
   let switchProjectShortcutLabel = $derived(formatShortcut(shortcutsStore.get('command-palette')));
 
-  onMount(async () => {
-    await refresh();
+  onMount(() => {
+    if (!isMobile) {
+      void refresh();
+      return;
+    }
+    void refreshLibrary();
+    // Projects can arrive while the app is backgrounded (sync, Files app).
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refreshLibrary();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   });
 
   async function refresh() {
@@ -33,6 +68,47 @@
     if (result.status === 'ok') {
       recentProjects = result.data;
     }
+  }
+
+  async function refreshLibrary() {
+    const generation = ++libraryGeneration;
+    const result = await commands.listLibraryProjects();
+    if (generation !== libraryGeneration) return;
+    libraryLoaded = true;
+    libraryNow = Date.now();
+    if (result.status === 'ok') {
+      libraryProjects = result.data;
+      libraryLoadError = '';
+    } else {
+      libraryLoadError = t('library.loadFailed', { error: result.error });
+    }
+  }
+
+  async function importProjectZip() {
+    if (importingProject) return;
+    importError = '';
+    // Busy state starts after the pick: a dismissed picker may never report back.
+    const file = await pickBrowserFile('.zip,application/zip');
+    if (!file) return;
+    importingProject = true;
+    try {
+      const staged = await stageBrowserFile(file);
+      const result = await commands.importLibraryProject(staged);
+      if (result.status === 'error') {
+        importError = t('library.importFailed', { error: result.error });
+        return;
+      }
+      void refreshLibrary();
+      onOpenRecent(result.data);
+    } catch (cause) {
+      importError = t('library.importFailed', { error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      importingProject = false;
+    }
+  }
+
+  function formatModified(modifiedAt: number): string {
+    return formatRelativeTime(modifiedAt, i18n.locale, libraryNow, t('sidebar.fileMeta.justNow'));
   }
 
   async function removeProject(e: Event, path: string) {
@@ -117,14 +193,66 @@
   }
 </script>
 
-<div class="welcome-root novelist-view-fade-in" data-testid="welcome-screen" data-tauri-drag-region>
+<div class="welcome-root novelist-view-fade-in" class:mobile={isMobile} data-testid="welcome-screen" data-tauri-drag-region>
   <div class="welcome-card">
     <div class="welcome-header">
       <h1 class="welcome-title">{t('app.name')}</h1>
-      <p class="welcome-subtitle">{t('app.subtitle')}</p>
+      <p class="welcome-subtitle">{t(isMobile ? 'library.subtitle' : 'app.subtitle')}</p>
     </div>
 
-    {#if recentProjects.length > 0}
+    {#if isMobile}
+      <div class="recent-section library-section">
+        <div class="recent-header">
+          <h2 class="recent-heading">{t('library.title')}</h2>
+        </div>
+        {#if libraryProjects.length > 0}
+          <ul class="recent-list library-list" data-testid="welcome-library-list">
+            {#each libraryProjects as project, index (project.path)}
+              <li class="recent-row">
+                <button
+                  class="recent-item"
+                  data-testid="library-project-{index}"
+                  disabled={importingProject}
+                  onclick={() => onOpenRecent(project.path)}
+                >
+                  <span class="recent-name">{project.name}</span>
+                  {#if project.modified_at !== null}
+                    <span class="recent-path">{formatModified(project.modified_at)}</span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if libraryLoaded && !libraryLoadError}
+          <div class="empty-state" data-testid="welcome-library-empty">
+            <p>{t('library.empty')}</p>
+          </div>
+        {/if}
+      </div>
+
+      {#if importError || libraryLoadError}
+        <p class="library-error" role="alert" data-testid="welcome-library-error">{importError || libraryLoadError}</p>
+      {/if}
+
+      <div class="welcome-actions library-actions">
+        {#if onNewProject}
+          <button class="new-file-btn" data-testid="welcome-new-project" disabled={importingProject} onclick={onNewProject}>
+            {t('welcome.newProject')}
+          </button>
+        {/if}
+        <button class="open-btn" data-testid="welcome-import-project" disabled={importingProject} onclick={importProjectZip}>
+          {importingProject ? t('library.importing') : t('library.importProject')}
+        </button>
+        <button class="open-btn" data-testid="welcome-cloud-download" disabled={importingProject} onclick={() => onOpenSettingsSection('sync')}>
+          {t('library.cloudDownload')}
+        </button>
+        <!-- No native menu on mobile: Settings (language, theme, sync) is
+             reachable before any project is open. -->
+        <button class="open-btn" data-testid="welcome-settings" onclick={() => uiStore.openSettings()}>
+          {t('command.openSettings')}
+        </button>
+      </div>
+    {:else if recentProjects.length > 0}
       <div class="recent-section">
         <div class="recent-header">
           <h2 class="recent-heading">{t('welcome.recentProjects')}</h2>
@@ -186,22 +314,24 @@
       </div>
     {/if}
 
-    <div class="welcome-actions">
-      {#if onNewProject}
-        <button class="new-file-btn" onclick={onNewProject}>
-          {t('welcome.newProject')}
+    {#if !isMobile}
+      <div class="welcome-actions">
+        {#if onNewProject}
+          <button class="new-file-btn" onclick={onNewProject}>
+            {t('welcome.newProject')}
+          </button>
+        {/if}
+        <button class="open-btn" data-testid="welcome-new-file" onclick={onNewFile}>
+          {t('welcome.newFile')}
         </button>
-      {/if}
-      <button class="open-btn" data-testid="welcome-new-file" onclick={onNewFile}>
-        {t('welcome.newFile')}
-      </button>
-      <button class="open-btn" data-testid="welcome-open-file" onclick={onOpenFile}>
-        {t('welcome.openFile')}
-      </button>
-      <button class="open-btn" data-testid="welcome-open-folder" onclick={onOpenDirectory}>
-        {t('welcome.openDirectory')}
-      </button>
-    </div>
+        <button class="open-btn" data-testid="welcome-open-file" onclick={onOpenFile}>
+          {t('welcome.openFile')}
+        </button>
+        <button class="open-btn" data-testid="welcome-open-folder" onclick={onOpenDirectory}>
+          {t('welcome.openDirectory')}
+        </button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -396,5 +526,72 @@
   .open-btn:hover {
     border-color: var(--novelist-accent);
     color: var(--novelist-text);
+  }
+
+  /* Touch input: row actions have no hover to reveal them. */
+  @media (hover: none) {
+    .recent-action-btn { opacity: 1; }
+  }
+  @media (pointer: coarse) {
+    .recent-action-btn { width: 44px; height: 44px; }
+  }
+
+  :global(html[data-layout='phone']) .welcome-card,
+  .welcome-root.mobile .welcome-card {
+    width: min(480px, calc(100% - 32px));
+  }
+
+  /* Mobile library */
+  .welcome-root.mobile {
+    box-sizing: border-box;
+    padding:
+      max(16px, env(safe-area-inset-top))
+      env(safe-area-inset-right)
+      max(16px, env(safe-area-inset-bottom))
+      env(safe-area-inset-left);
+  }
+  .welcome-root.mobile .welcome-card {
+    max-height: 100%;
+    gap: 1.25rem;
+  }
+  .welcome-root.mobile .welcome-header,
+  .library-actions,
+  .library-error {
+    flex-shrink: 0;
+  }
+  .welcome-root.mobile .welcome-title { font-size: 2rem; }
+  .library-section { flex: 1 1 auto; }
+  .library-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    overscroll-behavior: contain;
+  }
+  .welcome-root.mobile .recent-row:hover { background: transparent; }
+  .welcome-root.mobile .recent-item {
+    min-height: 44px;
+    justify-content: center;
+    padding: 0.7rem 0.75rem;
+  }
+  .welcome-root.mobile .recent-item:active:not(:disabled) {
+    background: var(--novelist-bg-secondary);
+  }
+  .welcome-root.mobile .recent-item:disabled { cursor: default; }
+  .library-error {
+    margin: 0;
+    color: var(--novelist-error, #e5484d);
+    font-size: 0.85rem;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+  .library-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
+  }
+  .library-actions button { min-height: 44px; }
+  .library-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

@@ -3,6 +3,7 @@
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { commands, type ChannelConfig, type PandocStatus, type PlatformConfig, type PublishSettings } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
 
   type PlatformId = PlatformConfig['platform'];
 
@@ -26,12 +27,15 @@
   // --- Pandoc status / override ---
   // Ghost and WordPress publish flows convert MD→HTML via Pandoc;
   // we surface its status here so the user can fix a broken install
-  // without leaving the Publish settings page.
+  // without leaving the Publish settings page. Mobile cannot spawn Pandoc,
+  // so the card (and its checks) only exist where external processes run.
+  const pandocAvailable = platform.can('external_processes');
   let pandocStatus = $state<PandocStatus | null>(null);
   let pandocOverrideInput = $state('');
   let pandocSavingOverride = $state(false);
 
   async function refreshPandocStatus() {
+    if (!pandocAvailable) return;
     const r = await commands.checkPandoc();
     if (r.status === 'ok') {
       pandocStatus = r.data;
@@ -40,6 +44,7 @@
   }
 
   async function savePandocOverride() {
+    if (!pandocAvailable) return;
     pandocSavingOverride = true;
     const value = pandocOverrideInput.trim();
     await commands.setPandocPath(value === '' ? null : value);
@@ -48,6 +53,7 @@
   }
 
   async function openPandocInstallPage() {
+    if (!pandocAvailable) return;
     // Tauri WKWebView blocks `window.open`; route through the shell plugin.
     try {
       await shellOpen('https://pandoc.org/installing.html');
@@ -185,7 +191,7 @@
          pandoc on the system. We never bundle it (binary-size cost),
          so users without it are pointed at the install page or can
          set a custom path. -->
-    {#if pandocStatus}
+    {#if pandocAvailable && pandocStatus}
       <div class="pandoc-card" class:pandoc-ok={pandocStatus.available} class:pandoc-err={!pandocStatus.available}>
         <div class="pandoc-row">
           <div class="pandoc-icon">
@@ -239,7 +245,7 @@
       <ul class="space-y-2 mb-4">
         {#each settings.channels as ch (ch.id)}
           <li class="rounded" style="border: 1px solid var(--novelist-border);">
-            <div class="flex items-center justify-between gap-3 p-2">
+            <div class="channel-row flex items-center justify-between gap-3 p-2">
               <div class="flex flex-col flex-1">
                 <span class="text-sm font-medium">{ch.name}</span>
                 <span class="text-xs" style="color: var(--novelist-text-secondary);">{platformLabel(ch.platform)}</span>
@@ -285,7 +291,7 @@
       <div class="modal" role="dialog" tabindex="-1">
         <h4 class="text-sm font-semibold mb-3">{editing.isNew ? 'Add' : 'Edit'} {platformLabel(editing.channel.platform)} channel</h4>
 
-        <div class="flex items-center justify-between mb-3 gap-2">
+        <div class="field-row flex items-center justify-between mb-3 gap-2">
           <label class="text-xs w-32" for="ch-name">Name</label>
           <input id="ch-name" type="text" class="text-sm flex-1 px-2 py-1 rounded"
                  style="border: 1px solid var(--novelist-border); background: var(--novelist-bg);"
@@ -295,7 +301,7 @@
         {#each fieldsFor(editing.channel) as f}
           {@const shown = f.secret && revealedFields.has(f.key)}
           <div class="mb-3">
-            <div class="flex items-center justify-between gap-2">
+            <div class="field-row flex items-center justify-between gap-2">
               <label class="text-xs w-32 shrink-0" for={`ch-${f.key}`}>{f.label}</label>
               <div class="flex flex-1 gap-1">
                 <input id={`ch-${f.key}`}
@@ -334,7 +340,7 @@
               </div>
             </div>
             {#if f.hint}
-              <div class="text-[11px] mt-1" style="color: var(--novelist-text-secondary); padding-left: 8.5rem;">{f.hint}</div>
+              <div class="field-hint text-[11px] mt-1" style="color: var(--novelist-text-secondary);">{f.hint}</div>
             {/if}
           </div>
         {/each}
@@ -459,5 +465,41 @@
     max-width: 90vw;
     max-height: 80vh;
     overflow-y: auto;
+  }
+  .field-hint {
+    padding-left: 8.5rem;
+  }
+
+  /* Phone: stack label above field; the edit sheet follows the visible
+     viewport so the on-screen keyboard never covers it. */
+  :global(html[data-layout='phone']) .channel-row {
+    flex-wrap: wrap;
+  }
+  :global(html[data-layout='phone']) .field-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  :global(html[data-layout='phone']) .field-row > label {
+    width: auto;
+  }
+  :global(html[data-layout='phone']) .field-hint {
+    padding-left: 0;
+  }
+  :global(html[data-mobile='true']) .modal-backdrop,
+  :global(html[data-layout='phone']) .modal-backdrop {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+    padding: max(16px, env(safe-area-inset-top, 0px)) 16px max(16px, env(safe-area-inset-bottom, 0px));
+  }
+  :global(html[data-mobile='true']) .modal,
+  :global(html[data-layout='phone']) .modal {
+    max-height: 100%;
+    overscroll-behavior: contain;
+  }
+  :global(html[data-layout='phone']) .modal {
+    width: 100%;
+    max-width: none;
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { flushSync, onDestroy, untrack } from 'svelte';
   import { dndzone, type DndEvent } from 'svelte-dnd-action';
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { t } from '$lib/i18n';
@@ -17,6 +17,17 @@
   } from './board';
 
   let { paneId = 'pane-1' }: { paneId?: string } = $props();
+
+  /**
+   * Hold time before a touch press turns into a card/column drag. Moving the
+   * finger sooner cancels the drag and scrolls the board or column natively.
+   * Mouse drags still start immediately.
+   */
+  const TOUCH_DRAG_DELAY_MS = 200;
+
+  let boardEl = $state<HTMLDivElement | undefined>(undefined);
+  /** Pointer that last pressed a column title: dblclick only exists for mice. */
+  let titlePointerType = 'mouse';
 
   let tab = $derived(tabsStore.getPaneActiveTab(paneId));
 
@@ -131,10 +142,42 @@
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       addCard(colId);
+      focusAfterRender('data-add-card', colId);
     } else if (e.key === 'Escape') {
       addingCardColumnId = null;
       newCardText = '';
+      focusAfterRender('data-add-card', colId);
     }
+  }
+
+  /**
+   * Render pending state now and focus the element for `colId` inside the
+   * current event: mobile browsers only raise the soft keyboard for a focus
+   * made during the tap itself, not in a later microtask. Scoped to this
+   * board because split panes can show the same file (same ids) twice.
+   */
+  function focusAfterRender(attr: string, colId: string, select = false) {
+    flushSync();
+    const el = boardEl?.querySelector<HTMLElement>(`[${attr}="${CSS.escape(colId)}"]`);
+    if (!el) return;
+    el.focus();
+    if (select && el instanceof HTMLInputElement) el.select();
+  }
+
+  function startRename(colId: string) {
+    editingColumnId = colId;
+    focusAfterRender('data-col-input', colId, true);
+  }
+
+  function onColumnTitleClick(colId: string) {
+    // A mouse renames on dblclick; touch and pen have no reliable dblclick.
+    if (titlePointerType !== 'mouse') startRename(colId);
+  }
+
+  function startAddCard(colId: string) {
+    addingCardColumnId = colId;
+    newCardText = '';
+    focusAfterRender('data-card-input', colId);
   }
 
   // Unmounting (tab switch to a non-kanban file, pane close) must write the
@@ -151,10 +194,10 @@
     <code class="parse-error-detail">{parseError}</code>
   </div>
 {:else}
-<div class="board">
+<div class="board" bind:this={boardEl}>
   <section
     class="columns"
-    use:dndzone={{ items: board.columns, type: 'column', flipDurationMs: 180 }}
+    use:dndzone={{ items: board.columns, type: 'column', flipDurationMs: 180, delayTouchStart: TOUCH_DRAG_DELAY_MS }}
     onconsider={handleColumnsConsider}
     onfinalize={handleColumnsFinalize}
   >
@@ -162,18 +205,24 @@
       <div class="column">
         <header class="col-header">
           {#if editingColumnId === col.id}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="col-name-input"
+              data-col-input={col.id}
               value={col.name}
-              autofocus
+              enterkeyhint="done"
               onblur={(e) => renameColumn(col.id, (e.target as HTMLInputElement).value)}
               onkeydown={onColumnNameKeydown}
             />
           {:else}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <h3 class="col-name" ondblclick={() => { editingColumnId = col.id; }}>{col.name}</h3>
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <h3
+              class="col-name"
+              onpointerdown={(e) => { titlePointerType = e.pointerType; }}
+              onclick={() => onColumnTitleClick(col.id)}
+              ondblclick={() => startRename(col.id)}
+            >{col.name}</h3>
           {/if}
           <span class="col-count">{col.cards.length}</span>
           <button class="col-del" title={t('kanban.deleteColumn')} onclick={() => deleteColumn(col.id)}><IconClose size={12} /></button>
@@ -181,7 +230,7 @@
 
         <div
           class="cards"
-          use:dndzone={{ items: col.cards, type: 'card', flipDurationMs: 180, dropTargetStyle: {} }}
+          use:dndzone={{ items: col.cards, type: 'card', flipDurationMs: 180, dropTargetStyle: {}, delayTouchStart: TOUCH_DRAG_DELAY_MS }}
           onconsider={(e) => handleColumnCardsConsider(col.id, e)}
           onfinalize={(e) => handleColumnCardsFinalize(col.id, e)}
         >
@@ -195,17 +244,17 @@
 
         <footer class="col-footer">
           {#if addingCardColumnId === col.id}
-            <!-- svelte-ignore a11y_autofocus -->
             <textarea
               class="card-input"
+              data-card-input={col.id}
               bind:value={newCardText}
               placeholder={t('kanban.cardPlaceholder')}
-              autofocus
+              enterkeyhint="done"
               onblur={() => addCard(col.id)}
               onkeydown={(e) => onCardInputKeydown(e, col.id)}
             ></textarea>
           {:else}
-            <button class="add-card" onclick={() => { addingCardColumnId = col.id; newCardText = ''; }}>{t('kanban.addCard')}</button>
+            <button class="add-card" data-add-card={col.id} onclick={() => startAddCard(col.id)}>{t('kanban.addCard')}</button>
           {/if}
         </footer>
       </div>
@@ -221,6 +270,9 @@
     height: 100%;
     overflow-x: auto;
     overflow-y: hidden;
+    /* A horizontal swipe past the last column must not drag the app body or
+       trigger browser back-swipe. */
+    overscroll-behavior-x: contain;
     padding: 14px;
     background: var(--novelist-bg);
     color: var(--novelist-text);
@@ -252,7 +304,7 @@
     min-width: fit-content;
   }
   .column {
-    flex: 0 0 272px;
+    flex: 0 0 min(272px, calc(100vw - 48px));
     max-height: 100%;
     display: flex;
     flex-direction: column;
@@ -297,6 +349,9 @@
     cursor: pointer; font-size: 12px;
     padding: 2px 4px; border-radius: 3px;
   }
+  /* The icon must not be the event target: svelte-dnd-action skips drag
+     detection only when the press lands on the button itself. */
+  .col-del :global(svg), .card-del :global(svg) { pointer-events: none; }
   .col-del:hover {
     background: color-mix(in srgb, var(--novelist-text) 8%, transparent);
     color: var(--novelist-text);
@@ -304,6 +359,7 @@
   .cards {
     flex: 1;
     overflow-y: auto;
+    overscroll-behavior-y: contain;
     padding: 8px;
     display: flex;
     flex-direction: column;
@@ -326,16 +382,23 @@
     word-break: break-word;
     color: var(--novelist-text);
   }
+  /* Cards are drag sources, not editable text: a long press lifts the card
+     instead of opening the iOS selection callout. */
+  .card, .col-name {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
   .card:active { cursor: grabbing; }
   .card-text { flex: 1; }
   .card-del {
-    visibility: hidden;
+    opacity: 0;
     border: none; background: transparent;
     color: var(--novelist-text-secondary);
     cursor: pointer; font-size: 11px;
     padding: 0 2px; border-radius: 3px;
   }
-  .card:hover .card-del { visibility: visible; }
+  .card:hover .card-del, .card-del:focus-visible { opacity: 1; }
   .card-del:hover {
     background: color-mix(in srgb, var(--novelist-text) 8%, transparent);
     color: var(--novelist-text);
@@ -373,7 +436,7 @@
     color: var(--novelist-text);
   }
   .add-column {
-    flex: 0 0 272px;
+    flex: 0 0 min(272px, calc(100vw - 48px));
     padding: 10px 12px;
     background: transparent;
     border: 1px dashed var(--novelist-border);
@@ -386,5 +449,31 @@
   .add-column:hover {
     background: var(--novelist-bg-secondary);
     color: var(--novelist-text);
+  }
+
+  /* Touch: no hover to reveal delete, 44px targets (negative margins keep
+     header and card heights compact), 16px fields so iOS does not zoom. */
+  @media (hover: none), (pointer: coarse) {
+    .card-del { opacity: 1; }
+    .col-del, .card-del {
+      min-width: 44px;
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: manipulation;
+    }
+    .col-del { margin: -8px -10px -8px 0; }
+    .card-del { margin: -8px -10px -8px 0; }
+    .col-name {
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+    }
+    .add-card, .add-column {
+      min-height: 44px;
+      touch-action: manipulation;
+    }
+    .col-name-input, .card-input { font-size: 16px; }
   }
 </style>

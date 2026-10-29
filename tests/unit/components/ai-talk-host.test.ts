@@ -189,4 +189,28 @@ describe('[contract] aiStream async generator', () => {
     expect(collected).toEqual([{ kind: 'error', message: 'boom' }]);
     expect(unlisten).toHaveBeenCalled();
   });
+
+  it('ends on abort without a terminal event and releases the listener', async () => {
+    let captured: ((e: { payload: unknown }) => void) | null = null;
+    const unlisten = vi.fn();
+    listen.mockImplementation(async (_ch: string, cb: (e: { payload: unknown }) => void) => { captured = cb; return unlisten; });
+
+    const abort = new AbortController();
+    const iter = aiStream('s3', abort.signal);
+    const collected: unknown[] = [];
+    const pump = (async () => {
+      for await (const ev of iter) collected.push(ev);
+    })();
+
+    await new Promise((r) => setTimeout(r, 0));
+    captured!({ payload: { kind: 'chunk', data: 'partial' } });
+    await new Promise((r) => setTimeout(r, 0));
+    abort.abort();
+    await pump;
+    // A late event after the abort is never yielded.
+    captured!({ payload: { kind: 'chunk', data: 'late' } });
+
+    expect(collected).toEqual([{ kind: 'chunk', data: 'partial' }]);
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
 });

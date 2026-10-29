@@ -224,3 +224,35 @@ describe('[contract][regression] commandRegistry.execute dedupe window', () => {
     expect(b).toBe(1);
   });
 });
+
+describe('[contract] commandRegistry availability gate', () => {
+  beforeEach(() => {
+    commandRegistry.commands.splice(0, commandRegistry.commands.length);
+    commandRegistry._resetDedupe();
+  });
+
+  it('hides unavailable commands from search and ignores their dispatch', () => {
+    let available = false;
+    let fired = 0;
+    commandRegistry.register({
+      id: 'gate.window',
+      label: 'New Window',
+      available: () => available,
+      handler: () => { fired++; },
+    });
+    commandRegistry.register({ id: 'gate.always', label: 'New File', handler: () => {} });
+
+    expect(commandRegistry.search('').map((c) => c.id)).toEqual(['gate.always']);
+    expect(commandRegistry.search('new').map((c) => c.id)).toEqual(['gate.always']);
+    expect(commandRegistry.isAvailable('gate.window')).toBe(false);
+    commandRegistry.execute('gate.window');
+    expect(fired).toBe(0);
+
+    available = true;
+    expect(commandRegistry.search('window').map((c) => c.id)).toEqual(['gate.window']);
+    expect(commandRegistry.isAvailable('gate.window')).toBe(true);
+    commandRegistry.execute('gate.window');
+    expect(fired).toBe(1);
+    expect(commandRegistry.isAvailable('gate.missing')).toBe(false);
+  });
+});

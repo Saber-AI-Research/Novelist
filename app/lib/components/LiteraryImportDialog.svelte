@@ -13,6 +13,8 @@
     type ReplaceLiteraryStudyBookResult,
   } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { pickBrowserFile, stageBrowserFile } from '$lib/services/mobile-files';
   import { isImeComposing } from '$lib/utils/ime';
   import { focusTrap } from './focus-trap';
 
@@ -60,6 +62,8 @@
   let chapters = $state<ChapterDraft[]>([]);
   let selectedIndex = $state(0);
   let sourcePath = $state('');
+  /** Display name of a browser-picked (mobile) source; its path is a cache copy. */
+  let sourceName = $state('');
   let title = $state('');
   let author = $state('');
   let language = $state('');
@@ -73,6 +77,8 @@
   let cleanChapterTitles = $state(true);
   let error = $state('');
   let preview = $state<HTMLTextAreaElement | null>(null);
+  /** Mobile: sources come from the browser picker, projects go into the library. */
+  const useLibrary = platform.isMobile;
 
   let selectedChapter = $derived(chapters[selectedIndex] ?? null);
   let canSubmit = $derived(
@@ -90,6 +96,12 @@
 
   onMount(async () => {
     if (mode === 'create') {
+      if (useLibrary) {
+        const result = await commands.getLibraryPath();
+        if (result.status === 'ok') parentDir = result.data;
+        else error = t('library.locationFailed', { error: result.error });
+        return;
+      }
       try {
         const home = await homeDir();
         parentDir = `${home.replace(/[\\/]$/, '')}/Documents`;
@@ -107,12 +119,33 @@
   });
 
   async function chooseSource() {
+    if (useLibrary) {
+      await chooseBrowserSource();
+      return;
+    }
     const selected = await openDialog({
       multiple: false,
       filters: [{ name: 'EPUB / TXT', extensions: ['epub', 'txt'] }],
     });
     if (typeof selected !== 'string') return;
     sourcePath = selected;
+    await inspectSource();
+  }
+
+  /** Mobile: browser picker → staged cache copy, which then stands in for the picked path. */
+  async function chooseBrowserSource() {
+    const file = await pickBrowserFile('.epub,.txt,application/epub+zip,text/plain');
+    if (!file) return;
+    inspecting = true;
+    error = '';
+    try {
+      sourcePath = await stageBrowserFile(file);
+      sourceName = file.name;
+    } catch (cause) {
+      error = t('library.sourceFailed', { error: cause instanceof Error ? cause.message : String(cause) });
+      inspecting = false;
+      return;
+    }
     await inspectSource();
   }
 
@@ -142,6 +175,7 @@
   }
 
   async function chooseDestination() {
+    if (useLibrary) return;
     const selected = await openDialog({
       directory: true,
       multiple: false,
@@ -314,11 +348,11 @@
     </header>
 
     <div class="source-bar">
-      <button class="command-button" onclick={chooseSource} disabled={inspecting}>
+      <button class="command-button" data-testid="literary-import-source" onclick={chooseSource} disabled={inspecting}>
         <FileUp size={15} />
         <span>{inspecting ? t('literaryImport.inspecting') : t('literaryImport.chooseSource')}</span>
       </button>
-      <div class="source-path" title={sourcePath}>{sourcePath || t('literaryImport.noSource')}</div>
+      <div class="source-path" title={sourceName || sourcePath}>{sourceName || sourcePath || t('literaryImport.noSource')}</div>
     </div>
 
     {#if inspection}
@@ -336,15 +370,22 @@
             <span>{t('literaryImport.projectName')}</span>
             <input bind:value={projectName} />
           </label>
-          <label class="destination">
-            <span>{t('newProject.location')}</span>
-            <div>
-              <input bind:value={parentDir} />
-              <button class="icon-button bordered" title={t('newProject.browse')} aria-label={t('newProject.browse')} onclick={chooseDestination}>
-                <FolderOpen size={15} />
-              </button>
+          {#if useLibrary}
+            <div class="destination">
+              <span>{t('newProject.location')}</span>
+              <div class="library-location" data-testid="literary-import-library-location">{t('library.location')}</div>
             </div>
-          </label>
+          {:else}
+            <label class="destination">
+              <span>{t('newProject.location')}</span>
+              <div>
+                <input bind:value={parentDir} />
+                <button class="icon-button bordered" title={t('newProject.browse')} aria-label={t('newProject.browse')} onclick={chooseDestination}>
+                  <FolderOpen size={15} />
+                </button>
+              </div>
+            </label>
+          {/if}
         {/if}
       </div>
 
@@ -639,6 +680,18 @@
     display: flex;
     gap: 6px;
   }
+  .metadata div.destination > span {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--novelist-text-secondary);
+    font-size: 0.7rem;
+  }
+  .library-location {
+    min-height: 32px;
+    align-items: center;
+    color: var(--novelist-text);
+    font-size: 0.82rem;
+  }
   main {
     min-height: 0;
     flex: 1;
@@ -785,5 +838,89 @@
     .metadata { padding-block: 9px; }
     .chapter-editor { padding: 9px; }
     textarea { padding: 14px 18px; }
+  }
+
+  /* Mobile: the backdrop tracks the visual viewport so the keyboard never covers the dialog. */
+  :global(html[data-mobile='true']) .backdrop {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+  }
+  :global(html[data-layout='tablet']) .dialog {
+    max-height: 100%;
+  }
+  :global(html[data-layout='tablet']) .dialog.has-preview {
+    height: min(640px, 100%);
+  }
+
+  /* Phone: full-screen sheet that scrolls as a whole; chapters stack above the editor. */
+  :global(html[data-layout='phone']) .backdrop {
+    padding: 0;
+  }
+  :global(html[data-layout='phone']) .dialog,
+  :global(html[data-layout='phone']) .dialog.has-preview {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  :global(html[data-layout='phone']) .metadata,
+  :global(html[data-layout='phone']) .metadata.replace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  :global(html[data-layout='phone']) main {
+    flex: 0 0 auto;
+    height: max(420px, 70%);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 32%) minmax(0, 1fr);
+  }
+  :global(html[data-layout='phone']) aside {
+    border-right: 0;
+    border-bottom: 1px solid var(--novelist-border);
+  }
+  :global(html[data-layout='phone']) footer {
+    position: sticky;
+    bottom: 0;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  /* Touch targets on phones and tablets (16px text avoids iOS focus zoom). */
+  :global(html[data-mobile='true']) .icon-button {
+    width: 44px;
+    height: 44px;
+  }
+  :global(html[data-mobile='true']) .command-button,
+  :global(html[data-mobile='true']) .primary-button,
+  :global(html[data-mobile='true']) .secondary-button,
+  :global(html[data-mobile='true']) .clean-titles,
+  :global(html[data-mobile='true']) .library-location {
+    min-height: 44px;
+  }
+  :global(html[data-mobile='true']) .metadata input,
+  :global(html[data-mobile='true']) .chapter-fields input,
+  :global(html[data-mobile='true']) .import-options select {
+    height: 44px;
+    font-size: 16px;
+  }
+  :global(html[data-mobile='true']) textarea {
+    font-size: 16px;
+  }
+  :global(html[data-mobile='true']) .chapter-list button {
+    height: 44px;
+  }
+  :global(html[data-mobile='true']) .chapter-fields {
+    grid-template-columns: minmax(140px, 1fr) minmax(110px, 0.45fr) 44px 44px 44px;
+  }
+  :global(html[data-mobile='true'][data-layout='phone']) .chapter-fields {
+    grid-template-columns: minmax(0, 1fr) 44px 44px 44px;
+  }
+  :global(html[data-mobile='true'][data-layout='phone']) .volume-input {
+    display: none;
   }
 </style>

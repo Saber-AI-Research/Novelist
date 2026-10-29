@@ -1,4 +1,4 @@
-use crate::services::sync::{self, SyncConfig, SyncStatus};
+use crate::services::sync::{self, ConflictResolution, SyncConfig, SyncStatus};
 use crate::services::webdav;
 use crate::AppError;
 use serde::Serialize;
@@ -15,6 +15,9 @@ pub struct SyncConfigMasked {
     pub password: String,
     pub interval_minutes: u32,
     pub legacy_remote_acknowledged: bool,
+    /// Credentials come from the device's cloud account; the URL and user
+    /// name only identify it and the password is always empty.
+    pub cloud_account: bool,
 }
 
 impl From<SyncConfig> for SyncConfigMasked {
@@ -31,12 +34,13 @@ impl From<SyncConfig> for SyncConfigMasked {
             },
             interval_minutes: c.interval_minutes,
             legacy_remote_acknowledged: c.legacy_remote_acknowledged,
+            cloud_account: c.cloud_account,
         }
     }
 }
 
 /// Config files are small, but every read/write still runs off the async workers.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, AppError> + Send + 'static,
 ) -> Result<T, AppError> {
     tokio::task::spawn_blocking(work)
@@ -78,12 +82,23 @@ pub async fn get_sync_config(project_dir: String) -> Result<SyncConfigMasked, Ap
 #[specta::specta]
 pub async fn save_sync_config(project_dir: String, mut config: SyncConfig) -> Result<(), AppError> {
     blocking(move || {
-        config.password = resolve_masked_password(
-            &project_dir,
-            &config.webdav_url,
-            &config.username,
-            std::mem::take(&mut config.password),
-        );
+        config.password = if config.cloud_account {
+            // Linked projects never store a password of their own.
+            String::new()
+        } else {
+            resolve_masked_password(
+                &project_dir,
+                &config.webdav_url,
+                &config.username,
+                std::mem::take(&mut config.password),
+            )
+        };
+        #[cfg(mobile)]
+        if !config.password.is_empty() {
+            return Err(AppError::InvalidInput(
+                "Passwords are kept only in this device's keychain: connect a cloud account in Settings → Sync instead".into(),
+            ));
+        }
         sync::save_sync_config_to_disk(&project_dir, &config)
     })
     .await
@@ -103,6 +118,18 @@ pub async fn adopt_sync_identity(project_dir: String, project_id: String) -> Res
     sync::adopt_legacy_identity(&project_dir, &project_id).await
 }
 
+/// Settle one path from `SyncStatus.conflicts`. Returns the project-relative
+/// path of the remote copy kept by `keep_both`.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_sync_conflict(
+    project_dir: String,
+    path: String,
+    resolution: ConflictResolution,
+) -> Result<Option<String>, AppError> {
+    sync::resolve_conflict(&project_dir, &path, resolution).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn test_sync_connection(
@@ -111,11 +138,21 @@ pub async fn test_sync_connection(
     username: String,
     password: String,
 ) -> Result<bool, AppError> {
-    let (url, user) = (webdav_url.clone(), username.clone());
-    let password =
-        blocking(move || Ok(resolve_masked_password(&project_dir, &url, &user, password))).await?;
-    let client = reqwest::Client::new();
-    let auth = webdav::WebDavAuth { username, password };
+    let (dir, url, user) = (project_dir.clone(), webdav_url.clone(), username.clone());
+    let stored = blocking(move || sync::read_sync_config(&dir)).await?;
+    // A linked project tests with the account credential, never a typed one,
+    // holding the account lease while it is in use.
+    let (auth, _lease) =
+        if stored.cloud_account && stored.webdav_url == url && stored.username == user {
+            sync::project_auth(&stored, None).await?
+        } else {
+            let password =
+                blocking(move || Ok(resolve_masked_password(&project_dir, &url, &user, password)))
+                    .await?;
+            (webdav::WebDavAuth { username, password }, None)
+        };
+    // Never follows redirects, so the password stays with this host.
+    let client = sync::webdav_client()?;
     webdav::test_connection(&client, &webdav_url, &auth).await
 }
 
@@ -135,6 +172,7 @@ mod tests {
             password: "secret_password_123".to_string(),
             interval_minutes: 15,
             legacy_remote_acknowledged: true,
+            cloud_account: false,
         };
         let masked: SyncConfigMasked = config.into();
         assert_eq!(masked.password, "****");
@@ -192,6 +230,7 @@ mod tests {
             password: "stored-secret".to_string(),
             interval_minutes: 30,
             legacy_remote_acknowledged: false,
+            cloud_account: false,
         }
     }
 

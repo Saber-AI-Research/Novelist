@@ -11,6 +11,7 @@ import {
 import { projectStore } from '$lib/stores/project.svelte';
 import { tabsStore } from '$lib/stores/tabs.svelte';
 import { uiStore } from '$lib/stores/ui.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 import { handleCliOpen, openProjectInThisWindow } from '$lib/services/cli-open';
 import { routeSingleFileOpen, wireFileRoutingBids } from '$lib/services/file-route';
 import { pathBasename, pathDirname, pathStartsWithChild } from '$lib/utils/path';
@@ -439,7 +440,7 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
   // sits comfortably under the watcher's 2s self-write ignore window so saves
   // are never reported as external edits. Cheap: usually a handful of `stat`s.
   let polling = false;
-  const externalPollInterval = window.setInterval(async () => {
+  async function pollExternalChangesNow() {
     if (polling) return; // don't overlap if a tick runs long
     drainImeDeferredChanges();
     polling = true;
@@ -458,7 +459,19 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     } finally {
       polling = false;
     }
-  }, 1_000);
+  }
+  const externalPollInterval = window.setInterval(() => { void pollExternalChangesNow(); }, 1_000);
+
+  // Mobile has no file watcher and timers are frozen while backgrounded:
+  // when the app returns to the foreground, rescan tracked open files
+  // (conflicts for dirty tabs go through the same queue) and the tree now
+  // instead of waiting for the next interval tick.
+  const handleForeground = () => {
+    if (document.visibilityState !== 'visible' || disposed) return;
+    void pollExternalChangesNow();
+    if (projectStore.dirPath) projectStore.refreshLoadedFolders().catch(() => {});
+  };
+  if (platform.isMobile) document.addEventListener('visibilitychange', handleForeground);
 
   // Cross-window file rename broadcast: another window auto-renamed a file we
   // may have open. Update our tab paths and refresh the affected sidebar folder.
@@ -528,6 +541,7 @@ export function wireAppEvents(ctx: AppEventContext): () => void {
     unlistenCliOpen?.();
     window.clearInterval(refreshInterval);
     window.clearInterval(externalPollInterval);
+    document.removeEventListener('visibilitychange', handleForeground);
     window.removeEventListener('novelist-composition-end', drainImeDeferredChanges);
     pendingExternalChanges.clear();
     imeDeferredChanges.clear();

@@ -109,6 +109,8 @@ pub fn pick_winner(bids: &[Bid], source_label: Option<&str>) -> Option<String> {
 /// `cli-open` / macOS `open-file`, broadcasting would make every window start
 /// its own routing round. We instead pick a single coordinator window, and
 /// let the normal bid router decide the final owner from there.
+/// Desktop-only: CLI forwarding and Finder "Open With" are the only sources.
+#[cfg(desktop)]
 pub fn pick_open_event_target(mut labels: Vec<String>) -> Option<String> {
     if labels.iter().any(|label| label == "main") {
         return Some("main".to_string());
@@ -188,6 +190,8 @@ pub async fn route_single_file_open(
     let winner = pick_winner(&bids, source_label.as_deref());
 
     if let Some(label) = winner.clone() {
+        // Mobile has a single, always-frontmost window and no focus API.
+        #[cfg(desktop)]
         if let Some(win) = app.get_webview_window(&label) {
             let _ = win.show();
             let _ = win.unminimize();

@@ -1,6 +1,6 @@
 # Design Docs Index
 
-Last updated: 2026-05-03
+Last updated: 2026-10-28
 
 This directory holds the durable design record for Novelist. Historical
 implementation plans live in `docs/exec-plans/`; this directory is for the
@@ -28,6 +28,7 @@ decisions that still guide future work.
 | Startup instrumentation | [startup-instrumentation.md](startup-instrumentation.md) |
 | Rendering pipeline | [rendering-pipeline.md](rendering-pipeline.md) |
 | Huge-file scroll stabilizer | [scroll-stabilizer-bug.md](scroll-stabilizer-bug.md) |
+| Mobile builds, signing, TestFlight/APK distribution, accounts and support | [mobile-deployment.md](mobile-deployment.md) |
 
 ## Historical But Still Useful
 

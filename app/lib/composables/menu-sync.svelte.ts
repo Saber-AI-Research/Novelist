@@ -1,5 +1,6 @@
 import { commands, type MenuLabels, type RecentEntry, type RecentProject } from '$lib/ipc/commands';
 import { i18n, t } from '$lib/i18n/index.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 
 /**
  * Build the label map for the native menu from the current i18n store.
@@ -83,9 +84,11 @@ export async function syncMenu(recentProjects: RecentProject[]): Promise<void> {
  * Reactive wrapper: rebuilds the native menu whenever the current
  * locale or the recent-projects list changes. Call from a component's
  * init (uses `$effect`). Initial sync runs on mount because `$effect`
- * evaluates once immediately after setup.
+ * evaluates once immediately after setup. Platforms without a native menu
+ * (iOS/Android) skip it entirely.
  */
 export function useMenuSync(getRecentProjects: () => RecentProject[]): void {
+  if (!platform.can('native_menu')) return;
   $effect(() => {
     // Establish reactive deps: locale triggers a rebuild so labels
     // follow the UI language; recentProjects drives the Open Recent

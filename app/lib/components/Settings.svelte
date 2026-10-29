@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
-  import { commands, type SyncConfig } from '$lib/ipc/commands';
+  import { commands, type SyncConfigMasked } from '$lib/ipc/commands';
   import { shortcutsStore, editorCommandIds, formatShortcut, buildShortcutString, matchesShortcutQuery } from '$lib/stores/shortcuts.svelte';
-  import { projectStore } from '$lib/stores/project.svelte';
+  import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
-  import { relaunch } from '@tauri-apps/plugin-process';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { pickAndStageFile, pickBrowserFile } from '$lib/services/mobile-files';
   import { convertTyporaTheme } from '$lib/utils/typora-theme';
   import { t, i18n } from '$lib/i18n';
   import type { Locale } from '$lib/i18n';
@@ -18,6 +19,7 @@
   import SettingsImageHostsPanel from './SettingsImageHostsPanel.svelte';
   import SettingsPublishPanel from './SettingsPublishPanel.svelte';
   import SettingsSwitch from './SettingsSwitch.svelte';
+  import CloudAccountPanel from '$lib/components/CloudAccountPanel.svelte';
   import MacroHint from './MacroHint.svelte';
   import PortableModeBanner from '$lib/components/PortableModeBanner.svelte';
   import { isImeComposing } from '$lib/utils/ime';
@@ -31,11 +33,81 @@
 
   interface Props {
     onClose: () => void;
+    /** Opens a project the cloud panel downloaded into the library. */
+    onOpenProject?: (path: string) => void;
   }
 
-  let { onClose }: Props = $props();
+  let { onClose, onOpenProject }: Props = $props();
 
-  let activeSection = $state<string>('editor');
+  const CORE_SECTIONS = [
+    { id: 'editor', labelKey: 'settings.editor' },
+    { id: 'theme', labelKey: 'settings.theme' },
+    { id: 'shortcuts', labelKey: 'settings.shortcuts' },
+    { id: 'templates', labelKey: 'settings.templates' },
+    { id: 'plugins', labelKey: 'settings.plugins' },
+    { id: 'image-hosts', labelKey: 'settings.imageHosts' },
+    { id: 'publish', labelKey: 'settings.publish' },
+    { id: 'sync', labelKey: 'settings.sync' },
+  ] as const;
+
+  // `uiStore.openSettings(section)` may ask for a section; the $effect below
+  // consumes the request (also when Settings is already open).
+  const requestedSection = uiStore.settingsInitialSection;
+  let activeSection = $state<string>(requestedSection ?? 'editor');
+  /** Phone layout shows either the section list or one section page. */
+  let phoneSectionOpen = $state(requestedSection !== null);
+  let phoneLayout = $derived(platform.layout === 'phone');
+  let dialogEl = $state<HTMLDivElement | null>(null);
+  let phoneBackButton = $state<HTMLButtonElement | null>(null);
+
+  function sectionLabel(id: string): string {
+    const core = CORE_SECTIONS.find((s) => s.id === id);
+    if (core) return t(core.labelKey);
+    if (id.startsWith('plugin:')) {
+      const pluginId = id.slice('plugin:'.length);
+      const entry = pluginSettings.get(pluginId);
+      return entry?.labelKey ? t(entry.labelKey) : (entry?.label ?? pluginId);
+    }
+    return t('settings.dialogLabel');
+  }
+
+  function openSection(id: string) {
+    activeSection = id;
+    const leavingPhoneList = phoneLayout && !phoneSectionOpen;
+    phoneSectionOpen = true;
+    // The tapped list row unmounts; keep focus inside the sheet.
+    if (leavingPhoneList) void tick().then(() => phoneBackButton?.focus());
+  }
+
+  async function showPhoneSectionList() {
+    phoneSectionOpen = false;
+    await tick();
+    dialogEl
+      ?.querySelector<HTMLElement>(`[data-testid="settings-section-${CSS.escape(activeSection)}"]`)
+      ?.focus();
+  }
+
+  $effect(() => {
+    const section = uiStore.settingsInitialSection;
+    if (section === null) return;
+    untrack(() => {
+      searchQuery = '';
+      openSection(section);
+    });
+    uiStore.settingsInitialSection = null;
+  });
+
+  // On-screen keyboard: the sheet shrinks to the visible viewport, so bring
+  // the focused field back into view inside the scrolled content.
+  $effect(() => {
+    if (!platform.isMobile || !platform.keyboardOpen) return;
+    void platform.viewportHeight;
+    const el = document.activeElement;
+    if (!(el instanceof HTMLElement) || !dialogEl?.contains(el)) return;
+    if (!el.matches('input, textarea, select, [contenteditable="true"]')) return;
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'nearest' }));
+  });
+
   let pluginSettingsComponents = $state<Record<string, import('svelte').Component>>({});
   let newFileShortcutLabel = $derived(formatShortcut(shortcutsStore.get('new-file')));
   let paletteShortcutExample = $derived(formatShortcut(shortcutsStore.get('command-palette')));
@@ -70,7 +142,7 @@
   let groupedResults = $derived.by(() => groupBySection(searchResults));
 
   function jumpToResult(item: SearchableSetting) {
-    activeSection = item.sectionId;
+    openSection(item.sectionId);
     searchQuery = '';
     if (item.anchor) {
       // Wait one frame so the {#if activeSection === ...} block has rendered.
@@ -150,18 +222,39 @@
     ...customThemes,
   ]);
 
+  function reportOperationError(e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    window.dispatchEvent(new CustomEvent('novelist-operation-error', { detail: { message } }));
+  }
+
   async function importTyporaTheme() {
-    const selected = await openDialog({
-      filters: [{ name: 'CSS Theme', extensions: ['css'] }],
-      multiple: false,
-    });
-    if (!selected) return;
-    const filePath = selected as string;
-    const result = await commands.readFile(filePath);
-    if (result.status !== 'ok') return;
-    const css = result.data;
-    // Derive name from filename
-    const fileName = filePath.split('/').pop()?.replace(/\.css$/i, '') || 'Imported';
+    let css: string;
+    let fileName: string;
+    if (platform.isMobile) {
+      // Mobile pickers hand out content:// / security-scoped URLs the backend
+      // cannot read, so the CSS is read in the WebView instead.
+      const file = await pickBrowserFile('.css,text/css');
+      if (!file) return;
+      try {
+        css = await file.text();
+      } catch (e) {
+        reportOperationError(e);
+        return;
+      }
+      fileName = file.name.replace(/\.css$/i, '') || 'Imported';
+    } else {
+      const selected = await openDialog({
+        filters: [{ name: 'CSS Theme', extensions: ['css'] }],
+        multiple: false,
+      });
+      if (!selected) return;
+      const filePath = selected as string;
+      const result = await commands.readFile(filePath);
+      if (result.status !== 'ok') return;
+      css = result.data;
+      // Derive name from filename
+      fileName = filePath.split('/').pop()?.replace(/\.css$/i, '') || 'Imported';
+    }
     const theme = convertTyporaTheme(css, fileName);
     addCustomTheme(theme);
     customThemes = loadCustomThemes();
@@ -211,13 +304,26 @@
   }
 
   async function handleImportTemplateZip() {
-    const selected = await openDialog({
-      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
-      multiple: false,
-    });
-    if (!selected) return;
+    let zipPath: string;
+    if (platform.isMobile) {
+      try {
+        const staged = await pickAndStageFile('.zip,application/zip');
+        if (!staged) return;
+        zipPath = staged.path;
+      } catch (e) {
+        templateError = e instanceof Error ? e.message : String(e);
+        return;
+      }
+    } else {
+      const selected = await openDialog({
+        filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+        multiple: false,
+      });
+      if (!selected) return;
+      zipPath = selected as string;
+    }
     templateError = '';
-    const result = await commands.importTemplateZip(selected as string);
+    const result = await commands.importTemplateZip(zipPath);
     if (result.status === 'ok') {
       await loadUserTemplates();
     } else {
@@ -276,6 +382,7 @@
   }
 
   async function pickNewFileDefaultDir() {
+    if (!platform.can('pick_directory')) return;
     const seed = settingsStore.effective.new_file.default_dir
       ?? projectStore.dirPath
       ?? undefined;
@@ -286,6 +393,30 @@
 
   async function clearNewFileDefaultDir() {
     await settingsStore.setDefaultDir(null);
+  }
+
+  /**
+   * Without a directory picker (mobile), the default folder is chosen from
+   * the open project's root and the folders the file tree has loaded.
+   */
+  let projectFolderOptions = $derived.by<{ path: string; label: string }[]>(() => {
+    const root = projectStore.dirPath;
+    if (!root) return [];
+    const options = [{ path: root, label: projectStore.name }];
+    const walk = (nodes: FileNode[], prefix: string) => {
+      for (const node of nodes) {
+        if (!node.is_dir || node.name.startsWith('.')) continue;
+        const label = `${prefix}/${node.name}`;
+        options.push({ path: node.path, label });
+        if (node.children) walk(node.children, label);
+      }
+    };
+    walk(projectStore.files, projectStore.name);
+    return options;
+  });
+
+  async function selectNewFileDefaultDir(value: string) {
+    await settingsStore.setDefaultDir(value === '' ? null : value);
   }
 
   function selectNewFilePreset(p: string) {
@@ -301,14 +432,14 @@
   import { pluginSettings, requestOpenPanelSettings } from '$lib/stores/plugin-settings.svelte';
   import { extensionStore } from '$lib/stores/extensions.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
-  import { IconGear } from './icons';
+  import { IconClose, IconGear } from './icons';
   let plugins = $state<PluginInfo[]>([]);
   let pluginsLoaded = $state(false);
 
   // Synthetic entries for first-party native panels — they don't live on
   // disk so listPlugins() doesn't see them, but Settings should still
   // surface them with the same row UI (toggle + Configure).
-  // i18n: re-derive on locale change so AI Talk / AI Agent name + description
+  // i18n: re-derive on locale change so the AI Talk name + description
   // pick up the active language. Reading `i18n.locale` inside the $derived is
   // what creates the dependency.
   let nativePlugins = $derived<PluginInfo[]>(
@@ -328,19 +459,6 @@
           ui: { type: 'panel', entry: 'native', label: t('settings.plugins.aiTalk.name'), file_extensions: null, width: null },
           permissions: ['ai:http'],
         },
-        {
-          id: 'ai-agent',
-          name: t('settings.plugins.aiAgent.name'),
-          version: '0.1.0',
-          description: t('settings.plugins.aiAgent.description'),
-          author: 'Novelist',
-          builtin: true,
-          enabled: true,
-          active: true,
-          icon: null,
-          ui: { type: 'panel', entry: 'native', label: t('settings.plugins.aiAgent.name'), file_extensions: null, width: null },
-          permissions: ['ai:claude-cli'],
-        },
       ];
     })()
   );
@@ -358,7 +476,7 @@
 
   function openPluginSettings(pluginId: string) {
     if (!pluginSettings.has(pluginId)) return;
-    activeSection = `plugin:${pluginId}`;
+    openSection(`plugin:${pluginId}`);
   }
 
   async function togglePluginEnabled(plugin: PluginInfo) {
@@ -393,9 +511,14 @@
 
   let pluginAddMenuOpen = $state(false);
   let scaffoldDialogOpen = $state(false);
+  /** iOS loads bundled plugins only: no add/create entry points there. */
+  const pluginInstallAvailable = platform.can('plugin_install');
+  /** Mobile has no file manager to reveal plugin folders in. */
+  const revealAvailable = !platform.isMobile;
 
   async function openPluginsFolder() {
     pluginAddMenuOpen = false;
+    if (!revealAvailable) return;
     const result = await commands.getPluginsDir();
     if (result.status === 'ok') {
       await commands.revealInFileManager(result.data);
@@ -405,18 +528,24 @@
   /** Plugin "Reload app": relaunch() skips the window close prompt, so ask here. */
   async function reloadApp() {
     if (!await tabsStore.promptUnsavedBeforeExit()) return;
+    if (platform.isMobile) {
+      location.reload();
+      return;
+    }
+    const { relaunch } = await import('@tauri-apps/plugin-process');
     await relaunch();
   }
 
   function openScaffoldDialog() {
     pluginAddMenuOpen = false;
+    if (!pluginInstallAvailable) return;
     scaffoldDialogOpen = true;
   }
 
   async function onPluginScaffolded(pluginPath: string) {
     scaffoldDialogOpen = false;
     await loadPlugins();
-    await commands.revealInFileManager(pluginPath);
+    if (revealAvailable) await commands.revealInFileManager(pluginPath);
   }
 
   let copyBtnLabel = $state('');
@@ -430,7 +559,7 @@
   }
 
   // Sync settings
-  function emptySyncConfig(): SyncConfig {
+  function emptySyncConfig(): SyncConfigMasked {
     return {
       enabled: false,
       webdav_url: '',
@@ -438,9 +567,10 @@
       password: '',
       interval_minutes: 30,
       legacy_remote_acknowledged: false,
+      cloud_account: false,
     };
   }
-  let syncConfig = $state<SyncConfig>(emptySyncConfig());
+  let syncConfig = $state<SyncConfigMasked>(emptySyncConfig());
   /** Project whose config is in `syncConfig`; edits only ever save there. */
   let syncLoadedFor = $state<string | null>(null);
   let syncLoaded = $derived(syncLoadedFor !== null && syncLoadedFor === projectStore.dirPath);
@@ -461,7 +591,7 @@
     adoptableProjectId = null;
     let config = emptySyncConfig();
     try {
-      const loaded = await invoke('get_sync_config', { projectDir }) as SyncConfig;
+      const loaded = await invoke('get_sync_config', { projectDir }) as SyncConfigMasked;
       config = { ...loaded, legacy_remote_acknowledged: loaded.legacy_remote_acknowledged ?? false };
     } catch (e) {
       console.error('Failed to load sync config:', e);
@@ -513,12 +643,16 @@
         files_uploaded: number;
         files_downloaded: number;
         errors: string[];
+        conflicts?: string[];
         in_progress: boolean;
         adoptable_project_id: string | null;
       };
       if (projectStore.dirPath === projectDir) {
         lastSyncTime = status.last_sync;
-        syncErrors = status.errors;
+        syncErrors = [
+          ...status.errors,
+          ...(status.conflicts ?? []).map((path) => t('settings.sync.conflict', { path })),
+        ];
         adoptableProjectId = status.adoptable_project_id ?? null;
       }
     } catch (e) {
@@ -594,7 +728,11 @@
       return;
     }
     if (isImeComposing(e)) return;
-    if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (phoneLayout && phoneSectionOpen) void showPhoneSectionList();
+      else onClose();
+    }
   }
 
   $effect(() => {
@@ -658,15 +796,15 @@
           title={t('settings.plugins.reload')}
           aria-label={t('settings.plugins.reload')}
           data-testid="plugin-reload-{plugin.id}"
-          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.id === 'ai-agent' || plugin.ui?.requires_app_reload}
+          disabled={!plugin.enabled || reloadingPluginId === plugin.id || plugin.id === 'ai-talk' || plugin.ui?.requires_app_reload}
           onclick={() => reloadPlugin(plugin)}
         >
           <span class="inline-block" style="transform: {reloadingPluginId === plugin.id ? 'rotate(360deg)' : 'none'}; transition: transform 0.6s;">↻</span>
         </button>
         <SettingsSwitch
           checked={plugin.enabled}
-          disabled={plugin.id === 'ai-talk' || plugin.id === 'ai-agent'}
-          title={plugin.id === 'ai-talk' || plugin.id === 'ai-agent' ? t('settings.plugins.section.builtinAlwaysOn') : ''}
+          disabled={plugin.id === 'ai-talk'}
+          title={plugin.id === 'ai-talk' ? t('settings.plugins.section.builtinAlwaysOn') : ''}
           ariaLabel={plugin.name}
           onCheckedChange={() => togglePluginEnabled(plugin)}
         />
@@ -677,24 +815,67 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="fixed inset-0 z-50 flex items-center justify-center" data-testid="settings-overlay" style="background: rgba(0,0,0,0.4);" onclick={onClose}>
+<div
+  class="fixed inset-0 z-50 flex items-center justify-center"
+  class:settings-overlay-touch={platform.touchShell}
+  data-testid="settings-overlay"
+  style="background: rgba(0,0,0,0.4);"
+  onclick={onClose}
+>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
-    class="rounded-lg shadow-xl w-full flex flex-col overflow-hidden"
+    class="settings-dialog rounded-lg shadow-xl w-full flex flex-col overflow-hidden"
+    class:settings-dialog-phone={phoneLayout}
+    class:settings-dialog-mobile={platform.isMobile}
+    class:settings-dialog-touch={platform.touchShell}
     data-testid="settings-dialog"
     role="dialog"
     aria-modal="true"
     aria-label={t('settings.dialogLabel')}
     tabindex="-1"
     use:focusTrap
-    style="max-width: 680px; background: var(--novelist-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border); height: 520px;"
+    bind:this={dialogEl}
+    style="background: var(--novelist-bg); color: var(--novelist-text);"
     onclick={(e) => e.stopPropagation()}
   >
-    <PortableModeBanner />
+    {#if phoneLayout}
+      <div class="settings-phone-header" data-testid="settings-phone-header">
+        {#if phoneSectionOpen}
+          <button
+            type="button"
+            class="settings-phone-icon-btn"
+            data-testid="settings-phone-back"
+            aria-label={t('settings.mobile.back')}
+            title={t('settings.mobile.back')}
+            bind:this={phoneBackButton}
+            onclick={showPhoneSectionList}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          </button>
+        {:else}
+          <span class="settings-phone-icon-spacer" aria-hidden="true"></span>
+        {/if}
+        <h2 class="settings-phone-title" data-testid="settings-phone-title">
+          {phoneSectionOpen ? sectionLabel(activeSection) : t('settings.dialogLabel')}
+        </h2>
+        <button
+          type="button"
+          class="settings-phone-icon-btn"
+          data-testid="settings-phone-close"
+          aria-label={t('settings.mobile.close')}
+          title={t('settings.mobile.close')}
+          onclick={onClose}
+        ><IconClose size={18} /></button>
+      </div>
+    {/if}
+    {#if !platform.isMobile}
+      <PortableModeBanner />
+    {/if}
     <div class="flex flex-1 min-h-0">
+    {#if !phoneLayout || !phoneSectionOpen}
     <!-- Left nav -->
-    <div class="shrink-0 flex flex-col py-3" style="width: 160px; border-right: 1px solid var(--novelist-border); background: var(--novelist-bg-secondary); border-radius: 8px 0 0 8px;">
+    <nav class="settings-nav shrink-0 flex flex-col py-3" data-testid="settings-nav" aria-label={t('settings.mobile.sections')}>
       <div class="px-3 mb-2">
         <input
           type="search"
@@ -716,22 +897,13 @@
       </div>
 
       {#if searchQuery.trim().length === 0}
-        {#each [
-          { id: 'editor', label: t('settings.editor') },
-          { id: 'theme', label: t('settings.theme') },
-          { id: 'shortcuts', label: t('settings.shortcuts') },
-          { id: 'templates', label: t('settings.templates') },
-          { id: 'plugins', label: t('settings.plugins') },
-          { id: 'image-hosts', label: t('settings.imageHosts') },
-          { id: 'publish', label: t('settings.publish') },
-          { id: 'sync', label: t('settings.sync') },
-        ] as section}
+        {#each CORE_SECTIONS as section}
           <button
-            class="text-left px-4 py-2 text-sm cursor-pointer"
+            class="settings-nav-item text-left px-4 py-2 text-sm cursor-pointer"
             data-testid="settings-section-{section.id}"
             style="background: {activeSection === section.id ? 'var(--novelist-sidebar-active)' : 'transparent'}; color: {activeSection === section.id ? 'var(--novelist-accent)' : 'var(--novelist-text)'}; border: none; font-weight: {activeSection === section.id ? '600' : '400'};"
-            onclick={() => activeSection = section.id}
-          >{section.label}</button>
+            onclick={() => openSection(section.id)}
+          >{t(section.labelKey)}{#if phoneLayout}<span class="settings-nav-chevron" aria-hidden="true">›</span>{/if}</button>
         {/each}
 
         {#if pluginSettings.list().length > 0}
@@ -740,11 +912,11 @@
             {@const sectionId = `plugin:${entry.pluginId}`}
             {@const localizedLabel = entry.labelKey ? t(entry.labelKey) : (entry.label ?? entry.pluginId)}
             <button
-              class="text-left px-4 py-2 text-sm cursor-pointer"
+              class="settings-nav-item text-left px-4 py-2 text-sm cursor-pointer"
               data-testid="settings-section-{sectionId}"
               style="background: {activeSection === sectionId ? 'var(--novelist-sidebar-active)' : 'transparent'}; color: {activeSection === sectionId ? 'var(--novelist-accent)' : 'var(--novelist-text)'}; border: none; font-weight: {activeSection === sectionId ? '600' : '400'};"
-              onclick={() => activeSection = sectionId}
-            >{localizedLabel}</button>
+              onclick={() => openSection(sectionId)}
+            >{localizedLabel}{#if phoneLayout}<span class="settings-nav-chevron" aria-hidden="true">›</span>{/if}</button>
           {/each}
         {/if}
       {:else}
@@ -772,16 +944,20 @@
         </div>
       {/if}
 
-      <div class="flex-1"></div>
-      <button
-        class="text-xs px-4 py-2 cursor-pointer"
-        style="color: var(--novelist-text-secondary); background: none; border: none;"
-        onclick={onClose}
-      >{t('settings.close')}</button>
-    </div>
+      {#if !phoneLayout}
+        <div class="flex-1"></div>
+        <button
+          class="text-xs px-4 py-2 cursor-pointer"
+          style="color: var(--novelist-text-secondary); background: none; border: none;"
+          onclick={onClose}
+        >{t('settings.close')}</button>
+      {/if}
+    </nav>
+    {/if}
 
+    {#if !phoneLayout || phoneSectionOpen}
     <!-- Right content -->
-    <div class="flex-1 overflow-y-auto px-5 py-4">
+    <div class="settings-content flex-1 overflow-y-auto px-5 py-4" data-testid="settings-content">
 
       {#if activeSection === 'editor'}
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.editor')}</h3>
@@ -928,7 +1104,7 @@
               <span>{t('settings.editor.newFile.template')}</span>
               <MacroHint />
             </div>
-            <div class="flex gap-2 items-center">
+            <div class="settings-inline-controls flex gap-2 items-center">
               <input
                 type="text"
                 data-testid="settings-newfile-template"
@@ -963,32 +1139,57 @@
 
           <div class="mt-4" data-testid="settings-newfile-defaultdir">
             <div class="text-sm mb-1">{t('settings.editor.newFile.defaultDir')}</div>
-            <div class="flex gap-2 items-center">
-              <input
-                type="text"
-                readonly
-                data-testid="settings-newfile-defaultdir-display"
-                value={settingsStore.effective.new_file.default_dir ?? t('settings.editor.newFile.defaultDirFollowLastUsed')}
-                class="flex-1 px-2 py-1 rounded"
-                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
-              />
-              <button
-                type="button"
-                class="px-2 py-1 rounded"
-                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
-                data-testid="settings-newfile-defaultdir-pick"
-                onclick={pickNewFileDefaultDir}
-              >{t('settings.editor.newFile.defaultDirPick')}</button>
-              {#if settingsStore.effective.new_file.default_dir}
+            {#if platform.can('pick_directory')}
+              <div class="flex gap-2 items-center">
+                <input
+                  type="text"
+                  readonly
+                  data-testid="settings-newfile-defaultdir-display"
+                  value={settingsStore.effective.new_file.default_dir ?? t('settings.editor.newFile.defaultDirFollowLastUsed')}
+                  class="flex-1 px-2 py-1 rounded"
+                  style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+                />
                 <button
                   type="button"
                   class="px-2 py-1 rounded"
                   style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
-                  data-testid="settings-newfile-defaultdir-clear"
-                  onclick={clearNewFileDefaultDir}
-                >{t('settings.editor.newFile.defaultDirClear')}</button>
+                  data-testid="settings-newfile-defaultdir-pick"
+                  onclick={pickNewFileDefaultDir}
+                >{t('settings.editor.newFile.defaultDirPick')}</button>
+                {#if settingsStore.effective.new_file.default_dir}
+                  <button
+                    type="button"
+                    class="px-2 py-1 rounded"
+                    style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+                    data-testid="settings-newfile-defaultdir-clear"
+                    onclick={clearNewFileDefaultDir}
+                  >{t('settings.editor.newFile.defaultDirClear')}</button>
+                {/if}
+              </div>
+            {:else}
+              {@const defaultDir = settingsStore.effective.new_file.default_dir}
+              <select
+                data-testid="settings-newfile-defaultdir-select"
+                aria-label={t('settings.editor.newFile.defaultDir')}
+                class="w-full px-2 py-1 rounded"
+                style="background: var(--novelist-input-bg); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+                value={defaultDir ?? ''}
+                onchange={(e) => selectNewFileDefaultDir(e.currentTarget.value)}
+              >
+                <option value="">{t('settings.editor.newFile.defaultDirFollowLastUsed')}</option>
+                {#if defaultDir && !projectFolderOptions.some((folder) => folder.path === defaultDir)}
+                  <option value={defaultDir}>{defaultDir}</option>
+                {/if}
+                {#each projectFolderOptions as folder (folder.path)}
+                  <option value={folder.path}>{folder.label}</option>
+                {/each}
+              </select>
+              {#if !projectStore.dirPath}
+                <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
+                  {t('settings.editor.newFile.defaultDirOpenProject')}
+                </div>
               {/if}
-            </div>
+            {/if}
             <div class="text-xs mt-1" style="color: var(--novelist-text-secondary);">
               {t('settings.editor.newFile.defaultDirHint', { shortcut: newFileShortcutLabel })}
             </div>
@@ -1039,16 +1240,18 @@
           </div>
         </div>
 
-        <div class="settings-group" data-testid="settings-developer-section">
-          <h4 class="settings-group-title">{t('settings.group.developer')}</h4>
-          <SettingsSwitch
-            label={t('settings.developerMode')}
-            description={t('settings.developerMode.hint')}
-            checked={uiStore.developerMode}
-            testId="settings-developer-mode-switch"
-            onCheckedChange={(v) => uiStore.setDeveloperMode(v)}
-          />
-        </div>
+        {#if !platform.isMobile}
+          <div class="settings-group" data-testid="settings-developer-section">
+            <h4 class="settings-group-title">{t('settings.group.developer')}</h4>
+            <SettingsSwitch
+              label={t('settings.developerMode')}
+              description={t('settings.developerMode.hint')}
+              checked={uiStore.developerMode}
+              testId="settings-developer-mode-switch"
+              onCheckedChange={(v) => uiStore.setDeveloperMode(v)}
+            />
+          </div>
+        {/if}
 
       {:else if activeSection === 'theme'}
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.theme')}</h3>
@@ -1070,7 +1273,7 @@
               </button>
               {#if theme.id.startsWith('typora-')}
                 <button
-                  class="absolute top-1 right-1 rounded-full cursor-pointer"
+                  class="settings-theme-delete absolute top-1 right-1 rounded-full cursor-pointer"
                   style="width: 18px; height: 18px; font-size: 10px; line-height: 1; background: rgba(255,0,0,0.15); color: #e55; border: none; display: flex; align-items: center; justify-content: center;"
                   onclick={(e) => { e.stopPropagation(); deleteCustomTheme(theme.id); }}
                   title="Delete imported theme"
@@ -1139,7 +1342,7 @@
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <span
-                      class="text-xs px-2 py-1 rounded cursor-pointer"
+                      class="settings-shortcut-badge text-xs px-2 py-1 rounded cursor-pointer"
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
                       title={t('settings.shortcuts.clickToChange')}
@@ -1178,7 +1381,7 @@
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <span
-                      class="text-xs px-2 py-1 rounded cursor-pointer"
+                      class="settings-shortcut-badge text-xs px-2 py-1 rounded cursor-pointer"
                       style="background: rgba(255, 255, 255, 0.08); color: {isCustom ? 'var(--novelist-accent)' : 'var(--novelist-text-secondary)'}; font-family: monospace; border: 1px solid {isCustom ? 'var(--novelist-accent)' : 'transparent'};"
                       onclick={() => startRecording(cmdId)}
                       title={t('settings.shortcuts.clickToChange')}
@@ -1290,24 +1493,28 @@
       {:else if activeSection === 'plugins'}
         <div class="flex items-center justify-between mb-4" style="position: relative;">
           <h3 class="text-xs font-semibold uppercase tracking-wide" style="color: var(--novelist-text-secondary);">{t('settings.plugins')}</h3>
-          <button
-            class="plugin-add-btn"
-            data-testid="plugin-add-btn"
-            onclick={(e) => { e.stopPropagation(); pluginAddMenuOpen = !pluginAddMenuOpen; }}
-            title={t('settings.plugins.add')}
-            aria-label={t('settings.plugins.add')}
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
-              <path d="M8 3v10M3 8h10" />
-            </svg>
-          </button>
-          {#if pluginAddMenuOpen}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="plugin-add-menu" data-testid="plugin-add-menu" onclick={(e) => e.stopPropagation()}>
-              <button class="plugin-add-menu-item" onclick={openPluginsFolder}>{t('settings.plugins.openFolder')}</button>
-              <button class="plugin-add-menu-item" onclick={openScaffoldDialog}>{t('settings.plugins.createFromTemplate')}</button>
-            </div>
+          {#if pluginInstallAvailable}
+            <button
+              class="plugin-add-btn"
+              data-testid="plugin-add-btn"
+              onclick={(e) => { e.stopPropagation(); pluginAddMenuOpen = !pluginAddMenuOpen; }}
+              title={t('settings.plugins.add')}
+              aria-label={t('settings.plugins.add')}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M8 3v10M3 8h10" />
+              </svg>
+            </button>
+            {#if pluginAddMenuOpen}
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="plugin-add-menu" data-testid="plugin-add-menu" onclick={(e) => e.stopPropagation()}>
+                {#if revealAvailable}
+                  <button class="plugin-add-menu-item" onclick={openPluginsFolder}>{t('settings.plugins.openFolder')}</button>
+                {/if}
+                <button class="plugin-add-menu-item" onclick={openScaffoldDialog}>{t('settings.plugins.createFromTemplate')}</button>
+              </div>
+            {/if}
           {/if}
         </div>
 
@@ -1371,6 +1578,7 @@
             </div>
           {/if}
 
+          {#if !platform.isMobile}
           <div class="rounded p-3 mt-3" style="background: var(--novelist-bg-secondary); border: 1px solid var(--novelist-border);">
             <div class="flex items-center">
               <p class="text-xs font-medium">{t('settings.plugins.createPlugin')}</p>
@@ -1406,12 +1614,17 @@
             </p>
             <p class="text-xs mt-1" style="color: var(--novelist-text-secondary);">{t('settings.plugins.aiSuggestion')}</p>
           </div>
+          {/if}
         {/if}
       {:else if activeSection === 'image-hosts'}
         <SettingsImageHostsPanel />
       {:else if activeSection === 'publish'}
         <SettingsPublishPanel />
       {:else if activeSection === 'sync'}
+        <div class="mb-5 pb-5" data-testid="settings-sync-cloud" style="border-bottom: 1px solid var(--novelist-border);">
+          <CloudAccountPanel projectDir={projectStore.dirPath} {onOpenProject} />
+        </div>
+
         <h3 class="text-xs font-semibold uppercase tracking-wide mb-4" style="color: var(--novelist-text-secondary);">{t('settings.sync.webdav')}</h3>
 
         {#if !projectStore.dirPath}
@@ -1429,6 +1642,9 @@
             />
           </div>
 
+          {#if syncConfig.cloud_account}
+            <p class="text-xs mb-3" data-testid="settings-sync-cloud-managed" style="color: var(--novelist-text-secondary);">{t('settings.sync.cloudAccountManaged')}</p>
+          {/if}
           <div class="mb-3">
             <label for="sync-webdav-url" class="text-sm block mb-1">{t('settings.sync.url')}</label>
             <input
@@ -1438,6 +1654,7 @@
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               placeholder="https://dav.example.com"
               value={syncConfig.webdav_url}
+              readonly={syncConfig.cloud_account}
               oninput={(e) => { syncConfig.webdav_url = (e.target as HTMLInputElement).value; }}
               onblur={saveSyncConfig}
             />
@@ -1451,6 +1668,7 @@
               class="text-sm px-2 py-1 rounded w-full"
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               value={syncConfig.username}
+              readonly={syncConfig.cloud_account}
               oninput={(e) => { syncConfig.username = (e.target as HTMLInputElement).value; }}
               onblur={saveSyncConfig}
             />
@@ -1464,6 +1682,7 @@
               class="text-sm px-2 py-1 rounded w-full"
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               value={syncConfig.password}
+              readonly={syncConfig.cloud_account}
               oninput={(e) => { syncConfig.password = (e.target as HTMLInputElement).value; }}
               onblur={saveSyncConfig}
             />
@@ -1577,6 +1796,7 @@
         {/if}
       {/if}
     </div>
+    {/if}
     </div>
   </div>
 </div>
@@ -1596,6 +1816,187 @@
     box-shadow: 0 0 0 0 transparent;
   }
 }
+.settings-dialog {
+  max-width: 680px;
+  height: 520px;
+  border: 1px solid var(--novelist-border);
+}
+.settings-nav {
+  width: 160px;
+  border-right: 1px solid var(--novelist-border);
+  background: var(--novelist-bg-secondary);
+  border-radius: 8px 0 0 8px;
+}
+
+/* Mobile / phone-narrow windows: follow the visual viewport so no part of
+   Settings sits under the on-screen keyboard. */
+.settings-overlay-touch {
+  top: var(--novelist-vv-top, 0px);
+  bottom: auto;
+  height: var(--novelist-vv-height, 100dvh);
+}
+.settings-dialog-touch .settings-nav,
+.settings-dialog-touch .settings-content {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Tablets keep the two-column dialog, clamped to the visible viewport. */
+.settings-dialog-mobile:not(.settings-dialog-phone) {
+  max-width: min(680px, calc(100vw - 32px));
+  height: min(520px, calc(var(--novelist-vv-height, 100dvh) - 32px));
+}
+
+/* Phone: full-screen sheet, section list → section page. */
+.settings-dialog-phone {
+  max-width: none;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.settings-phone-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  min-height: 52px;
+  padding: 4px;
+  border-bottom: 1px solid var(--novelist-border);
+}
+.settings-phone-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--novelist-text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+.settings-phone-icon-btn,
+.settings-phone-icon-spacer {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+}
+.settings-phone-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--novelist-text);
+  cursor: pointer;
+}
+.settings-phone-icon-btn:active {
+  background: var(--novelist-sidebar-hover);
+}
+.settings-dialog-phone .settings-nav {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border-right: none;
+  border-radius: 0;
+  background: var(--novelist-bg);
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.settings-dialog-phone .settings-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  font-size: 1rem;
+  box-shadow: inset 0 -1px 0 var(--novelist-border);
+}
+.settings-nav-chevron {
+  color: var(--novelist-text-secondary);
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.settings-dialog-phone .settings-content {
+  padding-left: 16px;
+  padding-right: 16px;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.settings-dialog-phone .settings-row {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.settings-dialog-phone .settings-control-wide {
+  max-width: 100%;
+}
+.settings-dialog-phone .settings-range-control {
+  flex: 1 1 200px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.settings-dialog-phone .settings-range-control input[type="range"] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.settings-dialog-phone .settings-inline-controls {
+  flex-wrap: wrap;
+}
+.settings-dialog-phone .settings-inline-controls > input,
+.settings-dialog-phone .settings-inline-controls > select {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+/* iOS zooms into focused fields smaller than 16px. */
+.settings-dialog-mobile :global(input:not([type='checkbox']):not([type='radio']):not([type='range'])),
+.settings-dialog-mobile :global(select),
+.settings-dialog-mobile :global(textarea) {
+  font-size: 16px;
+}
+
+@media (pointer: coarse) {
+  .settings-dialog-touch :global(button:not(.settings-theme-delete)) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .settings-dialog-touch :global(select),
+  .settings-dialog-touch :global(input:not([type='checkbox']):not([type='radio'])) {
+    min-height: 44px;
+  }
+  .settings-dialog-touch :global(input[type='checkbox']),
+  .settings-dialog-touch :global(input[type='radio']) {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+  }
+  .settings-dialog-touch .settings-row {
+    min-height: 44px;
+  }
+  .settings-dialog-touch .settings-shortcut-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  /* Keep the small visual badge; widen only the hit area. */
+  .settings-dialog-touch .settings-theme-delete::after {
+    content: '';
+    position: absolute;
+    inset: -13px;
+  }
+  .settings-dialog-touch .plugin-add-menu {
+    top: 48px;
+  }
+}
+
 .settings-group {
   padding: 14px 0;
   border-top: 1px solid var(--novelist-border);

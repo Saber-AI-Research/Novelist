@@ -282,6 +282,16 @@ export class PluginDocumentSessions {
     ));
   }
 
+  /**
+   * Wait for every queued plugin document write to finish (lifecycle flush
+   * before the app is backgrounded). Writes enqueued meanwhile are included.
+   */
+  async settled(): Promise<void> {
+    while (this.writeQueues.length > 0) {
+      await Promise.all(this.writeQueues.map((queue) => queue.tail));
+    }
+  }
+
   private live(ownerId: string, token: unknown): { session: DocumentSession; tab: TabState } | null {
     if (typeof token !== 'string' || !token) return null;
     const session = this.sessions.get(token);

@@ -1,5 +1,7 @@
 mod commands;
 mod error;
+#[cfg(target_os = "android")]
+mod logcat;
 mod menu;
 mod models;
 mod services;
@@ -17,16 +19,18 @@ use std::sync::Mutex;
 
 use commands::ai_bridge::{ai_fetch_stream_cancel, ai_fetch_stream_start, AiBridgeState};
 use commands::ai_files::{
-    delete_ai_session, list_ai_prompt_assets, list_ai_sessions, read_ai_session, save_ai_chat,
-    write_ai_memory, write_ai_session,
+    list_ai_prompt_assets, list_ai_sessions, read_ai_session, save_ai_chat, write_ai_memory,
+    write_ai_session,
 };
 use commands::bench::log_startup_phase;
 use commands::book_translation::create_book_translation_project;
-use commands::claude_bridge::{
-    claude_cli_detect, claude_cli_kill, claude_cli_send, claude_cli_spawn, ClaudeBridgeState,
-};
 use commands::cli_shim::{cli_shim_status, install_cli_shim};
-use commands::codex_bridge::{codex_cli_detect, codex_cli_kill, codex_cli_turn, CodexBridgeState};
+#[cfg(feature = "sync")]
+use commands::cloud::{
+    bind_cloud_project, check_cloud_account, connect_cloud_account, disconnect_cloud_account,
+    download_cloud_project, get_cloud_account, get_cloud_project_binding, list_cloud_projects,
+    unbind_cloud_project,
+};
 use commands::draft::{delete_draft_note, has_draft_note, read_draft_note, write_draft_note};
 #[cfg(all(target_os = "macos", feature = "e2e-testing"))]
 use commands::e2e::{
@@ -40,12 +44,16 @@ use commands::file::{
     broadcast_file_renamed, create_directory, create_file, create_scratch_file, delete_item,
     delete_scratch_file, duplicate_file, get_file_encoding, list_directory, move_item, read_file,
     rename_item, reveal_in_file_manager, search_in_project, write_binary_file, write_file,
-    write_file_if_unchanged, EncodingState,
+    EncodingState,
 };
 use commands::image_host::{
     get_image_host_settings, read_image_bytes, set_image_host_settings, upload_image_aliyun_oss,
     upload_image_custom, upload_image_imgur, upload_image_qiniu, upload_image_s3,
     upload_image_smms, WindowImageCapabilities,
+};
+use commands::library::{
+    export_library_document, export_library_project, get_library_path, import_library_file,
+    import_library_project, list_library_projects, stage_import_file,
 };
 use commands::literary_study::{
     create_literary_study_project, inspect_literary_source, read_literary_study_overview,
@@ -86,7 +94,8 @@ use commands::styled_copy::{
 };
 #[cfg(feature = "sync")]
 use commands::sync::{
-    adopt_sync_identity, get_sync_config, save_sync_config, sync_now, test_sync_connection,
+    adopt_sync_identity, get_sync_config, resolve_sync_conflict, save_sync_config, sync_now,
+    test_sync_connection,
 };
 use commands::template::{
     create_project_from_template, delete_template, import_template_zip, list_templates,
@@ -98,16 +107,19 @@ use commands::template_files::{
 };
 use commands::window::{open_devtools, set_window_appearance};
 use serde::{Deserialize, Serialize};
-use services::file_routing::{
-    pick_open_event_target, route_single_file_open_cmd, submit_file_open_bid, FileRoutingState,
-};
+#[cfg(desktop)]
+use services::file_routing::pick_open_event_target;
+use services::file_routing::{route_single_file_open_cmd, submit_file_open_bid, FileRoutingState};
 use services::file_watcher::{
     poll_external_changes, register_open_file, register_write_ignore, start_file_watcher,
     stop_file_watcher, unregister_open_file, FileWatcherState,
 };
+use services::platform::get_platform_capabilities;
 use services::plugin_host::sandbox::PluginHostState;
 use specta::Type;
-use tauri::{Emitter, Manager};
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
 #[cfg(feature = "codegen")]
@@ -125,6 +137,7 @@ fn normalize_generated_typescript(path: &std::path::Path) -> std::io::Result<()>
     Ok(())
 }
 
+#[cfg(desktop)]
 use services::cli::{help_text, parse_argv, CliRequest, FileTarget};
 
 #[cfg(feature = "e2e-testing")]
@@ -157,6 +170,7 @@ pub struct PendingFile {
 }
 
 impl PendingFile {
+    #[cfg(desktop)]
     fn from_target(t: &FileTarget) -> Self {
         Self {
             path: t.path.to_string_lossy().to_string(),
@@ -240,6 +254,7 @@ pub struct CliOpenPayload {
     pub target_label: String,
 }
 
+#[cfg(desktop)]
 impl CliOpenPayload {
     fn from_request(req: &CliRequest) -> Self {
         Self {
@@ -267,11 +282,13 @@ pub struct OpenFilePayload {
     pub target_label: String,
 }
 
+#[cfg(desktop)]
 fn open_event_target_label(app: &tauri::AppHandle) -> Option<String> {
     let labels = app.webview_windows().keys().cloned().collect();
     pick_open_event_target(labels)
 }
 
+#[cfg(desktop)]
 fn focus_open_event_target(app: &tauri::AppHandle, label: &str) {
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
@@ -307,6 +324,7 @@ fn remove_titlebar_separator(window: &tauri::WebviewWindow) {
 /// Parse argv early and short-circuit `--help` / `--version` so a CLI
 /// invocation prints to stdout and exits without spinning up the GUI.
 /// On macOS GUI launches argv has only the program name, so this is a no-op.
+#[cfg(desktop)]
 fn handle_early_exit_flags() {
     let argv: Vec<String> = std::env::args().collect();
     if argv.len() <= 1 {
@@ -329,35 +347,162 @@ fn handle_early_exit_flags() {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    #[cfg(feature = "e2e-testing")]
-    log_native_e2e_startup(&format!(
-        "run.begin socket={:?}",
-        std::env::var("TAURI_PLAYWRIGHT_SOCKET")
-    ));
-    // Early-exit flags (--version, --help) must work even if the portable
-    // data directory is unwritable. Run them before portable::init() so a
-    // read-only USB stick doesn't crash CLI introspection.
-    handle_early_exit_flags();
+/// The one IPC command list (D2 in the mobile platform plan). Every platform
+/// and feature set registers the same commands; platform gaps are reported
+/// from command bodies as `AppError::Unsupported`, so the generated bindings
+/// match every runtime. Feature-gated commands are appended as `extra`.
+macro_rules! app_commands {
+    ($($extra:ident),* $(,)?) => {
+        collect_commands![
+            read_file,
+            write_file,
+            get_file_encoding,
+            list_directory,
+            create_file,
+            create_scratch_file,
+            delete_scratch_file,
+            create_directory,
+            rename_item,
+            compute_document_key,
+            read_managed_name_state,
+            write_managed_name_state,
+            delete_managed_name_state,
+            broadcast_file_renamed,
+            move_item,
+            delete_item,
+            check_pandoc,
+            set_pandoc_path,
+            stage_export_css,
+            discard_staged_export_css,
+            cancel_export_project,
+            export_project,
+            detect_project,
+            read_project_config,
+            get_effective_settings,
+            get_global_settings,
+            write_global_settings,
+            write_project_settings,
+            start_file_watcher,
+            stop_file_watcher,
+            register_open_file,
+            unregister_open_file,
+            register_write_ignore,
+            poll_external_changes,
+            get_recent_projects,
+            add_recent_project,
+            remove_recent_project,
+            set_project_pinned,
+            reorder_recent_projects,
+            list_plugins,
+            load_plugin,
+            unload_plugin,
+            reload_plugin,
+            get_plugin_commands,
+            invoke_plugin_command,
+            set_plugin_document_state,
+            set_plugin_enabled,
+            scaffold_plugin,
+            get_plugins_dir,
+            is_portable_mode,
+            read_draft_note,
+            write_draft_note,
+            delete_draft_note,
+            has_draft_note,
+            search_in_project,
+            create_snapshot,
+            list_snapshots,
+            restore_snapshot,
+            delete_snapshot,
+            record_writing_stats,
+            get_writing_stats,
+            list_templates,
+            create_project_from_template,
+            inspect_literary_source,
+            create_book_translation_project,
+            create_literary_study_project,
+            read_literary_study_overview,
+            replace_literary_study_book,
+            save_project_as_template,
+            delete_template,
+            import_template_zip,
+            list_template_files,
+            read_template_file,
+            write_template_file,
+            rename_template_file,
+            delete_template_file,
+            duplicate_bundled_template,
+            create_file_with_body,
+            get_pending_open_files,
+            get_pending_open_projects,
+            route_single_file_open_cmd,
+            submit_file_open_bid,
+            cli_shim_status,
+            install_cli_shim,
+            read_image_bytes,
+            upload_image_qiniu,
+            upload_image_aliyun_oss,
+            upload_image_s3,
+            upload_image_imgur,
+            upload_image_smms,
+            upload_image_custom,
+            get_image_host_settings,
+            set_image_host_settings,
+            publish_to_ghost,
+            publish_to_wordpress_self_hosted,
+            publish_to_wordpress_com,
+            publish_to_medium,
+            verify_wordpress_self_hosted_update,
+            verify_wordpress_com_update,
+            upload_post_image_ghost,
+            upload_post_image_wordpress_self_hosted,
+            upload_post_image_wordpress_com,
+            upload_post_image_medium,
+            convert_markdown_to_html,
+            convert_markdown_to_styled_html,
+            read_styled_copy_image,
+            write_styled_clipboard,
+            verify_publish_channel,
+            list_publish_tags,
+            read_clipboard_image,
+            get_publish_settings,
+            set_publish_settings,
+            read_publish_form_drafts,
+            read_publish_remote_state,
+            write_publish_form_draft,
+            persist_publish_result,
+            store_publish_cover,
+            load_publish_cover,
+            clear_publish_cover,
+            bind_legacy_publication,
+            write_binary_file,
+            reveal_in_file_manager,
+            duplicate_file,
+            log_startup_phase,
+            ai_fetch_stream_start,
+            ai_fetch_stream_cancel,
+            list_ai_sessions,
+            read_ai_session,
+            write_ai_session,
+            list_ai_prompt_assets,
+            write_ai_memory,
+            save_ai_chat,
+            refresh_menu,
+            set_window_appearance,
+            open_devtools,
+            get_platform_capabilities,
+            get_library_path,
+            list_library_projects,
+            stage_import_file,
+            import_library_file,
+            import_library_project,
+            export_library_project,
+            export_library_document,
+            $($extra,)*
+        ]
+    };
+}
 
-    crate::services::portable::init();
-
-    let t0 = std::time::Instant::now();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "novelist=debug".into()),
-        )
-        .init();
-    tracing::info!(
-        target: "novelist::startup",
-        phase = "backend.run.begin",
-        since_start_ms = 0.0_f64,
-        "backend phase"
-    );
-
-    #[cfg(feature = "sync")]
+fn specta_builder() -> Builder<tauri::Wry> {
     // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
     // as `number` (file sizes, epoch-ms timestamps — all far
     // below 2^53), matching the pre-rc.25 bindings; without it the export
@@ -377,321 +522,76 @@ pub fn run() {
         .typ::<crate::services::publish::types::UnsupportedUpdateReason>()
         .typ::<crate::services::publish::sidecar::RemoteIdentity>()
         .typ::<crate::services::publish::sidecar::ChannelState>()
-        .typ::<crate::services::publish::sidecar::PublishSidecar>()
-        .commands(collect_commands![
-            read_file,
-            write_file,
-            write_file_if_unchanged,
-            get_file_encoding,
-            list_directory,
-            create_file,
-            create_scratch_file,
-            delete_scratch_file,
-            create_directory,
-            rename_item,
-            compute_document_key,
-            read_managed_name_state,
-            write_managed_name_state,
-            delete_managed_name_state,
-            broadcast_file_renamed,
-            move_item,
-            delete_item,
-            check_pandoc,
-            set_pandoc_path,
-            stage_export_css,
-            discard_staged_export_css,
-            cancel_export_project,
-            export_project,
-            detect_project,
-            read_project_config,
-            get_effective_settings,
-            get_global_settings,
-            write_global_settings,
-            write_project_settings,
-            start_file_watcher,
-            stop_file_watcher,
-            register_open_file,
-            unregister_open_file,
-            register_write_ignore,
-            poll_external_changes,
-            get_recent_projects,
-            add_recent_project,
-            remove_recent_project,
-            set_project_pinned,
-            reorder_recent_projects,
-            list_plugins,
-            load_plugin,
-            unload_plugin,
-            reload_plugin,
-            get_plugin_commands,
-            invoke_plugin_command,
-            set_plugin_document_state,
-            set_plugin_enabled,
-            scaffold_plugin,
-            get_plugins_dir,
-            is_portable_mode,
-            read_draft_note,
-            write_draft_note,
-            delete_draft_note,
-            has_draft_note,
-            search_in_project,
-            create_snapshot,
-            list_snapshots,
-            restore_snapshot,
-            delete_snapshot,
-            record_writing_stats,
-            get_writing_stats,
-            list_templates,
-            create_project_from_template,
-            inspect_literary_source,
-            create_book_translation_project,
-            create_literary_study_project,
-            read_literary_study_overview,
-            replace_literary_study_book,
-            save_project_as_template,
-            delete_template,
-            import_template_zip,
-            list_template_files,
-            read_template_file,
-            write_template_file,
-            rename_template_file,
-            delete_template_file,
-            duplicate_bundled_template,
-            create_file_with_body,
-            get_pending_open_files,
-            get_pending_open_projects,
-            route_single_file_open_cmd,
-            submit_file_open_bid,
-            cli_shim_status,
-            install_cli_shim,
-            read_image_bytes,
-            upload_image_qiniu,
-            upload_image_aliyun_oss,
-            upload_image_s3,
-            upload_image_imgur,
-            upload_image_smms,
-            upload_image_custom,
-            get_image_host_settings,
-            set_image_host_settings,
-            publish_to_ghost,
-            publish_to_wordpress_self_hosted,
-            publish_to_wordpress_com,
-            publish_to_medium,
-            verify_wordpress_self_hosted_update,
-            verify_wordpress_com_update,
-            upload_post_image_ghost,
-            upload_post_image_wordpress_self_hosted,
-            upload_post_image_wordpress_com,
-            upload_post_image_medium,
-            convert_markdown_to_html,
-            convert_markdown_to_styled_html,
-            read_styled_copy_image,
-            write_styled_clipboard,
-            verify_publish_channel,
-            list_publish_tags,
-            read_clipboard_image,
-            get_publish_settings,
-            set_publish_settings,
-            read_publish_form_drafts,
-            read_publish_remote_state,
-            write_publish_form_draft,
-            persist_publish_result,
-            store_publish_cover,
-            load_publish_cover,
-            clear_publish_cover,
-            bind_legacy_publication,
-            write_binary_file,
-            reveal_in_file_manager,
-            duplicate_file,
-            log_startup_phase,
-            ai_fetch_stream_start,
-            ai_fetch_stream_cancel,
-            list_ai_sessions,
-            read_ai_session,
-            write_ai_session,
-            delete_ai_session,
-            list_ai_prompt_assets,
-            write_ai_memory,
-            save_ai_chat,
-            claude_cli_detect,
-            claude_cli_spawn,
-            claude_cli_send,
-            claude_cli_kill,
-            codex_cli_detect,
-            codex_cli_turn,
-            codex_cli_kill,
-            refresh_menu,
-            set_window_appearance,
-            open_devtools,
+        .typ::<crate::services::publish::sidecar::PublishSidecar>();
+    #[cfg(feature = "sync")]
+    {
+        builder.commands(app_commands![
             get_sync_config,
             save_sync_config,
             sync_now,
             test_sync_connection,
             adopt_sync_identity,
-        ]);
+            resolve_sync_conflict,
+            get_cloud_account,
+            check_cloud_account,
+            connect_cloud_account,
+            disconnect_cloud_account,
+            list_cloud_projects,
+            download_cloud_project,
+            get_cloud_project_binding,
+            bind_cloud_project,
+            unbind_cloud_project,
+        ])
+    }
     #[cfg(not(feature = "sync"))]
-    // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
-    // as `number` (file sizes, epoch-ms timestamps — all far
-    // below 2^53), matching the pre-rc.25 bindings; without it the export
-    // refuses BigInt-style types outright.
-    let builder = Builder::<tauri::Wry>::new()
-        .dangerously_cast_bigints_to_number()
-        // `cli-open` is emitted manually (not a command param/result), so the
-        // payload type must be registered explicitly or it vanishes from the
-        // generated bindings — app-events.svelte.ts imports it.
-        .typ::<CliOpenPayload>()
-        // See sync-feature builder branch above for rationale.
-        .typ::<crate::services::publish::types::PublishError>()
-        .typ::<crate::services::publish::types::UnsupportedUpdateReason>()
-        .typ::<crate::services::publish::sidecar::RemoteIdentity>()
-        .typ::<crate::services::publish::sidecar::ChannelState>()
-        .typ::<crate::services::publish::sidecar::PublishSidecar>()
-        .commands(collect_commands![
-            read_file,
-            write_file,
-            write_file_if_unchanged,
-            get_file_encoding,
-            list_directory,
-            create_file,
-            create_scratch_file,
-            delete_scratch_file,
-            create_directory,
-            rename_item,
-            compute_document_key,
-            read_managed_name_state,
-            write_managed_name_state,
-            delete_managed_name_state,
-            broadcast_file_renamed,
-            move_item,
-            delete_item,
-            check_pandoc,
-            set_pandoc_path,
-            stage_export_css,
-            discard_staged_export_css,
-            cancel_export_project,
-            export_project,
-            detect_project,
-            read_project_config,
-            get_effective_settings,
-            get_global_settings,
-            write_global_settings,
-            write_project_settings,
-            start_file_watcher,
-            stop_file_watcher,
-            register_open_file,
-            unregister_open_file,
-            register_write_ignore,
-            poll_external_changes,
-            get_recent_projects,
-            add_recent_project,
-            remove_recent_project,
-            set_project_pinned,
-            reorder_recent_projects,
-            list_plugins,
-            load_plugin,
-            unload_plugin,
-            reload_plugin,
-            get_plugin_commands,
-            invoke_plugin_command,
-            set_plugin_document_state,
-            set_plugin_enabled,
-            scaffold_plugin,
-            get_plugins_dir,
-            is_portable_mode,
-            read_draft_note,
-            write_draft_note,
-            delete_draft_note,
-            has_draft_note,
-            search_in_project,
-            create_snapshot,
-            list_snapshots,
-            restore_snapshot,
-            delete_snapshot,
-            record_writing_stats,
-            get_writing_stats,
-            list_templates,
-            create_project_from_template,
-            inspect_literary_source,
-            create_book_translation_project,
-            create_literary_study_project,
-            read_literary_study_overview,
-            replace_literary_study_book,
-            save_project_as_template,
-            delete_template,
-            import_template_zip,
-            list_template_files,
-            read_template_file,
-            write_template_file,
-            rename_template_file,
-            delete_template_file,
-            duplicate_bundled_template,
-            create_file_with_body,
-            get_pending_open_files,
-            get_pending_open_projects,
-            route_single_file_open_cmd,
-            submit_file_open_bid,
-            cli_shim_status,
-            install_cli_shim,
-            read_image_bytes,
-            upload_image_qiniu,
-            upload_image_aliyun_oss,
-            upload_image_s3,
-            upload_image_imgur,
-            upload_image_smms,
-            upload_image_custom,
-            get_image_host_settings,
-            set_image_host_settings,
-            publish_to_ghost,
-            publish_to_wordpress_self_hosted,
-            publish_to_wordpress_com,
-            publish_to_medium,
-            verify_wordpress_self_hosted_update,
-            verify_wordpress_com_update,
-            upload_post_image_ghost,
-            upload_post_image_wordpress_self_hosted,
-            upload_post_image_wordpress_com,
-            upload_post_image_medium,
-            convert_markdown_to_html,
-            convert_markdown_to_styled_html,
-            read_styled_copy_image,
-            write_styled_clipboard,
-            verify_publish_channel,
-            list_publish_tags,
-            read_clipboard_image,
-            get_publish_settings,
-            set_publish_settings,
-            read_publish_form_drafts,
-            read_publish_remote_state,
-            write_publish_form_draft,
-            persist_publish_result,
-            store_publish_cover,
-            load_publish_cover,
-            clear_publish_cover,
-            bind_legacy_publication,
-            write_binary_file,
-            reveal_in_file_manager,
-            duplicate_file,
-            log_startup_phase,
-            ai_fetch_stream_start,
-            ai_fetch_stream_cancel,
-            list_ai_sessions,
-            read_ai_session,
-            write_ai_session,
-            delete_ai_session,
-            list_ai_prompt_assets,
-            write_ai_memory,
-            save_ai_chat,
-            claude_cli_detect,
-            claude_cli_spawn,
-            claude_cli_send,
-            claude_cli_kill,
-            codex_cli_detect,
-            codex_cli_turn,
-            codex_cli_kill,
-            refresh_menu,
-            set_window_appearance,
-            open_devtools,
-        ]);
+    {
+        builder.commands(app_commands![])
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    #[cfg(feature = "e2e-testing")]
+    log_native_e2e_startup(&format!(
+        "run.begin socket={:?}",
+        std::env::var("TAURI_PLAYWRIGHT_SOCKET")
+    ));
+    // Early-exit flags (--version, --help) must work even if the portable
+    // data directory is unwritable. Run them before portable::init() so a
+    // read-only USB stick doesn't crash CLI introspection. Mobile has no
+    // command line and resolves its data root in `setup` (needs the app).
+    #[cfg(desktop)]
+    {
+        handle_early_exit_flags();
+        crate::services::portable::init();
+    }
+
+    let t0 = std::time::Instant::now();
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "novelist=debug".into()),
+    );
+    // Android discards stdout/stderr: send the same records (and panics) to
+    // logcat. Logcat stamps time itself and does not render ANSI colors.
+    #[cfg(target_os = "android")]
+    {
+        subscriber
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logcat::Logcat)
+            .init();
+        logcat::install_panic_hook();
+    }
+    #[cfg(not(target_os = "android"))]
+    subscriber.init();
+    tracing::info!(
+        target: "novelist::startup",
+        phase = "backend.run.begin",
+        since_start_ms = 0.0_f64,
+        "backend phase"
+    );
+
+    let builder = specta_builder();
 
     #[cfg(feature = "codegen")]
     {
@@ -733,55 +633,64 @@ pub fn run() {
     #[cfg(not(all(target_os = "macos", feature = "e2e-testing")))]
     let invoke_handler = builder.invoke_handler();
 
-    #[allow(unused_mut)]
-    let mut app_builder = tauri::Builder::default()
-        // Single-instance MUST be the first plugin registered (per the plugin's
-        // README) so its IPC pipe is alive before any other setup work runs.
-        // The callback is invoked in the *original* instance with the second
-        // process's argv + cwd; we parse and emit `cli-open` for the frontend.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            tracing::info!(
-                target: "novelist::cli",
-                argv = ?argv,
-                cwd = %cwd,
-                "single-instance: forwarded args from second invocation"
-            );
-            let cwd_path = std::path::PathBuf::from(&cwd);
-            let req = parse_argv(&argv, &cwd_path);
-            let mut payload = CliOpenPayload::from_request(&req);
-            match open_event_target_label(app) {
-                Some(label) => {
-                    // Bring the coordinator to the front so the user sees the
-                    // routed result, whether it lands there or in a new window.
-                    focus_open_event_target(app, &label);
-                    // On Windows `emit_to` broadcasts to every webview, so stamp
-                    // the intended window's label and let the frontend filter.
-                    payload.target_label = label.clone();
-                    if let Err(e) = app.emit_to(label.as_str(), "cli-open", payload) {
+    let mut app_builder = tauri::Builder::default();
+
+    // Desktop shell: single-instance forwarding, the native menu bar, process
+    // restart and self-update. iOS/Android have none of these (TestFlight and
+    // APK reinstall replace self-update).
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder
+            // Single-instance MUST be the first plugin registered (per the plugin's
+            // README) so its IPC pipe is alive before any other setup work runs.
+            // The callback is invoked in the *original* instance with the second
+            // process's argv + cwd; we parse and emit `cli-open` for the frontend.
+            .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+                tracing::info!(
+                    target: "novelist::cli",
+                    argv = ?argv,
+                    cwd = %cwd,
+                    "single-instance: forwarded args from second invocation"
+                );
+                let cwd_path = std::path::PathBuf::from(&cwd);
+                let req = parse_argv(&argv, &cwd_path);
+                let mut payload = CliOpenPayload::from_request(&req);
+                match open_event_target_label(app) {
+                    Some(label) => {
+                        // Bring the coordinator to the front so the user sees the
+                        // routed result, whether it lands there or in a new window.
+                        focus_open_event_target(app, &label);
+                        // On Windows `emit_to` broadcasts to every webview, so stamp
+                        // the intended window's label and let the frontend filter.
+                        payload.target_label = label.clone();
+                        if let Err(e) = app.emit_to(label.as_str(), "cli-open", payload) {
+                            tracing::warn!(
+                                target: "novelist::cli",
+                                window = %label,
+                                error = %e,
+                                "failed to emit cli-open event to frontend"
+                            );
+                        }
+                    }
+                    None => {
                         tracing::warn!(
                             target: "novelist::cli",
-                            window = %label,
-                            error = %e,
-                            "failed to emit cli-open event to frontend"
+                            "no webview window available for cli-open event"
                         );
                     }
                 }
-                None => {
-                    tracing::warn!(
-                        target: "novelist::cli",
-                        "no webview window available for cli-open event"
-                    );
-                }
-            }
-        }))
-        .menu(|handle| menu::build_menu(handle, &menu::MenuLabels::fallback(), &[]))
-        .on_menu_event(|app, event| {
-            // Menu item IDs match command IDs registered in
-            // app/lib/app-commands.ts. Emit the ID to the webview;
-            // the menu-events composable dispatches through
-            // commandRegistry.execute so there is a single handler map.
-            let _ = app.emit("menu-command", event.id().0.clone());
-        })
+            }))
+            .menu(|handle| menu::build_menu(handle, &menu::MenuLabels::fallback(), &[]))
+            .on_menu_event(|app, event| {
+                // Menu item IDs match command IDs registered in
+                // app/lib/app-commands.ts. Emit the ID to the webview;
+                // the menu-events composable dispatches through
+                // commandRegistry.execute so there is a single handler map.
+                let _ = app.emit("menu-command", event.id().0.clone());
+            });
+    }
+
+    app_builder = app_builder
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 release_window_resources(window.app_handle(), window.label());
@@ -789,10 +698,14 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_mobile_support::init());
 
-    if !crate::services::portable::is_portable() {
-        app_builder = app_builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_process::init());
+        if !crate::services::portable::is_portable() {
+            app_builder = app_builder.plugin(tauri_plugin_updater::Builder::new().build());
+        }
     }
 
     #[cfg(feature = "e2e-testing")]
@@ -826,10 +739,17 @@ pub fn run() {
         .manage(PendingOpenProjects::new())
         .manage(FileRoutingState::new())
         .manage(AiBridgeState::new())
-        .manage(ClaudeBridgeState::new())
-        .manage(CodexBridgeState::new())
         .invoke_handler(invoke_handler)
         .setup(move |app| {
+            // The mobile data root lives in the app sandbox, which is only
+            // known once the app exists; nothing may read it before this.
+            #[cfg(mobile)]
+            crate::services::portable::init_mobile(app.handle())?;
+            // Cloud credentials live in the platform keychain/keystore through
+            // the mobile-support plugin (initialized before this hook).
+            #[cfg(all(mobile, feature = "sync"))]
+            crate::services::cloud::install_native_vault(app.handle());
+
             #[cfg(feature = "e2e-testing")]
             log_native_e2e_startup("setup.begin");
             tracing::info!(
@@ -839,14 +759,25 @@ pub fn run() {
                 "backend phase"
             );
 
-            if crate::services::portable::is_portable() {
+            if let Err(error) = crate::services::bundled_resources::prepare() {
+                tracing::warn!(
+                    target: "novelist::startup",
+                    %error,
+                    "bundled plugins and templates are unavailable"
+                );
+            }
+
+            // Plugin iframes load through the asset protocol. The static
+            // config scope names the default desktop and mobile roots; extend
+            // it to the resolved data root wherever that can differ.
+            if cfg!(mobile) || crate::services::portable::is_portable() {
                 let plugins_dir = crate::services::portable::novelist_home().join("plugins");
                 if let Err(e) = std::fs::create_dir_all(&plugins_dir) {
                     tracing::warn!(
                         target: "novelist::portable",
                         ?plugins_dir,
                         error = %e,
-                        "failed to create portable plugins directory"
+                        "failed to create plugins directory"
                     );
                 }
                 if let Err(e) = app
@@ -857,7 +788,7 @@ pub fn run() {
                         target: "novelist::portable",
                         ?plugins_dir,
                         error = %e,
-                        "failed to extend asset protocol scope for portable plugins"
+                        "failed to extend asset protocol scope for plugins"
                     );
                 }
             }
@@ -884,17 +815,21 @@ pub fn run() {
             }
 
             // Cold-start CLI args: parse files + folders into the pending
-            // queues so the main window drains them on first mount.
-            let argv: Vec<String> = std::env::args().collect();
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let req = parse_argv(&argv, &cwd);
-            let pending_files = app.state::<PendingOpenFiles>();
-            for f in &req.files {
-                pending_files.push(PendingFile::from_target(f));
-            }
-            let pending_projects = app.state::<PendingOpenProjects>();
-            for d in &req.folders {
-                pending_projects.push(d.to_string_lossy().to_string());
+            // queues so the main window drains them on first mount. Mobile
+            // launch arguments are not user paths.
+            #[cfg(desktop)]
+            {
+                let argv: Vec<String> = std::env::args().collect();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let req = parse_argv(&argv, &cwd);
+                let pending_files = app.state::<PendingOpenFiles>();
+                for f in &req.files {
+                    pending_files.push(PendingFile::from_target(f));
+                }
+                let pending_projects = app.state::<PendingOpenProjects>();
+                for d in &req.folders {
+                    pending_projects.push(d.to_string_lossy().to_string());
+                }
             }
 
             tracing::info!(
@@ -980,30 +915,9 @@ fn release_window_resources<R: tauri::Runtime>(app: &tauri::AppHandle<R>, owner_
             );
         }
     }
-    if let Some(state) = app.try_state::<ClaudeBridgeState>() {
-        state.tombstone_owner(owner_label);
-    }
-    if let Some(state) = app.try_state::<CodexBridgeState>() {
-        state.tombstone_owner(owner_label);
-    }
     if let Some(state) = app.try_state::<WindowImageCapabilities>() {
         state.clear_owner(owner_label);
     }
-
-    let claude_app = app.clone();
-    let claude_owner = owner_label.to_string();
-    tauri::async_runtime::spawn(async move {
-        if let Some(state) = claude_app.try_state::<ClaudeBridgeState>() {
-            state.drain_owner(&claude_owner).await;
-        }
-    });
-    let codex_app = app.clone();
-    let codex_owner = owner_label.to_string();
-    tauri::async_runtime::spawn(async move {
-        if let Some(state) = codex_app.try_state::<CodexBridgeState>() {
-            state.drain_owner(&codex_owner).await;
-        }
-    });
 }
 
 #[cfg(test)]

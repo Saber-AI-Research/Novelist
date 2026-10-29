@@ -54,6 +54,29 @@ are **not demotable to optional extras**.
 | `app/lib/components/SnapshotPanel.svelte` | Project snapshots (point-in-time backups) |
 | `app/lib/components/StatsPanel.svelte` | Writing stats panel |
 | `app/lib/components/PublishDialog.svelte` + `OnlinePublishPanel.svelte` + `StyledCopyPanel.svelte` | Online publishing plus sanitized WeChat/Zhihu rich clipboard workflows |
+| `app/lib/components/ai-talk/` | HTTP AI chat, shared by desktop and mobile; the separate CLI agent harness was removed with user approval |
+| `plugins/literary-commentary/`, `plugins/book-translation/` | Literary commentary and book translation document editors, including touch layouts |
+| `app/lib/components/CloudAccountPanel.svelte` | Optional per-device WebDAV account, project download/linking, and conflict resolution; local writing never requires login |
+
+## Platform availability
+
+Platform limits are explicit capabilities, not a reason to remove core writing
+features. `get_platform_capabilities` gates the UI and native unsupported errors
+gate direct IPC calls.
+
+| Surface | Desktop | Android | iOS / iPadOS |
+|---|---|---|---|
+| Editor, CJK/IME, templates, snapshots, statistics, AI Talk | Available | Available | Available |
+| Canvas, kanban, mindmap, literary commentary, book translation | Available | Available with touch controls | Available with touch controls |
+| Projects | Arbitrary filesystem folders | Private project library, picker imports, ZIP exchange | Files-visible Documents/Projects library, picker imports, ZIP exchange |
+| Export | Pandoc formats, rich clipboard and publishing | Markdown/HTML and ZIP through native sharing | Markdown/HTML and ZIP through native sharing |
+| Plugin installation | Existing plugin flow | Existing plugin flow | Bundled plugins only, enforced in Rust |
+| Multi-window, desktop menus, CLI, updater | Available | Not offered | Not offered |
+| Sync credentials | Owner-only app-data file (not encrypted at rest) | Android Keystore | iOS Keychain, device-only |
+
+Native deployment requirements and verification limits are tracked in
+[mobile-deployment.md](mobile-deployment.md); responsive browser evidence is
+not proof of a signed iOS build or store approval.
 
 ## Infrastructure (engine)
 

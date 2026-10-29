@@ -3,6 +3,14 @@ import { test, expect, openRecentProject } from '../fixtures/app-fixture';
 import { OPAQUE_RED_PNG_BYTES } from '../fixtures/image-data';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
+// The preview is a scriptless `sandbox=""` frame. Playwright's trace DOM
+// snapshotter injects script into every frame, which WebKit blocks there and
+// reports as "Blocked script execution in 'about:srcdoc'", failing the strict
+// browser-error check on traced retries. Screenshot-only traces keep the
+// harness out of the frame, so a blocked-script error can only come from the
+// preview document itself.
+test.use({ trace: { mode: 'on-first-retry', snapshots: false } });
+
 const FULL_SOURCE = '# 冻结全文\n\n前文 未保存选择文本 后文';
 const SELECTED_SOURCE = '未保存选择文本';
 const CHAPTER_PATH = `${MOCK_PROJECT_DIR}/Chapter 1.md`;

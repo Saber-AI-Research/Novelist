@@ -54,12 +54,13 @@
   } from '$lib/components/ai-shared/persistence';
   import { aiChatBasename, saveAiChat } from '$lib/services/ai-chat';
   import { aiTalkSessions, type DisplayMessage, type TalkSession } from './sessions.svelte';
-  import { AiAgentProjectLifecycle, type AiAgentProjectToken } from '$lib/components/ai-agent/lifecycle';
+  import { AiProjectLifecycle, type AiProjectToken } from '$lib/components/ai-shared/project-lifecycle';
   import { promptPresets } from './presets.svelte';
   import { commands } from '$lib/ipc/commands';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { renderChatMarkdown } from '$lib/components/ai-shared/chat-markdown';
   import { t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
   import Brain from '@lucide/svelte/icons/brain';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
@@ -109,6 +110,17 @@
     });
   }
 
+  function startSelectionPolling() {
+    if (selectionTimer) return;
+    refreshLiveSnapshot();
+    selectionTimer = setInterval(refreshLiveSnapshot, 300);
+  }
+
+  function stopSelectionPolling() {
+    if (selectionTimer) clearInterval(selectionTimer);
+    selectionTimer = null;
+  }
+
   // ------------------------------- Chat -------------------------------
 
   // Messages / history / cost all live in the session store now. These
@@ -120,6 +132,12 @@
   let chatInput = $state('');
   let chatStreaming = $state(false);
   let chatStreamId: string | null = null;
+  /**
+   * Local stop for the chat/compact stream in flight. Aborting ends its event
+   * loop at once, so a stopped turn keeps (and saves) what already arrived
+   * even if the bridge never reports the cancellation back.
+   */
+  let streamAbort: AbortController | null = null;
   let chatScroller = $state<HTMLDivElement | undefined>(undefined);
   // Follow the stream only while the reader is already at the bottom; once
   // they scroll up to reread, stop yanking the view and offer a jump button.
@@ -284,7 +302,7 @@
       createAttachmentFromContext({
         id: `${asset.kind}:${asset.id}`,
         kind: 'manual-note',
-        label: `${asset.kind === 'skill' ? 'Skill' : 'Command'}: ${asset.name}`,
+        label: `Skill: ${asset.name}`,
         path: asset.path,
         content: asset.content,
       }),
@@ -358,6 +376,8 @@
       return;
     }
     chatStreaming = true;
+    const abort = new AbortController();
+    streamAbort = abort;
     let failure: string | null = null;
     try {
       const cfg = activeConfig();
@@ -375,14 +395,16 @@
           { role: 'user', content: history.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n') },
         ],
       });
-      chatStreamId = await startAiStream(req);
-      const result = await collectCompactionSummary(aiStream(chatStreamId));
+      const streamId = await startTurnStream(req, abort);
+      const result = streamId ? await collectCompactionSummary(aiStream(streamId, abort.signal)) : null;
       // An error (401/429, Stop, panel closed) or empty reply keeps the history.
-      if (result.ok) aiTalkSessions.compact(sessionId, result.summary);
-      else failure = compactFailureMessage(result);
+      if (result?.ok) aiTalkSessions.compact(sessionId, result.summary);
+      else if (result && !abort.signal.aborted) failure = compactFailureMessage(result);
+      else failure = t('aiTalk.compactFailed', { reason: t('aiTalk.cancelled') });
     } catch (e) {
       failure = t('aiTalk.compactFailed', { reason: e instanceof Error ? e.message : String(e) });
     } finally {
+      streamAbort = null;
       chatStreaming = false;
       chatStreamId = null;
     }
@@ -439,6 +461,20 @@
     await runAssistantTurn(sessionId, history, turnContext);
   }
 
+  /** Start the bridge stream for a turn; null (and cancelled) if Stop came first. */
+  async function startTurnStream(
+    req: Parameters<typeof startAiStream>[0],
+    abort: AbortController,
+  ): Promise<string | null> {
+    const id = await startAiStream(req);
+    if (abort.signal.aborted) {
+      void cancelAiStream(id).catch(() => {});
+      return null;
+    }
+    chatStreamId = id;
+    return id;
+  }
+
   /**
    * Stream one assistant completion for the given conversation history
    * (which must end with a user message). Shared by send, retry, and edit.
@@ -465,6 +501,8 @@
 
     let buffered = '';
     let bufferedReasoning = '';
+    const abort = new AbortController();
+    streamAbort = abort;
     try {
       const cfg = activeConfig();
       const req = buildChatRequest({
@@ -474,36 +512,48 @@
         temperature: cfg.temperature,
         messages: buildChatContextFrom(history, turnContext),
       });
-      chatStreamId = await startAiStream(req);
-      for await (const ev of aiStream(chatStreamId)) {
-        if (ev.kind === 'chunk') {
-          const delta = parseChatChunk(ev.data);
-          if (delta?.reasoning) {
-            reasoningStartedAt ??= Date.now();
-            bufferedReasoning += delta.reasoning;
-          }
-          if (delta?.content) {
-            if (reasoningStartedAt !== null && reasoningMs === undefined) reasoningMs = Date.now() - reasoningStartedAt;
-            buffered += delta.content;
-          }
-          if (delta?.reasoning || delta?.content) {
+      const streamId = await startTurnStream(req, abort);
+      if (streamId) {
+        for await (const ev of aiStream(streamId, abort.signal)) {
+          if (ev.kind === 'chunk') {
+            const delta = parseChatChunk(ev.data);
+            if (delta?.reasoning) {
+              reasoningStartedAt ??= Date.now();
+              bufferedReasoning += delta.reasoning;
+            }
+            if (delta?.content) {
+              if (reasoningStartedAt !== null && reasoningMs === undefined) reasoningMs = Date.now() - reasoningStartedAt;
+              buffered += delta.content;
+            }
+            if (delta?.reasoning || delta?.content) {
+              working[assistantIdx] = {
+                role: 'assistant',
+                content: buffered,
+                reasoning: bufferedReasoning || undefined,
+                reasoningMs,
+              };
+              aiTalkSessions.updateMessages(sessionId, [...working]);
+              scrollChat();
+            }
+          } else if (ev.kind === 'error') {
             working[assistantIdx] = {
               role: 'assistant',
-              content: buffered,
+              content: `${buffered}\n\n⚠️ ${ev.message}${ev.status ? ` (HTTP ${ev.status})` : ''}`,
               reasoning: bufferedReasoning || undefined,
-              reasoningMs,
             };
             aiTalkSessions.updateMessages(sessionId, [...working]);
-            scrollChat();
           }
-        } else if (ev.kind === 'error') {
-          working[assistantIdx] = {
-            role: 'assistant',
-            content: `${buffered}\n\n⚠️ ${ev.message}${ev.status ? ` (HTTP ${ev.status})` : ''}`,
-            reasoning: bufferedReasoning || undefined,
-          };
-          aiTalkSessions.updateMessages(sessionId, [...working]);
         }
+      }
+      // Stopped (Stop button, session switch, app backgrounded): keep what arrived.
+      if (abort.signal.aborted) {
+        working[assistantIdx] = {
+          role: 'assistant',
+          content: `${buffered}\n\n⚠️ ${t('aiTalk.cancelled')}`,
+          reasoning: bufferedReasoning || undefined,
+          reasoningMs,
+        };
+        aiTalkSessions.updateMessages(sessionId, [...working]);
       }
     } catch (e) {
       working[assistantIdx] = {
@@ -517,6 +567,7 @@
         working[assistantIdx] = { ...working[assistantIdx], reasoningMs: Date.now() - reasoningStartedAt };
         aiTalkSessions.updateMessages(sessionId, [...working]);
       }
+      streamAbort = null;
       stopClock();
       chatStreaming = false;
       chatStreamId = null;
@@ -614,14 +665,17 @@
     }
   }
 
+  /**
+   * Stop the stream in flight. The owning turn ends locally — keeping and
+   * saving any partial reply — and resets the streaming state itself.
+   */
   async function cancelChat() {
+    streamAbort?.abort();
     if (chatStreamId) {
       const id = chatStreamId;
       chatStreamId = null;
       await cancelAiStream(id).catch(() => {});
     }
-    chatStreaming = false;
-    stopClock();
   }
 
   function clearChat() {
@@ -694,7 +748,7 @@
     setTimeout(() => (saveStatus = null), 3000);
   }
 
-  const projectLifecycle = new AiAgentProjectLifecycle({
+  const projectLifecycle = new AiProjectLifecycle({
     async teardownProject(ctx) {
       await cancelChat();
       await persistSessionsFor(ctx.projectDir);
@@ -726,7 +780,7 @@
       });
   });
 
-  async function readProjectSessions(ctx: AiAgentProjectToken, projectDir: string): Promise<TalkSession[] | null> {
+  async function readProjectSessions(ctx: AiProjectToken, projectDir: string): Promise<TalkSession[] | null> {
     const sessions: TalkSession[] = [];
     try {
       const assets = await listAiPromptAssets(projectDir);
@@ -760,7 +814,7 @@
     return projectLifecycle.isCurrent(ctx) ? sessions : null;
   }
 
-  async function loadProjectSessions(ctx: AiAgentProjectToken) {
+  async function loadProjectSessions(ctx: AiProjectToken) {
     const projectDir = ctx.projectDir;
     const adoptable = carryOver;
     carryOver = [];
@@ -848,14 +902,31 @@
     queueMicrotask(() => document.querySelector<HTMLTextAreaElement>('[data-testid="ai-talk-input"]')?.focus());
   }
 
+  // -------- Background safety --------
+  // Selection polling pauses while the app is hidden. A mobile OS may suspend
+  // a backgrounded WebView mid-reply, so a stream in flight is stopped like
+  // the Stop button: the partial reply stays in the session and goes through
+  // the normal save path. That save is best-effort — the OS can suspend the
+  // app before it lands. Desktop keeps streaming while minimized or occluded.
+  function onPageHidden() {
+    stopSelectionPolling();
+    if (platform.isMobile && chatStreaming) void cancelChat();
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') onPageHidden();
+    else startSelectionPolling();
+  }
+
   // Open settings on mount if a request flag is set (used by "Configure" entry)
   onMount(() => {
     if (sessionStorage.getItem('novelist:ai-talk:open-settings') === '1') {
       sessionStorage.removeItem('novelist:ai-talk:open-settings');
       settingsOpen = true;
     }
-    refreshLiveSnapshot();
-    selectionTimer = setInterval(refreshLiveSnapshot, 300);
+    if (document.visibilityState !== 'hidden') startSelectionPolling();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onPageHidden);
     window.addEventListener('novelist:ai-talk:save-chat', saveChatToProject);
   });
 
@@ -913,9 +984,12 @@
     destroyed = true;
     sessionsReady = false;
     detachSessions();
+    streamAbort?.abort();
     cancelPendingStreams([chatStreamId], cancelAiStream);
-    if (selectionTimer) clearInterval(selectionTimer);
+    stopSelectionPolling();
     stopClock();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('pagehide', onPageHidden);
     window.removeEventListener('novelist:ai-talk:save-chat', saveChatToProject);
   });
 </script>
@@ -931,6 +1005,7 @@
     onRename={handleSessionRename}
     testidPrefix="ai-talk-session"
     newLabel="New chat"
+    renameLabel={t('aiTalk.renameSession')}
   />
 
   <header class="toolbar">
@@ -1706,5 +1781,34 @@
   }
   .chip:focus-within {
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--novelist-accent) 60%, transparent);
+  }
+
+  /* ---- Touch: always-visible actions, 44px targets, no iOS focus zoom ---- */
+  @media (hover: none) {
+    .msg-actions { opacity: 1; }
+  }
+  @media (pointer: coarse) {
+    .tool,
+    .msg-actions button,
+    .scroll-bottom {
+      width: 44px;
+      height: 44px;
+    }
+    .msg-actions,
+    .step-head:not(.static),
+    .memory-card summary,
+    .starter,
+    .edit-actions button,
+    .suggestions-bulk button {
+      min-height: 44px;
+    }
+    .chip {
+      height: 44px;
+      padding: 0 10px;
+    }
+  }
+  :global(html[data-mobile='true']) .edit-box textarea,
+  :global(html[data-mobile='true']) .chip select {
+    font-size: 16px;
   }
 </style>

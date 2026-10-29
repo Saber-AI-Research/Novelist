@@ -1,5 +1,5 @@
 import { test as base, expect, type Page } from '@playwright/test';
-import { buildTauriMockScript } from './tauri-mock';
+import { buildTauriMockScript, type MockPlatform } from './tauri-mock';
 import {
   MOCK_FILES,
   MOCK_FILE_CONTENTS,
@@ -123,6 +123,11 @@ export const test = base.extend<{
    * `test.use({ allowedBrowserErrors: [/exact message/] })`.
    */
   allowedBrowserErrors: RegExp[];
+  /**
+   * Platform reported by the mocked `get_platform_capabilities`. Set per
+   * Playwright project (`use: { mockPlatform: 'ios' }`); defaults to macOS.
+   */
+  mockPlatform: MockPlatform;
   clipboardCapture: {
     start: () => Promise<void>;
     startDeferred: () => Promise<void>;
@@ -145,29 +150,15 @@ export const test = base.extend<{
     getSnapshots: () => Promise<Array<{ id: string; name: string; timestamp: number }>>;
     setSnapshotRetention: (maxCount: number, minIntervalMinutes: number) => Promise<void>;
     seedRecentProjects: (list: Array<{ path: string; name: string; last_opened: string; pinned?: boolean; sort_order?: number | null }>) => Promise<void>;
-    emitEvent: (event: string, payload: unknown, targetLabel?: string) => Promise<void>;
+    emitEvent: (event: string, payload: unknown) => Promise<void>;
     openProject: (dirPath: string, files: MockFileEntry[]) => Promise<void>;
     setProjectConfig: (config: ProjectConfig) => Promise<void>;
     setLiteraryOverview: (overview: LiteraryStudyOverview) => Promise<void>;
     renameFile: (oldPath: string, newPath: string) => Promise<void>;
-    setClaudeCliSendError: (message: string | null) => Promise<void>;
-    setClaudeCliKillBlocked: (blocked: boolean) => Promise<void>;
-    setCodexCliKillBlocked: (blocked: boolean) => Promise<void>;
-    setCodexCliTurnError: (message: string | null) => Promise<void>;
-    setAiSessionWriteError: (message: string | null) => Promise<void>;
-    setAiSessionWritesBlocked: (blocked: boolean) => Promise<void>;
-    setAiSessionDeletesBlocked: (blocked: boolean) => Promise<void>;
-    setAiSessionListError: (projectDir: string, message: string | null) => Promise<void>;
-    setAiPromptAssetError: (projectDir: string, message: string | null) => Promise<void>;
-      setAiPromptAssetsBlocked: (projectDir: string, blocked: boolean) => Promise<void>;
-      setProjectDetectBlocked: (projectDir: string, blocked: boolean) => Promise<void>;
     setReadFileBlocked: (path: string, blocked: boolean) => Promise<void>;
     releaseNextBlockedRead: () => Promise<void>;
     failNextBlockedRead: (message: string) => Promise<void>;
     rejectBlockedRead: (message: string) => Promise<void>;
-    scheduleConditionalWriteMutation: (path: string, content: string) => Promise<void>;
-    setConditionalWriteBlocked: (path: string, blocked: boolean) => Promise<void>;
-    setConditionalWriteResolvedTarget: (path: string, resolvedPath: string, content: string) => Promise<void>;
     setFileContent: (path: string, content: string) => Promise<void>;
      getFileContent: (path: string) => Promise<string | null>;
      setPublishChannels: (channels: ChannelConfig[]) => Promise<void>;
@@ -218,12 +209,6 @@ export const test = base.extend<{
      setPortableMode: (value: { enabled: boolean; dataRoot?: string } | { error: string }) => Promise<void>;
      setUpdaterResponses: (responses: Array<null | { version: string; body?: string | null } | { error: string }>) => Promise<void>;
      getInvokeCalls: () => Promise<MockInvokeCall[]>;
-    getAiSessionWriteCount: () => Promise<number>;
-    getClaudeCliSpawnUuidHistory: () => Promise<string[]>;
-    getClaudeCliSendCount: () => Promise<number>;
-    getClaudeCliKillCount: () => Promise<number>;
-    getCodexCliTurnCount: () => Promise<number>;
-     getCodexCliKillCount: () => Promise<number>;
      reset: () => Promise<void>;
      /**
       * Release blocked operations and reset updater/portable state, then fully
@@ -234,6 +219,7 @@ export const test = base.extend<{
    };
 }>({
   allowedBrowserErrors: [[], { option: true }],
+  mockPlatform: ['macos', { option: true }],
 
   browserErrors: async ({ page }, use) => {
     const errors: string[] = [];
@@ -247,7 +233,7 @@ export const test = base.extend<{
     await use(errors);
   },
 
-  app: async ({ page, browserErrors: _browserErrors }, use) => {
+  app: async ({ page, browserErrors: _browserErrors, mockPlatform }, use) => {
     await page.addInitScript({
       content: buildTauriMockScript({
         files: MOCK_FILES,
@@ -255,6 +241,7 @@ export const test = base.extend<{
         recentProjects: MOCK_RECENT_PROJECTS,
         projectDir: MOCK_PROJECT_DIR,
         projectConfig: MOCK_PROJECT_CONFIG,
+        platform: mockPlatform,
       }),
     });
 
@@ -364,11 +351,14 @@ export const test = base.extend<{
           list,
         );
       },
-      async emitEvent(event: string, payload: unknown, targetLabel?: string) {
-        await app.evaluate(
-          ([e, p, target]) => (window as any).__TAURI_MOCK_STATE__.emitEvent(e, p, target),
-          [event, payload, targetLabel] as const,
-        );
+      async emitEvent(event: string, payload: unknown) {
+        await app.evaluate(([e, p]) => {
+          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
+          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
+          const emit: unknown = Reflect.get(state, 'emitEvent');
+          if (typeof emit !== 'function') throw new Error('Mock event emitter unavailable');
+          emit.call(state, e, p);
+        }, [event, payload] as const);
       },
       async openProject(dirPath: string, files: MockFileEntry[]) {
         await app.evaluate(
@@ -394,24 +384,6 @@ export const test = base.extend<{
           [oldPath, newPath] as const,
         );
       },
-      async setClaudeCliSendError(message: string | null) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setClaudeCliSendError');
-          if (typeof setter !== 'function') throw new Error('Claude send-error setter unavailable');
-          setter.call(state, value);
-        }, message);
-      },
-      async setConditionalWriteResolvedTarget(path: string, resolvedPath: string, content: string) {
-        await app.evaluate(([requested, resolved, initial]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setConditionalWriteResolvedTarget');
-          if (typeof setter !== 'function') throw new Error('Conditional write target setter unavailable');
-          setter.call(state, requested, resolved, initial);
-        }, [path, resolvedPath, content] as const);
-      },
       async getFileContent(path: string) {
         return app.evaluate((target) => {
           const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
@@ -422,96 +394,6 @@ export const test = base.extend<{
           if (value !== null && typeof value !== 'string') throw new Error('Mock file content unavailable');
           return value;
         }, path);
-      },
-      async setClaudeCliKillBlocked(blocked: boolean) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setClaudeCliKillBlocked');
-          if (typeof setter !== 'function') throw new Error('Claude kill-block setter unavailable');
-          setter.call(state, value);
-        }, blocked);
-      },
-      async setCodexCliKillBlocked(blocked: boolean) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setCodexCliKillBlocked');
-          if (typeof setter !== 'function') throw new Error('Codex kill-block setter unavailable');
-          setter.call(state, value);
-        }, blocked);
-      },
-      async setCodexCliTurnError(message: string | null) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setCodexCliTurnError');
-          if (typeof setter !== 'function') throw new Error('Codex turn-error setter unavailable');
-          setter.call(state, value);
-        }, message);
-      },
-      async setAiSessionWriteError(message: string | null) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiSessionWriteError');
-          if (typeof setter !== 'function') throw new Error('AI session write-error setter unavailable');
-          setter.call(state, value);
-        }, message);
-      },
-      async setAiSessionWritesBlocked(blocked: boolean) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiSessionWritesBlocked');
-          if (typeof setter !== 'function') throw new Error('AI session write blocker unavailable');
-          setter.call(state, value);
-        }, blocked);
-      },
-      async setAiSessionDeletesBlocked(blocked: boolean) {
-        await app.evaluate((value) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiSessionDeletesBlocked');
-          if (typeof setter !== 'function') throw new Error('AI session delete blocker unavailable');
-          setter.call(state, value);
-        }, blocked);
-      },
-      async setAiSessionListError(projectDir: string, message: string | null) {
-        await app.evaluate(([dirPath, value]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiSessionListError');
-          if (typeof setter !== 'function') throw new Error('AI session list-error setter unavailable');
-          setter.call(state, dirPath, value);
-        }, [projectDir, message] as const);
-      },
-      async setAiPromptAssetError(projectDir: string, message: string | null) {
-        await app.evaluate(([dirPath, value]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiPromptAssetError');
-          if (typeof setter !== 'function') throw new Error('AI prompt-asset error setter unavailable');
-          setter.call(state, dirPath, value);
-        }, [projectDir, message] as const);
-      },
-      async setAiPromptAssetsBlocked(projectDir: string, blocked: boolean) {
-        await app.evaluate(([dirPath, value]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setAiPromptAssetsBlocked');
-          if (typeof setter !== 'function') throw new Error('AI prompt-asset blocker unavailable');
-          setter.call(state, dirPath, value);
-        }, [projectDir, blocked] as const);
-      },
-      async setProjectDetectBlocked(projectDir: string, blocked: boolean) {
-        await app.evaluate(([dirPath, value]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setProjectDetectBlocked');
-          if (typeof setter !== 'function') throw new Error('Project detect blocker unavailable');
-          setter.call(state, dirPath, value);
-        }, [projectDir, blocked] as const);
       },
       async setReadFileBlocked(path: string, blocked: boolean) {
         await app.evaluate(([filePath, value]) => {
@@ -548,24 +430,6 @@ export const test = base.extend<{
           if (typeof reject !== 'function') throw new Error('Blocked read rejecter unavailable');
           reject.call(state, value);
         }, message);
-      },
-      async scheduleConditionalWriteMutation(path: string, content: string) {
-        await app.evaluate(([filePath, externalContent]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const schedule: unknown = Reflect.get(state, 'scheduleConditionalWriteMutation');
-          if (typeof schedule !== 'function') throw new Error('Conditional-write mutation scheduler unavailable');
-          schedule.call(state, filePath, externalContent);
-        }, [path, content] as const);
-      },
-      async setConditionalWriteBlocked(path: string, blocked: boolean) {
-        await app.evaluate(([filePath, value]) => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const setter: unknown = Reflect.get(state, 'setConditionalWriteBlocked');
-          if (typeof setter !== 'function') throw new Error('Conditional-write blocker unavailable');
-          setter.call(state, filePath, value);
-        }, [path, blocked] as const);
       },
       async setFileContent(path: string, content: string) {
         await app.evaluate(([filePath, value]) => {
@@ -844,62 +708,6 @@ export const test = base.extend<{
           return calls;
         });
       },
-      async getAiSessionWriteCount() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const count: unknown = Reflect.get(state, 'aiSessionWriteCount');
-          if (typeof count !== 'number') throw new Error('AI session write count unavailable');
-          return count;
-        });
-      },
-      async getClaudeCliSpawnUuidHistory() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const history: unknown = Reflect.get(state, 'claudeCliSpawnUuidHistory');
-          if (!Array.isArray(history) || !history.every((value) => typeof value === 'string')) {
-            throw new Error('Claude spawn UUID history unavailable');
-          }
-          return history;
-        });
-      },
-      async getClaudeCliSendCount() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const count: unknown = Reflect.get(state, 'claudeCliSendCount');
-          if (typeof count !== 'number') throw new Error('Claude send count unavailable');
-          return count;
-        });
-      },
-      async getClaudeCliKillCount() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const count: unknown = Reflect.get(state, 'claudeCliKillCount');
-          if (typeof count !== 'number') throw new Error('Claude kill count unavailable');
-          return count;
-        });
-      },
-      async getCodexCliTurnCount() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const count: unknown = Reflect.get(state, 'codexCliTurnCount');
-          if (typeof count !== 'number') throw new Error('Codex turn count unavailable');
-          return count;
-        });
-      },
-      async getCodexCliKillCount() {
-        return app.evaluate(() => {
-          const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
-          if (typeof state !== 'object' || state === null) throw new Error('Tauri mock state unavailable');
-          const count: unknown = Reflect.get(state, 'codexCliKillCount');
-          if (typeof count !== 'number') throw new Error('Codex kill count unavailable');
-          return count;
-        });
-      },
        async reset() {
          await app.evaluate(() => (window as any).__TAURI_MOCK_STATE__.reset());
        },
@@ -907,10 +715,6 @@ export const test = base.extend<{
          return app.evaluate(async () => {
            const state = Reflect.get(window, '__TAURI_MOCK_STATE__') as Record<string, unknown>;
             for (const [name, value] of [
-             ['setAiSessionWritesBlocked', false],
-             ['setAiSessionDeletesBlocked', false],
-             ['setClaudeCliKillBlocked', false],
-             ['setCodexCliKillBlocked', false],
              ['setPublishCoverLoadBlocked', false],
               ['setPublishClipboardReadBlocked', false],
               ['setPublishBlocked', false],

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 /**
  * [contract] extensionStore — backs the sidebar icon strip + file-handler
- * registry. Built-in panels (AI Talk, AI Agent) are always present; plugin
+ * registry. The built-in AI Talk panel is always present; plugin
  * panels are merged in from `commands.listPlugins()` at startup.
  */
 
@@ -30,7 +30,6 @@ function resetStore() {
   // Re-seed the built-ins so each test starts from the published contract.
   extensionStore.panels = [
     { pluginId: 'ai-talk', type: 'panel', label: 'AI Talk', entryUrl: '', builtin: true },
-    { pluginId: 'ai-agent', type: 'panel', label: 'AI Agent', entryUrl: '', builtin: true },
   ];
   extensionStore.fileHandlers = [];
   extensionStore.pendingReloadPluginIds = [];
@@ -38,11 +37,10 @@ function resetStore() {
 }
 
 describe('[contract] extensionStore — initial state', () => {
-  it('exposes the two built-in panels (ai-talk + ai-agent)', () => {
+  it('exposes the built-in AI Talk panel', () => {
     resetStore();
     const ids = extensionStore.panels.map(p => p.pluginId);
-    expect(ids).toContain('ai-talk');
-    expect(ids).toContain('ai-agent');
+    expect(ids).toEqual(['ai-talk']);
     expect(extensionStore.panels.every(p => p.builtin)).toBe(true);
   });
 
@@ -70,8 +68,8 @@ describe('[contract] extensionStore.togglePanel / openPanel', () => {
   it('togglePanel switches directly to a different panel (active -> new active)', () => {
     extensionStore.togglePanel('ai-talk');
     // Toggling a different id should just replace (no close + reopen).
-    extensionStore.togglePanel('ai-agent');
-    expect(extensionStore.activePanelId).toBe('ai-agent');
+    extensionStore.togglePanel('mindmap');
+    expect(extensionStore.activePanelId).toBe('mindmap');
   });
 
   it('openPanel always sets the active id (no close-on-repeat)', () => {
@@ -153,14 +151,14 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     await extensionStore.loadFromPlugins();
 
-    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk', 'ai-agent']);
+    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk']);
     expect(extensionStore.fileHandlers).toEqual([]);
   });
 
   it('resets to built-ins only when listPlugins throws (caught by catch block)', async () => {
     (commands.listPlugins as any).mockRejectedValue(new Error('crash'));
     await extensionStore.loadFromPlugins();
-    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk', 'ai-agent']);
+    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk']);
     expect(extensionStore.fileHandlers).toEqual([]);
   });
 
@@ -211,7 +209,7 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     await extensionStore.loadFromPlugins();
 
-    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk', 'ai-agent', 'mindmap']);
+    expect(extensionStore.panels.map(p => p.pluginId)).toEqual(['ai-talk', 'mindmap']);
     const mindmap = extensionStore.panels.find(p => p.pluginId === 'mindmap')!;
     expect(mindmap.width).toBe(320);
     expect(mindmap.label).toBe('Mind Map');
@@ -244,8 +242,8 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     await extensionStore.loadFromPlugins();
 
-    // Still only two entries (the built-in wins; no duplicate).
-    expect(extensionStore.panels).toHaveLength(2);
+    // Still only the built-in entry (the built-in wins; no duplicate).
+    expect(extensionStore.panels).toHaveLength(1);
     expect(extensionStore.panels.find(p => p.pluginId === 'ai-talk')?.builtin).toBe(true);
   });
 
@@ -271,7 +269,7 @@ describe('[contract] extensionStore.loadFromPlugins', () => {
 
     await extensionStore.loadFromPlugins();
 
-    expect(extensionStore.panels).toHaveLength(2); // only built-ins
+    expect(extensionStore.panels).toHaveLength(1); // only built-ins
     expect(extensionStore.fileHandlers).toEqual([]);
   });
 

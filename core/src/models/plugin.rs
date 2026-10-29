@@ -93,7 +93,7 @@ permissions = ["read"]
     }
 
     #[test]
-    fn test_manifest_accepts_ai_bridge_tokens() {
+    fn test_manifest_accepts_ai_http_token() {
         let toml_str = r#"
 [plugin]
 id = "yolo"
@@ -103,19 +103,6 @@ permissions = ["read", "write", "ui", "ai:http"]
 "#;
         let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
         assert!(manifest.plugin.permissions.contains(&"ai:http".to_string()));
-
-        let toml_str = r#"
-[plugin]
-id = "claudian"
-name = "Claudian"
-version = "0.1.0"
-permissions = ["read", "write", "ui", "ai:claude-cli"]
-"#;
-        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
-        assert!(manifest
-            .plugin
-            .permissions
-            .contains(&"ai:claude-cli".to_string()));
     }
 
     #[test]

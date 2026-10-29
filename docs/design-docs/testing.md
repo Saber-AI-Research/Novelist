@@ -116,16 +116,6 @@ Stable browser practices:
   `__test_api__.setActiveEditorDocument()`, which dispatches outside history.
   Do not sleep to separate fixture setup from the first user undo step.
 
-AI Agent pre-send context failures require a target-session turn before the
-asynchronous context read begins. Browser regressions must assert that a typed
-or thrown context-read failure produces one sanitized retryable turn, zero
-provider spawn/send and zero tool/apply writes, and no global or destination-
-session error. Retrying that pending-context turn must perform a new context
-read and dispatch exactly once with the current bytes. Cover active-session
-switches with delayed output in another session, project A to B switching,
-session rename/delete, and component destruction through explicit fixture
-release/rejection points rather than timing sleeps.
-
 ## Task 23 tagged regression workflows
 
 Task 23 uses Playwright `@` tags in test titles, not the bracketed describe
@@ -152,6 +142,57 @@ invokes, listeners, pending waiters, AI/Publish/updater/template/plugin state
 against one exact zero-residue object, which proves the reset is complete. A
 negative UI assertion should also assert the exact forbidden IPC/request count
 whenever possible.
+
+## Mobile browser projects
+
+`playwright.config.ts` adds `iphone`, `ipad`, `ipad-landscape` and
+`android-phone` projects that run only `tests/e2e/specs/mobile/**`; the
+desktop projects ignore that folder. Each project sets the `mockPlatform`
+fixture option (`macos` default, `ios`, `android`), and the Tauri mock
+answers `get_platform_capabilities` with that platform's capability set plus
+the library, staging (`stage_import_file`), export and
+`plugin:mobile-support|share_file` commands. `__TAURI_MOCK_STATE__.sharedFiles`
+and `.stagedImports` expose what a test shared or imported. The app refuses
+to mount without capabilities (explicit `platform-init-error` screen), so
+every new boot-time IPC must exist in the mock for all platforms.
+
+The Playwright web server runs Vite with `--mode test`: file watching and HMR
+are disabled only in that mode. Tailwind otherwise watches documentation and
+test files too, so unrelated edits can reload an in-progress contract run back
+to Welcome. Source-module imports remain available; production preview alone
+cannot run fixtures that import `/app/lib/*.ts`.
+
+The styled-copy specs disable only trace DOM snapshots, not security sandboxing
+or console-error assertions. Playwright's snapshotter injects scripts into
+every frame; WebKit correctly refuses those inside the scriptless preview.
+Action logs and screenshots remain in their retry traces.
+
+
+These projects prove the touch shell's state machine (drawer, panel sheets,
+format bar, gated commands, background flush requests, share/import IPC) in
+emulated viewports. They cannot prove on-screen keyboard geometry, IME or
+dictation lifecycles, the native share sheet, OS backgrounding/termination,
+or iOS container relocation. Unit coverage pins the layout classification
+(`tests/unit/stores/platform.test.ts`), the mobile lifecycle
+(`tests/unit/composables/app-lifecycle.test.ts`) and the relocation-stable
+workspace key (`tests/unit/services/project-workspace-state.test.ts`).
+
+Real-device checklist (iPhone, iPad with and without an external keyboard,
+Android phone/tablet), recorded per release candidate:
+
+- IME matrix: iOS pinyin/zhuyin/Japanese, Android Gboard/Sogou/Baidu, plus
+  iOS dictation and Android voice typing into a chapter; `「」` and Chinese
+  punctuation; format-bar taps mid-composition.
+- Keyboard: toolbar/format bar/AI Talk composer stay above the keyboard;
+  rotation re-lays out; iPadOS-reserved shortcuts (Cmd+H, Cmd+Shift+3/4)
+  versus the app defaults.
+- Persistence: edit, background the app, kill it, relaunch — the text is on
+  disk; a dirty buffer survives an app update (container move) via the
+  library-relative workspace state.
+- Sync: offline edit then reconnect; resume after a remote change reloads
+  or raises the conflict dialog.
+- Share/import: project zip and document (Markdown/HTML) export through the
+  share sheet; zip/EPUB/TXT import through the system picker.
 
 ## Native macOS boundary
 

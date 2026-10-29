@@ -1,0 +1,7 @@
+# Android 15+ devices may use 16 KiB memory pages. These shared libraries must
+# also remain loadable on the 4 KiB devices supported back to API 26.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

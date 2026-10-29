@@ -3,7 +3,7 @@
  * Obsidian-inspired: each plugin can register a Settings tab, surfaced
  * from Settings → Plugins → ⚙ next to the plugin row.
  *
- * For built-in panels (ai-talk, ai-agent) this dynamic-imports the
+ * For built-in panels (ai-talk) this dynamic-imports the
  * panel's settings component on demand. Third-party plugins distributed
  * via iframe don't currently get a host-side settings panel; their
  * settings live inside the iframe.
@@ -39,13 +39,6 @@ const ENTRIES: Record<string, PluginSettingsEntry> = {
     labelKey: 'settings.plugins.aiTalk.name',
     panelId: 'ai-talk',
     load: () => import('$lib/components/ai-talk/AiTalkSettings.svelte'),
-  },
-  'ai-agent': {
-    pluginId: 'ai-agent',
-    label: 'AI Agent',
-    labelKey: 'settings.plugins.aiAgent.name',
-    panelId: 'ai-agent',
-    load: () => import('$lib/components/ai-agent/AiAgentSettings.svelte'),
   },
   'book-translation': {
     pluginId: 'book-translation',

@@ -35,6 +35,20 @@ surface discipline.
 - Updater support exists through Tauri's updater plugin.
 - Tag release actions are commit-pinned, dependency installs are frozen/locked,
   platform builders create drafts, and public release requires every build gate.
+- The WebDAV cloud account (one per device, from an existing provider; no
+  Novelist account service) stores its app password in the platform vault:
+  iOS Keychain (`AfterFirstUnlockThisDeviceOnly`, not synchronizable) or an
+  Android Keystore AES-GCM key, with no plaintext fallback on mobile. Desktop
+  keeps it in an owner-only (`0700` folder, `0600` file) app-data file that is
+  **not encrypted at rest**, the same level as per-project WebDAV settings.
+  The vault record binds the password to the URL and user it was entered for;
+  it is released only for exactly that pair and never returned over IPC.
+  Connecting validates the URL (https, or http to loopback only; no embedded
+  credentials, query or fragment) and authenticates before storing anything;
+  redirects are refused rather than followed. Remote project listings, identity
+  cards, `project.toml` and file downloads are size- and count-bounded, and a
+  listing href escaping its folder rejects the whole listing. See
+  `docs/design-docs/file-lifecycle.md` (Cloud account).
 
 ## Rules For New Work
 
@@ -44,8 +58,8 @@ surface discipline.
 - Validate paths at Rust command boundaries.
 - Preserve atomic writes for user content and project metadata.
 - Keep secrets out of project files, logs, and generated docs.
-- Bound and redact AI provider, tool, stream, apply, and context-resolution
-  diagnostics before store mutation, rendering, project-session persistence,
+- Bound and redact AI provider, stream, and context-resolution diagnostics
+  before store mutation, rendering, project-session persistence,
   or transcript export. A failed pre-send prompt remains owned by its source
   project/session for explicit retry and must never surface in a destination
   session after a project or session switch.

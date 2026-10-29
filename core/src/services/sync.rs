@@ -1,3 +1,4 @@
+use crate::services::cloud;
 use crate::services::project_files::is_project_content_path;
 use crate::services::webdav::{self, WebDavAuth};
 use crate::AppError;
@@ -24,6 +25,11 @@ pub struct SyncConfig {
     /// Explicitly leave an unidentifiable legacy `novelist/{name}` tree untouched.
     #[serde(default)]
     pub legacy_remote_acknowledged: bool,
+    /// Credentials come from this device's cloud account (`services::cloud`).
+    /// `webdav_url`/`username` then name the account the project was linked
+    /// to, and `password` stays empty.
+    #[serde(default)]
+    pub cloud_account: bool,
 }
 
 impl Default for SyncConfig {
@@ -35,6 +41,7 @@ impl Default for SyncConfig {
             password: String::new(),
             interval_minutes: 30,
             legacy_remote_acknowledged: false,
+            cloud_account: false,
         }
     }
 }
@@ -52,6 +59,9 @@ pub struct SyncStatus {
     /// `novelist/{name}` tree into `novelist-sync/{id}`. Joining that namespace
     /// requires an explicit `adopt_sync_identity` call with this ID.
     pub adoptable_project_id: Option<String>,
+    /// Files both sides changed since their last common version. Both copies
+    /// were left untouched; each needs `resolve_conflict`.
+    pub conflicts: Vec<String>,
 }
 
 /// Per-file common content established only by a successful transfer or equality.
@@ -72,9 +82,11 @@ pub struct SyncState {
     pub remote_binding: Option<String>,
 }
 
-const LOCAL_IDENTITY_PATH: &str = ".novelist/sync-identity.json";
+pub(crate) const LOCAL_IDENTITY_PATH: &str = ".novelist/sync-identity.json";
 const IDENTITY_FILE: &str = "sync-identity.json";
-const MAX_IDENTITY_BYTES: usize = 1024;
+pub(crate) const MAX_IDENTITY_BYTES: usize = 1024;
+/// Remote collection holding one `{project_id}` namespace per project.
+pub(crate) const REMOTE_ROOT: &str = "novelist-sync";
 /// Identity cards naming the namespace that continues a legacy
 /// `novelist/{name}` tree. Created with `If-None-Match: *`, so exactly one
 /// device decides; every other copy must explicitly adopt that identity.
@@ -87,6 +99,14 @@ struct SyncIdentity {
     project_id: String,
 }
 
+/// Project IDs are exactly 64 lowercase hexadecimal characters.
+pub(crate) fn is_project_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn parse_identity(bytes: &[u8]) -> Result<SyncIdentity, AppError> {
     if bytes.len() > MAX_IDENTITY_BYTES {
         return Err(AppError::InvalidInput(
@@ -96,18 +116,53 @@ fn parse_identity(bytes: &[u8]) -> Result<SyncIdentity, AppError> {
     let identity: SyncIdentity = serde_json::from_slice(bytes).map_err(|_| {
         AppError::InvalidInput("Invalid sync project identity; restore the project's original .novelist/sync-identity.json instead of replacing its ID".into())
     })?;
-    if identity.schema_version != 1
-        || identity.project_id.len() != 64
-        || !identity
-            .project_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if identity.schema_version != 1 || !is_project_id(&identity.project_id) {
         return Err(AppError::InvalidInput(
             "Invalid or unsupported sync project identity".into(),
         ));
     }
     Ok(identity)
+}
+
+/// The project ID a remote identity card names.
+pub(crate) fn parse_project_id(bytes: &[u8]) -> Result<String, AppError> {
+    parse_identity(bytes).map(|identity| identity.project_id)
+}
+
+/// The ID in a local project's identity card, if it has one.
+pub(crate) fn local_project_id(project: &Path) -> Result<Option<String>, AppError> {
+    let root = Dir::open_ambient_dir(project, ambient_authority())?;
+    Ok(read_local_identity(&root)?.map(|(identity, _)| identity.project_id))
+}
+
+/// The project's sync ID, creating its identity card if it has none yet (an
+/// existing card is never replaced). The same ID the first sync would publish.
+pub(crate) fn ensure_project_identity(project: &Path) -> Result<String, AppError> {
+    let root = Dir::open_ambient_dir(project, ambient_authority())?;
+    Ok(project_identity(&root)?.0.project_id)
+}
+
+/// Give a new, still empty project copy an existing identity. An existing card
+/// is never replaced: a project that already has another ID is rejected.
+pub(crate) fn write_project_identity(project: &Path, project_id: &str) -> Result<(), AppError> {
+    if !is_project_id(project_id) {
+        return Err(AppError::InvalidInput(
+            "Invalid or unsupported sync project identity".into(),
+        ));
+    }
+    let identity = SyncIdentity {
+        schema_version: 1,
+        project_id: project_id.to_owned(),
+    };
+    let root = Dir::open_ambient_dir(project, ambient_authority())?;
+    let parent = webdav::confined_parent(&root, Path::new(LOCAL_IDENTITY_PATH), true)?;
+    publish_identity(&parent, &serde_json::to_vec_pretty(&identity)?, false)?;
+    match read_local_identity(&root)? {
+        Some((stored, _)) if stored == identity => Ok(()),
+        _ => Err(AppError::Custom(
+            "This folder already has a different sync identity; it was not changed".into(),
+        )),
+    }
 }
 
 fn read_local_identity(root: &Dir) -> Result<Option<(SyncIdentity, Vec<u8>)>, AppError> {
@@ -197,14 +252,17 @@ fn publish_identity(parent: &Dir, bytes: &[u8], replace: bool) -> Result<(), App
     result
 }
 
-/// Get the sync data directory for a project: ~/.novelist/sync/{project-hash}/
+/// Get the sync data directory for a project: ~/.novelist/sync/{key-hash}/,
+/// keyed by the project storage key (path on desktop, library-relative path
+/// on mobile, so iOS app-container relocation keeps config and baselines).
 fn sync_dir_for_project(project_dir: &str) -> Result<PathBuf, AppError> {
-    let hash = blake3::hash(project_dir.as_bytes()).to_hex();
+    let key = crate::services::portable::project_storage_key(project_dir);
+    let hash = blake3::hash(key.as_bytes()).to_hex();
     let dir = data_root().join("sync").join(&hash[..16]);
     Ok(dir)
 }
 
-fn data_root() -> PathBuf {
+pub(crate) fn data_root() -> PathBuf {
     // `NOVELIST_SYNC_DATA_DIR` is a test seam (used by unit tests that need
     // per-test isolation and can't rely on `portable::init()` having run).
     // Production code goes through `portable::novelist_home`.
@@ -266,7 +324,119 @@ fn write_sync_state(project_dir: &str, state: &SyncState) -> Result<(), AppError
     Ok(())
 }
 
-fn atomic_write_state(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+/// Last completed sync of a project, if any.
+pub(crate) fn last_sync(project_dir: &str) -> Result<Option<String>, AppError> {
+    Ok(read_sync_state(project_dir)?.last_sync_iso)
+}
+
+fn ignore_missing(result: std::io::Result<()>) -> Result<(), AppError> {
+    match result {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+/// A folder's app-data sync directory (config, baselines, recovery copies),
+/// resolved while the folder still exists under that name: its storage key
+/// may depend on resolving the path, which fails once the folder is renamed.
+pub(crate) struct SyncData(PathBuf);
+
+impl SyncData {
+    pub(crate) fn of(project_dir: &str) -> Result<Self, AppError> {
+        Ok(Self(sync_dir_for_project(project_dir)?))
+    }
+
+    /// Move the config and baselines to the key of `to_project`, replacing
+    /// whatever an earlier folder at that path left behind. Both exist after
+    /// a completed sync; a missing one is an error, never a silently unlinked
+    /// project.
+    pub(crate) fn relocate(self, to_project: &str) -> Result<(), AppError> {
+        let to = sync_dir_for_project(to_project)?;
+        if self.0 == to {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&to)?;
+        for name in ["config.json", "sync-state.json"] {
+            std::fs::rename(self.0.join(name), to.join(name))?;
+        }
+        self.discard()
+    }
+
+    /// Forget the sync data of a folder that never became a project.
+    pub(crate) fn discard(self) -> Result<(), AppError> {
+        ignore_missing(std::fs::remove_dir_all(&self.0))
+    }
+}
+
+/// Apply `edit` to every stored project sync config; a config is rewritten
+/// (atomically) only when `edit` reports a change. Returns how many changed.
+fn rewrite_sync_configs(mut edit: impl FnMut(&mut SyncConfig) -> bool) -> Result<u32, AppError> {
+    let entries = match std::fs::read_dir(data_root().join("sync")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut changed = 0;
+    for entry in entries {
+        let path = entry?.path().join("config.json");
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut config) = serde_json::from_str::<SyncConfig>(&data) else {
+            continue;
+        };
+        if edit(&mut config) {
+            atomic_write_state(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+/// Turn sync off for every project linked to the cloud account. Their files,
+/// baselines and remote copies stay; returns how many were unlinked.
+pub(crate) fn unlink_cloud_projects() -> Result<u32, AppError> {
+    rewrite_sync_configs(|config| {
+        if !config.cloud_account {
+            return false;
+        }
+        config.cloud_account = false;
+        config.enabled = false;
+        config.password.clear();
+        true
+    })
+}
+
+/// Move per-project WebDAV passwords out of plaintext configs when an account
+/// connects. Projects using exactly that endpoint and user become linked to
+/// it (the baseline binding, which covers URL, user and project ID, is
+/// unchanged). With `strip_others` (mobile, where no plaintext password may
+/// remain), every other stored password is removed and that project's sync
+/// turned off until it is linked.
+pub(crate) fn adopt_inline_credentials(
+    endpoint: &str,
+    username: &str,
+    strip_others: bool,
+) -> Result<u32, AppError> {
+    rewrite_sync_configs(|config| {
+        if config.cloud_account {
+            return false;
+        }
+        if config.webdav_url == endpoint && config.username == username {
+            config.cloud_account = true;
+            config.password.clear();
+            return true;
+        }
+        if strip_others && !config.password.is_empty() {
+            config.password.clear();
+            config.enabled = false;
+            return true;
+        }
+        false
+    })
+}
+
+pub(crate) fn atomic_write_state(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::InvalidInput("Missing sync state parent".into()))?;
@@ -529,50 +699,16 @@ async fn fetch_identity(
     remote_path: &str,
     auth: &WebDavAuth,
 ) -> Result<Option<SyncIdentity>, AppError> {
-    let mut response = client
-        .get(webdav::remote_url(&config.webdav_url, remote_path)?)
-        .timeout(webdav::REQUEST_TIMEOUT)
-        .basic_auth(&auth.username, Some(&auth.password))
-        .send()
-        .await
-        .map_err(|error| {
-            AppError::Custom(format!(
-                "WebDAV identity GET failed: {}",
-                error.without_url()
-            ))
-        })?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !response.status().is_success() {
-        return Err(AppError::Custom(format!(
-            "WebDAV identity GET returned {}",
-            response.status()
-        )));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_IDENTITY_BYTES as u64)
-    {
-        return Err(AppError::InvalidInput(
-            "Remote sync identity exceeds its size limit".into(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        AppError::Custom(format!(
-            "WebDAV identity body failed: {}",
-            error.without_url()
-        ))
-    })? {
-        if chunk.len() > MAX_IDENTITY_BYTES - bytes.len() {
-            return Err(AppError::InvalidInput(
-                "Remote sync identity exceeds its size limit".into(),
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    parse_identity(&bytes).map(Some)
+    webdav::get_file_if_exists(
+        client,
+        &config.webdav_url,
+        remote_path,
+        auth,
+        MAX_IDENTITY_BYTES,
+    )
+    .await?
+    .map(|file| parse_identity(&file.bytes))
+    .transpose()
 }
 
 async fn remote_identity(
@@ -767,6 +903,8 @@ enum Transfer {
     Downloaded,
     DeletedRemote,
     DeletedLocal,
+    /// Both sides changed since the common version; neither was touched.
+    Conflict,
 }
 
 /// Version both sides hold after a file is reconciled.
@@ -883,53 +1021,128 @@ async fn sync_file(
             })?;
             assert_local_unchanged(root, relative, None)?;
             assert_local_unchanged(root, LOCAL_IDENTITY_PATH, Some(identity_hash))?;
-            webdav::delete_file_if_match(client, &config.webdav_url, &remote_path, auth, etag).await?;
+            webdav::delete_file_if_match(client, &config.webdav_url, &remote_path, auth, etag)
+                .await?;
             Ok((Transfer::DeletedRemote, None))
         }
         // New here, edited here after a remote deletion, or edited only here.
         (Some(bytes), Some(local_hash), remote)
-            if remote.is_none() || remote.as_ref().map(|version| version.hash.as_str()) == baseline =>
+            if remote.is_none()
+                || remote.as_ref().map(|version| version.hash.as_str()) == baseline =>
         {
             let condition = match remote.as_ref() {
                 None => webdav::PutCondition::Absent,
-                Some(version) => webdav::PutCondition::Matches(version.etag.as_deref().ok_or_else(|| {
-                    AppError::Custom("Cannot safely replace remote file without a strong ETag".into())
-                })?),
+                Some(version) => {
+                    webdav::PutCondition::Matches(version.etag.as_deref().ok_or_else(|| {
+                        AppError::Custom(
+                            "Cannot safely replace remote file without a strong ETag".into(),
+                        )
+                    })?)
+                }
             };
             ensure_remote_parents(client, &config.webdav_url, &remote_path, auth).await?;
             assert_local_unchanged(root, relative, Some(&local_hash))?;
             assert_local_unchanged(root, LOCAL_IDENTITY_PATH, Some(identity_hash))?;
-            let etag = webdav::put_bytes(client, &config.webdav_url, &remote_path, bytes, auth, condition).await?;
+            let etag = webdav::put_bytes(
+                client,
+                &config.webdav_url,
+                &remote_path,
+                bytes,
+                auth,
+                condition,
+            )
+            .await?;
             assert_local_unchanged(root, relative, Some(&local_hash))?;
-            Ok((Transfer::Uploaded, Some(Common { hash: local_hash, etag })))
+            Ok((
+                Transfer::Uploaded,
+                Some(Common {
+                    hash: local_hash,
+                    etag,
+                }),
+            ))
         }
         // New remotely, edited remotely after a local deletion, or edited only remotely.
-        (_, local_hash, Some(remote)) if local_hash.is_none() || local_hash.as_deref() == baseline => {
-            let bytes = remote.bytes.ok_or_else(|| {
-                AppError::Custom("Remote content was not downloaded".into())
-            })?;
+        (_, local_hash, Some(remote))
+            if local_hash.is_none() || local_hash.as_deref() == baseline =>
+        {
+            let bytes = remote
+                .bytes
+                .ok_or_else(|| AppError::Custom("Remote content was not downloaded".into()))?;
             let _settings_guard = settings_guard(project, relative).await?;
             assert_local_unchanged(root, LOCAL_IDENTITY_PATH, Some(identity_hash))?;
             commit_download(root, relative, &bytes, local_hash.as_deref())?;
-            Ok((Transfer::Downloaded, Some(Common { hash: remote.hash, etag: remote.etag })))
+            Ok((
+                Transfer::Downloaded,
+                Some(Common {
+                    hash: remote.hash,
+                    etag: remote.etag,
+                }),
+            ))
         }
-        _ => Err(AppError::Custom("Conflict: local and remote differ without a common unchanged version; resolve explicitly".into())),
+        _ => Ok((Transfer::Conflict, None)),
     }
 }
 
-fn webdav_session(config: &SyncConfig) -> Result<(Client, WebDavAuth), AppError> {
-    webdav::remote_url(&config.webdav_url, "")?;
-    let client = Client::builder()
+const CONFLICT_MESSAGE: &str = "Conflict: local and remote differ without a common unchanged version; both copies were left untouched. Choose which version to keep";
+
+/// A client that never follows redirects, so credentials stay with the
+/// configured host.
+pub(crate) fn webdav_client() -> Result<Client, AppError> {
+    Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(webdav::REQUEST_TIMEOUT)
         .timeout(webdav::REQUEST_TIMEOUT)
         .build()
-        .map_err(|_| AppError::Custom("Cannot create WebDAV client".into()))?;
-    let auth = WebDavAuth {
-        username: config.username.clone(),
-        password: config.password.clone(),
-    };
-    Ok((client, auth))
+        .map_err(|_| AppError::Custom("Cannot create WebDAV client".into()))
+}
+
+/// Credentials a project's sync sends. A project linked to the cloud account
+/// only receives the password stored for exactly the account it was linked
+/// to, together with the account lease that must be held while it is used.
+/// `held`: a lease the caller already holds (a download); taking a second one
+/// could wait forever behind a pending account change.
+pub(crate) async fn project_auth(
+    config: &SyncConfig,
+    held: Option<&cloud::AccountLease>,
+) -> Result<(WebDavAuth, Option<cloud::AccountLease>), AppError> {
+    if !config.cloud_account {
+        let auth = WebDavAuth {
+            username: config.username.clone(),
+            password: config.password.clone(),
+        };
+        return Ok((auth, None));
+    }
+    if let Some(lease) = held {
+        if lease.endpoint() != config.webdav_url || lease.auth().username != config.username {
+            return Err(AppError::Custom(
+                "This project is linked to another cloud account".into(),
+            ));
+        }
+        return Ok((lease.auth().clone(), None));
+    }
+    let lease = cloud::lease_account(Some((&config.webdav_url, &config.username))).await?;
+    Ok((lease.auth().clone(), Some(lease)))
+}
+
+async fn webdav_session(
+    config: &SyncConfig,
+    held: Option<&cloud::AccountLease>,
+) -> Result<(Client, WebDavAuth, Option<cloud::AccountLease>), AppError> {
+    webdav::remote_url(&config.webdav_url, "")?;
+    let client = webdav_client()?;
+    let (auth, lease) = project_auth(config, held).await?;
+    Ok((client, auth, lease))
+}
+
+/// Baselines are meaningful only for one project identity on one account.
+fn remote_binding(config: &SyncConfig, project_id: &str) -> Result<String, AppError> {
+    let remote_url =
+        webdav::remote_url(&config.webdav_url, &format!("{REMOTE_ROOT}/{project_id}"))?;
+    Ok(hash(&serde_json::to_vec(&(
+        remote_url.as_str(),
+        &config.username,
+        project_id,
+    ))?))
 }
 
 fn project_name(project: &Path) -> Result<&str, AppError> {
@@ -941,6 +1154,16 @@ fn project_name(project: &Path) -> Result<&str, AppError> {
 
 /// One canonical-project lock covers discovery, transfers, and baseline persistence.
 pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
+    perform_sync_with(project_dir, None).await
+}
+
+/// `held`: the cloud-account lease of a caller that already holds one (see
+/// `project_auth`). A linked project's sync stops between files once the
+/// account is being changed, keeping the baselines it completed.
+pub(crate) async fn perform_sync_with(
+    project_dir: &str,
+    held: Option<&cloud::AccountLease>,
+) -> Result<SyncStatus, AppError> {
     let project = std::fs::canonicalize(project_dir)?;
     let _guard = sync_guard(&project).await?;
     let config = read_sync_config(project_dir)?;
@@ -952,12 +1175,15 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
         errors: Vec::new(),
         in_progress: false,
         adoptable_project_id: None,
+        conflicts: Vec::new(),
     };
     if !config.enabled {
         status.errors.push("Sync is not enabled".into());
         return Ok(status);
     }
-    let (client, auth) = webdav_session(&config)?;
+    let (client, auth, owned) = webdav_session(&config, held).await?;
+    let lease = owned.as_ref().or(held);
+    let account_revoked = || lease.is_some_and(cloud::AccountLease::revoked);
     let project_name = project_name(&project)?;
     let root = Dir::open_ambient_dir(&project, ambient_authority())?;
     let (identity, identity_bytes) = project_identity(&root)?;
@@ -993,17 +1219,16 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
             return Ok(status);
         }
     }
-    let remote_url = webdav::remote_url(&config.webdav_url, &remote_base)?;
-    let binding = hash(&serde_json::to_vec(&(
-        remote_url.as_str(),
-        &config.username,
-        &identity.project_id,
-    ))?);
+    let binding = remote_binding(&config, &identity.project_id)?;
     if state.remote_binding.as_deref() != Some(&binding) {
         state.common_hashes.clear();
         state.remote_etags.clear();
         state.file_mod_times.clear();
         state.remote_binding = Some(binding);
+    }
+    if account_revoked() {
+        status.errors.push(cloud::account_changed().to_string());
+        return Ok(status);
     }
     let remote_files =
         match collect_remote_files(&client, &config.webdav_url, &remote_base, &auth).await {
@@ -1013,13 +1238,9 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
                 return Ok(status);
             }
         };
-    let run = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     let deleted_dir = sync_dir_for_project(project_dir)?
         .join("deleted")
-        .join(run.to_string());
+        .join(run_id());
     let session = SyncSession {
         root: &root,
         project: &project,
@@ -1031,12 +1252,18 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
         deleted_dir: &deleted_dir,
     };
     let paths: BTreeSet<&String> = local_files.iter().chain(remote_files.keys()).collect();
-    let mut identity_changed = false;
+    // Set when this run ends early; completed baselines are still saved.
+    let mut stopped = false;
     for relative in paths {
+        if account_revoked() {
+            status.errors.push(cloud::account_changed().to_string());
+            stopped = true;
+            break;
+        }
         if let Err(error) = assert_local_unchanged(&root, LOCAL_IDENTITY_PATH, Some(&identity_hash))
         {
             status.errors.push(format!("Project identity: {error}"));
-            identity_changed = true;
+            stopped = true;
             break;
         }
         let result = sync_file(
@@ -1048,12 +1275,18 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
         )
         .await;
         match result {
+            Ok((Transfer::Conflict, _)) => {
+                status.conflicts.push(relative.clone());
+                status
+                    .errors
+                    .push(format!("Sync {relative}: {CONFLICT_MESSAGE}"));
+            }
             Ok((transfer, common)) => {
                 if let Err(error) =
                     assert_local_unchanged(&root, LOCAL_IDENTITY_PATH, Some(&identity_hash))
                 {
                     status.errors.push(format!("Project identity: {error}"));
-                    identity_changed = true;
+                    stopped = true;
                     break;
                 }
                 match common {
@@ -1074,16 +1307,20 @@ pub async fn perform_sync(project_dir: &str) -> Result<SyncStatus, AppError> {
                 match transfer {
                     Transfer::Uploaded | Transfer::DeletedRemote => status.files_uploaded += 1,
                     Transfer::Downloaded | Transfer::DeletedLocal => status.files_downloaded += 1,
-                    Transfer::Unchanged => {}
+                    Transfer::Unchanged | Transfer::Conflict => {}
                 }
             }
             Err(error) => status.errors.push(format!("Sync {relative}: {error}")),
         }
     }
     // Each completed transfer established its baseline; keep those even when a
-    // later identity check or request ends this run.
+    // later identity check, request or account change ends this run.
     write_sync_state(project_dir, &state)?;
-    if identity_changed {
+    if stopped {
+        return Ok(status);
+    }
+    if account_revoked() {
+        status.errors.push(cloud::account_changed().to_string());
         return Ok(status);
     }
     if let Err(error) = assert_local_unchanged(&root, LOCAL_IDENTITY_PATH, Some(&identity_hash)) {
@@ -1117,7 +1354,7 @@ pub async fn adopt_legacy_identity(project_dir: &str, project_id: &str) -> Resul
     let project = std::fs::canonicalize(project_dir)?;
     let _guard = sync_guard(&project).await?;
     let config = read_sync_config(project_dir)?;
-    let (client, auth) = webdav_session(&config)?;
+    let (client, auth, _lease) = webdav_session(&config, None).await?;
     let project_name = project_name(&project)?;
     let root = Dir::open_ambient_dir(&project, ambient_authority())?;
     if let Some((local, _)) = read_local_identity(&root)? {
@@ -1160,6 +1397,211 @@ pub async fn adopt_legacy_identity(project_dir: &str, project_id: &str) -> Resul
     }
     let parent = webdav::confined_parent(&root, Path::new(LOCAL_IDENTITY_PATH), true)?;
     publish_identity(&parent, &serde_json::to_vec_pretty(&claim)?, true)
+}
+
+/// How to settle a file reported in `SyncStatus.conflicts`.
+#[derive(Deserialize, Serialize, Type, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictResolution {
+    /// Upload this device's copy over the remote one.
+    #[serde(rename = "keep_local")]
+    Local,
+    /// Replace this device's copy with the remote one.
+    #[serde(rename = "keep_remote")]
+    Remote,
+    /// Save the remote copy as a new file next to it, then upload this
+    /// device's copy; the next sync shares both.
+    #[serde(rename = "keep_both")]
+    Both,
+}
+
+fn run_id() -> String {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string()
+}
+
+fn save_backup(dir: &Path, relative: &str, bytes: &[u8]) -> Result<(), AppError> {
+    let path = dir.join(relative);
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| AppError::InvalidInput("Invalid sync filename".into()))?,
+    )?;
+    atomic_write_state(&path, bytes)
+}
+
+/// Store the remote version under a new, unused name beside the original.
+fn save_remote_copy(root: &Dir, relative: &str, bytes: &[u8]) -> Result<String, AppError> {
+    let path = Path::new(relative);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| AppError::InvalidInput("Invalid sync filename".into()))?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| AppError::InvalidInput("Invalid sync filename".into()))?;
+    let stamp = chrono_now_iso().replace(':', "").replace('T', " ");
+    let stamp = stamp.trim_end_matches('Z');
+    for attempt in 1..=100 {
+        let suffix = if attempt == 1 {
+            String::new()
+        } else {
+            format!(" {attempt}")
+        };
+        let name = format!("{stem} (remote {stamp}{suffix}).{extension}");
+        let copy = match relative.rsplit_once('/') {
+            Some((directory, _)) => format!("{directory}/{name}"),
+            None => name,
+        };
+        if optional_local(root, &copy)?.is_some() {
+            continue;
+        }
+        // `None` makes the commit fail rather than replace a file created meanwhile.
+        commit_download(root, &copy, bytes, None)?;
+        return Ok(copy);
+    }
+    Err(AppError::Custom(
+        "No free name for the remote copy; rename the file first".into(),
+    ))
+}
+
+/// Settle one conflicted file by explicit choice. The side being replaced is
+/// first copied into app data (`conflicts/`), and every write is conditional
+/// on exactly the versions just read: local bytes by hash, the remote by its
+/// strong ETag. Returns the project-relative path of a kept remote copy.
+pub async fn resolve_conflict(
+    project_dir: &str,
+    relative: &str,
+    resolution: ConflictResolution,
+) -> Result<Option<String>, AppError> {
+    if relative.is_empty()
+        || webdav::validate_remote_path(relative).is_err()
+        || !is_project_content_path(Path::new(relative))
+    {
+        return Err(AppError::InvalidInput("Not a syncable project file".into()));
+    }
+    if resolution == ConflictResolution::Both && relative.starts_with(".novelist/") {
+        return Err(AppError::InvalidInput(
+            "Project settings cannot be kept twice; keep one version".into(),
+        ));
+    }
+    let project = std::fs::canonicalize(project_dir)?;
+    let _guard = sync_guard(&project).await?;
+    let config = read_sync_config(project_dir)?;
+    if !config.enabled {
+        return Err(AppError::Custom("Sync is not enabled".into()));
+    }
+    let (client, auth, lease) = webdav_session(&config, None).await?;
+    let root = Dir::open_ambient_dir(&project, ambient_authority())?;
+    let (identity, identity_bytes) = read_local_identity(&root)?
+        .ok_or_else(|| AppError::Custom("This project has never been synced".into()))?;
+    let identity_hash = hash(&identity_bytes);
+    let remote_base = format!("{REMOTE_ROOT}/{}", identity.project_id);
+    if remote_identity(&client, &config, &remote_base, &auth)
+        .await?
+        .as_ref()
+        != Some(&identity)
+    {
+        return Err(AppError::Custom(
+            "Sync identity conflict: the remote folder no longer belongs to this project; nothing was changed".into(),
+        ));
+    }
+    let mut state = read_sync_state(project_dir)?;
+    if state.remote_binding != Some(remote_binding(&config, &identity.project_id)?) {
+        return Err(AppError::Custom(
+            "Sync this project with the current account before resolving conflicts".into(),
+        ));
+    }
+    let remote_path = format!("{remote_base}/{relative}");
+    let remote = webdav::get_file_if_exists(
+        &client,
+        &config.webdav_url,
+        &remote_path,
+        &auth,
+        webdav::MAX_FILE_BYTES,
+    )
+    .await?;
+    // A change of account stops here, before anything is written.
+    if lease.as_ref().is_some_and(cloud::AccountLease::revoked) {
+        return Err(cloud::account_changed());
+    }
+    let local = optional_local(&root, relative)?;
+    let local_hash = local.as_deref().map(hash);
+    let backup = sync_dir_for_project(project_dir)?
+        .join("conflicts")
+        .join(run_id());
+    let mut copy = None;
+    let common = match (local, local_hash, remote) {
+        // Already identical: only the baseline was missing.
+        (Some(_), Some(local_hash), Some(remote)) if local_hash == hash(&remote.bytes) => Common {
+            hash: local_hash,
+            etag: remote.etag,
+        },
+        (local, local_hash, Some(remote)) if resolution == ConflictResolution::Remote => {
+            if let Some(bytes) = &local {
+                save_backup(&backup.join("local"), relative, bytes)?;
+            }
+            let _settings_guard = settings_guard(&project, relative).await?;
+            assert_local_unchanged(&root, LOCAL_IDENTITY_PATH, Some(&identity_hash))?;
+            commit_download(&root, relative, &remote.bytes, local_hash.as_deref())?;
+            Common {
+                hash: hash(&remote.bytes),
+                etag: remote.etag,
+            }
+        }
+        (_, _, None) if resolution == ConflictResolution::Remote => {
+            return Err(AppError::Custom(
+                "The remote copy no longer exists; keep this device's copy instead".into(),
+            ))
+        }
+        (Some(bytes), Some(local_hash), remote) => {
+            let condition = match &remote {
+                None => webdav::PutCondition::Absent,
+                Some(file) => {
+                    save_backup(&backup.join("remote"), relative, &file.bytes)?;
+                    if resolution == ConflictResolution::Both {
+                        copy = Some(save_remote_copy(&root, relative, &file.bytes)?);
+                    }
+                    webdav::PutCondition::Matches(file.etag.as_deref().ok_or_else(|| {
+                        AppError::Custom(
+                            "Cannot safely replace remote file without a strong ETag".into(),
+                        )
+                    })?)
+                }
+            };
+            ensure_remote_parents(&client, &config.webdav_url, &remote_path, &auth).await?;
+            assert_local_unchanged(&root, relative, Some(&local_hash))?;
+            assert_local_unchanged(&root, LOCAL_IDENTITY_PATH, Some(&identity_hash))?;
+            let etag = webdav::put_bytes(
+                &client,
+                &config.webdav_url,
+                &remote_path,
+                bytes,
+                &auth,
+                condition,
+            )
+            .await?;
+            Common {
+                hash: local_hash,
+                etag,
+            }
+        }
+        _ => {
+            return Err(AppError::Custom(
+                "This device's copy no longer exists; keep the remote copy instead".into(),
+            ))
+        }
+    };
+    state.common_hashes.insert(relative.to_owned(), common.hash);
+    match common.etag {
+        Some(etag) => state.remote_etags.insert(relative.to_owned(), etag),
+        None => state.remote_etags.remove(relative),
+    };
+    state.file_mod_times.remove(relative);
+    write_sync_state(project_dir, &state)?;
+    Ok(copy)
 }
 
 /// Get current time as ISO 8601 string (without external chrono crate)
@@ -1258,6 +1700,7 @@ mod tests {
                 password: "not-a-credential".into(),
                 interval_minutes: 30,
                 legacy_remote_acknowledged: false,
+                cloud_account: false,
             };
             save_sync_config_to_disk(&project, &config).unwrap();
             let root = Dir::open_ambient_dir(&project, ambient_authority()).unwrap();

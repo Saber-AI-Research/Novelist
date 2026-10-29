@@ -112,6 +112,55 @@ html, body, #app {
   }
 }
 
+/* --- Mobile (iOS / Android) shell -------------------------------------
+   `html[data-mobile]`, `[data-layout]` and `[data-keyboard]` are set by
+   app/lib/stores/platform.svelte.ts before the app mounts. */
+html[data-mobile='true'],
+html[data-mobile='true'] body {
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+/* iOS keeps the layout viewport full height under the on-screen keyboard
+   and only shrinks/scrolls the visual viewport; pin the app to the visible
+   area so bottom bars and composers sit right above the keyboard. Android
+   resizes the WebView itself, where these variables equal the window. */
+html[data-mobile='true'] #app {
+  position: fixed;
+  top: var(--novelist-vv-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--novelist-vv-height, 100%);
+}
+/* WebKit zooms into focused form fields under 16px; that zoom would stack
+   on the layout and leave the page scaled after blur. */
+html[data-mobile='true'] :is(input:not([type='checkbox']):not([type='radio']):not([type='range']), textarea, select) {
+  font-size: max(16px, 1em) !important;
+}
+/* Phones: tighter editor gutters; the status bar yields to the keyboard. */
+html[data-layout='phone'] .cm-editor .cm-content {
+  padding-top: 1.25rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+html[data-layout='phone'][data-keyboard='open'] [data-testid='status-bar'] {
+  display: none;
+}
+/* Phone screens are read at arm's length: user-chosen editor and sidebar
+   sizes render this much larger (16px → 18px) without changing the stored
+   setting. Narrow desktop windows keep their sizes. */
+html[data-mobile='true'][data-layout='phone'] {
+  --novelist-touch-text-scale: 1.125;
+}
+html[data-mobile='true'][data-layout='phone'] [data-testid='status-bar'] {
+  font-size: 12px !important;
+}
+/* Line numbers cost a fifth of a phone's width and mean little in prose. */
+html[data-mobile='true'][data-layout='phone'] .cm-editor .cm-gutters {
+  display: none;
+}
+
 /* App-owned overlay scrollbars: thin, rounded, themed, and AUTO-HIDING.
    Transparent at rest; the thumb fades in only while the pointer is over the
    container (`:hover`) or while it is actively scrolling (`.is-scrolling`,
@@ -242,6 +291,12 @@ html, body, #app {
   height: 1px;
   margin: 4px 8px;
   background: var(--novelist-border-subtle, var(--novelist-border));
+}
+@media (pointer: coarse) {
+  .context-menu-item {
+    min-height: 44px;
+    font-size: 0.95rem;
+  }
 }
 
 /*

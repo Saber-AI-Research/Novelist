@@ -623,119 +623,6 @@ pub async fn write_file(
     .await
 }
 
-#[derive(Debug, Clone, Copy, Serialize, specta::Type, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WriteFileIfUnchangedResult {
-    Written,
-    Conflict,
-}
-
-fn resolve_project_scoped_text_target(project_dir: &str, path: &str) -> Result<PathBuf, AppError> {
-    let project = validate_path(project_dir)?;
-    let canonical_project = project.canonicalize().map_err(|_| {
-        AppError::InvalidInput("Active project root is not an existing directory".into())
-    })?;
-    if !canonical_project.is_dir() {
-        return Err(AppError::InvalidInput(
-            "Active project root is not a directory".into(),
-        ));
-    }
-
-    let requested = resolve_text_write_target(&validate_path(path)?)?;
-    let effective_target = if requested.exists() {
-        requested.canonicalize().map_err(|_| {
-            AppError::InvalidInput("Conditional write target cannot be resolved".into())
-        })?
-    } else {
-        ensure_text_write_parent_exists(&requested)?;
-        let parent = requested
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .ok_or_else(|| AppError::InvalidInput("Conditional write target has no parent".into()))?
-            .canonicalize()
-            .map_err(|_| {
-                AppError::InvalidInput("Conditional write parent cannot be resolved".into())
-            })?;
-        if !parent.is_dir() {
-            return Err(AppError::InvalidInput(
-                "Conditional write parent is not a directory".into(),
-            ));
-        }
-        let file_name = requested.file_name().ok_or_else(|| {
-            AppError::InvalidInput("Conditional write target has no filename".into())
-        })?;
-        parent.join(file_name)
-    };
-
-    if !effective_target.starts_with(&canonical_project) {
-        return Err(AppError::InvalidInput(
-            "Conditional write target resolves outside active project".into(),
-        ));
-    }
-    Ok(effective_target)
-}
-
-/// Compare and write within the process-wide lock shared by Novelist text
-/// writers. External processes can still race the final rename, so this is a
-/// best-effort immediate conflict check rather than a cross-process CAS.
-pub(crate) async fn write_file_if_unchanged_inner(
-    project_dir: &str,
-    path: &str,
-    expected_content: Option<&str>,
-    content: &str,
-    enc_state: &EncodingState,
-    file_watcher_state: &crate::services::file_watcher::FileWatcherState,
-    write_owner: Option<&str>,
-) -> Result<WriteFileIfUnchangedResult, AppError> {
-    let p = resolve_project_scoped_text_target(project_dir, path)?;
-    let effective_path = p.to_string_lossy().to_string();
-    let mutex = text_write_lock_for_target(&p)?;
-    let _guard = mutex.lock().await;
-    ensure_text_write_parent_exists(&p)?;
-
-    let matches_expected = match expected_content {
-        None => !p.exists(),
-        Some(_) if !p.exists() => false,
-        Some(expected) => read_file_inner(&effective_path, enc_state).await? == expected,
-    };
-    if !matches_expected {
-        return Ok(WriteFileIfUnchangedResult::Conflict);
-    }
-
-    write_file_locked(
-        &p,
-        content,
-        enc_state,
-        Some(file_watcher_state),
-        write_owner,
-    )
-    .await?;
-    Ok(WriteFileIfUnchangedResult::Written)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn write_file_if_unchanged(
-    project_dir: String,
-    path: String,
-    expected_content: Option<String>,
-    content: String,
-    window: tauri::WebviewWindow,
-    encoding_state: tauri::State<'_, EncodingState>,
-    file_watcher_state: tauri::State<'_, crate::services::file_watcher::FileWatcherState>,
-) -> Result<WriteFileIfUnchangedResult, AppError> {
-    write_file_if_unchanged_inner(
-        &project_dir,
-        &path,
-        expected_content.as_deref(),
-        &content,
-        &encoding_state,
-        &file_watcher_state,
-        Some(window.label()),
-    )
-    .await
-}
-
 /// Returns the detected encoding for a file that was previously read via `read_file`.
 /// Returns `"UTF-8"` if the file is UTF-8 (or was never read).
 #[tauri::command]
@@ -864,9 +751,7 @@ pub async fn create_scratch_file() -> Result<String, AppError> {
 }
 
 fn scratch_cache_dir() -> Result<PathBuf, AppError> {
-    Ok(dirs::cache_dir()
-        .ok_or_else(|| AppError::Custom("Cannot determine cache directory".into()))?
-        .join("novelist"))
+    crate::services::portable::cache_root()
 }
 
 fn is_scratch_file_name(name: &str) -> bool {
@@ -1519,6 +1404,7 @@ fn is_same_directory_entry(a: &Path, b: &Path) -> bool {
 #[tauri::command]
 #[specta::specta]
 pub async fn reveal_in_file_manager(path: String) -> Result<(), AppError> {
+    crate::services::platform::require_desktop("Reveal in file manager")?;
     let p = validate_path(&path)?;
     if !p.exists() {
         return Err(AppError::FileNotFound(path));
@@ -3456,198 +3342,8 @@ mod tests {
         assert_no_staged_temp(&first);
     }
 
-    #[test]
-    fn test_write_file_if_unchanged_result_serializes_as_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&WriteFileIfUnchangedResult::Written).unwrap(),
-            "\"written\""
-        );
-        assert_eq!(
-            serde_json::to_string(&WriteFileIfUnchangedResult::Conflict).unwrap(),
-            "\"conflict\""
-        );
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_modifies_matching_cjk_text() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("第一章.md");
-        let original = "# 第一章\n\n旧内容。";
-        let updated = "# 第一章\n\n新内容。";
-        fs::write(&file_path, original).unwrap();
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            Some(original),
-            updated,
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Written);
-        assert_eq!(fs::read_to_string(&file_path).unwrap(), updated);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_conflict_preserves_exact_bytes_and_no_temp() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("chapter.md");
-        let original = "# 第一章\n\n磁盘上的内容。".as_bytes().to_vec();
-        fs::write(&file_path, &original).unwrap();
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            Some("# 第一章\n\n过期内容。"),
-            "replacement",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Conflict);
-        assert_eq!(fs::read(&file_path).unwrap(), original);
-        assert_no_staged_temp(&file_path);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_none_creates_absent_file() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("new.md");
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            None,
-            "新文件",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Written);
-        assert_eq!(fs::read_to_string(&file_path).unwrap(), "新文件");
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_none_conflicts_with_existing_file() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("existing.md");
-        fs::write(&file_path, "present").unwrap();
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            None,
-            "replacement",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Conflict);
-        assert_eq!(fs::read_to_string(&file_path).unwrap(), "present");
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_none_conflicts_with_empty_existing_file() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("empty.md");
-        fs::write(&file_path, []).unwrap();
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            None,
-            "replacement",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Conflict);
-        assert_eq!(fs::read(&file_path).unwrap(), Vec::<u8>::new());
-    }
-
-    async fn assert_conditional_write_preserves_remembered_encoding(
-        encoding: &'static encoding_rs::Encoding,
-        original: &str,
-        updated: &str,
-    ) {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join(format!("{}.txt", encoding.name()));
-        let (original_bytes, _, original_had_errors) = encoding.encode(original);
-        assert!(!original_had_errors);
-        fs::write(&file_path, &*original_bytes).unwrap();
-
-        let state = enc();
-        let decoded = read_file_inner(&file_path.to_string_lossy(), &state)
-            .await
-            .unwrap();
-        assert_eq!(decoded, original);
-
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            Some(original),
-            updated,
-            &state,
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-        let (expected_bytes, _, updated_had_errors) = encoding.encode(updated);
-        assert!(!updated_had_errors);
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Written);
-        assert_eq!(fs::read(&file_path).unwrap(), &*expected_bytes);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_preserves_remembered_gbk() {
-        assert_conditional_write_preserves_remembered_encoding(
-            encoding_rs::GBK,
-            "第一章\n落霞与孤鹜齐飞，秋水共长天一色。",
-            "第二章\n海上生明月，天涯共此时。",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_preserves_remembered_big5() {
-        assert_conditional_write_preserves_remembered_encoding(
-            encoding_rs::BIG5,
-            "測試文字",
-            "更新文字",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_preserves_remembered_shift_jis() {
-        assert_conditional_write_preserves_remembered_encoding(
-            encoding_rs::SHIFT_JIS,
-            "こんにちは世界",
-            "さようなら世界",
-        )
-        .await;
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_normal_and_conditional_text_writes_share_one_path_lock() {
+    async fn test_text_write_waits_for_path_lock() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("serialized.md");
         fs::write(&file_path, "v0").unwrap();
@@ -3655,49 +3351,22 @@ mod tests {
         let lock =
             text_write_lock_for_target(&resolve_text_write_target(&file_path).unwrap()).unwrap();
         let guard = lock.lock().await;
-        let path = file_path.to_string_lossy().to_string();
         let normal_state = std::sync::Arc::new(enc());
-        let normal_path = path.clone();
+        let normal_path = file_path.to_string_lossy().to_string();
         let normal =
             tokio::spawn(
                 async move { write_file_inner(&normal_path, "normal", &normal_state).await },
             );
-        let conditional_state = std::sync::Arc::new(enc());
-        let watcher_state =
-            std::sync::Arc::new(crate::services::file_watcher::FileWatcherState::new());
-        let conditional_path = path.clone();
-        let project_dir = dir.path().to_string_lossy().to_string();
-        let conditional = tokio::spawn(async move {
-            write_file_if_unchanged_inner(
-                &project_dir,
-                &conditional_path,
-                Some("v0"),
-                "conditional",
-                &conditional_state,
-                &watcher_state,
-                None,
-            )
-            .await
-        });
 
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert!(
             !normal.is_finished(),
             "normal write bypassed the shared lock"
         );
-        assert!(
-            !conditional.is_finished(),
-            "conditional write bypassed the shared lock"
-        );
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "v0");
 
         drop(guard);
         normal.await.unwrap().unwrap();
-        let conditional_result = conditional.await.unwrap().unwrap();
-        assert!(matches!(
-            conditional_result,
-            WriteFileIfUnchangedResult::Written | WriteFileIfUnchangedResult::Conflict
-        ));
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "normal");
     }
 
@@ -3715,186 +3384,20 @@ mod tests {
         let guard = lock.lock().await;
         let alias = alias_path.to_string_lossy().to_string();
         let state = std::sync::Arc::new(enc());
-        let watcher_state =
-            std::sync::Arc::new(crate::services::file_watcher::FileWatcherState::new());
-        let project_dir = dir.path().to_string_lossy().to_string();
-        let conditional = tokio::spawn(async move {
-            write_file_if_unchanged_inner(
-                &project_dir,
-                &alias,
-                Some("stale"),
-                "replacement",
-                &state,
-                &watcher_state,
-                None,
-            )
-            .await
-        });
+        let write =
+            tokio::spawn(async move { write_file_inner(&alias, "replacement", &state).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert!(
-            !conditional.is_finished(),
+            !write.is_finished(),
             "resolvable symlink alias bypassed the canonical target lock"
         );
+        assert_eq!(fs::read_to_string(&real_path).unwrap(), "current");
         drop(guard);
 
-        assert_eq!(
-            conditional.await.unwrap().unwrap(),
-            WriteFileIfUnchangedResult::Conflict
-        );
+        write.await.unwrap().unwrap();
         assert!(alias_path.is_symlink());
-        assert_eq!(fs::read_to_string(&real_path).unwrap(), "current");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_rejects_existing_symlink_escape() {
-        let dir = TempDir::new().unwrap();
-        let project = dir.path().join("project");
-        let external = dir.path().join("external.md");
-        let alias = project.join("linked.md");
-        fs::create_dir(&project).unwrap();
-        fs::write(&external, "外部原文").unwrap();
-        std::os::unix::fs::symlink(&external, &alias).unwrap();
-
-        let err = write_file_if_unchanged_inner(
-            &project.to_string_lossy(),
-            &alias.to_string_lossy(),
-            Some("外部原文"),
-            "不得写入",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, AppError::InvalidInput(_)));
-        assert_eq!(fs::read_to_string(&external).unwrap(), "外部原文");
-        assert!(alias.is_symlink());
-        assert_no_staged_temp(&external);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_updates_approved_in_project_symlink_target() {
-        let dir = TempDir::new().unwrap();
-        let project = dir.path().join("project");
-        let real = project.join("real.md");
-        let alias = project.join("linked.md");
-        fs::create_dir(&project).unwrap();
-        fs::write(&real, "项目内原文").unwrap();
-        std::os::unix::fs::symlink(&real, &alias).unwrap();
-
-        let result = write_file_if_unchanged_inner(
-            &project.to_string_lossy(),
-            &alias.to_string_lossy(),
-            Some("项目内原文"),
-            "项目内更新",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, WriteFileIfUnchangedResult::Written);
-        assert!(alias.is_symlink());
-        assert_eq!(fs::read_to_string(&real).unwrap(), "项目内更新");
-
-        fs::remove_file(&real).unwrap();
-        let recreated = write_file_if_unchanged_inner(
-            &project.to_string_lossy(),
-            &alias.to_string_lossy(),
-            None,
-            "重新创建目标",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(recreated, WriteFileIfUnchangedResult::Written);
-        assert!(alias.is_symlink());
-        assert_eq!(fs::read_to_string(&real).unwrap(), "重新创建目标");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_rejects_symlinked_creation_parent_escape() {
-        let dir = TempDir::new().unwrap();
-        let project = dir.path().join("project");
-        let external_dir = dir.path().join("external");
-        let linked_parent = project.join("linked-parent");
-        let requested = linked_parent.join("new.md");
-        let external_target = external_dir.join("new.md");
-        fs::create_dir(&project).unwrap();
-        fs::create_dir(&external_dir).unwrap();
-        std::os::unix::fs::symlink(&external_dir, &linked_parent).unwrap();
-
-        let err = write_file_if_unchanged_inner(
-            &project.to_string_lossy(),
-            &requested.to_string_lossy(),
-            None,
-            "不得创建",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, AppError::InvalidInput(_)));
-        assert!(!external_target.exists());
-        assert_no_staged_temp(&external_target);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_error_leaves_no_partial_target() {
-        let dir = TempDir::new().unwrap();
-        let missing_parent = dir.path().join("missing");
-        let file_path = missing_parent.join("chapter.md");
-
-        let err = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            None,
-            "content",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, AppError::FileNotFound(_)));
-        assert!(!file_path.exists());
-        assert!(!missing_parent.exists());
-        assert_no_staged_temp(&file_path);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_if_unchanged_missing_parent_errors_before_conflict() {
-        let dir = TempDir::new().unwrap();
-        let missing_parent = dir.path().join("missing");
-        let file_path = missing_parent.join("chapter.md");
-
-        let err = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file_path.to_string_lossy(),
-            Some("expected old content"),
-            "new content",
-            &enc(),
-            &crate::services::file_watcher::FileWatcherState::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, AppError::FileNotFound(_)));
-        assert!(!file_path.exists());
-        assert!(!missing_parent.exists());
-        assert_no_staged_temp(&file_path);
+        assert_eq!(fs::read_to_string(&real_path).unwrap(), "replacement");
     }
 
     #[tokio::test]
@@ -4036,18 +3539,9 @@ mod tests {
                 .unwrap();
             assert_eq!(fs::read(&file).unwrap(), original_bytes, "{encoding}");
 
-            let result = write_file_if_unchanged_inner(
-                &dir.path().to_string_lossy(),
-                &path,
-                Some(original),
-                updated,
-                &state,
-                &watcher,
-                Some("window-a"),
-            )
-            .await
-            .unwrap();
-            assert_eq!(result, WriteFileIfUnchangedResult::Written);
+            write_file_with_watcher_inner(&path, updated, &state, &watcher, Some("window-a"))
+                .await
+                .unwrap();
             assert_eq!(fs::read(&file).unwrap(), updated_bytes, "{encoding}");
             assert_eq!(read_file_inner(&path, &state).await.unwrap(), updated);
             assert_eq!(
@@ -4096,38 +3590,10 @@ mod tests {
         );
         assert_no_staged_temp(Path::new(&*path));
 
-        let error = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &path,
-            Some(text),
-            &unmappable,
-            &state,
-            &watcher,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(error, AppError::InvalidInput(_)));
-        assert_eq!(fs::read(&file_path).unwrap(), original_bytes.as_ref());
-        assert_eq!(
-            state.encodings.lock().unwrap().get(&canonical),
-            Some(&"GBK")
-        );
-        assert_no_staged_temp(Path::new(&*path));
-
         let representable = format!("{text}\n第二章");
-        let result = write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &path,
-            Some(text),
-            &representable,
-            &state,
-            &watcher,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, WriteFileIfUnchangedResult::Written);
+        write_file_with_watcher_inner(&path, &representable, &state, &watcher, None)
+            .await
+            .unwrap();
         let (expected_bytes, _, _) = encoding_rs::GBK.encode(&representable);
         assert_eq!(fs::read(&file_path).unwrap(), expected_bytes.as_ref());
         assert_eq!(

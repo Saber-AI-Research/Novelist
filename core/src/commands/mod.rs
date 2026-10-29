@@ -2,15 +2,16 @@ pub mod ai_bridge;
 pub mod ai_files;
 pub mod bench;
 pub mod book_translation;
-pub mod claude_bridge;
 pub mod cli_shim;
-pub mod codex_bridge;
+#[cfg(feature = "sync")]
+pub mod cloud;
 pub mod draft;
 #[cfg(all(target_os = "macos", feature = "e2e-testing"))]
 pub mod e2e;
 pub mod export;
 pub mod file;
 pub mod image_host;
+pub mod library;
 pub mod literary_study;
 pub mod menu;
 pub mod naming;

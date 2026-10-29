@@ -34,9 +34,17 @@
   const loadLiteraryStudyPanel = () => import('$lib/components/LiteraryStudyPanel.svelte');
   const loadPluginPanel = () => import('$lib/components/PluginPanel.svelte');
   const loadAiTalkPanel = () => import('$lib/components/AiTalkPanel.svelte');
-  const loadAiAgentPanel = () => import('$lib/components/AiAgentPanel.svelte');
   const loadUpdateProgressModal = () => import('$lib/components/UpdateProgressModal.svelte');
   const loadUpdateAvailableBanner = () => import('$lib/components/UpdateAvailableBanner.svelte');
+  // Touch shell chrome (mobile + phone-narrow desktop windows) stays out of
+  // the desktop first-paint chunk.
+  const loadMobileToolbar = () => import('$lib/components/MobileToolbar.svelte');
+  const loadMobilePanelBar = () => import('$lib/components/MobilePanelBar.svelte');
+  const loadFormatToolbar = () => import('$lib/components/FormatToolbar.svelte');
+  import type { PanelBarEntry } from '$lib/components/MobilePanelBar.svelte';
+  import { OPEN_MOVE_PALETTE_EVENT, type OpenMovePaletteDetail } from '$lib/components/move-file-palette';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { pickAndStageFile } from '$lib/services/mobile-files';
   import { updaterState } from '$lib/stores/updater-state.svelte';
   import { consumeWindowSeed } from '$lib/services/cli-open';
   import {
@@ -51,7 +59,7 @@
   import { ProjectWatcherOwner } from '$lib/services/project-watcher-owner';
   import type { TemplateFileSummary } from '$lib/ipc/commands';
   import { extensionStore } from '$lib/stores/extensions.svelte';
-  import { uiStore } from '$lib/stores/ui.svelte';
+  import { uiStore, type RightPanel } from '$lib/stores/ui.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore, getEditorView } from '$lib/stores/tabs.svelte';
   import { commands } from '$lib/ipc/commands';
@@ -124,9 +132,14 @@
   let cursorCol = $derived(activeMetrics?.cursorCol ?? 1);
   let headings = $derived(activeMetrics?.headings ?? []);
   let activeEditorRef = $derived(uiStore.zenMode ? zenEditorRef : activeMetrics?.editorRef);
+  // Focus inside a CodeMirror editor drives the touch format bar (and hides
+  // the panel bar on phones while typing).
+  let editorFocused = $state(false);
 
-let paletteOpen = $state(false);
+  let paletteOpen = $state(false);
   let movePaletteOpen = $state(false);
+  /** Explicit entry to move (sidebar "Move to…"); null moves the active tab. */
+  let movePaletteSource = $state<string | null>(null);
   let exportDialogOpen = $state(false);
   let mindmapOverlayOpen = $state(false);
   let projectSearchOpen = $state(false);
@@ -225,6 +238,165 @@ let paletteOpen = $state(false);
     if (!literaryProjectOpen && uiStore.literaryVisible) {
       uiStore.activeRightPanel = null;
     }
+  });
+
+  // --- Touch shell: right-panel sheet + horizontal panel bar ---------------
+  // Phone: every right panel (AI Talk included) is a full sheet. Tablet:
+  // a panel docks only while the editor keeps a useful width; otherwise it
+  // overlays as a side sheet. Desktop layout keeps the docked column.
+  const EDITOR_MIN_WIDTH = 560;
+  let rightPanelAsSheet = $derived.by(() => {
+    if (platform.layout === 'desktop') return false;
+    if (platform.layout === 'phone') return true;
+    const sidebarWidth = !uiStore.sidebarIsDrawer && uiStore.sidebarVisible ? uiStore.sidebarWidth : 0;
+    return platform.viewportWidth - sidebarWidth - uiStore.rightPanelWidth < EDITOR_MIN_WIDTH;
+  });
+  let activeExtensionPanel = $derived(
+    extensionStore.activePanelId
+      ? extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)
+      : undefined,
+  );
+  // Mirrors the desktop column's priority chain (draft › … › extension).
+  let panelChainVisible = $derived(
+    (uiStore.draftVisible && !!tabsStore.activeTab)
+    || uiStore.snapshotVisible
+    || (uiStore.statsVisible && !!(projectStore.dirPath ?? tabsStore.activeTab))
+    || uiStore.templateVisible
+    || (uiStore.literaryVisible && literaryProjectOpen)
+    || activeExtensionPanel?.pluginId === 'ai-talk'
+    || (!!activeExtensionPanel && !!tabsStore.activeTab),
+  );
+  let sheetPanel = $derived<'chain' | 'outline' | null>(
+    !rightPanelAsSheet ? null
+      : panelChainVisible ? 'chain'
+      : uiStore.outlineVisible ? 'outline'
+      : null,
+  );
+  let sheetTitle = $derived.by(() => {
+    if (sheetPanel === 'outline') return t('mobile.panel.outline');
+    if (uiStore.draftVisible && tabsStore.activeTab) return t('mobile.panel.draft');
+    if (uiStore.snapshotVisible) return t('mobile.panel.snapshots');
+    if (uiStore.statsVisible) return t('mobile.panel.stats');
+    if (uiStore.templateVisible) return t('mobile.panel.templates');
+    if (uiStore.literaryVisible && literaryProjectOpen) return t('literaryPanel.title');
+    return activeExtensionPanel?.label ?? '';
+  });
+
+  function closePanelSheet() {
+    uiStore.outlineVisible = false;
+    uiStore.activeRightPanel = null;
+    extensionStore.activePanelId = null;
+  }
+  // In sheet mode one panel replaces another; docked layouts keep the
+  // desktop rail semantics (outline coexists with one other panel).
+  function toggleTouchOutline() {
+    if (!rightPanelAsSheet) { uiStore.toggleOutline(); return; }
+    const wasOpen = sheetPanel === 'outline';
+    closePanelSheet();
+    if (!wasOpen) uiStore.outlineVisible = true;
+  }
+  function toggleTouchBuiltin(panel: Exclude<RightPanel, null>) {
+    if (!rightPanelAsSheet) {
+      extensionStore.activePanelId = null;
+      uiStore.toggleRightPanel(panel);
+      return;
+    }
+    const wasOpen = uiStore.activeRightPanel === panel;
+    closePanelSheet();
+    if (!wasOpen) uiStore.activeRightPanel = panel;
+  }
+  function toggleTouchExtension(pluginId: string) {
+    if (!rightPanelAsSheet) {
+      uiStore.activeRightPanel = null;
+      extensionStore.togglePanel(pluginId);
+      return;
+    }
+    const wasOpen = extensionStore.activePanelId === pluginId;
+    closePanelSheet();
+    if (!wasOpen) extensionStore.openPanel(pluginId);
+  }
+  /**
+   * Android system Back (MainActivity calls `window.__novelistBack()`): close
+   * the top-most layer. `false` lets Android leave the app as usual.
+   */
+  function handleSystemBack(): boolean {
+    if (paletteOpen) { paletteOpen = false; return true; }
+    if (movePaletteOpen) { movePaletteOpen = false; return true; }
+    if (projectSearchOpen) { projectSearchOpen = false; return true; }
+    if (exportDialogOpen || newProjectDialogOpen || translationImportDialogOpen || literaryImportDialogOpen || uiStore.settingsOpen) {
+      // These own their close path (unsaved-input confirmation, Settings
+      // section page → section list), all bound to Escape on window.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return true;
+    }
+    if (mindmapOverlayOpen) { mindmapOverlayOpen = false; return true; }
+    if (sheetPanel || (rightPanelAsSheet && extensionStore.activePanelId)) { closePanelSheet(); return true; }
+    if (uiStore.sidebarDrawerOpen) { uiStore.closeSidebarDrawer(); return true; }
+    if (uiStore.zenMode) { uiStore.toggleZen(); return true; }
+    return false;
+  }
+  $effect(() => {
+    if (!platform.isMobile) return;
+    const host = window as typeof window & { __novelistBack?: () => boolean };
+    host.__novelistBack = handleSystemBack;
+    return () => { delete host.__novelistBack; };
+  });
+  // Same data-testids as the desktop rail; only one of the two renders.
+  // The drawer overlays the panel area, so a chip tap dismisses it first.
+  let touchPanelEntries = $derived<PanelBarEntry[]>([
+    { key: 'outline', label: t('mobile.panel.outline'), testId: 'toggle-outline', active: rightPanelAsSheet ? sheetPanel === 'outline' : uiStore.outlineVisible, onSelect: toggleTouchOutline },
+    { key: 'draft', label: t('mobile.panel.draft'), testId: 'toggle-draft', active: uiStore.draftVisible, onSelect: () => toggleTouchBuiltin('draft') },
+    { key: 'snapshot', label: t('mobile.panel.snapshots'), testId: 'toggle-snapshot', active: uiStore.snapshotVisible, onSelect: () => toggleTouchBuiltin('snapshot') },
+    { key: 'stats', label: t('mobile.panel.stats'), testId: 'toggle-stats', active: uiStore.statsVisible, onSelect: () => toggleTouchBuiltin('stats') },
+    { key: 'template', label: t('mobile.panel.templates'), testId: 'toggle-template', active: uiStore.templateVisible, onSelect: () => toggleTouchBuiltin('template') },
+    ...(literaryProjectOpen
+      ? [{ key: 'literary', label: t('literaryPanel.shortTitle'), testId: 'toggle-literary-study', active: uiStore.literaryVisible, onSelect: () => toggleTouchBuiltin('literary') }]
+      : []),
+    ...extensionStore.panels.filter(p => p.pluginId !== 'mindmap').map((panel) => ({
+      key: `panel-${panel.pluginId}`,
+      label: panel.label,
+      testId: `panel-toggle-${panel.pluginId}`,
+      active: extensionStore.activePanelId === panel.pluginId,
+      onSelect: () => toggleTouchExtension(panel.pluginId),
+    })),
+    { key: 'mindmap', label: t('mobile.panel.mindmap'), testId: 'mobile-panel-mindmap', active: mindmapOverlayOpen, onSelect: () => { mindmapOverlayOpen = !mindmapOverlayOpen; } },
+  ].map((entry) => ({
+    ...entry,
+    onSelect: () => {
+      uiStore.closeSidebarDrawer();
+      entry.onSelect();
+    },
+  })));
+  let showFormatBar = $derived(
+    platform.touchShell && !!activeEditorRef && (editorFocused || platform.layout !== 'phone'),
+  );
+  // Phones hide the panel bar while typing so the editor keeps its rows.
+  let showPanelBar = $derived(
+    platform.touchShell && !(platform.layout === 'phone' && (editorFocused || platform.keyboardOpen)),
+  );
+
+  // Opening a file from the drawer returns to the editor.
+  let lastActiveTabId: string | null = null;
+  $effect(() => {
+    const id = tabsStore.activeTab?.id ?? null;
+    untrack(() => {
+      if (id !== null && id !== lastActiveTabId && uiStore.sidebarDrawerOpen) uiStore.closeSidebarDrawer();
+      lastActiveTabId = id;
+    });
+  });
+  // A docked sidebar (rotation / wider window) retires the drawer state.
+  $effect(() => {
+    if (!platform.sidebarDrawer) untrack(() => { uiStore.sidebarDrawerOpen = false; });
+  });
+  // The drawer is a modal dialog: move focus into it when it opens (unless
+  // something inside, e.g. an inline rename field, already has focus).
+  let sidebarDrawerEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const el = sidebarDrawerEl;
+    if (!uiStore.sidebarDrawerOpen || !el) return;
+    untrack(() => {
+      if (!el.contains(document.activeElement)) el.focus({ preventScroll: true });
+    });
   });
 
   // Recent projects cache for Cmd+Number switching (Notion-style)
@@ -392,6 +564,8 @@ let paletteOpen = $state(false);
             projectStore.removeWorkspacePath(lastOpenFilePath);
           }
         }
+        // Compact layouts: show the file drawer when no file was restored.
+        if (uiStore.sidebarIsDrawer) uiStore.sidebarDrawerOpen = !tabsStore.activeTab;
 
         // Track as recent project (backend persistence for next launch)
         const name = config?.project?.name || pathBasename(dirPath) || 'Untitled';
@@ -529,6 +703,7 @@ let paletteOpen = $state(false);
   }
 
   async function openNewWindow() {
+    if (!platform.can('multi_window')) return;
     const label = `novelist-${Date.now()}`;
     const webview = new WebviewWindow(label, {
       title: 'Novelist',
@@ -543,6 +718,8 @@ let paletteOpen = $state(false);
   }
 
   async function handleOpenDirectory() {
+    // Mobile projects live in the sandboxed library (Welcome / New Project).
+    if (!platform.can('pick_directory')) return;
     const selected = await open({ directory: true, multiple: false });
     if (!selected) return;
     await openProjectFromPath(selected as string);
@@ -572,12 +749,34 @@ let paletteOpen = $state(false);
   }
 
   async function handleOpenFile() {
+    // Mobile pickers return content:// / scoped URLs the backend cannot
+    // read; files enter through `handleImportFileIntoProject` instead.
+    if (platform.isMobile) return;
     const selected = await open({
       multiple: false,
       filters: [{ name: 'Text files', extensions: ['md', 'markdown', 'txt', 'json', 'jsonl', 'csv', 'canvas', 'kanban', 'litstudy', 'novtrans'] }],
     });
     if (!selected) return;
     await openSingleFile(selected as string);
+  }
+
+  /** Mobile: copy a picked Markdown/text file into the open library project. */
+  async function handleImportFileIntoProject() {
+    const projectDir = projectStore.dirPath;
+    if (!platform.isMobile || !projectDir) return;
+    try {
+      const staged = await pickAndStageFile('.md,.markdown,.txt,text/markdown,text/plain');
+      if (!staged || projectStore.dirPath !== projectDir) return;
+      const imported = await commands.importLibraryFile(staged.path, projectDir);
+      if (imported.status === 'error') {
+        showOperationError(imported.error);
+        return;
+      }
+      await projectStore.refreshFolder(projectDir);
+      if (projectStore.dirPath === projectDir) await openSingleFile(imported.data);
+    } catch (error) {
+      showOperationError(t('mobile.importFailed', { error: (error as Error)?.message ?? String(error) }));
+    }
   }
 
   /** Open the active file's containing folder as a project. */
@@ -743,9 +942,13 @@ let paletteOpen = $state(false);
     if (view) fmt.toggleLinePrefix(view, prefix);
   }
 
+  function saveActiveFile() {
+    void activeEditorRef?.saveCurrentFile();
+  }
+
   const handleKeydown = createKeydownHandler({
     openNewWindow: () => openNewWindow(),
-    saveActiveFile: () => { void activeEditorRef?.saveCurrentFile(); },
+    saveActiveFile,
     toggleProjectSearch: () => { projectSearchOpen = !projectSearchOpen; },
     getRecentProjects: () => recentProjects,
     openProjectFromPath: (path) => { void openProjectFromPath(path); },
@@ -830,15 +1033,16 @@ let paletteOpen = $state(false);
       handleOpenDirectory,
       handleOpenContainingFolder,
       handleCloseTab,
+      handleImportFileIntoProject,
       handleGoToLine,
       saveCurrentFileAsTemplate,
       togglePalette: () => { paletteOpen = !paletteOpen; },
-      openMovePalette: () => { movePaletteOpen = true; },
+      openMovePalette: () => { movePaletteSource = null; movePaletteOpen = true; },
       toggleProjectSearch: () => { projectSearchOpen = !projectSearchOpen; },
       openExportDialog: () => { exportDialogOpen = true; },
       openNewProjectDialog: () => { newProjectDialogOpen = true; },
       toggleMindmapOverlay: () => { mindmapOverlayOpen = !mindmapOverlayOpen; },
-      requestProjectSwitcher: () => { uiStore.sidebarVisible = true; projectSwitcherTrigger++; },
+      requestProjectSwitcher: () => { uiStore.revealSidebar(); projectSwitcherTrigger++; },
     });
 
     // Lifecycle wiring (onCloseRequested, WebDAV auto-sync) stays pre-paint so
@@ -846,7 +1050,33 @@ let paletteOpen = $state(false);
     const unlistenLifecycle = useAppLifecycle({
       t,
       isClosingTab: () => closeTab.isClosing(),
+      saveDirtyTabs: () => autoSave.runOnce(),
     });
+
+    // Sidebar "Move to…" (touch alternative to drag-and-drop).
+    const handleOpenMovePalette = (event: Event) => {
+      const detail = (event as CustomEvent<OpenMovePaletteDetail>).detail;
+      if (!detail?.sourcePath) return;
+      movePaletteSource = detail.sourcePath;
+      movePaletteOpen = true;
+    };
+    window.addEventListener(OPEN_MOVE_PALETTE_EVENT, handleOpenMovePalette);
+    // Focus events fire synchronously while Svelte tears down a focused
+    // element (inside a block effect), where writing $state is illegal, so
+    // the flag is updated in a microtask and only when it changes.
+    const setEditorFocused = (focused: boolean) => {
+      queueMicrotask(() => {
+        if (editorFocused !== focused) editorFocused = focused;
+      });
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      setEditorFocused(!!(event.target as Element | null)?.closest?.('.cm-editor'));
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      setEditorFocused(!!(event.relatedTarget as Element | null)?.closest?.('.cm-editor'));
+    };
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
 
     // Deferred teardown handles — nulled until the rAF fires. The cleanup
     // closure optional-chains so unmounting before first-paint is safe.
@@ -904,17 +1134,22 @@ let paletteOpen = $state(false);
       }));
 
       // Native menu → commandRegistry dispatch bridge.
-      unlistenMenu = wireMenuEvents({
-        onOpenRecent: (path) => { void handleOpenRecent(path); },
-      });
-
-      // Check for updates silently after startup (5s delay to not block UI)
-      setTimeout(async () => {
-        runStartupTask('checkForUpdates', async () => {
-          const { checkForUpdates } = await import('$lib/updater');
-          await checkForUpdates(true);
+      if (platform.can('native_menu')) {
+        unlistenMenu = wireMenuEvents({
+          onOpenRecent: (path) => { void handleOpenRecent(path); },
         });
-      }, 5000);
+      }
+
+      // Check for updates silently after startup (5s delay to not block UI).
+      // iOS updates via TestFlight, Android APKs are reinstalled manually.
+      if (platform.can('self_update')) {
+        setTimeout(async () => {
+          runStartupTask('checkForUpdates', async () => {
+            const { checkForUpdates } = await import('$lib/updater');
+            await checkForUpdates(true);
+          });
+        }, 5000);
+      }
     });
 
     return () => {
@@ -923,6 +1158,9 @@ let paletteOpen = $state(false);
       unlistenMenu?.();
       unlistenScrollAutoHide();
       window.removeEventListener('novelist-operation-error', handleOperationError);
+      window.removeEventListener(OPEN_MOVE_PALETTE_EVENT, handleOpenMovePalette);
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
     };
   });
 </script>
@@ -934,9 +1172,16 @@ let paletteOpen = $state(false);
   }}
   ondragend={clearSidebarDragState}
   ondrop={clearSidebarDragState}
-  onmousedown={handleTitlebarDrag}
+  onmousedown={(e) => {
+    // Mobile has no draggable native title bar; a tap near the top must
+    // never be swallowed by startDragging().
+    if (!platform.isMobile) handleTitlebarDrag(e);
+  }}
   onclick={closeEditorCtxMenu}
   oncontextmenu={(e: MouseEvent) => {
+    // Mobile: long-press/selection callouts (copy, paste, look up, dictation)
+    // stay native; formatting lives in the touch format bar instead.
+    if (platform.isMobile) return;
     const target = e.target as HTMLElement | null;
     if (!target) { e.preventDefault(); return; }
     // Inside the editor: show a styled custom menu (matches the app theme)
@@ -1047,8 +1292,99 @@ let paletteOpen = $state(false);
   </div>
 {/if}
 
+{#snippet sidebarContent()}
+  <Sidebar
+    onOpenProjectFromPath={openProjectFromPath}
+    {recentProjects}
+    onRemoveRecentProject={(path) => { recentProjects = recentProjects.filter(p => p.path !== path); }}
+    onRefreshRecentProjects={refreshRecentProjects}
+    openSwitcherTrigger={projectSwitcherTrigger}
+  />
+{/snippet}
+
+{#snippet outlinePanel(closeOnNavigate: boolean)}
+  {#await loadOutline() then { default: Outline }}
+    <Outline
+      {headings}
+      onNavigate={(from) => { activeEditorRef?.scrollToPosition(from); if (closeOnNavigate) closePanelSheet(); }}
+      onMoveSection={handleMoveSection}
+    />
+  {/await}
+{/snippet}
+
+<!-- Right-panel priority chain (draft › snapshot › stats › template ›
+     literary › extension), shared by the docked column and the touch sheet. -->
+{#snippet panelChain(width: string, closeOnNavigate: boolean)}
+  {#if uiStore.draftVisible && tabsStore.activeTab}
+    <div style="width: {width};">
+      {#await loadDraftNote() then { default: DraftNote }}
+        <DraftNote filePath={tabsStore.activeTab.filePath} />
+      {/await}
+    </div>
+  {:else if uiStore.snapshotVisible}
+    <div style="width: {width};">
+      {#await loadSnapshotPanel() then { default: SnapshotPanel }}
+        <SnapshotPanel />
+      {/await}
+    </div>
+  {:else if uiStore.statsVisible && (projectStore.dirPath ?? tabsStore.activeTab)}
+    <div style="width: {width};">
+      {#await loadStatsPanel() then { default: StatsPanel }}
+        <StatsPanel projectDir={projectStore.dirPath ?? tabsStore.activeTab?.filePath ?? ''} />
+      {/await}
+    </div>
+  {:else if uiStore.templateVisible}
+    <div style="width: {width};">
+      {#await loadTemplatePanel() then { default: TemplatePanel }}
+        <TemplatePanel
+          onExecute={executeTemplateWrapper}
+          openDialogRequest={templateDialogRequest}
+          onDialogHandled={() => { templateDialogRequest = null; }}
+        />
+      {/await}
+    </div>
+  {:else if uiStore.literaryVisible && literaryProjectOpen}
+    <div style="width: {width};">
+      {#await loadLiteraryStudyPanel() then { default: LiteraryStudyPanel }}
+        <LiteraryStudyPanel
+          onOpenChapter={(relativePath) => { void openLiteraryChapter(relativePath); }}
+          onReplaceBook={() => {
+            literaryImportMode = 'replace';
+            literaryImportDialogOpen = true;
+          }}
+        />
+      {/await}
+    </div>
+  {:else if extensionStore.activePanelId}
+    {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
+    {#if activePanel?.pluginId === 'ai-talk'}
+      <div style="width: {width};">
+        {#await loadAiTalkPanel() then { default: AiTalkPanel }}
+          <ErrorBoundary><AiTalkPanel /></ErrorBoundary>
+        {/await}
+      </div>
+    {:else if activePanel && tabsStore.activeTab}
+      <div style="width: {width};">
+        {#await loadPluginPanel() then { default: PluginPanel }}
+          <PluginPanel
+            extension={activePanel}
+            onNavigate={(from) => { activeEditorRef?.scrollToPosition(from); if (closeOnNavigate) closePanelSheet(); }}
+          />
+        {/await}
+      </div>
+    {/if}
+  {/if}
+{/snippet}
+
 {#if !projectStore.isOpen}
-  <Welcome onOpenFile={handleOpenFile} onOpenDirectory={handleOpenDirectory} onOpenRecent={handleOpenRecent} onNewFile={handleNewScratchFile} onNewProject={() => { newProjectDialogOpen = true; }} />
+  <Welcome
+    onOpenFile={handleOpenFile}
+    onOpenDirectory={handleOpenDirectory}
+    onOpenRecent={handleOpenRecent}
+    onNewFile={handleNewScratchFile}
+    onNewProject={() => { newProjectDialogOpen = true; }}
+    onOpenSettingsSection={(section) => uiStore.openSettings(section)}
+  />
 {:else if uiStore.zenMode}
   {#await loadZenMode() then { default: ZenMode }}
     <ZenMode wordCount={zenWordCount}>
@@ -1072,17 +1408,27 @@ let paletteOpen = $state(false);
   <!--
     Layout: sidebar | [editor-area] | outline
     Editor area: [pane1] | [pane2 if split] stacked vertically with shared status bar
+    Touch shell (mobile / phone-narrow windows): top toolbar, sidebar drawer,
+    right panels as a sheet, horizontal panel bar + format bar at the bottom.
   -->
-  <div data-testid="app-layout" class="novelist-view-fade-in flex h-full w-full" style="{isDraggingAny ? 'cursor: col-resize; user-select: none;' : ''}">
-    {#if uiStore.sidebarVisible}
+  <div
+    data-testid="app-layout"
+    class="novelist-view-fade-in app-shell"
+    class:app-shell-touch={platform.touchShell}
+    data-layout={platform.layout}
+    style="{isDraggingAny ? 'cursor: col-resize; user-select: none;' : ''}"
+  >
+  {#if platform.touchShell}
+    {#await loadMobileToolbar() then { default: MobileToolbar }}
+      <MobileToolbar onSave={saveActiveFile} />
+    {/await}
+  {/if}
+  <div class="app-body flex w-full">
+    {#if uiStore.sidebarIsDrawer}
+      <!-- Drawer rendered below as an overlay. -->
+    {:else if uiStore.sidebarVisible}
       <div data-testid="sidebar-region" class="shrink-0" style="width: {uiStore.sidebarWidth}px;">
-        <Sidebar
-          onOpenProjectFromPath={openProjectFromPath}
-          {recentProjects}
-          onRemoveRecentProject={(path) => { recentProjects = recentProjects.filter(p => p.path !== path); }}
-          onRefreshRecentProjects={refreshRecentProjects}
-          openSwitcherTrigger={projectSwitcherTrigger}
-        />
+        {@render sidebarContent()}
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="sidebar-edge">
@@ -1117,14 +1463,16 @@ let paletteOpen = $state(false);
 
     <!-- Main editor column (contains split panes + status bar) -->
     <div data-testid="editor-region" class="flex flex-col flex-1 min-w-0 relative">
-      <!-- Panes row: N resizable editor columns, dividers between them. -->
+      <!-- Panes row: N resizable editor columns, dividers between them.
+           Compact layouts render only the active pane (split is desktop-only). -->
       <div class="flex flex-1 min-h-0" bind:this={splitContainerRef} style="{isDraggingSplit ? 'cursor: col-resize; user-select: none;' : ''}">
         {#each tabsStore.panes as pane, i (pane.id)}
-          {#if i > 0}
+          {#if !platform.singlePane || pane.id === tabsStore.activePaneId}
+          {#if i > 0 && !platform.singlePane}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="split-divider" onmousedown={startDividerDrag(i)}></div>
           {/if}
-          <div class="flex flex-col min-w-0" style="flex: {paneFlex(i)} 1 0%;">
+          <div class="flex flex-col min-w-0" style="flex: {platform.singlePane ? 1 : paneFlex(i)} 1 0%;">
             <EditorPane
               paneId={pane.id}
               index={i}
@@ -1133,6 +1481,7 @@ let paletteOpen = $state(false);
               onmetrics={handlePaneMetrics}
             />
           </div>
+          {/if}
         {/each}
       </div>
 
@@ -1141,6 +1490,7 @@ let paletteOpen = $state(false);
     </div>
 
     <!-- Right panels (Outline + one of Draft/Snapshot/Stats) + toggle tabs -->
+    {#if !rightPanelAsSheet}
     <div class="shrink-0 flex">
       <!-- Resize handle for right panel -->
       {#if rightPanelContentVisible}
@@ -1150,73 +1500,11 @@ let paletteOpen = $state(false);
       <!-- Panel content -->
       {#if uiStore.outlineVisible}
         <div class="overflow-y-auto" style="width: {uiStore.rightPanelWidth}px; border-right: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
-          {#await loadOutline() then { default: Outline }}
-            <Outline {headings} onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} onMoveSection={handleMoveSection} />
-          {/await}
+          {@render outlinePanel(false)}
         </div>
       {/if}
-      {#if uiStore.draftVisible && tabsStore.activeTab}
-        <div style="width: {uiStore.rightPanelWidth}px;">
-          {#await loadDraftNote() then { default: DraftNote }}
-            <DraftNote filePath={tabsStore.activeTab.filePath} />
-          {/await}
-        </div>
-      {:else if uiStore.snapshotVisible}
-        <div style="width: {uiStore.rightPanelWidth}px;">
-          {#await loadSnapshotPanel() then { default: SnapshotPanel }}
-            <SnapshotPanel />
-          {/await}
-        </div>
-      {:else if uiStore.statsVisible && (projectStore.dirPath ?? tabsStore.activeTab)}
-        <div style="width: {uiStore.rightPanelWidth}px;">
-          {#await loadStatsPanel() then { default: StatsPanel }}
-            <StatsPanel projectDir={projectStore.dirPath ?? tabsStore.activeTab?.filePath ?? ''} />
-          {/await}
-        </div>
-      {:else if uiStore.templateVisible}
-        <div style="width: {uiStore.rightPanelWidth}px;">
-          {#await loadTemplatePanel() then { default: TemplatePanel }}
-            <TemplatePanel
-              onExecute={executeTemplateWrapper}
-              openDialogRequest={templateDialogRequest}
-              onDialogHandled={() => { templateDialogRequest = null; }}
-            />
-          {/await}
-        </div>
-      {:else if uiStore.literaryVisible && literaryProjectOpen}
-        <div style="width: {uiStore.rightPanelWidth}px;">
-          {#await loadLiteraryStudyPanel() then { default: LiteraryStudyPanel }}
-            <LiteraryStudyPanel
-              onOpenChapter={(relativePath) => { void openLiteraryChapter(relativePath); }}
-              onReplaceBook={() => {
-                literaryImportMode = 'replace';
-                literaryImportDialogOpen = true;
-              }}
-            />
-          {/await}
-        </div>
-      {:else if extensionStore.activePanelId}
-        {@const activePanel = extensionStore.panels.find(p => p.pluginId === extensionStore.activePanelId)}
-        {#if activePanel?.pluginId === 'ai-talk'}
-          <div style="width: {uiStore.rightPanelWidth}px;">
-            {#await loadAiTalkPanel() then { default: AiTalkPanel }}
-              <ErrorBoundary><AiTalkPanel /></ErrorBoundary>
-            {/await}
-          </div>
-        {:else if activePanel?.pluginId === 'ai-agent'}
-          <div style="width: {uiStore.rightPanelWidth}px;">
-            {#await loadAiAgentPanel() then { default: AiAgentPanel }}
-              <ErrorBoundary><AiAgentPanel /></ErrorBoundary>
-            {/await}
-          </div>
-        {:else if activePanel && tabsStore.activeTab}
-          <div style="width: {uiStore.rightPanelWidth}px;">
-            {#await loadPluginPanel() then { default: PluginPanel }}
-              <PluginPanel extension={activePanel} onNavigate={(from) => activeEditorRef?.scrollToPosition(from)} />
-            {/await}
-          </div>
-        {/if}
-      {/if}
+      {@render panelChain(`${uiStore.rightPanelWidth}px`, false)}
+      {#if !platform.touchShell}
       <!-- Vertical toggle tabs -->
       <div class="flex flex-col" style="border-left: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
         <button
@@ -1295,7 +1583,76 @@ let paletteOpen = $state(false);
           </button>
         {/each}
       </div>
+      {/if}
     </div>
+    {/if}
+
+    {#if uiStore.sidebarIsDrawer}
+      {#if uiStore.sidebarDrawerOpen}
+        <button
+          type="button"
+          class="touch-scrim"
+          data-testid="sidebar-drawer-scrim"
+          aria-label={t('mobile.closeFiles')}
+          onclick={() => uiStore.closeSidebarDrawer()}
+        ></button>
+      {/if}
+      <div
+        bind:this={sidebarDrawerEl}
+        class="sidebar-drawer"
+        class:sidebar-drawer-open={uiStore.sidebarDrawerOpen}
+        data-testid="sidebar-region"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label={t('mobile.files')}
+        inert={!uiStore.sidebarDrawerOpen}
+        onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); uiStore.closeSidebarDrawer(); } }}
+      >
+        {@render sidebarContent()}
+      </div>
+    {/if}
+
+    {#if sheetPanel}
+      <section
+        class="panel-sheet"
+        class:panel-sheet-full={platform.layout === 'phone'}
+        data-testid="panel-sheet"
+        aria-label={sheetTitle}
+      >
+        <header class="panel-sheet-header">
+          <h2 class="panel-sheet-title">{sheetTitle}</h2>
+          <button
+            type="button"
+            class="panel-sheet-close"
+            data-testid="panel-sheet-close"
+            aria-label={t('mobile.closePanel', { name: sheetTitle })}
+            title={t('mobile.closePanel', { name: sheetTitle })}
+            onclick={closePanelSheet}
+          >
+            <X size={20} />
+          </button>
+        </header>
+        <div class="panel-sheet-body">
+          {#if sheetPanel === 'outline'}
+            <div class="panel-sheet-scroll">{@render outlinePanel(platform.layout === 'phone')}</div>
+          {:else}
+            {@render panelChain('100%', platform.layout === 'phone')}
+          {/if}
+        </div>
+      </section>
+    {/if}
+  </div>
+  {#if showPanelBar}
+    {#await loadMobilePanelBar() then { default: MobilePanelBar }}
+      <MobilePanelBar entries={touchPanelEntries} />
+    {/await}
+  {/if}
+  {#if showFormatBar}
+    {#await loadFormatToolbar() then { default: FormatToolbar }}
+      <FormatToolbar getView={getActiveEditorView} {editorFocused} />
+    {/await}
+  {/if}
   </div>
 {/if}
 
@@ -1318,12 +1675,14 @@ let paletteOpen = $state(false);
 
 {#if movePaletteOpen}
   {#await loadMoveFilePalette() then { default: MoveFilePalette }}
-    <MoveFilePalette onClose={() => {
+    <MoveFilePalette sourcePath={movePaletteSource ?? undefined} onClose={() => {
       movePaletteOpen = false;
+      movePaletteSource = null;
       // Return focus to the editor on the next frame so typing resumes without
       // a manual click. rAF waits for the palette's input to unmount first.
+      // Mobile skips it: focusing would pop the on-screen keyboard.
       const tabId = tabsStore.activeTab?.id;
-      if (tabId) requestAnimationFrame(() => getEditorView(tabId)?.focus());
+      if (tabId && !platform.isMobile) requestAnimationFrame(() => getEditorView(tabId)?.focus());
     }} />
   {/await}
 {/if}
@@ -1336,7 +1695,13 @@ let paletteOpen = $state(false);
 
 {#if uiStore.settingsOpen}
   {#await loadSettings() then { default: Settings }}
-    <Settings onClose={() => { uiStore.settingsOpen = false; }} />
+    <Settings
+      onClose={() => { uiStore.settingsOpen = false; }}
+      onOpenProject={(path) => {
+        uiStore.settingsOpen = false;
+        void openProjectFromPath(path);
+      }}
+    />
   {/await}
 {/if}
 
@@ -1560,4 +1925,170 @@ let paletteOpen = $state(false);
   }
 
   /* Pane drop overlays — only rendered while a sidebar file drag is in flight. */
+
+  /* --- Shell ------------------------------------------------------------ */
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+  .app-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+  }
+  /* Notch / rounded-corner insets in landscape (iOS; Android's native
+     root padding already shrinks the WebView, so env() is 0 there). */
+  .app-shell-touch .app-body {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  /* Home indicator: the shell pads once (bottom bars, status bar, sheets and
+     the drawer all sit above it); with the keyboard up the inset is moot. */
+  :global(html[data-keyboard='closed']) .app-shell-touch {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  :global(html[data-mobile='true']) .operation-error-toast {
+    top: calc(env(safe-area-inset-top, 0px) + 52px);
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: auto;
+    width: min(420px, calc(100vw - 24px));
+  }
+  @media (pointer: coarse) {
+    .operation-error-dismiss {
+      flex-basis: 44px;
+      width: 44px;
+      height: 44px;
+    }
+  }
+
+  /* --- Sidebar drawer --------------------------------------------------- */
+  .touch-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 80;
+    padding: 0;
+    border: 0;
+    background: color-mix(in srgb, #000 32%, transparent);
+    cursor: default;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sidebar-drawer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    width: min(340px, 86vw);
+    max-width: 100%;
+    background: var(--novelist-sidebar-bg);
+    box-shadow: 0 0 24px color-mix(in srgb, #000 22%, transparent);
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition: transform 180ms ease-out, visibility 0s linear 180ms;
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+  .sidebar-drawer-open {
+    /* `none`, not translateX(0): a transformed ancestor would become the
+       containing block of the sidebar's fixed-position menus. */
+    transform: none;
+    visibility: visible;
+    transition: transform 180ms ease-out, visibility 0s;
+  }
+  .sidebar-drawer > :global(*) {
+    flex: 1;
+    min-height: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-drawer,
+    .sidebar-drawer-open {
+      transition: none;
+    }
+  }
+
+  /* --- Right panel sheet ------------------------------------------------ */
+  .panel-sheet {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 70;
+    display: flex;
+    flex-direction: column;
+    width: min(420px, 92%);
+    background: var(--novelist-bg);
+    border-left: 1px solid var(--novelist-border);
+    box-shadow: -8px 0 24px color-mix(in srgb, #000 14%, transparent);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  .panel-sheet-full {
+    left: 0;
+    width: auto;
+    border-left: 0;
+    box-shadow: none;
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+  .panel-sheet-header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 4px 0 14px;
+    border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border));
+    background: var(--novelist-bg-secondary);
+  }
+  .panel-sheet-title {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--novelist-text);
+  }
+  .panel-sheet-close {
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--novelist-text-secondary);
+    cursor: pointer;
+  }
+  .panel-sheet-close:active,
+  .panel-sheet-close:hover {
+    background: var(--novelist-sidebar-hover);
+    color: var(--novelist-text);
+  }
+  .panel-sheet-close:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--novelist-accent) 45%, transparent);
+    outline-offset: -2px;
+  }
+  .panel-sheet-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
+  .panel-sheet-body > :global(div) {
+    min-height: 0;
+    overflow: auto;
+  }
+  .panel-sheet-scroll {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 </style>
