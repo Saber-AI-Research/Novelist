@@ -1,0 +1,137 @@
+# Novelist cloud sync server: Nextcloud (official image) + MariaDB + Redis.
+#
+# Exposure by default: Nextcloud HTTP is published on 127.0.0.1 only. MariaDB
+# and Redis publish no ports and live on an internal network without outbound
+# access. Phones must reach the server over HTTPS through a reverse proxy:
+#   - existing Nginx Proxy Manager: add compose.npm.yaml (see README.md)
+#   - any other proxy on this host: forward to 127.0.0.1:${NEXTCLOUD_HTTP_PORT}
+#
+# Secrets are Docker secret files under ./secrets (create them with
+# ./init-secrets.sh); .env holds only non-secret settings.
+# Image tags were checked against Docker Hub on 2026-10-28 (README.md lists
+# the digests); bump them one Nextcloud major version at a time.
+name: novelist-nextcloud
+
+x-nextcloud: &nextcloud
+  image: ${NEXTCLOUD_IMAGE:-nextcloud:34.0.5-apache}
+  restart: unless-stopped
+  environment: &nextcloud-env
+    MYSQL_HOST: db
+    MYSQL_DATABASE: nextcloud
+    MYSQL_USER: nextcloud
+    MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    REDIS_HOST: redis
+    REDIS_HOST_PASSWORD_FILE: /run/secrets/redis_password
+    PHP_UPLOAD_LIMIT: ${PHP_UPLOAD_LIMIT:-1G}
+    PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
+    # Only for a TLS proxy on this host (empty values are ignored by the image).
+    OVERWRITEPROTOCOL: ${NEXTCLOUD_OVERWRITE_PROTOCOL:-}
+    OVERWRITEHOST: ${NEXTCLOUD_OVERWRITE_HOST:-}
+    OVERWRITECLIURL: ${NEXTCLOUD_OVERWRITE_CLI_URL:-}
+  volumes:
+    - html:/var/www/html
+    - data:/var/www/html/data
+
+services:
+  db:
+    image: ${MARIADB_IMAGE:-mariadb:11.8.9-noble}
+    restart: unless-stopped
+    command:
+      - --transaction-isolation=READ-COMMITTED
+      - --binlog-format=ROW
+    environment:
+      MARIADB_DATABASE: nextcloud
+      MARIADB_USER: nextcloud
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_AUTO_UPGRADE: "1"
+    secrets: [db_password, db_root_password]
+    volumes:
+      - db:/var/lib/mysql
+    networks:
+      backend: {}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:8.10.3-trixie}
+    restart: unless-stopped
+    user: redis
+    # requirepass is read from stdin so the secret never appears in argv,
+    # `ps` or `docker inspect`. Cache and file locks only: no persistence.
+    command:
+      - sh
+      - -ec
+      - |
+        exec redis-server - <<EOF
+        requirepass $$(cat /run/secrets/redis_password)
+        save ""
+        appendonly no
+        EOF
+    secrets: [redis_password]
+    networks:
+      backend: {}
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  app:
+    <<: *nextcloud
+    environment:
+      <<: *nextcloud-env
+      NEXTCLOUD_ADMIN_USER_FILE: /run/secrets/nextcloud_admin_user
+      NEXTCLOUD_ADMIN_PASSWORD_FILE: /run/secrets/nextcloud_admin_password
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_DOMAIN:?set NEXTCLOUD_DOMAIN in .env} localhost 127.0.0.1
+    secrets: [db_password, redis_password, nextcloud_admin_user, nextcloud_admin_password]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${NEXTCLOUD_HTTP_PORT:-8080}:80"
+    networks:
+      frontend: {}
+      backend: {}
+
+  # Background jobs (versions/trash expiry, file locks cleanup) every 5 minutes.
+  cron:
+    <<: *nextcloud
+    entrypoint: /cron.sh
+    secrets: [db_password, redis_password]
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      frontend: {}
+      backend: {}
+
+networks:
+  # Loopback port and outbound access (app store, update checks); app and cron only.
+  frontend: {}
+  # Database and cache traffic; no route outside this stack.
+  backend:
+    internal: true
+
+volumes:
+  db:
+  html:
+  data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_root_password:
+    file: ./secrets/db_root_password
+  redis_password:
+    file: ./secrets/redis_password
+  nextcloud_admin_user:
+    file: ./secrets/nextcloud_admin_user
+  nextcloud_admin_password:
+    file: ./secrets/nextcloud_admin_password

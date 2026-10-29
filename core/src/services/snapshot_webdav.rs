@@ -1,7 +1,8 @@
 //! WebDAV backup helpers for snapshots.
 //!
 //! Remote path scheme:
-//!   `{webdav_url}/novelist-snapshots/{slug}-{hash8}/`
+//!   desktop: `{webdav_url}/novelist-snapshots/{slug}-{hash8}/` (absolute path)
+//!   mobile:  `{webdav_url}/novelist-snapshots/project-{sync project id}/`
 //!       project.json          ← identity card, written once on first upload
 //!       snap-{ts}/
 //!           metadata.json
@@ -9,9 +10,12 @@
 //!
 //! Failures are logged; metadata.json is a completion marker published only last.
 
+use crate::services::cloud::AccountLease;
 use crate::services::project_files::is_project_content_path;
 use crate::services::snapshots::{snapshots_dir, SnapshotMeta};
-use crate::services::sync::read_sync_config;
+use crate::services::sync::{
+    ensure_project_identity, project_auth, read_sync_config, webdav_client,
+};
 use crate::services::webdav::{self, create_collection, delete_remote, WebDavAuth};
 use crate::AppError;
 use cap_fs_ext::DirExt;
@@ -19,6 +23,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::Path;
 
 // ── slug / hash helpers ───────────────────────────────────────────────────────
@@ -53,7 +58,7 @@ pub fn hash8(project_dir: &str) -> String {
     h[..8].to_string()
 }
 
-/// Remote base directory for a project: `novelist-snapshots/{slug}-{hash8}`.
+/// Desktop remote base directory for a project: `novelist-snapshots/{slug}-{hash8}`.
 pub fn remote_project_dir(project_dir: &str) -> String {
     let folder_name = Path::new(project_dir)
         .file_name()
@@ -64,9 +69,52 @@ pub fn remote_project_dir(project_dir: &str) -> String {
     format!("novelist-snapshots/{}-{}", slug, h8)
 }
 
-/// Remote directory for a snapshot; IDs may include a collision-avoidance suffix.
+/// Desktop remote directory for a snapshot; IDs may include a collision-avoidance suffix.
+#[cfg(test)]
 pub fn remote_snap_dir(project_dir: &str, snap_id: &str) -> String {
     format!("{}/{}", remote_project_dir(project_dir), snap_id)
+}
+
+/// A project's remote snapshot folder and the owner its identity card names.
+#[derive(Debug, PartialEq, Eq)]
+struct RemoteNamespace {
+    dir: String,
+    owner: String,
+}
+
+impl RemoteNamespace {
+    /// Desktop: keyed and owned by the absolute path, unchanged so existing
+    /// backups stay reachable.
+    fn for_path(project_dir: &str) -> Self {
+        Self {
+            dir: remote_project_dir(project_dir),
+            owner: project_dir.to_owned(),
+        }
+    }
+
+    /// Mobile: keyed by the project's sync identity. Clones and renamed
+    /// copies of one project share it; independent projects that merely share
+    /// a name (on two devices) never do. The app-container path, which iOS
+    /// moves on updates, is not part of it.
+    fn for_project_id(project_id: &str) -> Self {
+        Self {
+            dir: format!("novelist-snapshots/project-{project_id}"),
+            owner: format!("project-id:{project_id}"),
+        }
+    }
+
+    fn snap_dir(&self, snap_id: &str) -> String {
+        format!("{}/{snap_id}", self.dir)
+    }
+}
+
+/// Mobile projects get (or are given) a sync identity; desktop keeps paths.
+fn remote_namespace(project_dir: &str) -> Result<RemoteNamespace, AppError> {
+    if !cfg!(mobile) {
+        return Ok(RemoteNamespace::for_path(project_dir));
+    }
+    let project_id = ensure_project_identity(Path::new(project_dir))?;
+    Ok(RemoteNamespace::for_project_id(&project_id))
 }
 
 // ── identity card ─────────────────────────────────────────────────────────────
@@ -79,76 +127,80 @@ struct ProjectIdentity {
 
 // ── WebDAV detection ──────────────────────────────────────────────────────────
 
+/// `project.json` holds a path or project ID plus a folder name.
+const MAX_IDENTITY_BYTES: usize = 16 * 1024;
+
 struct WebDavCtx {
     client: Client,
     base_url: String,
     auth: WebDavAuth,
+    /// Held while a cloud-account password is in use; an account change
+    /// stops the mirroring (see `run`).
+    lease: Option<AccountLease>,
 }
 
-fn get_webdav_ctx(project_dir: &str) -> Option<WebDavCtx> {
+impl WebDavCtx {
+    /// Mirroring may stop anywhere: an incomplete snapshot has no
+    /// completion marker and is retried.
+    async fn run<T>(&self, work: impl Future<Output = Result<T, AppError>>) -> Result<T, AppError> {
+        match &self.lease {
+            Some(lease) => lease.guard(work).await,
+            None => work.await,
+        }
+    }
+}
+
+async fn get_webdav_ctx(project_dir: &str) -> Option<WebDavCtx> {
     let cfg = read_sync_config(project_dir).ok()?;
     if !cfg.enabled || cfg.webdav_url.is_empty() || cfg.username.is_empty() {
         return None;
     }
+    let (auth, lease) = match project_auth(&cfg, None).await {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            tracing::warn!("Snapshot WebDAV upload skipped: {error}");
+            return None;
+        }
+    };
     Some(WebDavCtx {
-        client: Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(webdav::REQUEST_TIMEOUT)
-            .timeout(webdav::REQUEST_TIMEOUT)
-            .build()
-            .ok()?,
+        client: webdav_client().ok()?,
         base_url: cfg.webdav_url,
-        auth: WebDavAuth {
-            username: cfg.username,
-            password: cfg.password,
-        },
+        auth,
+        lease,
     })
 }
 
 // ── pre-upload identity check ─────────────────────────────────────────────────
 
 /// The identity must be readable and match, or be atomically created if absent.
-async fn verify_or_create_identity(ctx: &WebDavCtx, project_dir: &str) -> Result<(), AppError> {
-    let project_remote = remote_project_dir(project_dir);
+async fn verify_or_create_identity(
+    ctx: &WebDavCtx,
+    namespace: &RemoteNamespace,
+    project_dir: &str,
+) -> Result<(), AppError> {
+    let project_remote = &namespace.dir;
     create_collection(&ctx.client, &ctx.base_url, "novelist-snapshots", &ctx.auth).await?;
-    create_collection(&ctx.client, &ctx.base_url, &project_remote, &ctx.auth).await?;
+    create_collection(&ctx.client, &ctx.base_url, project_remote, &ctx.auth).await?;
     let identity_path = format!("{project_remote}/project.json");
-    let response = ctx
-        .client
-        .get(webdav::remote_url(&ctx.base_url, &identity_path)?)
-        .timeout(webdav::REQUEST_TIMEOUT)
-        .basic_auth(&ctx.auth.username, Some(&ctx.auth.password))
-        .send()
-        .await
-        .map_err(|error| {
-            AppError::Custom(format!(
-                "Snapshot identity GET failed: {}",
-                error.without_url()
-            ))
-        })?;
-    if response.status().is_success() {
-        let bytes = response.bytes().await.map_err(|error| {
-            AppError::Custom(format!(
-                "Snapshot identity read failed: {}",
-                error.without_url()
-            ))
-        })?;
-        let identity: ProjectIdentity = serde_json::from_slice(&bytes)?;
-        if identity.original_path != project_dir {
+    if let Some(card) = webdav::get_file_if_exists(
+        &ctx.client,
+        &ctx.base_url,
+        &identity_path,
+        &ctx.auth,
+        MAX_IDENTITY_BYTES,
+    )
+    .await?
+    {
+        let identity: ProjectIdentity = serde_json::from_slice(&card.bytes)?;
+        if identity.original_path != namespace.owner {
             return Err(AppError::Custom(
                 "Snapshot remote project identity does not match".into(),
             ));
         }
         return Ok(());
     }
-    if response.status().as_u16() != 404 {
-        return Err(AppError::Custom(format!(
-            "Snapshot identity GET returned {}",
-            response.status()
-        )));
-    }
     let identity = ProjectIdentity {
-        original_path: project_dir.to_string(),
+        original_path: namespace.owner.clone(),
         display_name: Path::new(project_dir)
             .file_name()
             .and_then(|name| name.to_str())
@@ -218,8 +270,9 @@ async fn upload_snapshot(
     if meta.id.is_empty() || meta.id.contains('/') {
         return Err(AppError::InvalidInput("Invalid snapshot ID".into()));
     }
-    verify_or_create_identity(ctx, project_dir).await?;
-    let remote = remote_snap_dir(project_dir, &meta.id);
+    let namespace = remote_namespace(project_dir)?;
+    verify_or_create_identity(ctx, &namespace, project_dir).await?;
+    let remote = namespace.snap_dir(&meta.id);
     create_collection(&ctx.client, &ctx.base_url, &remote, &ctx.auth).await?;
     let marker = format!("{remote}/metadata.json");
     // Invalidate a previous completion marker before retrying any content.
@@ -291,26 +344,29 @@ async fn upload_snapshot(
 /// Returns whether the remote now holds this complete snapshot; callers delete
 /// retired remote copies only then.
 pub async fn try_upload_snapshot(project_dir: &str, meta: &SnapshotMeta) -> bool {
-    let Some(ctx) = get_webdav_ctx(project_dir) else {
+    let Some(ctx) = get_webdav_ctx(project_dir).await else {
         return false;
     };
     // Even a responsive but very slow server must not hold this project's
     // mirror lock (and so its next snapshot) indefinitely.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-        webdav::validate_remote_path(&meta.id)?;
-        if meta.id.is_empty() || meta.id.contains('/') {
-            return Err(AppError::InvalidInput("Invalid snapshot ID".into()));
-        }
-        let root = Dir::open_ambient_dir(snapshots_dir(project_dir), ambient_authority())?;
-        let snapshot = root.open_dir_nofollow(&meta.id)?;
-        upload_snapshot(&ctx, project_dir, meta, &snapshot).await
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(AppError::Custom(
-            "Snapshot WebDAV upload deadline exceeded".into(),
-        ))
-    });
+    let upload = async {
+        tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            webdav::validate_remote_path(&meta.id)?;
+            if meta.id.is_empty() || meta.id.contains('/') {
+                return Err(AppError::InvalidInput("Invalid snapshot ID".into()));
+            }
+            let root = Dir::open_ambient_dir(snapshots_dir(project_dir), ambient_authority())?;
+            let snapshot = root.open_dir_nofollow(&meta.id)?;
+            upload_snapshot(&ctx, project_dir, meta, &snapshot).await
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(AppError::Custom(
+                "Snapshot WebDAV upload deadline exceeded".into(),
+            ))
+        })
+    };
+    let result = ctx.run(upload).await;
     match result {
         Ok(()) => true,
         Err(error) => {
@@ -327,12 +383,26 @@ pub async fn try_delete_snapshot_remote(project_dir: &str, snap_id: &str) {
         tracing::warn!("Snapshot WebDAV deletion rejected invalid ID");
         return;
     }
-    let ctx = match get_webdav_ctx(project_dir) {
+    let ctx = match get_webdav_ctx(project_dir).await {
         Some(c) => c,
         None => return,
     };
-    let snap_remote = remote_snap_dir(project_dir, snap_id);
-    if let Err(e) = delete_remote(&ctx.client, &ctx.base_url, &snap_remote, &ctx.auth).await {
+    let snap_remote = match remote_namespace(project_dir) {
+        Ok(namespace) => namespace.snap_dir(snap_id),
+        Err(error) => {
+            tracing::warn!("Snapshot WebDAV deletion skipped: {error}");
+            return;
+        }
+    };
+    if let Err(e) = ctx
+        .run(delete_remote(
+            &ctx.client,
+            &ctx.base_url,
+            &snap_remote,
+            &ctx.auth,
+        ))
+        .await
+    {
         tracing::warn!("snapshot WebDAV: DELETE {} failed: {e}", snap_remote);
     }
 }
@@ -395,6 +465,44 @@ mod tests {
         let d = remote_snap_dir("/Users/foo/proj", "snap-1000");
         assert!(d.contains("/snap-1000"));
         assert!(d.starts_with("novelist-snapshots/"));
+        assert_eq!(
+            RemoteNamespace::for_path("/Users/foo/proj").snap_dir("snap-1000"),
+            d
+        );
+    }
+
+    /// Two devices each create "长夜" independently; a third copy is a clone
+    /// (an imported export) renamed to "长夜 备份" on yet another device.
+    #[test]
+    fn mobile_snapshot_namespaces_follow_sync_identity_not_project_name() {
+        let device_a = tempfile::tempdir().unwrap();
+        let device_b = tempfile::tempdir().unwrap();
+        let device_c = tempfile::tempdir().unwrap();
+        let a = device_a.path().join("Projects/长夜");
+        let b = device_b.path().join("Projects/长夜");
+        let clone = device_c.path().join("Projects/长夜 备份");
+        for project in [&a, &b, &clone] {
+            std::fs::create_dir_all(project).unwrap();
+        }
+        let namespace = |project: &Path| {
+            RemoteNamespace::for_project_id(&ensure_project_identity(project).unwrap())
+        };
+
+        let first = namespace(&a);
+        let independent = namespace(&b);
+        assert_ne!(first.dir, independent.dir);
+        assert_ne!(first.owner, independent.owner);
+        assert!(!first.dir.contains("长夜"), "{}", first.dir);
+
+        std::fs::create_dir_all(clone.join(".novelist")).unwrap();
+        std::fs::copy(
+            a.join(".novelist/sync-identity.json"),
+            clone.join(".novelist/sync-identity.json"),
+        )
+        .unwrap();
+        assert_eq!(namespace(&clone), first);
+        // Stable: asking again neither rotates nor replaces the identity.
+        assert_eq!(namespace(&a), first);
     }
 
     #[tokio::test]
@@ -430,6 +538,7 @@ mod tests {
                 username: "test".into(),
                 password: "not-a-credential".into(),
             },
+            lease: None,
         };
         let remote = remote_snap_dir(project_name, &meta.id);
         let file_path = webdav::remote_url(
@@ -530,6 +639,7 @@ mod tests {
                 username: "test".into(),
                 password: "not-a-credential".into(),
             },
+            lease: None,
         };
         assert!(
             upload_snapshot(&ctx, snapshot.path().to_str().unwrap(), &meta, &root)
@@ -545,6 +655,43 @@ mod tests {
             .any(|request| request.method == "PUT"
                 && (request.path.ends_with("metadata.json")
                     || request.path.ends_with("chapter.md"))));
+    }
+
+    #[tokio::test]
+    async fn oversized_remote_snapshot_identity_is_rejected_unread() {
+        use crate::services::webdav::test_server::DavServer;
+        let server = DavServer::start();
+        let project = "/projects/Novel";
+        let namespace = RemoteNamespace::for_path(project);
+        let card = webdav::remote_url(&server.url, &format!("{}/project.json", namespace.dir))
+            .unwrap()
+            .path()
+            .to_owned();
+        server.state.lock().unwrap().canned.insert(
+            ("GET".into(), card.clone()),
+            (200, vec![b' '; MAX_IDENTITY_BYTES + 1]),
+        );
+        let ctx = WebDavCtx {
+            client: Client::new(),
+            base_url: server.url.clone(),
+            auth: WebDavAuth {
+                username: "test".into(),
+                password: "not-a-credential".into(),
+            },
+            lease: None,
+        };
+        let error = verify_or_create_identity(&ctx, &namespace, project)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("size limit"), "{error}");
+        assert!(!server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|request| request.method == "PUT" && request.path == card));
     }
 
     #[tokio::test]
@@ -575,6 +722,7 @@ mod tests {
                 username: "test".into(),
                 password: "not-a-credential".into(),
             },
+            lease: None,
         };
         let remote = remote_snap_dir(project, &meta.id);
         let file_path = webdav::remote_url(&server.url, &format!("{remote}/files/chapter.md"))

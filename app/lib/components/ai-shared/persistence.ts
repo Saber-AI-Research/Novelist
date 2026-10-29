@@ -13,17 +13,13 @@ export type {
   AiSessionKind,
 } from '$lib/ipc/commands';
 
-function sessionKindArg(kind: AiSessionKind): 'talk' | 'agent' {
-  return kind;
-}
-
 export async function listAiSessions(
   projectDir: string,
   kind: AiSessionKind,
 ): Promise<AiSessionFile[]> {
   return invoke<AiSessionFile[]>('list_ai_sessions', {
     projectDir,
-    kind: sessionKindArg(kind),
+    kind,
   });
 }
 
@@ -34,7 +30,7 @@ export async function readAiSession(
 ): Promise<string | null> {
   return invoke<string | null>('read_ai_session', {
     projectDir,
-    kind: sessionKindArg(kind),
+    kind,
     id,
   });
 }
@@ -47,21 +43,9 @@ export async function writeAiSession(
 ): Promise<void> {
   await invoke('write_ai_session', {
     projectDir,
-    kind: sessionKindArg(kind),
+    kind,
     id,
     bodyJson: JSON.stringify(value),
-  });
-}
-
-export async function deleteAiSession(
-  projectDir: string,
-  kind: AiSessionKind,
-  id: string,
-): Promise<void> {
-  await invoke('delete_ai_session', {
-    projectDir,
-    kind: sessionKindArg(kind),
-    id,
   });
 }
 

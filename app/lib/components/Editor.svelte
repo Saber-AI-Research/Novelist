@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { EditorView } from '@codemirror/view';
   import type { Extension, EditorState } from '@codemirror/state';
   import { createEditorExtensions, createEditorState, highlightMatchCompartment, reconfigureEditorState } from '$lib/editor/setup';
@@ -9,6 +9,8 @@
   import { remoteChangeAnnotation } from '$lib/editor/annotations';
   import { projectStore } from '$lib/stores/project.svelte';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { requestStartRename } from '$lib/components/sidebar-events';
   import { commands } from '$lib/ipc/commands';
   import { save as saveDialog, ask, message } from '@tauri-apps/plugin-dialog';
   import { isScratchFile } from '$lib/utils/scratch';
@@ -406,8 +408,20 @@ import {
     }
   }
 
-  /** Save As / Rename: prompt user for a new file name and location. */
+  /**
+   * Save As / Rename: prompt user for a new file name and location. Mobile
+   * has no free-form save location (files live in the project library), so
+   * it renames in place through the sidebar's inline rename instead.
+   */
   async function saveAsRename(tab: { id: string; filePath: string; content: string }) {
+    if (platform.isMobile) {
+      if (isScratchFile(tab.filePath) || !projectStore.dirPath) return;
+      uiStore.revealSidebar();
+      // The drawer must leave `inert` before the rename input can focus.
+      await tick();
+      requestStartRename(tab.filePath);
+      return;
+    }
     // Default to project dir if available, otherwise the file's own dir
     const defaultDir = projectStore.dirPath || pathDirname(tab.filePath);
     const savePath = await saveDialog({
@@ -609,8 +623,18 @@ import {
     }
     setWysiwygImageDocumentDir(view, pathDirname(tab.filePath));
     registerEditorView(tab.id, view);
-    // Auto-focus the editor so the user can type immediately
-    requestAnimationFrame(() => view?.focus());
+    // Auto-focus the editor so the user can type immediately — unless they
+    // already moved on to a text field. The view mounts after an async read
+    // and a lazy chunk load, so it can land after e.g. a sidebar double-click
+    // has opened the inline rename input; taking focus would blur (commit)
+    // that rename and send the next keystrokes into the document instead.
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      const typingElsewhere = active instanceof HTMLElement
+        && (active.isContentEditable || active.matches('input, textarea, select'))
+        && !view?.dom.contains(active);
+      if (!typingElsewhere) view?.focus();
+    });
 
     (window as any).__novelist_view = view;
     (window as any).__novelist_save = saveCurrentFile;

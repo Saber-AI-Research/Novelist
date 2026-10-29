@@ -110,7 +110,7 @@
         bind:value={newName}
         disabled={loading}
         placeholder={t('snapshot.namePlaceholder')}
-        class="flex-1 min-w-0"
+        class="snapshot-input flex-1 min-w-0"
         style="
           padding: 4px 8px;
           font-size: 12px;
@@ -125,7 +125,7 @@
       <button
         onclick={handleCreate}
         disabled={loading || !newName.trim()}
-        class="cursor-pointer"
+        class="snapshot-btn cursor-pointer"
         style="
           padding: 4px 10px;
           font-size: 11px;
@@ -154,26 +154,26 @@
     {:else}
       {#each snapshots as snap (snap.id)}
         <div class="px-3 py-2" style="border-bottom: 1px solid var(--novelist-border-subtle, var(--novelist-border));">
-          <div style="font-size: 12px; font-weight: 500; color: var(--novelist-text);">
+          <div class="snapshot-name" style="font-size: 12px; font-weight: 500; color: var(--novelist-text);">
             {snap.name}
           </div>
-          <div style="font-size: 10px; color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); margin-top: 2px;">
+          <div class="snapshot-meta" style="font-size: 10px; color: var(--novelist-text-tertiary, var(--novelist-text-secondary)); margin-top: 2px;">
             {formatDate(snap.timestamp)} &middot; {snap.file_count} files &middot; {formatBytes(snap.total_bytes)}
           </div>
 
           {#if confirmRestoreId === snap.id}
-            <div style="margin-top: 6px; font-size: 11px; color: var(--novelist-text-secondary);">
+            <div class="snapshot-confirm" style="margin-top: 6px; font-size: 11px; color: var(--novelist-text-secondary);">
               {t('snapshot.restoreConfirm')}
               <div class="flex gap-1 mt-1">
                 <button
-                  class="cursor-pointer"
+                  class="snapshot-btn cursor-pointer"
                   style="padding: 2px 8px; font-size: 10px; border: 1px solid #e55; border-radius: 3px; background: #e55; color: white;"
                   onclick={() => handleRestore(snap.id)}
                 >
                   {t('snapshot.yesRestore')}
                 </button>
                 <button
-                  class="cursor-pointer"
+                  class="snapshot-btn cursor-pointer"
                   style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary);"
                   onclick={() => { confirmRestoreId = null; }}
                 >
@@ -184,14 +184,14 @@
           {:else}
             <div class="flex gap-1 mt-1">
               <button
-                class="cursor-pointer"
+                class="snapshot-btn cursor-pointer"
                 style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary); transition: color 100ms;"
                 onclick={() => { confirmRestoreId = snap.id; }}
               >
                 {t('snapshot.restore')}
               </button>
               <button
-                class="cursor-pointer"
+                class="snapshot-btn cursor-pointer"
                 style="padding: 2px 8px; font-size: 10px; border: 1px solid var(--novelist-border); border-radius: 3px; background: transparent; color: var(--novelist-text-secondary); transition: color 100ms;"
                 onclick={() => handleDelete(snap.id)}
               >
@@ -204,3 +204,25 @@
     {/if}
   </div>
 </div>
+
+<style>
+  /* Touch: ≥44px targets and readable text (the inline sizes are desktop-dense). */
+  @media (pointer: coarse) {
+    .snapshot-btn {
+      min-height: 44px;
+      padding: 0 14px !important;
+      font-size: 14px !important;
+    }
+    .snapshot-input {
+      min-height: 44px;
+      font-size: 16px !important;
+    }
+    .snapshot-name {
+      font-size: 15px !important;
+    }
+    .snapshot-meta,
+    .snapshot-confirm {
+      font-size: 13px !important;
+    }
+  }
+</style>

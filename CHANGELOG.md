@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Android and iOS native project sources with shared platform-capability IPC,
+  desktop-only API isolation, Android API 26 / iOS 16 minimums, and iPhone/iPad
+  device-family configuration. Release mobile builds do not enable WebView
+  developer tools.
+- Phone and tablet layouts with a project library, file drawers, accessible
+  touch toolbars, responsive settings and AI Talk panels, safe areas and
+  keyboard-aware editor sizing. Phones retain full document editing.
+- Sandbox-safe project ZIP import/export and Markdown/HTML document sharing
+  through native share sheets; private app metadata is separated from the
+  iOS Files-visible project library. Library-relative persistence survives
+  app-container relocation.
+- A per-device WebDAV account, remote-project discovery and download, project
+  linking, and explicit keep-local/keep-remote/keep-both sync conflict choices.
+  Mobile app passwords use Keychain/Keystore; desktop storage remains an
+  owner-only app-data file. Account changes cancel or drain in-flight work.
+- Touch editing for canvas, kanban, mindmap, literary commentary and book
+  translation. In-project canvas note links are portable between devices;
+  mobile cards refuse paths outside the current project.
+- Mobile build/check/release scripts, isolated mobile browser projects,
+  TestFlight and signed-APK workflows, developer-account/signing runbooks,
+  an optional self-hosted Nextcloud configuration, and a WebDAV conformance
+  checker. Production signing and TestFlight distribution require maintainer
+  credentials; these changes do not publish a release.
+
+### Removed
+
+- The AI Agent panel (Claude Code / Codex CLI harness) is removed on all
+  platforms, including its settings page, the `Cmd+Shift+I` (toggle AI Agent)
+  and `Cmd+Alt+Shift+N` (new AI Agent session) shortcuts, Apply Changes cards,
+  the agent-only `/plan` and `/act` slash commands, project slash commands
+  from `.novelist/ai/commands/`, and the now-unused IPC commands
+  (`claude_cli_*`, `codex_cli_*`, `write_file_if_unchanged`,
+  `delete_ai_session`). AI Talk and Book Translation reference translation
+  are unchanged; existing `.novelist/ai/sessions/agent-*.json` files are left
+  untouched and ignored.
+
+### Fixed
+
+- Literary commentary opens a comment from the 中括号 key in every
+  punctuation mode: `[…]` and `［…］` now delimit comments alongside
+  `【…】` and `「…」` (ASCII `[` used to be recorded as a mistake). An IME or
+  symbol keyboard that commits an empty pair such as `「」` keeps the comment
+  open for the text typed between the brackets, and a source bracket in the
+  middle of a multi-character commit is checked against the up-to-date
+  transcription position.
+- Double-clicking a sidebar file to rename it no longer loses the rename
+  input when the editor for that file finishes opening afterwards (slow disk
+  or first editor load). An opening editor no longer takes focus from a text
+  field the user has already moved to, so typed names stay out of the
+  document.
+
 ## [0.6.1] - 2026-10-24
 
 ### Added

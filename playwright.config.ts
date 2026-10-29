@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 declare const process: { env: Record<string, string | undefined> };
 const isCI = !!process.env['CI'];
 
-export default defineConfig({
+export default defineConfig<{ mockPlatform: 'macos' | 'ios' | 'android' }>({
   testDir: './tests/e2e/specs',
   fullyParallel: true,
   forbidOnly: isCI,
@@ -26,15 +26,37 @@ export default defineConfig({
   projects: [
     {
       name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
+      testIgnore: '**/mobile/**',
+      use: { ...devices['Desktop Safari'], mockPlatform: 'macos' },
     },
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      testIgnore: '**/mobile/**',
+      use: { ...devices['Desktop Chrome'], mockPlatform: 'macos' },
+    },
+    {
+      name: 'iphone',
+      testMatch: '**/mobile/**/*.spec.ts',
+      use: { ...devices['iPhone 13'], mockPlatform: 'ios' },
+    },
+    {
+      name: 'ipad',
+      testMatch: '**/mobile/**/*.spec.ts',
+      use: { ...devices['iPad (gen 7)'], mockPlatform: 'ios' },
+    },
+    {
+      name: 'ipad-landscape',
+      testMatch: '**/mobile/**/*.spec.ts',
+      use: { ...devices['iPad (gen 7) landscape'], mockPlatform: 'ios' },
+    },
+    {
+      name: 'android-phone',
+      testMatch: '**/mobile/**/*.spec.ts',
+      use: { ...devices['Pixel 7'], mockPlatform: 'android' },
     },
   ],
   webServer: {
-    command: 'pnpm dev',
+    command: 'pnpm exec vite --mode test',
     url: 'http://localhost:1420',
     reuseExistingServer: !isCI,
     timeout: 30000,

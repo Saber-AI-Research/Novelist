@@ -29,6 +29,34 @@ pnpm verify:quick     # Fast local gate
 pnpm verify:ci        # Local CI mirror
 ```
 
+### Mobile (iOS / Android)
+
+```bash
+pnpm mobile:android:doctor    # validate ANDROID_HOME, NDK, JDK 17, libclang, Rust targets
+pnpm mobile:android:check     # clippy for aarch64/x86_64-linux-android
+pnpm mobile:android:build     # universal debug APK, no release credentials
+pnpm mobile:android:dev       # tauri android dev (tauri flags after --)
+pnpm mobile:ios:doctor        # needs full Xcode, iOS platform and simulator runtime
+pnpm mobile:ios:check         # clippy for aarch64-apple-ios(-sim)
+pnpm mobile:ios:build         # unsigned simulator app
+pnpm mobile:ios:dev           # tauri ios dev (device/simulator name after --)
+```
+
+Signed builds (`publish`), TestFlight upload, build numbers and the required
+accounts are described in
+[design-docs/mobile-deployment.md](design-docs/mobile-deployment.md).
+
+### App version
+
+`core/Cargo.toml` `[package].version` is the only app version; Tauri,
+the release workflows and `scripts/mobile.mjs` all read it from there.
+`package.json` and `core/tauri*.conf.json` must not declare one.
+
+```bash
+node scripts/app-version.mjs             # print it (fails on a duplicate version field)
+node scripts/app-version.mjs bump 0.7.0  # release bump: Cargo.toml + its Cargo.lock entry only
+```
+
 ## Testing
 
 Three tiers — see [design-docs/testing.md](design-docs/testing.md) and

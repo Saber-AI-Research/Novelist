@@ -16,18 +16,26 @@
   import CanvasTextNode from './CanvasTextNode.svelte';
   import CanvasFileNode from './CanvasFileNode.svelte';
   import CanvasGroupNode from './CanvasGroupNode.svelte';
+  import CanvasNotePicker from './CanvasNotePicker.svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
   import { commands } from '$lib/ipc/commands';
   import { t } from '$lib/i18n';
   import { createTabReloadGate } from '../structured-file';
   import { createTabsStructuredSaver } from '../structured-file-tab-saver';
   import { canvasToFlow, flowToCanvas, parseCanvas, serializeCanvas } from './canvas-format';
+  import { canReadCanvasFile, toCanvasFileRef } from './file-ref';
 
   let { paneId = 'pane-1' }: { paneId?: string } = $props();
 
-  const { screenToFlowPosition, getViewport, setViewport } = useSvelteFlow();
+  const { screenToFlowPosition, getViewport, setViewport, deleteElements } = useSvelteFlow();
+
+  // Fingers land less precisely than a mouse: snap a dragged connection to a
+  // handle from farther away on touch-first devices.
+  const connectionRadius =
+    typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches ? 40 : 20;
 
   // Curated 10-color palette for groups. Balanced for dark + light themes.
   const GROUP_COLORS = [
@@ -75,6 +83,8 @@
 
   let nodes = $state<Node[]>([]);
   let edges = $state<Edge[]>([]);
+  /** Touch has no Delete key: the toolbar offers deletion while this holds. */
+  let hasSelection = $derived(nodes.some((n) => n.selected) || edges.some((e) => e.selected));
   /** Unknown top-level keys of the loaded file, written back on save. */
   let fileExtra: Record<string, unknown> = {};
   /** Set when the file is not a canvas: shown read-only, never saved. */
@@ -124,6 +134,7 @@
   }
 
   async function openFileInTab(filePath: string) {
+    if (!canReadCanvasFile(filePath, projectStore.dirPath ?? null, platform.isMobile)) return;
     const r = await commands.readFile(filePath);
     if (r.status !== 'ok') return;
     tabsStore.openTab(filePath, r.data);
@@ -149,24 +160,34 @@
       parseError = parsed.error;
       return;
     }
-    const flow = canvasToFlow(parsed.data, flowHandlers);
+    const projectRoot = untrack(() => projectStore.dirPath ?? null);
+    const flow = canvasToFlow(parsed.data, flowHandlers, projectRoot);
     nodes = flow.nodes;
     edges = flow.edges;
     fileExtra = parsed.data.extra;
     parseError = null;
+    // Migrate this project's absolute note links (older canvases, other
+    // tools) to project-relative ones now, so the file keeps working after the
+    // project moves or syncs to another device. External links stay as-is.
+    const migrates = parsed.data.nodes.some(
+      (node) => node.type === 'file' && toCanvasFileRef(node.file, projectRoot) !== node.file,
+    );
+    if (migrates) untrack(() => markDirtyAndSave());
   });
 
   /** Copy the canvas into the tab right away; the disk write is debounced. */
   function markDirtyAndSave() {
     const current = tab;
     if (!current || parseError !== null) return;
-    tabsStore.updateContent(current.id, serializeCanvas(flowToCanvas(nodes, edges, fileExtra)));
+    const canvas = flowToCanvas(nodes, edges, fileExtra, projectStore.dirPath ?? null);
+    tabsStore.updateContent(current.id, serializeCanvas(canvas));
     if (current.filePath) saver.schedule(current.id);
   }
 
   // Unmounting (tab switch to a non-canvas file, pane close) must write the
   // pending edit, not cancel it.
   onDestroy(() => {
+    closeNotePicker(null);
     void saver.flush();
   });
 
@@ -388,7 +409,23 @@
     createGroupAt(flowX - 180, flowY - 120);
   }
 
+  /** Resolves the open in-project note picker (mobile only). */
+  let notePickerResolve = $state<((path: string | null) => void) | null>(null);
+
+  function closeNotePicker(path: string | null) {
+    const resolve = notePickerResolve;
+    notePickerResolve = null;
+    resolve?.(path);
+  }
+
   async function pickNoteFile(): Promise<string | null> {
+    // Mobile system pickers return sandbox copies or content:// URIs outside
+    // the project that a file card can never read: browse the project instead.
+    if (platform.isMobile) {
+      if (!projectStore.dirPath) return null;
+      closeNotePicker(null);
+      return new Promise((resolve) => { notePickerResolve = resolve; });
+    }
     const picked = await openDialog({
       multiple: false,
       directory: false,
@@ -408,12 +445,14 @@
   }
 
   // --- Toolbar -------------------------------------------------------------
+  /** Center of the visible canvas, not of the window: the pane may sit beside
+   *  a sidebar or in one half of a split view. */
   function centerFlowPosition() {
-    const pos = screenToFlowPosition({
-      x: (window.innerWidth ?? 800) / 2,
-      y: (window.innerHeight ?? 600) / 2,
+    const rect = editorEl?.getBoundingClientRect();
+    return screenToFlowPosition({
+      x: rect ? rect.left + rect.width / 2 : (window.innerWidth ?? 800) / 2,
+      y: rect ? rect.top + rect.height / 2 : (window.innerHeight ?? 600) / 2,
     });
-    return pos;
   }
 
   function toolbarAddText() {
@@ -432,6 +471,15 @@
   function toolbarAddGroup() {
     const p = centerFlowPosition();
     createGroupAt(p.x - 180, p.y - 120);
+  }
+
+  function toolbarDeleteSelection() {
+    // Same path as the Delete key: connected edges go too, and SvelteFlow's
+    // `ondelete` callback saves.
+    void deleteElements({
+      nodes: nodes.filter((n) => n.selected),
+      edges: edges.filter((e) => e.selected),
+    });
   }
 </script>
 
@@ -465,6 +513,7 @@
     maxZoom={2}
     elevateNodesOnSelect={false}
     connectionMode={ConnectionMode.Loose}
+    {connectionRadius}
     onnodedragstart={onNodeDragStart}
     onnodedrag={onNodeDrag}
     onnodedragstop={onNodeDragStop}
@@ -484,7 +533,7 @@
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 4h10M3 8h10M3 12h7"/></svg>
       <span>{t('canvas.text')}</span>
     </button>
-    <button type="button" class="tb-btn" onclick={toolbarAddFile} title={t('canvas.addFileNode')}>
+    <button type="button" class="tb-btn" onclick={toolbarAddFile} title={t('canvas.addFileNode')} data-testid="canvas-add-note">
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>
       <span>{t('canvas.file')}</span>
     </button>
@@ -493,13 +542,27 @@
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/></svg>
       <span>{t('canvas.group')}</span>
     </button>
+    {#if hasSelection}
+      <span class="tb-sep"></span>
+      <button type="button" class="tb-btn" onclick={toolbarDeleteSelection} title={t('canvas.deleteSelection')} aria-label={t('canvas.deleteSelection')} data-testid="canvas-delete-selection">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5"/></svg>
+      </button>
+    {/if}
   </div>
+
+  {#if notePickerResolve && projectStore.dirPath}
+    <CanvasNotePicker
+      rootDir={projectStore.dirPath}
+      onPick={(path) => closeNotePicker(path)}
+      onCancel={() => closeNotePicker(null)}
+    />
+  {/if}
 
   {#if ctxMenu}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
       class="ctx-menu"
-      style="left: {ctxMenu.screenX}px; top: {ctxMenu.screenY}px;"
+      style="left: min({ctxMenu.screenX}px, calc(100vw - 216px)); top: min({ctxMenu.screenY}px, calc(100dvh - 168px));"
       role="menu"
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
@@ -528,6 +591,8 @@
     background: var(--novelist-bg);
     color: var(--novelist-text);
     overflow: hidden;
+    /* Narrow rules below follow the pane (sidebar, split view), not the window. */
+    container-type: inline-size;
   }
   .canvas-editor.drop-active::after {
     content: '';
@@ -691,5 +756,57 @@
   }
   .canvas-editor :global(.svelte-flow__node-group.selected) {
     box-shadow: none !important;
+  }
+
+  /* --- Touch --------------------------------------------------------------- */
+  /* The flow surface is a gesture canvas: SvelteFlow owns one-finger pan, node
+     drag and pinch zoom, so the browser must not scroll or zoom the page here.
+     Node textareas are their own scroll containers and keep native scrolling,
+     caret placement and selection. */
+  .canvas-editor :global(.svelte-flow) {
+    touch-action: none;
+  }
+  @media (hover: none), (pointer: coarse) {
+    .tb-btn {
+      min-width: 44px;
+      min-height: 44px;
+      justify-content: center;
+      touch-action: manipulation;
+    }
+    .ctx-item { min-height: 44px; }
+    .canvas-editor :global(.svelte-flow__controls-button) {
+      width: 44px;
+      height: 44px;
+    }
+    .canvas-editor :global(.svelte-flow__handle),
+    .canvas-editor :global(.svelte-flow__resize-control.handle) {
+      width: 12px;
+      height: 12px;
+    }
+    /* Invisible 44px hit area around connection and resize handles. */
+    .canvas-editor :global(.svelte-flow__handle::after),
+    .canvas-editor :global(.svelte-flow__resize-control.handle::after) {
+      content: '';
+      position: absolute;
+      inset: -16px;
+      border-radius: 50%;
+    }
+  }
+  /* Narrow panes (phones, iPad portrait beside the sidebar, split view): the
+     bottom-centre toolbar would overlap the 200px minimap, so the minimap
+     goes; narrower still, the toolbar keeps only icons (names stay as
+     accessible labels) so it clears the zoom controls. */
+  @container (max-width: 740px) {
+    .canvas-editor :global(.svelte-flow__minimap) { display: none; }
+  }
+  @container (max-width: 480px) {
+    .tb-btn span {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
   }
 </style>

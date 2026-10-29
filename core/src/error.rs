@@ -19,6 +19,11 @@ pub enum AppError {
     PathNotAllowed(String),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    /// A native capability this platform does not have (e.g. Pandoc or the
+    /// native menu on iOS/Android). The payload names the feature so the
+    /// frontend can say which one is unavailable.
+    #[error("{0} is not supported on this platform")]
+    Unsupported(&'static str),
     #[error("{0}")]
     Custom(String),
 }
@@ -52,6 +57,15 @@ mod tests {
 
         let err = AppError::Custom("something went wrong".to_string());
         assert_eq!(err.to_string(), "something went wrong");
+    }
+
+    #[test]
+    fn test_unsupported_names_the_feature() {
+        let err = AppError::Unsupported("Pandoc export");
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            "\"Pandoc export is not supported on this platform\""
+        );
     }
 
     #[test]

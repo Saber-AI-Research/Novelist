@@ -1,5 +1,6 @@
 use crate::commands::image_host::WindowImageCapabilities;
 use crate::error::AppError;
+#[cfg(desktop)]
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use specta::Type;
@@ -7,7 +8,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
-use tauri::{Emitter, Manager};
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::Manager;
 
 // ── Rename-ignore set (self-trigger suppression for rename_item) ────
 //
@@ -45,6 +48,7 @@ pub async fn clear_rename_ignore(old_path: &str, new_path: &str) {
 
 /// Returns true and removes the entry if `path` was registered as a
 /// self-initiated rename target within the TTL; otherwise returns false.
+#[cfg(desktop)]
 async fn take_rename_ignored(path: &str) -> bool {
     RENAME_IGNORED
         .lock()
@@ -114,6 +118,7 @@ impl IgnoreSet {
 
 // ── Event payload ───────────────────────────────────────────────────
 
+#[cfg(desktop)]
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct FileChangedPayload {
     pub path: String,
@@ -127,12 +132,14 @@ pub struct ExternalFileChangePayload {
     pub paths: Vec<String>,
 }
 
+#[cfg(desktop)]
 #[derive(Debug)]
 struct PendingFsEvent {
     path: PathBuf,
     refresh_dir: Option<PathBuf>,
 }
 
+#[cfg(desktop)]
 fn is_temp_write_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -140,6 +147,7 @@ fn is_temp_write_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(desktop)]
 fn refresh_dir_for_path(path: &Path, watching_dir: &Path) -> Option<PathBuf> {
     if is_temp_write_path(path) {
         return None;
@@ -163,6 +171,7 @@ fn refresh_dir_for_path(path: &Path, watching_dir: &Path) -> Option<PathBuf> {
 /// `original_dir` prefix so it matches what the frontend knows. Paths that
 /// don't share the canonical prefix (or when the two roots are identical) are
 /// returned untouched.
+#[cfg(desktop)]
 fn normalize_event_path(path: PathBuf, canonical_dir: &Path, original_dir: &Path) -> PathBuf {
     if canonical_dir == original_dir {
         return path;
@@ -180,12 +189,16 @@ pub struct FileWatcherState {
 }
 
 struct FileWatcherInner {
+    /// OS watchers per window. iOS/Android have none (capability
+    /// `file_watcher: false`); `poll_external_changes` covers them.
+    #[cfg(desktop)]
     watchers: HashMap<String, RecommendedWatcher>,
     tracked_files: HashMap<PathBuf, TrackedFile>,
     ignore_set: IgnoreSet,
     #[allow(dead_code)]
     watching_dirs: HashMap<String, PathBuf>,
     /// Handles to cancel each window's debounce processor task.
+    #[cfg(desktop)]
     cancel_txs: HashMap<String, tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -193,10 +206,12 @@ impl FileWatcherState {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(FileWatcherInner {
+                #[cfg(desktop)]
                 watchers: HashMap::new(),
                 tracked_files: HashMap::new(),
                 ignore_set: IgnoreSet::new(),
                 watching_dirs: HashMap::new(),
+                #[cfg(desktop)]
                 cancel_txs: HashMap::new(),
             }),
         }
@@ -251,6 +266,7 @@ fn revalidate_aliases(key: &Path, entry: &mut TrackedFile) {
         .retain(|owner| owners.contains(owner));
 }
 
+#[cfg(desktop)]
 fn commit_notify_change(
     inner: &mut FileWatcherInner,
     key: &Path,
@@ -289,12 +305,14 @@ fn commit_notify_change(
 }
 
 /// Delivery seam for watcher batches; production emits Tauri events.
+#[cfg(desktop)]
 trait WatchEmitter {
     fn directory_changed(&self, owner: &str, payload: &FileChangedPayload);
     /// Returns whether the payload reached the window.
     fn file_changed(&self, owner: &str, payload: &ExternalFileChangePayload) -> bool;
 }
 
+#[cfg(desktop)]
 impl<R: tauri::Runtime> WatchEmitter for tauri::AppHandle<R> {
     fn directory_changed(&self, owner: &str, payload: &FileChangedPayload) {
         let _ = self.emit_to(owner, "directory-changed", payload);
@@ -307,6 +325,7 @@ impl<R: tauri::Runtime> WatchEmitter for tauri::AppHandle<R> {
 
 /// The notify watcher for one window: watches the canonical root and rewrites
 /// event paths back onto the prefix the frontend uses.
+#[cfg(desktop)]
 fn create_watcher(
     dir: &Path,
     canonical_dir: &Path,
@@ -359,6 +378,7 @@ fn create_watcher(
 
 /// Wait for the first event, then collect the rest of its 200 ms burst.
 /// `None` once the window's watcher is cancelled or dropped.
+#[cfg(desktop)]
 async fn next_watch_batch(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PendingFsEvent>,
     cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
@@ -386,6 +406,7 @@ async fn next_watch_batch(
 /// renames, refresh the owner's sidebar folders, then hash tracked files off
 /// the lock and the async workers and dispatch real content changes to every
 /// window tracking them, except the window whose own save produced them.
+#[cfg(desktop)]
 async fn process_watch_batch(
     events: Vec<PendingFsEvent>,
     owner: &str,
@@ -495,6 +516,11 @@ async fn process_watch_batch(
 
 // ── Tauri commands ──────────────────────────────────────────────────
 
+/// Bind a window to its project folder: registers the folder as the window's
+/// image-read scope and, where the platform has OS file events, watches it.
+/// On iOS/Android (capability `file_watcher: false`) no OS watcher exists and
+/// no `file-changed`/`directory-changed` events are emitted; external edits to
+/// open files are found by `poll_external_changes` (e.g. on app resume).
 #[tauri::command]
 #[specta::specta]
 pub async fn start_file_watcher(
@@ -508,41 +534,50 @@ pub async fn start_file_watcher(
     if !dir.is_dir() {
         return Err(AppError::NotADirectory(dir_path));
     }
-
-    // Channel for raw notify events -> debounce processor
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PendingFsEvent>();
     // FSEvents resolves symlinks and reports canonical paths; remember both so
     // we can rewrite event paths back onto the prefix the frontend uses.
     let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-    let watcher = create_watcher(&dir, &canonical_dir, tx)?;
     let owner = window.label().to_string();
-    image_capabilities.replace_project(&owner, &canonical_dir)?;
 
-    // Cancellation channel for the processor task
-    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-
+    #[cfg(mobile)]
     {
-        let mut guard = state
-            .inner
-            .lock()
-            .map_err(|e| AppError::Custom(e.to_string()))?;
-        guard.watchers.insert(owner.clone(), watcher);
-        guard.watching_dirs.insert(owner.clone(), dir);
-        if let Some(previous) = guard.cancel_txs.insert(owner.clone(), cancel_tx) {
-            let _ = previous.send(());
-        }
+        let _ = (app_handle, state);
+        image_capabilities.replace_project(&owner, &canonical_dir)
     }
 
-    // Ends when `stop_file_watcher_inner` cancels it or drops the watcher
-    // (explicit stop, project switch, or window destruction).
-    let app = app_handle.clone();
-    tokio::spawn(async move {
-        while let Some(events) = next_watch_batch(&mut rx, &mut cancel_rx).await {
-            process_watch_batch(events, &owner, &app.state::<FileWatcherState>(), &app).await;
-        }
-    });
+    #[cfg(desktop)]
+    {
+        // Channel for raw notify events -> debounce processor
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PendingFsEvent>();
+        let watcher = create_watcher(&dir, &canonical_dir, tx)?;
+        image_capabilities.replace_project(&owner, &canonical_dir)?;
 
-    Ok(())
+        // Cancellation channel for the processor task
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        {
+            let mut guard = state
+                .inner
+                .lock()
+                .map_err(|e| AppError::Custom(e.to_string()))?;
+            guard.watchers.insert(owner.clone(), watcher);
+            guard.watching_dirs.insert(owner.clone(), dir);
+            if let Some(previous) = guard.cancel_txs.insert(owner.clone(), cancel_tx) {
+                let _ = previous.send(());
+            }
+        }
+
+        // Ends when `stop_file_watcher_inner` cancels it or drops the watcher
+        // (explicit stop, project switch, or window destruction).
+        let app = app_handle.clone();
+        tokio::spawn(async move {
+            while let Some(events) = next_watch_batch(&mut rx, &mut cancel_rx).await {
+                process_watch_batch(events, &owner, &app.state::<FileWatcherState>(), &app).await;
+            }
+        });
+
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -566,11 +601,14 @@ pub(crate) fn stop_file_watcher_inner(
         .inner
         .lock()
         .map_err(|e| AppError::Custom(e.to_string()))?;
-    guard.watchers.remove(owner);
-    guard.watching_dirs.remove(owner);
-    if let Some(tx) = guard.cancel_txs.remove(owner) {
-        let _ = tx.send(());
+    #[cfg(desktop)]
+    {
+        guard.watchers.remove(owner);
+        if let Some(tx) = guard.cancel_txs.remove(owner) {
+            let _ = tx.send(());
+        }
     }
+    guard.watching_dirs.remove(owner);
     guard.tracked_files.retain(|_, entry| {
         entry.pending_poll_owners.remove(owner);
         entry.aliases.retain(|_, owners| {
@@ -1188,7 +1226,7 @@ mod tests {
         let state = FileWatcherState::new();
         track_for_owner(&state, &file, "window-a");
         track_for_owner(&state, &file, "window-b");
-        save_test_file(dir.path(), &file, &state, Some("window-a"), false).await;
+        save_test_file(&file, &state, Some("window-a")).await;
         let emitter = RecordingEmitter::default();
 
         process_watch_batch(
@@ -1306,41 +1344,17 @@ mod tests {
         })
     }
 
-    async fn save_test_file(
-        project: &Path,
-        file: &Path,
-        state: &FileWatcherState,
-        owner: Option<&str>,
-        conditional: bool,
-    ) {
+    async fn save_test_file(file: &Path, state: &FileWatcherState, owner: Option<&str>) {
         let enc = crate::commands::file::EncodingState::new();
-        if conditional {
-            let result = crate::commands::file::write_file_if_unchanged_inner(
-                &project.to_string_lossy(),
-                &file.to_string_lossy(),
-                Some("v0"),
-                "saved by app",
-                &enc,
-                state,
-                owner,
-            )
-            .await
-            .unwrap();
-            assert_eq!(
-                result,
-                crate::commands::file::WriteFileIfUnchangedResult::Written
-            );
-        } else {
-            crate::commands::file::write_file_with_watcher_inner(
-                &file.to_string_lossy(),
-                "saved by app",
-                &enc,
-                state,
-                owner,
-            )
-            .await
-            .unwrap();
-        }
+        crate::commands::file::write_file_with_watcher_inner(
+            &file.to_string_lossy(),
+            "saved by app",
+            &enc,
+            state,
+            owner,
+        )
+        .await
+        .unwrap();
         // Make poll coverage independent of the filesystem's timestamp resolution.
         state
             .inner
@@ -1562,115 +1576,109 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_app_save_suppresses_only_saving_owner() {
-        for conditional in [false, true] {
-            for owners in [["window-a", "window-b"], ["window-b", "window-a"]] {
-                let dir = TempDir::new().unwrap();
-                let file = dir.path().join("shared.md");
-                fs::write(&file, "v0").unwrap();
-                let state = FileWatcherState::new();
-                track_for_owner(&state, &file, "window-a");
-                track_for_owner(&state, &file, "window-b");
-                save_test_file(dir.path(), &file, &state, Some("window-a"), conditional).await;
-
-                for owner in owners {
-                    let changed = poll_external_changes_inner(&state, owner).unwrap();
-                    if owner == "window-a" {
-                        assert!(changed.is_empty());
-                    } else {
-                        assert_eq!(
-                            changed,
-                            vec![ExternalFileChangePayload {
-                                identity: tracking_key(&file).to_string_lossy().to_string(),
-                                paths: vec![file.to_string_lossy().to_string()],
-                            }]
-                        );
-                    }
-                    assert!(poll_external_changes_inner(&state, owner)
-                        .unwrap()
-                        .is_empty());
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_notify_app_save_suppresses_only_saving_owner() {
-        for conditional in [false, true] {
+        for owners in [["window-a", "window-b"], ["window-b", "window-a"]] {
             let dir = TempDir::new().unwrap();
             let file = dir.path().join("shared.md");
             fs::write(&file, "v0").unwrap();
             let state = FileWatcherState::new();
             track_for_owner(&state, &file, "window-a");
             track_for_owner(&state, &file, "window-b");
-            save_test_file(dir.path(), &file, &state, Some("window-a"), conditional).await;
-            let key = tracking_key(&file);
+            save_test_file(&file, &state, Some("window-a")).await;
 
-            let dispatches = commit_notify_change(
-                &mut state.inner.lock().unwrap(),
-                &key,
-                blake3::hash(b"v0"),
-                blake3::hash(b"saved by app"),
-                SystemTime::now(),
-            );
-            assert_eq!(
-                dispatches,
-                vec![(
-                    "window-b".to_string(),
-                    ExternalFileChangePayload {
-                        identity: key.to_string_lossy().to_string(),
-                        paths: vec![file.to_string_lossy().to_string()],
-                    },
-                )]
-            );
-            // Failed notify delivery keeps only the other window's poll cursor.
-            assert!(poll_external_changes_inner(&state, "window-a")
-                .unwrap()
-                .is_empty());
-            assert_eq!(
-                poll_external_changes_inner(&state, "window-b")
+            for owner in owners {
+                let changed = poll_external_changes_inner(&state, owner).unwrap();
+                if owner == "window-a" {
+                    assert!(changed.is_empty());
+                } else {
+                    assert_eq!(
+                        changed,
+                        vec![ExternalFileChangePayload {
+                            identity: tracking_key(&file).to_string_lossy().to_string(),
+                            paths: vec![file.to_string_lossy().to_string()],
+                        }]
+                    );
+                }
+                assert!(poll_external_changes_inner(&state, owner)
                     .unwrap()
-                    .len(),
-                1
-            );
-            assert!(poll_external_changes_inner(&state, "window-b")
-                .unwrap()
-                .is_empty());
+                    .is_empty());
+            }
         }
     }
 
     #[tokio::test]
+    async fn test_notify_app_save_suppresses_only_saving_owner() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("shared.md");
+        fs::write(&file, "v0").unwrap();
+        let state = FileWatcherState::new();
+        track_for_owner(&state, &file, "window-a");
+        track_for_owner(&state, &file, "window-b");
+        save_test_file(&file, &state, Some("window-a")).await;
+        let key = tracking_key(&file);
+
+        let dispatches = commit_notify_change(
+            &mut state.inner.lock().unwrap(),
+            &key,
+            blake3::hash(b"v0"),
+            blake3::hash(b"saved by app"),
+            SystemTime::now(),
+        );
+        assert_eq!(
+            dispatches,
+            vec![(
+                "window-b".to_string(),
+                ExternalFileChangePayload {
+                    identity: key.to_string_lossy().to_string(),
+                    paths: vec![file.to_string_lossy().to_string()],
+                },
+            )]
+        );
+        // Failed notify delivery keeps only the other window's poll cursor.
+        assert!(poll_external_changes_inner(&state, "window-a")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            poll_external_changes_inner(&state, "window-b")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(poll_external_changes_inner(&state, "window-b")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn test_background_app_save_never_suppresses_any_owner() {
-        for conditional in [false, true] {
-            for notify in [false, true] {
-                let dir = TempDir::new().unwrap();
-                let file = dir.path().join("shared.md");
-                fs::write(&file, "v0").unwrap();
-                let state = FileWatcherState::new();
-                track_for_owner(&state, &file, "window-a");
-                track_for_owner(&state, &file, "window-b");
-                save_test_file(dir.path(), &file, &state, None, conditional).await;
-                if notify {
-                    let dispatches = commit_notify_change(
-                        &mut state.inner.lock().unwrap(),
-                        &tracking_key(&file),
-                        blake3::hash(b"v0"),
-                        blake3::hash(b"saved by app"),
-                        SystemTime::now(),
-                    );
-                    assert_eq!(
-                        dispatches
-                            .iter()
-                            .map(|(owner, _)| owner.as_str())
-                            .collect::<Vec<_>>(),
-                        vec!["window-a", "window-b"]
-                    );
-                }
-                for owner in ["window-a", "window-b"] {
-                    assert_eq!(poll_external_changes_inner(&state, owner).unwrap().len(), 1);
-                    assert!(poll_external_changes_inner(&state, owner)
-                        .unwrap()
-                        .is_empty());
-                }
+        for notify in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let file = dir.path().join("shared.md");
+            fs::write(&file, "v0").unwrap();
+            let state = FileWatcherState::new();
+            track_for_owner(&state, &file, "window-a");
+            track_for_owner(&state, &file, "window-b");
+            save_test_file(&file, &state, None).await;
+            if notify {
+                let dispatches = commit_notify_change(
+                    &mut state.inner.lock().unwrap(),
+                    &tracking_key(&file),
+                    blake3::hash(b"v0"),
+                    blake3::hash(b"saved by app"),
+                    SystemTime::now(),
+                );
+                assert_eq!(
+                    dispatches
+                        .iter()
+                        .map(|(owner, _)| owner.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["window-a", "window-b"]
+                );
+            }
+            for owner in ["window-a", "window-b"] {
+                assert_eq!(poll_external_changes_inner(&state, owner).unwrap().len(), 1);
+                assert!(poll_external_changes_inner(&state, owner)
+                    .unwrap()
+                    .is_empty());
             }
         }
     }
@@ -1690,7 +1698,7 @@ mod tests {
             track_for_owner(&state, &alias, "window-a");
             track_for_owner(&state, &target, "window-b");
             let key = tracking_key(&target);
-            save_test_file(dir.path(), &alias, &state, Some("window-a"), false).await;
+            save_test_file(&alias, &state, Some("window-a")).await;
 
             assert!(alias.is_symlink());
             assert_eq!(
@@ -1818,42 +1826,6 @@ mod tests {
         assert!(poll_external_changes_inner(&state, TEST_OWNER)
             .unwrap()
             .is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_conditional_write_conflict_does_not_register_watcher_ignore() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("conflict.md");
-        fs::write(&file, "disk content").unwrap();
-        let watcher_state = FileWatcherState::new();
-        track(&watcher_state, &file);
-
-        let result = crate::commands::file::write_file_if_unchanged_inner(
-            &dir.path().to_string_lossy(),
-            &file.to_string_lossy(),
-            Some("stale content"),
-            "replacement",
-            &crate::commands::file::EncodingState::new(),
-            &watcher_state,
-            Some(TEST_OWNER),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            crate::commands::file::WriteFileIfUnchangedResult::Conflict
-        );
-        assert!(!Path::new(&format!("{}.novelist-tmp", file.display())).exists());
-
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&file, "external edit").unwrap();
-        assert_eq!(
-            poll_external_changes_inner(&watcher_state, TEST_OWNER).unwrap(),
-            vec![ExternalFileChangePayload {
-                identity: tracking_key(&file).to_string_lossy().to_string(),
-                paths: vec![file.to_string_lossy().to_string()],
-            }]
-        );
     }
 
     #[test]

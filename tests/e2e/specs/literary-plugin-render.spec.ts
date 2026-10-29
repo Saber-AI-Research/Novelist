@@ -240,6 +240,83 @@ test('literary comments accept distinct IME punctuation and corner-bracket commi
   await expect(page.locator('.chapter-stats')).toContainText('4 已抄 · 0 错字 · 2 评注');
 });
 
+/**
+ * The 中括号 key reaches the plugin as 「/【 from a full-width IME, but as a
+ * plain '[' keystroke in half-width punctuation or English mode — which used
+ * to be written as a red mistake. The IME commits below follow the event
+ * order a real WKWebView produces for NSTextInputClient commits:
+ * `insertFromComposition` while still composing, then `compositionend`.
+ */
+test('[regression] the 中括号 key, IME bracket pairs and rewound brackets open comments', async ({ page }) => {
+  await page.goto('/plugins/literary-commentary/index.html');
+  await connectPluginHost(page);
+  await postToPlugin(page, {
+    type: 'file-open', documentId: 'bracket-triggers', revision: 0,
+    filePath: '/mock/中括号.litstudy', locale: 'zh-CN',
+    content: JSON.stringify({
+      schemaVersion: 1,
+      book: { title: '评注', author: null, language: 'zh-CN' },
+      chapter: { id: 'brackets', title: '中括号', volume: null, index: 1, total: 1, previousPath: null, nextPath: null },
+      source: '北凉王府龙盘虎踞', sourceCursor: 0, insertions: [],
+      stats: { correct: 0, mistakes: 0, pasted: 0, startedAt: null, completedAt: null },
+    }),
+  });
+  const capture = page.locator('textarea.input-capture');
+  const status = page.locator('.comment-status');
+  const article = page.locator('article');
+  await expect(capture).toBeAttached();
+
+  await capture.fill('北凉');
+  await capture.press('[');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await expect(status).toContainText('正在评注');
+  await expect(status).toContainText('输入]结束');
+  // Brackets typed inside the comment nest as literal text.
+  await capture.fill('风骨[1]');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await capture.press(']');
+  await expect(capture).toHaveAttribute('aria-label', '输入原文');
+
+  const commit = (text: string) => capture.evaluate((element: HTMLTextAreaElement, value) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { data: '' }));
+    element.value = value;
+    element.dispatchEvent(new CompositionEvent('compositionupdate', { data: value }));
+    element.dispatchEvent(new InputEvent('input', { data: value, inputType: 'insertCompositionText', isComposing: true }));
+    element.dispatchEvent(new InputEvent('input', { data: value, inputType: 'insertFromComposition', isComposing: true }));
+    element.dispatchEvent(new CompositionEvent('compositionend', { data: value }));
+  }, text);
+  // An IME or symbol keyboard that commits a whole pair leaves the caret inside it.
+  await commit('王府「」');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await expect(status).toContainText('输入」结束');
+  await commit('妙');
+  await commit('」');
+  await expect(capture).toHaveAttribute('aria-label', '输入原文');
+  await expect(page.locator('.comment')).toHaveText(['风骨[1]', '妙']);
+  await expect(page.locator('.mistake')).toHaveCount(0);
+
+  // Rewound caret: full-width 中括号 annotate earlier text; the frontier stays.
+  const textBeforeCaret = () => article.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element, 0);
+    range.setEndBefore(element.querySelector('.typing-caret')!);
+    return range.toString();
+  });
+  await capture.press('Home');
+  await capture.press('ArrowRight');
+  await expect.poll(textBeforeCaret).toBe('北');
+  await page.keyboard.insertText('［');
+  await expect(capture).toHaveAttribute('aria-label', '输入评注');
+  await page.keyboard.insertText('注');
+  await page.keyboard.insertText('］');
+  await expect(capture).toHaveAttribute('aria-label', '输入原文');
+  await expect.poll(textBeforeCaret).toBe('北注');
+  await expect.poll(() => article.textContent()).toBe('北注凉风骨[1]王府妙龙盘虎踞');
+  await expect(page.locator('.pending')).toHaveText('龙盘虎踞');
+  await expect(page.locator('.mistake')).toHaveCount(0);
+  await expect(page.locator('.chapter-stats')).toContainText('4 已抄 · 0 错字 · 7 评注');
+});
+
 test('literary plugin preserves macOS deletion and undo shortcuts', async ({ page }) => {
   await page.goto('/plugins/literary-commentary/index.html');
   await connectPluginHost(page);

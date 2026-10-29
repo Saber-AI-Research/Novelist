@@ -87,15 +87,27 @@ describe('aiTalkSettings store', () => {
     expect(aiTalkSettings.value.model).toBe('other-model');
   });
 
-  it('renameProfile / deleteProfile manage custom profiles only', () => {
+  it('renameProfile / deleteProfile manage built-in and custom profiles', () => {
     const id = aiTalkSettings.saveAsNewProfile('Temp');
     aiTalkSettings.renameProfile(id, 'Renamed');
     expect(aiTalkSettings.value.profiles.find((p) => p.id === id)?.label).toBe('Renamed');
-    aiTalkSettings.deleteProfile('openai'); // built-in: no-op
-    expect(aiTalkSettings.value.profiles.some((p) => p.id === 'openai')).toBe(true);
+    aiTalkSettings.deleteProfile('openai');
+    expect(aiTalkSettings.value.profiles.some((p) => p.id === 'openai')).toBe(false);
     aiTalkSettings.deleteProfile(id);
     expect(aiTalkSettings.value.profiles.some((p) => p.id === id)).toBe(false);
     expect(aiTalkSettings.value.activeProfileId).not.toBe(id);
+  });
+
+  it('deleting the final profile clears flattened credentials and can restore a clean template', () => {
+    aiTalkSettings.update({ apiKey: 'sk-deleted' });
+    for (const p of [...aiTalkSettings.value.profiles]) aiTalkSettings.deleteProfile(p.id);
+    expect(aiTalkSettings.value).toMatchObject({ profiles: [], activeProfileId: '', baseUrl: '', apiKey: '', model: '' });
+    expect(localStorage.getItem(KEY)).not.toContain('sk-deleted');
+    aiTalkSettings.addProfile('openai');
+    expect(aiTalkSettings.value).toMatchObject({ activeProfileId: 'openai', apiKey: '', model: 'gpt-4o-mini' });
+    const duplicate = aiTalkSettings.addProfile('openai');
+    expect(duplicate).not.toBe('openai');
+    expect(new Set(aiTalkSettings.value.profiles.map((p) => p.id)).size).toBe(2);
   });
 
   it('persist failures (quota / disabled storage) do not throw', () => {
@@ -124,6 +136,16 @@ describe('aiTalkSettings — module-load behavior', () => {
     expect(mod.aiTalkSettings.value.baseUrl).toBe('https://api.openai.com/v1');
     expect(mod.aiTalkSettings.value.temperature).toBe(0.7);
   });
+
+  it.each([{ profiles: [] }, { profiles: [{ id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat', temperature: 0.7 }] }])(
+    'does not recreate deleted built-in profiles on reload (%j)', async ({ profiles }) => {
+      localStorage.setItem(KEY, JSON.stringify({ profiles, activeProfileId: 'openai', apiKey: 'stale-key' }));
+      const { aiTalkSettings: reloaded } = await import('$lib/components/ai-talk/settings.svelte');
+      expect(reloaded.value.profiles).toEqual(profiles);
+      expect(reloaded.value.apiKey).toBe('');
+      expect(reloaded.value.activeProfileId).toBe(profiles[0]?.id ?? '');
+    },
+  );
 
   it('falls back to defaults when localStorage contains corrupt JSON', async () => {
     localStorage.setItem(KEY, '{not valid json');

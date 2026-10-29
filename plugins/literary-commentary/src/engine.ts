@@ -309,7 +309,21 @@ export function applyInput(
   return finishMutation(next, now);
 }
 
-export type CommentOpener = '【' | '「';
+/**
+ * Bracket pairs that open and close an inline comment. 【】 and 「」 are what
+ * Chinese IMEs emit for the bracket keys in full-width punctuation mode; ［］
+ * and [] are the full- and half-width square brackets (macOS Pinyin names both
+ * 中括号) that the same keys produce from its candidate list, in half-width
+ * punctuation mode, or with an English keyboard.
+ */
+const CLOSER_FOR_OPENER = {
+  '【': '】',
+  '「': '」',
+  '［': '］',
+  '[': ']',
+} as const;
+
+export type CommentOpener = keyof typeof CLOSER_FOR_OPENER;
 
 /**
  * Brackets still open inside the current comment, outermost first. The first
@@ -319,19 +333,23 @@ export type CommentOpener = '【' | '「';
  */
 export type CommentBrackets = readonly (CommentOpener | null)[];
 
-const OPENER_FOR_CLOSER: Readonly<Record<string, CommentOpener>> = {
-  '】': '【',
-  '」': '「',
-};
+const OPENER_FOR_CLOSER: Readonly<Record<string, CommentOpener>> = Object.fromEntries(
+  Object.entries(CLOSER_FOR_OPENER).map(([opener, closer]) => [closer, opener as CommentOpener]),
+);
 
 function isCommentOpener(character: string): character is CommentOpener {
-  return character === '【' || character === '「';
+  return Object.prototype.hasOwnProperty.call(CLOSER_FOR_OPENER, character);
+}
+
+/** The closer that ends a comment opened with `opener`. */
+export function commentCloser(opener: CommentOpener): string {
+  return CLOSER_FOR_OPENER[opener];
 }
 
 /**
  * Track bracket nesting for one character typed in comment mode. Returns the
  * brackets still open afterwards, or `null` when the character closes the
- * comment. Only the closer matching the comment's own opener ends it (either
+ * comment. Only the closer matching the comment's own opener ends it (any
  * closer ends a shortcut comment); brackets opened inside the comment, and
  * stray closers, stay literal text — so 【此处「风骨」妙】 is one comment.
  */
@@ -347,9 +365,70 @@ function stepCommentBrackets(brackets: CommentBrackets, character: string): Comm
 }
 
 /**
+ * Split one committed batch into transcription and commentary runs. Opening
+ * brackets switch to commentary (unless `opensComment` keeps one as text);
+ * delimiters are consumed, never emitted. Pending text is emitted before
+ * `opensComment` is asked, so it sees the transcript as of that character.
+ *
+ * A batch that ends with a freshly opened, still empty pair — an IME or
+ * symbol keyboard that inserts 「」 with the caret between — leaves the
+ * comment open for the next input instead of closing it unseen.
+ */
+function splitDelimitedInput(
+  input: string,
+  initialMode: LiteraryMode,
+  initialBrackets: CommentBrackets,
+  emit: (text: string, mode: LiteraryMode) => void,
+  opensComment: (opener: CommentOpener) => boolean = () => true,
+): { mode: LiteraryMode; brackets: CommentBrackets } {
+  let mode = initialMode;
+  let brackets: CommentBrackets = mode === 'comment' ? initialBrackets : [];
+  let buffer = '';
+  let openedEmpty = false;
+
+  const flush = () => {
+    if (!buffer) return;
+    emit(buffer, mode);
+    buffer = '';
+  };
+
+  const characters = Array.from(input);
+  characters.forEach((character, index) => {
+    const justOpened = openedEmpty;
+    openedEmpty = false;
+    if (mode === 'copy') {
+      if (isCommentOpener(character)) {
+        flush();
+        if (opensComment(character)) {
+          mode = 'comment';
+          brackets = [character];
+          openedEmpty = true;
+          return;
+        }
+      }
+      buffer += character;
+      return;
+    }
+    const remaining = stepCommentBrackets(brackets, character);
+    if (remaining === null) {
+      if (justOpened && index === characters.length - 1) return;
+      flush();
+      mode = 'copy';
+      brackets = [];
+      return;
+    }
+    brackets = remaining;
+    buffer += character;
+  });
+  flush();
+
+  return { mode, brackets };
+}
+
+/**
  * Apply normal transcription plus inline comments from one committed input
- * batch. Full-width and corner brackets are control characters unless the
- * source itself expects an opening bracket at the current cursor:
+ * batch. Comment brackets (see `CLOSER_FOR_OPENER`) are control characters
+ * unless the source itself expects that opening bracket at the current cursor:
  *
  *   source text【inline comment】more source text「another comment」
  *
@@ -368,41 +447,18 @@ export function applyDelimitedInput(
   now = new Date().toISOString(),
 ): { file: LiteraryStudyFile; mode: LiteraryMode; brackets: CommentBrackets } {
   let next = file;
-  let mode = initialMode;
-  let brackets: CommentBrackets = mode === 'comment' ? initialBrackets : [];
-  let buffer = '';
-
-  const flush = () => {
-    if (!buffer) return;
-    next = applyInput(next, buffer, mode, pasted, now);
-    buffer = '';
-  };
-
-  for (const character of input) {
-    if (mode === 'copy') {
-      // A real opening bracket in the source must remain transcribable. The
-      // keyboard shortcut can still force comment mode at this position.
-      if (isCommentOpener(character) && !next.source.startsWith(character, next.sourceCursor)) {
-        flush();
-        mode = 'comment';
-        brackets = [character];
-        continue;
-      }
-    } else {
-      const remaining = stepCommentBrackets(brackets, character);
-      if (remaining === null) {
-        flush();
-        mode = 'copy';
-        brackets = [];
-        continue;
-      }
-      brackets = remaining;
-    }
-    buffer += character;
-  }
-  flush();
-
-  return { file: next, mode, brackets };
+  const state = splitDelimitedInput(
+    input,
+    initialMode,
+    initialBrackets,
+    (text, mode) => {
+      next = applyInput(next, text, mode, pasted, now);
+    },
+    // A real opening bracket in the source must remain transcribable. The
+    // keyboard shortcut can still force comment mode at this position.
+    (opener) => !next.source.startsWith(opener, next.sourceCursor),
+  );
+  return { file: next, ...state };
 }
 
 export function applyBackspace(
@@ -643,7 +699,7 @@ export function insertAtCaret(
  * At the frontier this is the existing transcribe-or-mark behaviour. Rewound,
  * there is no pending source character to match, so every typed character
  * becomes an insertion — commentary in comment mode, a mistake mark otherwise
- * — and both bracket pairs keep working as the comment delimiters, closing
+ * — and every bracket pair keeps working as the comment delimiters, closing
  * only on the closer that matches the comment's opener.
  */
 export function applyDelimitedInputAtCaret(
@@ -667,46 +723,18 @@ export function applyDelimitedInputAtCaret(
 
   let next = file;
   let index = clampCaret(file, caretIndex);
-  let mode = initialMode;
-  let brackets: CommentBrackets = mode === 'comment' ? initialBrackets : [];
-  let buffer = '';
-
-  const flush = () => {
-    if (!buffer) return;
+  const state = splitDelimitedInput(input, initialMode, initialBrackets, (text, mode) => {
     const kind: InsertionKind = mode === 'comment' ? 'comment' : 'mistake';
     if (pasted) {
       next = cloneFile(next);
-      next.stats.pasted += Array.from(buffer).length;
+      next.stats.pasted += Array.from(text).length;
     }
-    const result = insertAtCaret(next, index, kind, buffer, now);
+    const result = insertAtCaret(next, index, kind, text, now);
     next = result.file;
     index = result.caretIndex;
-    buffer = '';
-  };
+  });
 
-  for (const character of input) {
-    if (mode === 'copy') {
-      if (isCommentOpener(character)) {
-        flush();
-        mode = 'comment';
-        brackets = [character];
-        continue;
-      }
-    } else {
-      const remaining = stepCommentBrackets(brackets, character);
-      if (remaining === null) {
-        flush();
-        mode = 'copy';
-        brackets = [];
-        continue;
-      }
-      brackets = remaining;
-    }
-    buffer += character;
-  }
-  flush();
-
-  return { file: next, mode, brackets, caretIndex: index };
+  return { file: next, ...state, caretIndex: index };
 }
 
 /**

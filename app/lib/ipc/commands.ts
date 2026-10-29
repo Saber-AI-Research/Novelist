@@ -9,7 +9,6 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	readFile: (path: string) => typedError<string, string>(__TAURI_INVOKE("read_file", { path })),
 	writeFile: (path: string, content: string) => typedError<null, string>(__TAURI_INVOKE("write_file", { path, content })),
-	writeFileIfUnchanged: (projectDir: string, path: string, expectedContent: string | null, content: string) => typedError<WriteFileIfUnchangedResult, string>(__TAURI_INVOKE("write_file_if_unchanged", { projectDir, path, expectedContent, content })),
 	/**
 	 *  Returns the detected encoding for a file that was previously read via `read_file`.
 	 *  Returns `"UTF-8"` if the file is UTF-8 (or was never read).
@@ -170,6 +169,13 @@ export const commands = {
 	max_count?: number | null,
 	min_interval_minutes?: number | null,
 } | null) => typedError<null, string>(__TAURI_INVOKE("write_project_settings", { dirPath, view, newFile, plugins, snapshot })),
+	/**
+	 *  Bind a window to its project folder: registers the folder as the window's
+	 *  image-read scope and, where the platform has OS file events, watches it.
+	 *  On iOS/Android (capability `file_watcher: false`) no OS watcher exists and
+	 *  no `file-changed`/`directory-changed` events are emitted; external edits to
+	 *  open files are found by `poll_external_changes` (e.g. on app resume).
+	 */
 	startFileWatcher: (dirPath: string) => typedError<null, string>(__TAURI_INVOKE("start_file_watcher", { dirPath })),
 	stopFileWatcher: () => typedError<null, string>(__TAURI_INVOKE("stop_file_watcher")),
 	registerOpenFile: (path: string) => typedError<null, string>(__TAURI_INVOKE("register_open_file", { path })),
@@ -201,7 +207,10 @@ export const commands = {
 	 *  their existing `sort_order`.
 	 */
 	reorderRecentProjects: (orderedPaths: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_recent_projects", { orderedPaths })),
-	/**  Scan ~/.novelist/plugins/ and return info for each plugin found. */
+	/**
+	 *  Scan ~/.novelist/plugins/ and return info for each plugin found. Where only
+	 *  bundled plugins may run (iOS), third-party folders are not reported.
+	 */
 	listPlugins: () => typedError<PluginInfo[], string>(__TAURI_INVOKE("list_plugins")),
 	/**  Load and activate a plugin by its ID. */
 	loadPlugin: (pluginId: string) => typedError<null, string>(__TAURI_INVOKE("load_plugin", { pluginId })),
@@ -433,23 +442,9 @@ export const commands = {
 	listAiSessions: (projectDir: string, kind: AiSessionKind) => typedError<AiSessionFile[], string>(__TAURI_INVOKE("list_ai_sessions", { projectDir, kind })),
 	readAiSession: (projectDir: string, kind: AiSessionKind, id: string) => typedError<string | null, string>(__TAURI_INVOKE("read_ai_session", { projectDir, kind, id })),
 	writeAiSession: (projectDir: string, kind: AiSessionKind, id: string, bodyJson: string) => typedError<null, string>(__TAURI_INVOKE("write_ai_session", { projectDir, kind, id, bodyJson })),
-	deleteAiSession: (projectDir: string, kind: AiSessionKind, id: string) => typedError<null, string>(__TAURI_INVOKE("delete_ai_session", { projectDir, kind, id })),
 	listAiPromptAssets: (projectDir: string) => typedError<AiPromptAssets, string>(__TAURI_INVOKE("list_ai_prompt_assets", { projectDir })),
 	writeAiMemory: (projectDir: string, body: string) => typedError<null, string>(__TAURI_INVOKE("write_ai_memory", { projectDir, body })),
 	saveAiChat: (projectDir: string, filename: string, body: string) => typedError<string, string>(__TAURI_INVOKE("save_ai_chat", { projectDir, filename, body })),
-	claudeCliDetect: () => __TAURI_INVOKE<{
-	path: string,
-	version: string | null,
-} | null>("claude_cli_detect"),
-	claudeCliSpawn: (req: ClaudeSpawnRequest) => typedError<string, string>(__TAURI_INVOKE("claude_cli_spawn", { req })),
-	claudeCliSend: (sessionId: string, line: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_send", { sessionId, line })),
-	claudeCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("claude_cli_kill", { sessionId })),
-	codexCliDetect: () => __TAURI_INVOKE<{
-	path: string,
-	version: string | null,
-} | null>("codex_cli_detect"),
-	codexCliTurn: (req: CodexTurnRequest) => typedError<string, string>(__TAURI_INVOKE("codex_cli_turn", { req })),
-	codexCliKill: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("codex_cli_kill", { sessionId })),
 	refreshMenu: (labels: MenuLabels, recent: RecentEntry[]) => typedError<null, string>(__TAURI_INVOKE("refresh_menu", { labels, recent })),
 	/**
 	 *  Match the NSWindow's appearance to the app theme so the system-drawn
@@ -463,11 +458,48 @@ export const commands = {
 	 */
 	setWindowAppearance: (dark: boolean) => __TAURI_INVOKE<void>("set_window_appearance", { dark }),
 	/**
-	 *  Open the native WebView developer tools for this window. Compiled in all
-	 *  builds because the `devtools` Cargo feature is enabled by default (see
-	 *  Cargo.toml). Gated in the UI behind Developer Mode (F12).
+	 *  Open the native WebView developer tools for this window. Desktop builds
+	 *  enable Tauri's `devtools` feature (see Cargo.toml); the UI gates the
+	 *  command behind Developer Mode (F12). iOS/Android have no in-app inspector:
+	 *  debug builds are inspected remotely (Safari / Chrome), release builds not
+	 *  at all.
 	 */
-	openDevtools: () => __TAURI_INVOKE<void>("open_devtools"),
+	openDevtools: () => typedError<null, string>(__TAURI_INVOKE("open_devtools")),
+	getPlatformCapabilities: () => __TAURI_INVOKE<PlatformCapabilities>("get_platform_capabilities"),
+	/**
+	 *  Absolute path of the project library; the parent directory for
+	 *  `create_project_from_template` on mobile.
+	 */
+	getLibraryPath: () => typedError<string, string>(__TAURI_INVOKE("get_library_path")),
+	/**  Library projects, most recently changed first. */
+	listLibraryProjects: () => typedError<LibraryProject[], string>(__TAURI_INVOKE("list_library_projects")),
+	/**
+	 *  Copy picker bytes (base64, at most 64 MiB decoded) into a fresh,
+	 *  cache-confined staging folder. Returns the staged path for
+	 *  `import_library_file` / `import_library_project`.
+	 */
+	stageImportFile: (name: string, base64Data: string) => typedError<string, string>(__TAURI_INVOKE("stage_import_file", { name, base64Data })),
+	/**
+	 *  Copy a staged Markdown / text / Novelist document into a folder of a
+	 *  library project, bumping `name 2.md` on collision. Returns the new path.
+	 */
+	importLibraryFile: (stagedPath: string, projectDir: string) => typedError<string, string>(__TAURI_INVOKE("import_library_file", { stagedPath, projectDir })),
+	/**
+	 *  Unpack a staged project ZIP into a new library project. Nothing appears in
+	 *  the library unless the whole archive was extracted. Returns the project path.
+	 */
+	importLibraryProject: (archivePath: string) => typedError<string, string>(__TAURI_INVOKE("import_library_project", { archivePath })),
+	/**
+	 *  ZIP a library project (content, assets, project identity and metadata;
+	 *  never credentials or caches) into the share-able exports directory.
+	 */
+	exportLibraryProject: (projectDir: string) => typedError<string, string>(__TAURI_INVOKE("export_library_project", { projectDir })),
+	/**
+	 *  Export one library document as `markdown` (the original bytes) or `html`
+	 *  (CommonMark rendered and sanitized into a standalone page; not a Pandoc
+	 *  equivalent) into the share-able exports directory.
+	 */
+	exportLibraryDocument: (filePath: string, format: string) => typedError<string, string>(__TAURI_INVOKE("export_library_document", { filePath, format })),
 	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
 	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
 	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
@@ -477,6 +509,28 @@ export const commands = {
 	 *  legacy WebDAV folder (`SyncStatus.adoptable_project_id`).
 	 */
 	adoptSyncIdentity: (projectDir: string, projectId: string) => typedError<null, string>(__TAURI_INVOKE("adopt_sync_identity", { projectDir, projectId })),
+	/**
+	 *  Settle one path from `SyncStatus.conflicts`. Returns the project-relative
+	 *  path of the remote copy kept by `keep_both`.
+	 */
+	resolveSyncConflict: (projectDir: string, path: string, resolution: ConflictResolution) => typedError<string | null, string>(__TAURI_INVOKE("resolve_sync_conflict", { projectDir, path, resolution })),
+	getCloudAccount: () => typedError<CloudAccountSummary, string>(__TAURI_INVOKE("get_cloud_account")),
+	/**  Re-test the stored credential against the server. */
+	checkCloudAccount: () => typedError<CloudAccountStatus, string>(__TAURI_INVOKE("check_cloud_account")),
+	/**  Validates the URL and authenticates before anything is stored. */
+	connectCloudAccount: (endpoint: string, username: string, password: string) => typedError<CloudAccountSummary, string>(__TAURI_INVOKE("connect_cloud_account", { endpoint, username, password })),
+	/**  Forgets the account on this device; no local or remote file is deleted. */
+	disconnectCloudAccount: () => typedError<CloudDisconnect, string>(__TAURI_INVOKE("disconnect_cloud_account")),
+	listCloudProjects: () => typedError<CloudProjectList, string>(__TAURI_INVOKE("list_cloud_projects")),
+	/**
+	 *  Mobile downloads into the project library (`parent_dir` must be `null`);
+	 *  desktop has no library and needs a destination folder chosen by the user.
+	 */
+	downloadCloudProject: (projectId: string, parentDir: string | null) => typedError<CloudDownload, string>(__TAURI_INVOKE("download_cloud_project", { projectId, parentDir })),
+	getCloudProjectBinding: (projectDir: string) => typedError<CloudProjectBinding, string>(__TAURI_INVOKE("get_cloud_project_binding", { projectDir })),
+	/**  Link a project to the connected account and turn its sync on. */
+	bindCloudProject: (projectDir: string, intervalMinutes: number) => typedError<CloudProjectBinding, string>(__TAURI_INVOKE("bind_cloud_project", { projectDir, intervalMinutes })),
+	unbindCloudProject: (projectDir: string) => typedError<CloudProjectBinding, string>(__TAURI_INVOKE("unbind_cloud_project", { projectDir })),
 };
 
 /* Types */
@@ -505,7 +559,6 @@ export type AiPromptAsset = {
 };
 
 export type AiPromptAssets = {
-	commands: AiPromptAsset[],
 	skills: AiPromptAsset[],
 	memory: AiPromptAsset | null,
 };
@@ -517,7 +570,7 @@ export type AiSessionFile = {
 	updatedAt: number | null,
 };
 
-export type AiSessionKind = "talk" | "agent";
+export type AiSessionKind = "talk";
 
 /**
  *  Whether the caller can subsequently `update` a verified remote
@@ -588,37 +641,6 @@ export type ChapterStats = {
 	word_count: number,
 };
 
-export type ClaudeSpawnRequest = {
-	/**  Override the auto-detected CLI path. */
-	cli_path: string | null,
-	/**  Working directory for the spawned process. Default: inherit. */
-	cwd: string | null,
-	system_prompt: string | null,
-	/**  Extra `--add-dir` values (plugin usually includes the project root). */
-	add_dirs: string[],
-	/**
-	 *  One of: "acceptEdits", "auto", "bypassPermissions", "default",
-	 *  "dontAsk", "plan". Passed through as-is.
-	 */
-	permission_mode: string | null,
-	model: string | null,
-	/**  Plugin-owned UUID; must be a valid UUID string on the CLI side. */
-	session_uuid: string,
-	/**
-	 *  Resume an existing CLI conversation instead of creating a new one.
-	 *  The CLI rejects `--session-id` values it has already seen (the
-	 *  process exits immediately, which surfaced as "Unknown claude
-	 *  session" on the next send), so re-spawns of a session that already
-	 *  produced output MUST pass `--resume` instead.
-	 */
-	resume?: boolean,
-	/**
-	 *  Extra CLI args (escape hatch). Validated against a blocklist of
-	 *  flags we manage ourselves.
-	 */
-	extra_args: string[],
-};
-
 /**
  *  Payload emitted as the `cli-open` event on hot path (existing instance
  *  receives a second invocation). The frontend routes folders to new windows
@@ -660,27 +682,86 @@ export type ClipboardImage = {
 	height: number,
 };
 
-export type CodexTurnRequest = {
-	/**  Override the auto-detected CLI path. */
-	cli_path: string | null,
-	/**  Working directory / agent workspace root. */
-	cwd: string | null,
-	/**  Model id (passed as `-m`). Empty/None → Codex picks its default. */
-	model: string | null,
-	/**  Sandbox policy: "read-only", "workspace-write", or "danger-full-access". */
-	sandbox: string | null,
-	/**  Extra writable directories (`--add-dir`). */
-	add_dirs: string[],
-	/**  The user prompt for this turn (sent via stdin). */
-	prompt: string,
-	/**
-	 *  When set, resume the existing Codex conversation
-	 *  (`codex exec … resume <thread_id>`) instead of starting a new one.
-	 */
-	resume_thread_id: string | null,
-	/**  Caller-owned id used to key the Tauri event channel + kill registry. */
-	session_uuid: string,
+export type CloudAccountStatus = {
+	account: CloudAccountSummary,
+	state: CloudConnectionState,
+	message: string | null,
 };
+
+/**  The connected account, without any credential. */
+export type CloudAccountSummary = {
+	connected: boolean,
+	/**  WebDAV folder URL; validated to carry no credentials. */
+	endpoint: string | null,
+	host: string | null,
+	username: string | null,
+	connected_at: string | null,
+	credential_storage: CredentialStorage,
+};
+
+export type CloudConnectionState = "not_connected" | "online" |
+/**  The server rejected the stored user name or app password. */
+"auth_failed" |
+/**
+ *  The password is missing from this device's vault, or belongs to
+ *  another server or user.
+ */
+"credential_missing" | "unreachable" |
+/**  The URL does not answer as a WebDAV folder. */
+"rejected";
+
+export type CloudDisconnect = {
+	/**  Projects whose sync was turned off; their files were not touched. */
+	unlinked_projects: number,
+};
+
+export type CloudDownload = {
+	project_dir: string,
+	/**  This device already had the project; nothing was downloaded. */
+	already_present: boolean,
+	/**  Result of the initial sync that downloaded the files. */
+	status: SyncStatus | null,
+};
+
+export type CloudProject = {
+	project_id: string,
+	/**  `[project] name` from the remote project.toml, when readable. */
+	name: string | null,
+	/**  An existing copy of this project on this device. */
+	local_project_dir: string | null,
+};
+
+export type CloudProjectBinding = {
+	/**  Sync uses this device's cloud account. */
+	linked: boolean,
+	/**  Linked to a different server or user than the connected account. */
+	other_account: boolean,
+	/**  Sync uses the project's own WebDAV settings instead. */
+	custom_webdav: boolean,
+	enabled: boolean,
+	interval_minutes: number,
+	last_sync: string | null,
+};
+
+export type CloudProjectList = {
+	projects: CloudProject[],
+	/**  More projects exist than one listing describes. */
+	truncated: boolean,
+	/**  Project folders without a valid identity card; never downloadable. */
+	skipped: number,
+};
+
+/**  How to settle a file reported in `SyncStatus.conflicts`. */
+export type ConflictResolution =
+/**  Upload this device's copy over the remote one. */
+"keep_local" |
+/**  Replace this device's copy with the remote one. */
+"keep_remote" |
+/**
+ *  Save the remote copy as a new file next to it, then upload this
+ *  device's copy; the next sync shares both.
+ */
+"keep_both";
 
 /**
  *  Reference to a stored cover asset. Serialized inside the Publish
@@ -737,15 +818,17 @@ export type CreateLiteraryStudyProjectResult = {
 	chapterCount: number,
 };
 
+/**  Where this device keeps the app password. */
+export type CredentialStorage =
+/**  iOS Keychain / Android Keystore, bound to this device. */
+"system_keychain" |
+/**  Owner-only file in the app data folder; not encrypted at rest. */
+"app_data_file";
+
 export type DailyStats = {
 	date: string,
 	words_written: number,
 	time_minutes: number,
-};
-
-export type DetectedCli = {
-	path: string,
-	version: string | null,
 };
 
 export type EffectiveSettings = {
@@ -914,6 +997,14 @@ export type ImageHostSettings_Serialize = {
 	hosts: HostConfig_Serialize[],
 	active_host_id?: string | null,
 	auto_on_paste: boolean,
+};
+
+export type LibraryProject = {
+	path: string,
+	/**  `[project].name` from `.novelist/project.toml`, else the folder name. */
+	name: string,
+	/**  Unix epoch milliseconds of the project folder's last change. */
+	modified_at: number | null,
 };
 
 export type LiteraryChapterDraft = {
@@ -1285,6 +1376,35 @@ export type PendingFile = {
 	col: number | null,
 };
 
+export type PlatformCapabilities = {
+	os: PlatformOs,
+	is_mobile: boolean,
+	/**  OS menu bar driven by `refresh_menu`. */
+	native_menu: boolean,
+	/**  Additional `novelist-*` windows. */
+	multi_window: boolean,
+	/**  Any folder can be opened as a project (mobile uses the project library). */
+	pick_directory: boolean,
+	/**  Helper binaries such as Pandoc can be spawned. */
+	external_processes: boolean,
+	/**  The updater plugin is registered (desktop, not portable). */
+	self_update: boolean,
+	cli_shim: boolean,
+	/**
+	 *  OS file-system events. Without it, `poll_external_changes` is the only
+	 *  external-change detector; open-file tracking works everywhere.
+	 */
+	file_watcher: boolean,
+	/**  Third-party plugins can be installed, scaffolded and loaded. */
+	plugin_install: boolean,
+	/**
+	 *  Document export formats: Pandoc's `export_project` formats where
+	 *  helper binaries run (`external_processes`), otherwise the built-in
+	 *  `export_library_document` formats.
+	 */
+	export_formats: string[],
+};
+
 export type PlatformConfig = { platform: "ghost";
 /**  Admin URL ending without a slash, e.g. "https://blog.example.com". */
 admin_url: string;
@@ -1307,6 +1427,8 @@ access_token: string } | { platform: "medium";
  *  in late 2024; legacy users only.
  */
 token: string };
+
+export type PlatformOs = "macos" | "windows" | "linux" | "ios" | "android";
 
 export type PluginInfo = {
 	id: string,
@@ -2104,6 +2226,12 @@ export type SyncConfig = {
 	interval_minutes: number,
 	/**  Explicitly leave an unidentifiable legacy `novelist/{name}` tree untouched. */
 	legacy_remote_acknowledged?: boolean,
+	/**
+	 *  Credentials come from this device's cloud account (`services::cloud`).
+	 *  `webdav_url`/`username` then name the account the project was linked
+	 *  to, and `password` stays empty.
+	 */
+	cloud_account?: boolean,
 };
 
 export type SyncConfigMasked = {
@@ -2113,6 +2241,11 @@ export type SyncConfigMasked = {
 	password: string,
 	interval_minutes: number,
 	legacy_remote_acknowledged: boolean,
+	/**
+	 *  Credentials come from the device's cloud account; the URL and user
+	 *  name only identify it and the password is always empty.
+	 */
+	cloud_account: boolean,
 };
 
 export type SyncStatus = {
@@ -2129,6 +2262,11 @@ export type SyncStatus = {
 	 *  requires an explicit `adopt_sync_identity` call with this ID.
 	 */
 	adoptable_project_id: string | null,
+	/**
+	 *  Files both sides changed since their last common version. Both copies
+	 *  were left untouched; each needs `resolve_conflict`.
+	 */
+	conflicts: string[],
 };
 
 export type TemplateFile = {
@@ -2374,8 +2512,6 @@ export type ViewConfig_Serialize = {
 	wrap_file_names?: boolean | null,
 	sidebar_font_size?: number | null,
 };
-
-export type WriteFileIfUnchangedResult = "written" | "conflict";
 
 export type WritingConfig = {
 	daily_goal?: number,

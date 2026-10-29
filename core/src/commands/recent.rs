@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::services::atomic_file::atomic_write_sync;
+use crate::services::portable::{self, LibraryLayout};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,23 @@ pub fn sort_projects(projects: &mut [RecentProject]) {
     });
 }
 
+/// iOS moves the app container (and so every absolute path) on app updates.
+/// On mobile the list file therefore names library projects by
+/// library-relative reference (see [`portable::project_storage_key`]); callers
+/// always see absolute paths. Desktop has no library: the format is unchanged.
+fn current_library() -> Option<&'static LibraryLayout> {
+    portable::library().ok()
+}
+
+/// The spelling every comparison uses: the same project reached through
+/// `/var/…` and `/private/var/…` is one entry.
+fn normalize_path(path: &str, library: Option<&LibraryLayout>) -> String {
+    match library {
+        Some(library) => library.configured_path(path).into_owned(),
+        None => path.to_owned(),
+    }
+}
+
 /// Reads the recent-projects list from `file`. A missing file is an empty list.
 ///
 /// An unparseable file is never treated as empty in place: the next write would
@@ -54,13 +72,27 @@ pub fn sort_projects(projects: &mut [RecentProject]) {
 /// file cannot be moved aside (or cannot be read at all), the error is returned
 /// and callers write nothing.
 async fn read_projects(file: &Path) -> Result<Vec<RecentProject>, AppError> {
+    read_projects_with(file, current_library()).await
+}
+
+async fn read_projects_with(
+    file: &Path,
+    library: Option<&LibraryLayout>,
+) -> Result<Vec<RecentProject>, AppError> {
     let bytes = match tokio::fs::read(file).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let parse_error = match serde_json::from_slice(&bytes) {
-        Ok(projects) => return Ok(projects),
+    let parse_error = match serde_json::from_slice::<Vec<RecentProject>>(&bytes) {
+        Ok(mut projects) => {
+            if let Some(library) = library {
+                for project in &mut projects {
+                    project.path = library.resolve(&project.path).into_owned();
+                }
+            }
+            return Ok(projects);
+        }
         Err(error) => error,
     };
     let mut backup = file.as_os_str().to_owned();
@@ -86,7 +118,27 @@ async fn read_projects(file: &Path) -> Result<Vec<RecentProject>, AppError> {
 }
 
 async fn write_projects(file: &Path, projects: &[RecentProject]) -> Result<(), AppError> {
-    let json = serde_json::to_vec_pretty(projects)?;
+    write_projects_with(file, projects, current_library()).await
+}
+
+async fn write_projects_with(
+    file: &Path,
+    projects: &[RecentProject],
+    library: Option<&LibraryLayout>,
+) -> Result<(), AppError> {
+    let json = match library {
+        Some(library) => {
+            let stored: Vec<RecentProject> = projects
+                .iter()
+                .map(|project| RecentProject {
+                    path: library.storage_key(&project.path).into_owned(),
+                    ..project.clone()
+                })
+                .collect();
+            serde_json::to_vec_pretty(&stored)?
+        }
+        None => serde_json::to_vec_pretty(projects)?,
+    };
     let file = file.to_path_buf();
     tokio::task::spawn_blocking(move || atomic_write_sync(&file, &json))
         .await
@@ -130,6 +182,7 @@ pub async fn add_recent_project(path: String, name: String) -> Result<(), AppErr
 }
 
 async fn add_project_in(file: &Path, path: String, name: String) -> Result<(), AppError> {
+    let path = normalize_path(&path, current_library());
     let mut projects = read_projects(file).await?;
 
     // Preserve pin / sort_order if the project already exists.
@@ -185,6 +238,7 @@ pub async fn remove_recent_project(path: String) -> Result<(), AppError> {
 }
 
 async fn remove_project_in(file: &Path, path: &str) -> Result<(), AppError> {
+    let path = normalize_path(path, current_library());
     let mut projects = read_projects(file).await?;
     projects.retain(|p| p.path != path);
     write_projects(file, &projects).await
@@ -198,6 +252,7 @@ pub async fn set_project_pinned(path: String, pinned: bool) -> Result<(), AppErr
 }
 
 async fn set_pinned_in(file: &Path, path: &str, pinned: bool) -> Result<(), AppError> {
+    let path = normalize_path(path, current_library());
     let mut projects = read_projects(file).await?;
     let Some(project) = projects.iter_mut().find(|p| p.path == path) else {
         return Err(AppError::Custom(format!("Project not in recents: {path}")));
@@ -217,9 +272,11 @@ pub async fn reorder_recent_projects(ordered_paths: Vec<String>) -> Result<(), A
 }
 
 async fn reorder_in(file: &Path, ordered_paths: &[String]) -> Result<(), AppError> {
+    let library = current_library();
     let mut projects = read_projects(file).await?;
     for (idx, path) in ordered_paths.iter().enumerate() {
-        if let Some(project) = projects.iter_mut().find(|p| &p.path == path) {
+        let path = normalize_path(path, library);
+        if let Some(project) = projects.iter_mut().find(|p| p.path == path) {
             project.sort_order = Some(idx as i64);
         }
     }
@@ -425,5 +482,52 @@ mod tests {
             .await
             .is_err());
         assert!(file.is_dir(), "nothing may replace an unreadable list");
+    }
+
+    #[tokio::test]
+    async fn mobile_recents_survive_app_container_relocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let container = |id: &str| {
+            LibraryLayout::prepare(
+                dir.path().join(id).join("Documents/Projects"),
+                dir.path().join(id).join("Library/Caches"),
+            )
+            .unwrap()
+        };
+        let before = container("8F1C");
+        let after = container("D27A");
+        let file = recents_file(&dir);
+        let in_library = before
+            .library_root()
+            .join("长夜")
+            .to_string_lossy()
+            .into_owned();
+        let projects = vec![
+            RecentProject {
+                pinned: true,
+                sort_order: Some(0),
+                ..mk(&in_library, "长夜", "100")
+            },
+            mk("/elsewhere/书", "书", "50"),
+        ];
+
+        write_projects_with(&file, &projects, Some(&before))
+            .await
+            .unwrap();
+
+        let stored = std::fs::read_to_string(&file).unwrap();
+        assert!(stored.contains("\"library:长夜\""), "{stored}");
+        assert!(
+            !stored.contains("8F1C"),
+            "no container prefix may persist: {stored}"
+        );
+        let reopened = read_projects_with(&file, Some(&after)).await.unwrap();
+        assert_eq!(
+            reopened[0].path,
+            after.library_root().join("长夜").to_string_lossy()
+        );
+        assert!(reopened[0].pinned);
+        assert_eq!(reopened[0].sort_order, Some(0));
+        assert_eq!(reopened[1].path, "/elsewhere/书");
     }
 }

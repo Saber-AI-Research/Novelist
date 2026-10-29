@@ -2,8 +2,11 @@ name: Release
 
 on:
   push:
+    # Stable tags only. Prerelease tags (v1.2.0-beta.1) are mobile betas,
+    # published by mobile-release.yml without desktop builds or latest.json.
     tags:
       - 'v*'
+      - '!v*-*'
   workflow_dispatch:
     inputs:
       tag:
@@ -30,12 +33,21 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
           persist-credentials: false
+      # scripts/app-version.mjs reads core/Cargo.toml with `cargo metadata`.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.93.1
       - name: Verify immutable release tag and version
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          jq -e --arg version "${RELEASE_TAG#v}" '.version == $version' package.json core/tauri.conf.json
+          app_version="$(node scripts/app-version.mjs)"
+          if [ "$app_version" != "${RELEASE_TAG#v}" ]; then
+            echo "::error::tag $RELEASE_TAG needs app version ${RELEASE_TAG#v} in core/Cargo.toml, the commit has $app_version"
+            exit 1
+          fi
 
   # ── Self-hosted macOS ARM build (M1/M2) ───────────────
   build-macos-arm:

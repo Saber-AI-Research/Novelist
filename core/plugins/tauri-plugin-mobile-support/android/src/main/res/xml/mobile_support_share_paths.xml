@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Must match SHARE_STAGING_DIR_NAME in src/lib.rs (Rust app_cache_dir() is Context.cacheDir). -->
+    <cache-path name="exports" path="exports/" />
+</paths>

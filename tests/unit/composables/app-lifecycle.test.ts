@@ -51,9 +51,11 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: hoisted.getCurrentW
 vi.mock('$lib/stores/tabs.svelte', () => ({
   tabsStore: {
     get dirtyTabs() { return hoisted.tabsState.dirtyTabs; },
+    activeTab: null,
     saveAllDirty: () => hoisted.tabsState.saveAllDirty(),
     markSaved: (id: string) => hoisted.tabsState.markSaved(id),
   },
+  getEditorView: () => undefined,
 }));
 
 vi.mock('$lib/stores/project.svelte', async () => {
@@ -68,10 +70,13 @@ vi.mock('$lib/stores/project.svelte', async () => {
 import { useAppLifecycle } from '$lib/composables/app-lifecycle.svelte';
 import { projectState } from './project-state.svelte';
 
+const saveDirtyTabs = vi.fn(async () => {});
+
 function ctx(isClosingTab = false) {
   return {
     t: (k: string) => k,
     isClosingTab: () => isClosingTab,
+    saveDirtyTabs,
   };
 }
 
@@ -87,6 +92,7 @@ beforeEach(() => {
   hoisted.tabsState.markSaved.mockClear();
   projectState.dirPath = null;
   hoisted.resetCloseHandler();
+  saveDirtyTabs.mockClear();
 });
 
 afterEach(() => {
@@ -396,5 +402,88 @@ describe('[contract] useAppLifecycle — teardown', () => {
     hoisted.invoke.mockClear();
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(hoisted.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe('[contract] useAppLifecycle — mobile persistence', () => {
+  const MOBILE = {
+    os: 'ios', is_mobile: true, native_menu: false, multi_window: false, pick_directory: false,
+    external_processes: false, self_update: false, cli_shim: false, file_watcher: false,
+    plugin_install: false, export_formats: [],
+  } as const;
+
+  async function onMobile() {
+    const { platform } = await import('$lib/stores/platform.svelte');
+    platform.setCapabilities({ ...MOBILE, export_formats: [] });
+  }
+
+  function setVisibility(state: 'hidden' | 'visible') {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  afterEach(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+  });
+
+  it('registers no window close prompt on mobile', async () => {
+    await onMobile();
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    expect(hoisted.getCloseHandler()).toBeNull();
+    teardown();
+  });
+
+  it('debounces an auto-save after editor input', async () => {
+    await onMobile();
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    document.body.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    document.body.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(saveDirtyTabs).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saveDirtyTabs).toHaveBeenCalledTimes(1);
+    teardown();
+  });
+
+  it('flushes dirty tabs then syncs an enabled project when backgrounded', async () => {
+    await onMobile();
+    projectState.dirPath = '/library/Novel';
+    hoisted.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_sync_config') return { enabled: true, interval_minutes: 0 };
+      return undefined;
+    });
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    await vi.advanceTimersByTimeAsync(0);
+    hoisted.invoke.mockClear();
+
+    setVisibility('hidden');
+    await vi.waitFor(() => {
+      expect(hoisted.invoke).toHaveBeenCalledWith('sync_now', { projectDir: '/library/Novel' });
+    });
+    expect(saveDirtyTabs).toHaveBeenCalledTimes(1);
+    teardown();
+  });
+
+  it('does not sync a project without WebDAV sync when backgrounded', async () => {
+    await onMobile();
+    projectState.dirPath = '/library/Novel';
+    hoisted.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_sync_config') return { enabled: false, interval_minutes: 0 };
+      return undefined;
+    });
+    const teardown = useAppLifecycle(ctx());
+    await flushListeners();
+    await vi.advanceTimersByTimeAsync(0);
+    hoisted.invoke.mockClear();
+
+    setVisibility('hidden');
+    await vi.waitFor(() => expect(saveDirtyTabs).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(hoisted.invoke).not.toHaveBeenCalledWith('sync_now', expect.anything());
+    teardown();
   });
 });

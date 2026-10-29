@@ -2,6 +2,7 @@
   import type { ChannelConfig } from '$lib/ipc/commands';
   import type { StyledCopySource } from '$lib/services/styled-copy';
   import { t } from '$lib/i18n';
+  import { platform } from '$lib/stores/platform.svelte';
   import { IconClose } from './icons';
   import OnlinePublishPanel from './OnlinePublishPanel.svelte';
   import StyledCopyPanel from './StyledCopyPanel.svelte';
@@ -45,6 +46,8 @@
   let onlineLoadError = $state(false);
   let switchingMode = $state(false);
   let onlineLoadGeneration = 0;
+  /** Styled copy converts through Pandoc, unavailable on mobile. */
+  const styledAvailable = platform.can('external_processes');
 
   function invalidateOnlineLoad(): number {
     loadingOnline = false;
@@ -63,6 +66,7 @@
 
   async function switchMode(nextMode: PublishDialogMode): Promise<void> {
     if (publishing || switchingMode || mode === nextMode) return;
+    if (nextMode === 'styled' && !styledAvailable) return;
     const generation = invalidateOnlineLoad();
     onlineLoadError = false;
 
@@ -124,18 +128,20 @@
           />
           <span>{t('publish.mode.online')}</span>
         </label>
-        <label class:active={mode === 'styled'}>
-          <input
-            type="radio"
-            name="publish-mode"
-            value="styled"
-            checked={mode === 'styled'}
-            disabled={publishing || switchingMode}
-            data-testid="publish-mode-styled"
-            onchange={() => { void switchMode('styled'); }}
-          />
-          <span>{t('publish.mode.styled')}</span>
-        </label>
+        {#if styledAvailable}
+          <label class:active={mode === 'styled'}>
+            <input
+              type="radio"
+              name="publish-mode"
+              value="styled"
+              checked={mode === 'styled'}
+              disabled={publishing || switchingMode}
+              data-testid="publish-mode-styled"
+              onchange={() => { void switchMode('styled'); }}
+            />
+            <span>{t('publish.mode.styled')}</span>
+          </label>
+        {/if}
       </div>
       <button class="close-button" type="button" onclick={requestClose} disabled={switchingMode} aria-label={t('publish.closeDialog')}>
         <IconClose size={14} />

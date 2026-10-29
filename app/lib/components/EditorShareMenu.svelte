@@ -4,6 +4,7 @@
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { projectStore } from '$lib/stores/project.svelte';
   import { commandRegistry } from '$lib/stores/commands.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
   import {
     capturePublishDocumentSnapshot,
     type EditorPublishDocumentSnapshot,
@@ -23,13 +24,19 @@
   let dialogMode = $state<PublishDialogMode | null>(null);
   let dialogSource = $state<EditorPublishDocumentSnapshot | null>(null);
   let channels = $state<ChannelConfig[]>([]);
+  // Styled copy and every non-Medium channel convert through Pandoc, which
+  // does not exist on mobile (no external processes).
+  const pandocAvailable = platform.can('external_processes');
+  let publishableChannels = $derived(
+    pandocAvailable ? channels : channels.filter((c) => c.platform === 'medium'),
+  );
   let buttonEl = $state<HTMLButtonElement | null>(null);
   let openOperation = 0;
 
   onMount(() => {
     void reloadChannels();
-    document.addEventListener('mousedown', onClickOutside);
-    return () => document.removeEventListener('mousedown', onClickOutside);
+    document.addEventListener('pointerdown', onClickOutside);
+    return () => document.removeEventListener('pointerdown', onClickOutside);
   });
 
   async function reloadChannels() {
@@ -37,7 +44,7 @@
     if (r.status === 'ok') channels = r.data.channels ?? [];
   }
 
-  function onClickOutside(e: MouseEvent) {
+  function onClickOutside(e: Event) {
     if (!menuOpen) return;
     if (buttonEl && !buttonEl.parentElement?.contains(e.target as Node)) {
       menuOpen = false;
@@ -138,18 +145,20 @@
     <button class="share-item" role="menuitem" onclick={() => runCommand('image-host.upload-all')}>
       {t('share.uploadImages')}
     </button>
-    <div class="share-divider"></div>
-    <button
-      class="share-item"
-      role="menuitem"
-      data-testid="share-styled-copy"
-      onclick={openStyledCopyDialog}
-    >
-      {t('share.styledCopy')}
-    </button>
-    {#if channels.length > 0}
+    {#if pandocAvailable}
       <div class="share-divider"></div>
-      {#each channels as c (c.id)}
+      <button
+        class="share-item"
+        role="menuitem"
+        data-testid="share-styled-copy"
+        onclick={openStyledCopyDialog}
+      >
+        {t('share.styledCopy')}
+      </button>
+    {/if}
+    {#if publishableChannels.length > 0}
+      <div class="share-divider"></div>
+      {#each publishableChannels as c (c.id)}
         <button class="share-item" role="menuitem" onclick={() => openPublishDialog(c)}>
           <span class="share-channel-name">{t('share.publishTo')} {c.name}</span>
           <span class="share-channel-platform">{c.platform}</span>
@@ -165,7 +174,7 @@
 {#if dialogMode && (dialogMode === 'styled' || (dialogChannel && activeDoc))}
   <PublishDialog
     initialMode={dialogMode}
-    {channels}
+    channels={publishableChannels}
     source={dialogSource}
     channel={dialogChannel}
     doc={activeDoc}

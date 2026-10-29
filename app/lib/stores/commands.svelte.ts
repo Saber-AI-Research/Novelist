@@ -14,6 +14,12 @@ interface Command {
   secondaryLabel?: string;
   secondaryLabelFn?: () => string | undefined;
   shortcut?: string;
+  /**
+   * Platform gate. When it returns false the command is hidden from the
+   * palette and `execute` ignores it (shortcut, menu and touch toolbar
+   * dispatches included), e.g. new-window or split on mobile.
+   */
+  available?: () => boolean;
   handler: () => void;
 }
 
@@ -62,13 +68,20 @@ class CommandRegistry {
     this.lastExecuted.set(id, { at: now, source });
 
     const cmd = this.commands.find(c => c.id === id);
-    if (cmd) cmd.handler();
+    if (cmd && (cmd.available?.() ?? true)) cmd.handler();
+  }
+
+  /** Whether a registered command can run on this platform right now. */
+  isAvailable(id: string): boolean {
+    const cmd = this.commands.find(c => c.id === id);
+    return !!cmd && (cmd.available?.() ?? true);
   }
 
   search(query: string): Command[] {
-    if (!query.trim()) return this.commands;
+    const available = this.commands.filter(c => c.available?.() ?? true);
+    if (!query.trim()) return available;
     const q = query.toLowerCase();
-    return this.commands.filter(c => {
+    return available.filter(c => {
       if (c.label.toLowerCase().includes(q)) return true;
       const sec = getSecondaryLabel(c);
       if (sec && sec.toLowerCase().includes(q)) return true;

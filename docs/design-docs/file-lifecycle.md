@@ -126,7 +126,8 @@ from unescaped project names.
 `services/sync.rs` reconciles each file three ways against a common BLAKE3
 content hash, the baseline. Only successful transfers, propagated deletions or
 byte-equality advance it; conflicts and failed transfers leave it unchanged and
-appear in `SyncStatus.errors`.
+appear in `SyncStatus.errors`. Conflicted paths are also listed in
+`SyncStatus.conflicts` until they are resolved explicitly (see below).
 
 | Local | Remote | Action |
 |---|---|---|
@@ -215,6 +216,10 @@ CJK and literal `#`, `?`, `%` filenames retain distinct identities. DAV hrefs
 are decoded once and confined to the queried collection; traversal, ambiguous
 encoded separators, fragments and embedded URL credentials are rejected.
 
+Project file downloads hold at most 256 MiB per file, listings at most 32 MiB
+of XML and a snapshot `project.json` at most 16 KiB; a larger response fails
+that request instead of exhausting memory.
+
 Snapshot mirroring removes any stale completion marker before retrying content.
 Every directory and file transfer must succeed and match local metadata counts
 before the final `metadata.json` PUT. Failed uploads remain visibly incomplete.
@@ -225,6 +230,128 @@ restoring never wait for WebDAV, while uploads and remote deletions stay in
 order. A retired snapshot's remote copy is deleted only after its replacement
 uploaded completely. An unreadable snapshot folder is logged and skipped, and a
 failed local retirement is logged, so neither blocks listing or creation.
+
+### Cloud account
+
+A device can connect one cloud account (`services/cloud.rs`, Settings → Sync →
+Cloud account): a WebDAV folder URL, a user name and an app password created
+for that device at an existing provider such as Nextcloud or a self-hosted
+WebDAV server. Novelist runs no account service of its own: registration,
+password resets and revoking a lost device happen at the provider. Writing
+locally never requires an account.
+
+`connect_cloud_account` validates before storing anything. The URL must be
+`https://` (plain `http://` only for a loopback host, for development) and may
+not carry a user name, password, query or fragment; the user name may not
+contain `:`. An authenticated Depth-0 `PROPFIND` must answer `207` with a
+collection; `401` is reported as rejected credentials, and redirects are
+reported, never followed, so the password cannot reach another host. Only
+then is the password written to the vault and the account record
+(`<app data>/cloud/account.json`: URL, user name, time; never a secret)
+written. The vault entry stores the password together with the URL and user
+name it was entered for and releases it only for exactly that pair, so a
+tampered record or project config cannot redirect it.
+
+The connection check proves only that the URL is an authenticated WebDAV
+folder, not that the server is safe to sync with. Sync relies on the server
+for its lost-update protection, so a supported server must: return a strong
+`ETag` that changes whenever a file's bytes change (also for same-length
+writes within the same second); answer `412` to a `PUT` with
+`If-None-Match: *` when the file exists and to a `PUT` or `DELETE` whose
+`If-Match` no longer matches; and serve the configured URL without redirects.
+A server that accepts a stale precondition can silently overwrite or delete
+another device's edit. Check a server against these requirements before
+relying on it (the deployment guide covers Nextcloud and Apache `mod_dav`);
+servers that fail them are unsupported, and sync does not work around them.
+
+| Platform | Password storage |
+|---|---|
+| iOS | Keychain generic password, `AfterFirstUnlockThisDeviceOnly`, not synchronizable (`tauri-plugin-mobile-support`) |
+| Android | Keystore AES-256-GCM key; ciphertext in app-private preferences, excluded from backup |
+| Desktop | `<app data>/cloud/credential.json`, folder `0700`, file `0600`, written atomically; **not encrypted at rest** — readable by anything running as the same OS user, and included in unencrypted backups of the home folder |
+
+Mobile has no plaintext fallback: without the native vault every credential
+operation fails. No command returns the password to the WebView; the account
+summary and status carry only the URL, host, user name and connection state.
+
+A project uses the account when its sync config has `cloud_account: true`
+(`bind_cloud_project`). The per-project config then keeps only the URL and
+user name naming the account, never a password; every sync, conflict
+resolution and snapshot upload resolves the password from the vault at that
+moment. A project linked to a different URL or user than the connected account
+is refused before any request. Connecting an account links projects already
+configured for exactly that URL and user and removes their per-project
+password copy; on mobile every other stored per-project password is removed
+as well and that project's sync turned off. Baselines are bound to URL, user
+and project ID, so linking a project changes none of them and nothing is
+re-sent. On mobile `save_sync_config` rejects per-project passwords.
+
+`disconnect_cloud_account` deletes the vault entry and the account record and
+turns sync off for linked projects (`unbind_cloud_project` does the same for
+one project). It deletes no local or remote file and keeps baselines, so
+linking again continues where the project left off.
+
+All authenticated cloud work (sync of a linked project, conflict resolution,
+snapshot mirroring, listing, download, connection checks) holds a shared
+account lease for its whole duration. Disconnecting, or connecting a
+replacement account after its credentials were verified, first asks every
+lease to stop and then waits until all are released: listings, checks and
+snapshot mirroring stop at their next await, a sync stops between files and
+keeps the baselines it completed, and a download stops before publishing (its
+staging folder and sync data are removed). When the change returns, no
+request, publication or project link on behalf of the previous account is
+still in flight. A download holds one lease through its whole sync rather
+than taking a second one, which could wait forever behind the change.
+
+A download's final commit (last revocation check, publishing the folder,
+moving its sync data) and the change's stop signal share a small commit gate,
+held only for those synchronous steps and never while waiting for leases.
+Whichever takes it first goes first: after the signal no download publishes;
+a commit that already started completes, and the change is signalled after
+it. Such a project stays published — nothing visible is rolled back — and is
+then unlinked by the disconnect (after a replacement it remains linked to the
+previous account and reports that until it is linked again).
+
+Offline edits need no separate queue: the files and their baselines are the
+queue. The app syncs a linked project on its interval, when it returns to the
+foreground, and when the network comes back; a failed run leaves every
+baseline that was not completed unchanged and is simply retried.
+
+### New devices
+
+`list_cloud_projects` lists `novelist-sync/` (at most 1 MiB of XML and 1000
+entries; an href escaping the folder rejects the whole listing) and describes
+at most 200 folders named by a valid project ID. A folder counts only when its
+own identity card (at most 1 KiB) names that ID; the display name comes from
+its `.novelist/project.toml` (at most 64 KiB), stripped of control and
+bidirectional-format characters and limited to 120 characters.
+
+`download_cloud_project` never writes into an existing folder. In a hidden
+staging folder inside the destination (the mobile project library, or a folder
+chosen on desktop) it writes the exact remote identity card, links the
+account, and runs the regular `perform_sync`, so every file arrives with its
+baseline and later deletions propagate as on any other device. Only an
+error-free result is published, under a free name, with one rename; its sync
+config and baselines move to the published path. Otherwise the staging folder
+and its sync data are removed and nothing appears. A project whose identity
+already exists in the destination is opened instead of downloaded twice.
+
+### Resolving conflicts
+
+A file changed differently on both sides is never transferred automatically.
+`resolve_sync_conflict(project, path, resolution)` settles one path from
+`SyncStatus.conflicts` under the project's sync lock, after re-checking the
+project identity on both sides and the baseline's account binding:
+
+| Resolution | Effect |
+|---|---|
+| `keep_local` | upload this device's copy with `If-Match` on the remote ETag just read |
+| `keep_remote` | download the remote copy, replacing the local file only while its bytes still equal what was read |
+| `keep_both` | save the remote copy as `<name> (remote <date time>).<ext>` beside the file (never replacing one), then `keep_local`; the next sync shares the copy. Not offered for `.novelist/` settings files |
+
+The version being replaced is first saved to
+`<app data>/sync/<project-hash>/conflicts/<run>/{local,remote}/<path>`. The
+resolved content becomes the new baseline.
 
 ## Save flow auto-rename
 
@@ -528,3 +655,65 @@ In portable mode:
 The standard (`Novelist_<ver>_x64_windows.zip`) and portable
 (`Novelist_<ver>_x64_windows-portable.zip`) zips contain the same binary;
 only `portable.dat` differs.
+
+## Mobile project library
+
+iOS and Android cannot open arbitrary folders. `portable::init_mobile(app)`
+runs first in `setup` and fails with the offending directory instead of
+falling back to `$HOME`:
+
+- `novelist_home()` is the private app data directory (settings, credentials,
+  plugin data, snapshots, sync config and baselines, writing stats). It is
+  never visible in the Files app.
+- The project library is `Documents/Projects` on iOS (the only folder exposed
+  through Files) and `<app data>/Projects` on Android.
+- `portable::cache_root()` is the app cache directory; `imports/` holds staged
+  picker files and `exports/` holds share-sheet output.
+
+iOS relocates the app container on updates, so nothing persisted names a
+library project by absolute path. `portable::project_storage_key(path)` is the
+project path on desktop (unchanged layout) and `library:<relative path>` for
+library projects on mobile; local snapshots, sync config/state and writing
+stats hash it. `recent-projects.json` stores the same key and resolves it
+against the current library root on read, and mobile `write_project_settings`
+stores `[new_file]` directories relative to the project
+(`get_effective_settings` resolves relative values on every platform). The
+WebDAV snapshot backup folder is not name-based on mobile: it is
+`novelist-snapshots/project-<sync project id>` (identity created on first
+upload), so clones and renamed copies share it while independent projects
+with the same name on different devices stay isolated. Desktop keeps
+`<slug>-<hash8(path)>`.
+
+`core/src/commands/library.rs` owns the library commands (desktop returns
+`AppError::Unsupported`); new projects reuse `create_project_from_template`
+with `get_library_path()` as parent:
+
+- `stage_import_file(name, base64_data)` writes at most 64 MiB into a fresh
+  `imports/stage-*/<sanitized name>` folder; imports accept only such staged
+  paths (canonicalized, so links out of staging are refused) and delete them
+  after success.
+- `import_library_file(staged_path, project_dir)` copies a document type
+  accepted by `is_project_content_path` into a folder inside the library,
+  publishing with no-clobber `name 2.md` bumps.
+- `import_library_project(archive_path)` validates every ZIP entry first
+  (≤ 20 000 entries, ≤ 512 MiB counted while reading; traversal, absolute,
+  control-character and symlink entries abort), extracts into a hidden
+  `.novelist-import-*` folder in the library, then reserves the final name
+  and renames the whole tree into place. A failure removes the staging folder;
+  nothing partial is visible.
+- `export_library_project(project_dir)` writes
+  `exports/<project>-<YYYYMMDD-HHMMSS>.zip` via a hidden temp file and a
+  no-clobber rename. Reads go through a confined `cap_std` directory.
+- `export_library_document(file_path, format)` exports one Markdown/text file
+  as its original bytes (`markdown`) or as a sanitized standalone page
+  rendered by pulldown-cmark (`html`); it is not a Pandoc equivalent.
+
+Archives in both directions carry visible files and folders (content and
+assets) plus the `.novelist` allow-list: `project.toml`,
+`sync-identity.json`, `literary-study.json`, `book-translation.json` and the
+`ai`, `chats`, `drafts`, `naming`, `publish`, `publish-assets` and
+`templates` folders. Credentials, settings, caches, rename journals, hidden
+files and `*.novelist-tmp` files never travel. An imported copy keeps its
+sync identity, so it joins the original's WebDAV namespace. Disposable files
+in `imports/`, `exports/` and stale library staging folders older than 24 h
+are pruned on the next stage, export or import.

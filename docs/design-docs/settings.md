@@ -192,3 +192,104 @@ project root), filters out the active tab's current parent to prevent
 no-op moves, and on selection calls `commands.moveItem(srcPath, targetDir)`.
 Success path: `tabsStore.updatePath` rewires the open tab to the new
 path and both source + destination folders are refreshed.
+
+## AI Talk connection profiles
+
+AI Talk uses the device-local `novelist:ai-talk:settings:v1` storage key,
+independently of the global/project settings overlay. A saved `profiles` array
+is authoritative, including `[]`; provider templates are seeded only for fresh
+installations and legacy records without a profile list. Do not merge missing
+built-in profiles back on load: absence records a deliberate deletion.
+
+All connections can be renamed, duplicated and deleted. Deletion uses an inline
+confirmation that also works in mobile WebViews. Removing the active connection
+selects the first remaining one; removing the last clears the flattened active
+ID, endpoint, key and model. Conversation history and prompt presets are kept.
+Adding a provider template creates a clean connection without a key; duplication
+explicitly copies the current connection, including its key. Template IDs are
+reused only when absent; additional connections to the same provider get unique
+IDs. Both the inline panel settings and the main Settings page share this UI.
+
+Connection controls and shared conversation defaults are visually separated.
+Mobile inputs use 16px text to avoid iOS focus zoom and controls have at least
+44px touch height. Selecting, adding or duplicating a connection hides the key.
+
+Validation on 2026-10-29: `pnpm check` passed without diagnostics; the settings,
+OpenAI adapter and prompt-preset unit suites passed (30 tests). Playwright ran
+`ai-talk-settings.spec.ts` and `ai-panels.spec.ts` against a fresh Vite test server
+on port 1430 (36 tests passed), with desktop WebKit/Chromium plus iPhone, iPad
+portrait/landscape and Android phone settings workflows. The settings workflow
+checks touch activation, duplicate credential isolation, cancelled deletion,
+deletion of every built-in and the last profile, reload persistence, clean
+template restoration, CJK renaming, horizontal bounds and mobile touch heights.
+Settings and inline deletion screenshots were saved and the iPad screenshots
+visually inspected. These are browser tests with mocked Tauri IPC, not native
+iPad acceptance or live provider inference. No iPad was connected (`idevice_id -l`
+was empty); this Mac has Command Line Tools but no full Xcode or simulator tools.
+
+### Subscription sign-in investigation (verified 2026-10-29)
+
+**Status: researched, not implemented.** Current AI Talk requests use an API key
+and the OpenAI-compatible Chat Completions protocol. OAuth credentials cannot
+simply replace that key: login lifecycle and inference adapters are required.
+
+| Route | Practical integration | Platform boundary |
+| --- | --- | --- |
+| Codex local client | Official app-server `account/read`, `account/login/start`, `account/login/cancel`; wait for `account/login/completed`. Use `model/list`, `thread/start` and `turn/start`, translate answer events and require a completed turn. | Desktop with Codex installed; processes are unavailable on iOS/Android. |
+| Sign in with ChatGPT | Register the open-source client, authorize using PKCE, validate tokens and plan permission, refresh credentials, list account-specific models and call the Responses API. | Documented OSS flow requires an HTTP loopback callback on `127.0.0.1`; custom URI callbacks are not documented for this flow. Mobile feasibility needs a separate native prototype, including browser return and app suspension. |
+| Claude local client | Official `claude auth login`, `claude auth status`; infer through the unmodified `claude -p` client with structured streaming output. | Desktop with Claude Code installed; mobile needs a separately designed remote runtime. Published official SDK guidance and newer help/legal guidance disagree about third-party subscription login; resolve that before shipping a public login feature. |
+
+The lowest-effort technical route is desktop CLI integration, behind the
+existing `external_processes` capability. Add a connection kind (`api-key`,
+`codex-cli`, `claude-cli`) with a legacy default of `api-key`. Keep credentials
+under the official client's management, expose only sanitized account/status
+information, and do not copy CLI OAuth tokens into localStorage. Login controls
+must support cancel, timeout, missing/unsupported CLI and browser failure.
+Deleting a connection should remove its AI Talk configuration without logging
+other applications out of a shared CLI account.
+
+The inference bridge needs process discovery for packaged desktop apps, bounded
+JSON/JSONL parsing, cancellation that terminates and reaps the owned process,
+and terminal-error propagation. Subscribe before starting events to avoid losing
+fast replies. Use the same connection adapter for chat and compaction. Pass only
+explicitly selected writing context and disable agent tools, hooks, project
+instructions and inherited MCP integrations; logging in must not grant a writing
+chat implicit access to edit the user's files. Preserve user CLI configuration;
+any required model/provider/environment overrides should affect only the owned
+child process. A model catalog or successful login alone does not verify model
+access: an actual completed inference is required.
+
+Mobile should not show an enabled local-CLI login button. For a unified mobile
+experience, evaluate the official ChatGPT sign-in route separately and define
+an authenticated remote Claude execution service if that product scope is
+chosen. This investigation did not find an equivalent public Claude consumer
+OAuth integration suitable for directly embedding subscription inference into
+both mobile apps. Claude's help page (October 7 update) says subscription usage
+still works in Agent SDK / `claude -p`, and its legal page describes running the
+unmodified binary in third-party products with each user's own credentials.
+However, the SDK overview still says third-party claude.ai login needs prior
+approval. These sources do not establish an unambiguous public embedded OAuth
+route. Reusing extracted tokens against arbitrary APIs is not the documented
+CLI integration.
+
+For ChatGPT direct inference, the existing Chat Completions adapter is unsuitable:
+the documented route uses Responses with `store: false`, `stream: true`, and the
+full required history in `input`. Its preview excludes `temperature` and
+`previous_response_id` over HTTP. First registration uses `dynamic_agent_client`
+and saves the issued client ID; validate state, PKCE, nonce, ID-token signature
+and granted plan scopes before activating the connection. Credentials belong in
+protected native storage, with atomic refresh and explicit sign-out, rather than
+the existing API-key localStorage record. Login, model listing and a completed
+inference must be verified separately. This is a new integration, not a UI-only
+change; no nonfunctional login controls have been added.
+
+Official references checked for this investigation:
+
+- [Codex app-server authentication and inference](https://learn.chatgpt.com/docs/app-server)
+- [ChatGPT open-source client registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [ChatGPT plan inference and supported endpoint](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+- [ChatGPT preview request limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+- [Claude CLI authentication and structured output](https://code.claude.com/docs/en/cli-reference)
+- [Claude plan usage through Agent SDK and print mode](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+- [Claude SDK third-party login guidance](https://code.claude.com/docs/en/agent-sdk/overview)
+- [Claude Code in third-party products](https://code.claude.com/docs/en/legal-and-compliance)

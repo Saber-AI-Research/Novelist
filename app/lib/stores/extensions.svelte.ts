@@ -49,13 +49,6 @@ const BUILTIN_PANELS: UIExtension[] = [
     entryUrl: '',
     builtin: true,
   },
-  {
-    pluginId: 'ai-agent',
-    type: 'panel',
-    label: 'AI Agent',
-    entryUrl: '',
-    builtin: true,
-  },
 ];
 
 class ExtensionStore {

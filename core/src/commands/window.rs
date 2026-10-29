@@ -50,11 +50,24 @@ pub fn set_window_appearance(window: tauri::WebviewWindow, dark: bool) {
     }
 }
 
-/// Open the native WebView developer tools for this window. Compiled in all
-/// builds because the `devtools` Cargo feature is enabled by default (see
-/// Cargo.toml). Gated in the UI behind Developer Mode (F12).
+/// Open the native WebView developer tools for this window. Desktop builds
+/// enable Tauri's `devtools` feature (see Cargo.toml); the UI gates the
+/// command behind Developer Mode (F12). iOS/Android have no in-app inspector:
+/// debug builds are inspected remotely (Safari / Chrome), release builds not
+/// at all.
 #[tauri::command]
 #[specta::specta]
-pub fn open_devtools(window: tauri::WebviewWindow) {
-    window.open_devtools();
+pub fn open_devtools(window: tauri::WebviewWindow) -> Result<(), crate::error::AppError> {
+    #[cfg(desktop)]
+    {
+        window.open_devtools();
+        Ok(())
+    }
+    #[cfg(mobile)]
+    {
+        let _ = window;
+        Err(crate::error::AppError::Unsupported(
+            "In-app developer tools",
+        ))
+    }
 }

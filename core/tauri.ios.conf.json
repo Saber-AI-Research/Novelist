@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
+  "identifier": "com.novelist.app",
+  "app": {
+    "windows": [
+      {
+        "title": "Novelist"
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/plugins/**"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": null
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "resources": [
+      "bundled-plugins/",
+      "bundled-templates/"
+    ],
+    "fileAssociations": null,
+    "iOS": {
+      "minimumSystemVersion": "16.0"
+    }
+  }
+}

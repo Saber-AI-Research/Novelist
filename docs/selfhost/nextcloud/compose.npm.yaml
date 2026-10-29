@@ -1,0 +1,34 @@
+# Optional override: serve Nextcloud through an existing Nginx Proxy Manager
+# (NPM) that runs on the external Docker network ${NPM_NETWORK} and
+# terminates TLS. The loopback port is removed; NPM reaches the app as
+# http://novelist-nextcloud:80 on the proxy network.
+#
+#   COMPOSE_FILE=compose.yaml:compose.npm.yaml in .env, then docker compose up -d
+#   (or: docker compose -f compose.yaml -f compose.npm.yaml up -d)
+#
+# Requires Docker Compose 2.24.4+ (`!reset`).
+services:
+  app:
+    ports: !reset []
+    environment:
+      OVERWRITEPROTOCOL: https
+      OVERWRITEHOST: ${NEXTCLOUD_DOMAIN:?set NEXTCLOUD_DOMAIN in .env}
+      OVERWRITECLIURL: https://${NEXTCLOUD_DOMAIN}
+      # Trust X-Forwarded-* only from the proxy network, and let Nextcloud
+      # (not Apache mod_remoteip) evaluate them.
+      TRUSTED_PROXIES: ${NPM_PROXY_SUBNET:?set NPM_PROXY_SUBNET to the CIDR of the proxy network in .env}
+      APACHE_DISABLE_REWRITE_IP: "1"
+    networks:
+      proxy:
+        aliases: [novelist-nextcloud]
+
+  cron:
+    environment:
+      OVERWRITEPROTOCOL: https
+      OVERWRITEHOST: ${NEXTCLOUD_DOMAIN}
+      OVERWRITECLIURL: https://${NEXTCLOUD_DOMAIN}
+
+networks:
+  proxy:
+    external: true
+    name: ${NPM_NETWORK:-proxy}

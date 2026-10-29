@@ -4,10 +4,11 @@
 //! dynamic labels and a dynamic Open Recent submenu. The frontend owns
 //! the i18n store and the recent-projects list, so it pushes both
 //! across the bridge via `refresh_menu`. Called on app init and
-//! whenever locale or recent-projects state changes.
+//! whenever locale or recent-projects state changes. iOS/Android have
+//! no native menu, so the command is rejected there.
 
 use crate::error::AppError;
-use crate::menu::{build_menu, MenuLabels, RecentEntry};
+use crate::menu::{MenuLabels, RecentEntry};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -17,9 +18,17 @@ pub async fn refresh_menu(
     labels: MenuLabels,
     recent: Vec<RecentEntry>,
 ) -> Result<(), AppError> {
-    let menu = build_menu(&app, &labels, &recent)
-        .map_err(|e| AppError::Custom(format!("build menu: {e}")))?;
-    app.set_menu(menu)
-        .map_err(|e| AppError::Custom(format!("set menu: {e}")))?;
-    Ok(())
+    #[cfg(mobile)]
+    {
+        let _ = (app, labels, recent);
+        Err(AppError::Unsupported("Native menu"))
+    }
+    #[cfg(desktop)]
+    {
+        let menu = crate::menu::build_menu(&app, &labels, &recent)
+            .map_err(|e| AppError::Custom(format!("build menu: {e}")))?;
+        app.set_menu(menu)
+            .map_err(|e| AppError::Custom(format!("set menu: {e}")))?;
+        Ok(())
+    }
 }

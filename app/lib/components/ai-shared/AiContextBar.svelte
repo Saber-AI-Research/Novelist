@@ -125,4 +125,13 @@
     white-space: pre-wrap;
     font-size: 11px;
   }
+  @media (pointer: coarse) {
+    .chip-main { min-height: 44px; }
+    .chip-close {
+      justify-content: center;
+      min-width: 44px;
+      min-height: 44px;
+    }
+    .clear { min-height: 44px; }
+  }
 </style>

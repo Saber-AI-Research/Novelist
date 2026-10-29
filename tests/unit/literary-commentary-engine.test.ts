@@ -8,6 +8,7 @@ import {
   applyInput,
   buildRenderPieces,
   clampCaret,
+  commentCloser,
   insertAtCaret,
   moveCaret,
   normalizeStudyFile,
@@ -248,6 +249,143 @@ describe('literary commentary engine', () => {
     });
     expect(normalized.sourceCursor).toBe(1);
     expect(normalized.stats.correct).toBe(1);
+  });
+});
+
+/**
+ * Comment triggers: the bracket keys reach the plugin as 【, 「, ［ or [
+ * depending on the IME's punctuation mode (macOS Pinyin calls ［ and [ 中括号).
+ * Square brackets used to be ordinary text, so pressing the 中括号 key in
+ * half-width or English mode wrote a red mistake instead of opening a comment.
+ */
+describe('[regression] literary comment bracket triggers', () => {
+  const families = [
+    ['【', '】'],
+    ['「', '」'],
+    ['［', '］'],
+    ['[', ']'],
+  ] as const;
+
+  it.each(families)('opens a comment from a lone %s and closes it on its own closer', (opener, closer) => {
+    const opened = applyDelimitedInput(study('北凉王府'), opener, 'copy');
+    expect(opened.mode).toBe('comment');
+    expect(opened.brackets).toEqual([opener]);
+    expect(opened.file.sourceCursor).toBe(0);
+    expect(opened.file.insertions).toEqual([]);
+    expect(commentCloser(opener)).toBe(closer);
+
+    const closed = applyDelimitedInput(opened.file, `风骨${closer}北凉`, opened.mode, opened.brackets);
+    expect(closed.mode).toBe('copy');
+    expect(closed.brackets).toEqual([]);
+    expect(closed.file.sourceCursor).toBe(2);
+    expect(closed.file.stats.mistakes).toBe(0);
+    expect(closed.file.insertions).toMatchObject([{ kind: 'comment', text: '风骨', sourceOffset: 0 }]);
+  });
+
+  it.each(families)('turns a complete %s pair in one commit into one comment', (opener, closer) => {
+    const result = applyDelimitedInput(study('北凉王府'), `北凉${opener}风骨凛然${closer}王府`, 'copy');
+    expect(result.mode).toBe('copy');
+    expect(result.file.sourceCursor).toBe(4);
+    expect(result.file.stats.mistakes).toBe(0);
+    expect(result.file.insertions).toMatchObject([{ kind: 'comment', text: '风骨凛然', sourceOffset: 2 }]);
+  });
+
+  it.each(families)('keeps a committed empty %s pair open for the text typed between it', (opener, closer) => {
+    // IMEs and symbol keyboards that insert a whole pair leave the caret inside.
+    const opened = applyDelimitedInput(study('北凉王府'), `北凉${opener}${closer}`, 'copy');
+    expect(opened.mode).toBe('comment');
+    expect(opened.brackets).toEqual([opener]);
+    expect(opened.file.sourceCursor).toBe(2);
+    expect(opened.file.insertions).toEqual([]);
+
+    const typed = applyDelimitedInput(opened.file, '风骨', opened.mode, opened.brackets);
+    expect(typed.mode).toBe('comment');
+    const closed = applyDelimitedInput(typed.file, `${closer}王府`, typed.mode, typed.brackets);
+    expect(closed.mode).toBe('copy');
+    expect(closed.file.sourceCursor).toBe(4);
+    expect(closed.file.insertions).toMatchObject([{ kind: 'comment', text: '风骨', sourceOffset: 2 }]);
+  });
+
+  it('still closes an empty pair mid-commit and a closer committed on its own', () => {
+    const inline = applyDelimitedInput(study('北凉王府'), '北凉【】王府', 'copy');
+    expect(inline.mode).toBe('copy');
+    expect(inline.file.sourceCursor).toBe(4);
+    expect(inline.file.insertions).toEqual([]);
+
+    const opened = applyDelimitedInput(study('北凉王府'), '[', 'copy');
+    const cancelled = applyDelimitedInput(opened.file, ']', opened.mode, opened.brackets);
+    expect(cancelled.mode).toBe('copy');
+    expect(cancelled.file.insertions).toEqual([]);
+  });
+
+  it('closes a comment only on its own closer, whatever the bracket family', () => {
+    const square = applyDelimitedInput(study('正文'), '[注】」］释]正文', 'copy');
+    expect(square.mode).toBe('copy');
+    expect(square.file.insertions).toMatchObject([{ kind: 'comment', text: '注】」］释' }]);
+
+    const nested = applyDelimitedInput(study('正文'), '【见 [1] 与［2］】正文', 'copy');
+    expect(nested.mode).toBe('copy');
+    expect(nested.file.insertions).toMatchObject([{ kind: 'comment', text: '见 [1] 与［2］' }]);
+    expect(nested.file.sourceCursor).toBe(2);
+
+    const shortcut = applyDelimitedInput(study('正文'), '注]正文', 'comment', [null]);
+    expect(shortcut.mode).toBe('copy');
+    expect(shortcut.file.insertions).toMatchObject([{ kind: 'comment', text: '注' }]);
+  });
+
+  it('keeps square brackets transcribable when the source expects them', () => {
+    const result = applyDelimitedInput(study('注[1]正文'), '注[1]正文', 'copy');
+    expect(result.mode).toBe('copy');
+    expect(result.file.sourceCursor).toBe(result.file.source.length);
+    expect(result.file.insertions).toEqual([]);
+  });
+
+  it('asks the source about a bracket only after earlier text in the same commit', () => {
+    // A multi-character commit (phrase IME, speech input) used to compare the
+    // second 「 against the cursor from before the commit.
+    const result = applyDelimitedInput(study('「好」评'), '「好」「妙」评', 'copy');
+    expect(result.mode).toBe('copy');
+    expect(result.file.sourceCursor).toBe(result.file.source.length);
+    expect(result.file.stats.mistakes).toBe(0);
+    expect(result.file.insertions).toMatchObject([{ kind: 'comment', text: '妙', sourceOffset: 3 }]);
+  });
+
+  it('leaves Markdown syntax as ordinary text in and out of comments', () => {
+    const plain = applyDelimitedInput(study('北凉'), '*#`(', 'copy');
+    expect(plain.mode).toBe('copy');
+    expect(plain.file.insertions).toMatchObject([{ kind: 'mistake', text: '*#`(' }]);
+
+    const link = '[链接](https://example.com)与**重点**';
+    const inComment = applyDelimitedInput(study('正文'), `【见${link}】正文`, 'copy');
+    expect(inComment.mode).toBe('copy');
+    expect(inComment.file.insertions).toMatchObject([{ kind: 'comment', text: `见${link}` }]);
+
+    const squareComment = applyDelimitedInput(study('正文'), '[参见[链接](https://example.com)]正文', 'copy');
+    expect(squareComment.mode).toBe('copy');
+    expect(squareComment.file.insertions).toMatchObject([
+      { kind: 'comment', text: '参见[链接](https://example.com)' },
+    ]);
+    expect(squareComment.file.sourceCursor).toBe(2);
+  });
+
+  it('opens square-bracket and empty-pair comments at a rewound caret', () => {
+    const file = applyInput(study('北凉王府'), '北凉王府', 'copy');
+    const opened = applyDelimitedInputAtCaret(file, 2, '[', 'copy');
+    expect(opened.mode).toBe('comment');
+    expect(opened.caretIndex).toBe(2);
+    const closed = applyDelimitedInputAtCaret(opened.file, opened.caretIndex, '好]', opened.mode, opened.brackets);
+    expect(closed.mode).toBe('copy');
+    expect(closed.caretIndex).toBe(3);
+    expect(closed.file.sourceCursor).toBe(4);
+    expect(renderedText(closed.file)).toBe('北凉好王府');
+
+    const pair = applyDelimitedInputAtCaret(file, 2, '「」', 'copy');
+    expect(pair.mode).toBe('comment');
+    expect(pair.brackets).toEqual(['「']);
+    const typed = applyDelimitedInputAtCaret(pair.file, pair.caretIndex, '妙', pair.mode, pair.brackets);
+    expect(typed.caretIndex).toBe(3);
+    expect(typed.file.sourceCursor).toBe(4);
+    expect(renderedText(typed.file)).toBe('北凉妙王府');
   });
 });
 

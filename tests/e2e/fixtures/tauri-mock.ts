@@ -1,11 +1,33 @@
 import type { MockFileEntry, MockRecentProject } from './mock-data';
 
+export type MockPlatform = 'macos' | 'ios' | 'android';
+
 export interface TauriMockConfig {
   files: MockFileEntry[];
   fileContents: Record<string, string>;
   recentProjects: MockRecentProject[];
   projectDir: string;
   projectConfig: unknown;
+  /** Platform reported by `get_platform_capabilities`; defaults to macOS. */
+  platform?: MockPlatform;
+}
+
+/** Mirrors `PlatformCapabilities` from the Rust `get_platform_capabilities`. */
+export function mockPlatformCapabilities(platform: MockPlatform) {
+  const mobile = platform !== 'macos';
+  return {
+    os: platform,
+    is_mobile: mobile,
+    native_menu: !mobile,
+    multi_window: !mobile,
+    pick_directory: !mobile,
+    external_processes: !mobile,
+    self_update: !mobile,
+    cli_shim: !mobile,
+    file_watcher: !mobile,
+    plugin_install: platform !== 'ios',
+    export_formats: mobile ? ['markdown', 'html'] : ['html', 'pdf', 'docx', 'epub'],
+  };
 }
 
 export function buildTauriMockScript(config: TauriMockConfig): string {
@@ -90,30 +112,8 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       const mockWindowLabel = 'main';
       let nextEventListenerId = 1;
       let aiStreamCounter = 0;
-      let claudeCliDetectResult = null;
-      let claudeCliSendError = null;
-      const claudeCliSpawnUuidHistory = [];
-      let claudeCliSendCount = 0;
-      let claudeCliKillCount = 0;
-      let claudeCliKillBlocked = false;
-      const claudeCliKillWaiters = [];
-      let codexCliTurnCount = 0;
-      let codexCliTurnError = null;
-      let codexCliKillCount = 0;
-      let codexCliKillBlocked = false;
-      const codexCliKillWaiters = [];
-      let aiSessionWritesBlocked = false;
-      let aiSessionWriteError = null;
-      const aiSessionWriteWaiters = [];
-      let aiSessionWriteCount = 0;
-      let aiSessionDeletesBlocked = false;
-      const aiSessionDeleteWaiters = [];
       let blockedReadPath = null;
       const blockedReadWaiters = [];
-      let blockedConditionalWritePath = null;
-      const blockedConditionalWriteWaiters = [];
-      let conditionalWriteMutation = null;
-      const conditionalWriteResolutions = {};
        const MOCK_PUBLISH_CHANNELS_KEY = '__novelist_mock_publish_channels__';
        const MOCK_PUBLISH_DRAFTS_KEY = '__novelist_mock_publish_drafts__';
        const MOCK_PUBLISH_COVERS_KEY = '__novelist_mock_publish_covers__';
@@ -177,13 +177,60 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
        let updaterResponses = readJsonKey(MOCK_UPDATER_RESPONSES_KEY, []);
        let updaterCheckCount = 0;
        const aiSessions = {};
-       const aiSessionListErrors = {};
-        const aiPromptAssetErrors = {};
-        const aiPromptAssetBlockedProjects = {};
-        const aiPromptAssetWaiters = [];
-        const projectDetectBlockedProjects = {};
-        const projectDetectWaiters = [];
         const watcherStartErrors = {};
+      // Mobile platform + sandboxed project library. The library root is the
+      // parent of the default mock project so the seeded project is a library
+      // project on mobile.
+      const mockPlatform = ${JSON.stringify(config.platform ?? 'macos')};
+      const platformCapabilities = ${JSON.stringify(mockPlatformCapabilities(config.platform ?? 'macos'))};
+      const libraryRoot = ${JSON.stringify(config.projectDir.slice(0, config.projectDir.lastIndexOf('/')) || '/')};
+      const stagedImports = {};
+      const importedLibraryProjects = [];
+      const sharedFiles = [];
+      let shareError = null;
+      function stagedBytes(base64) {
+        try {
+          return Uint8Array.from(atob(base64), ch => ch.charCodeAt(0));
+        } catch {
+          return new Uint8Array(0);
+        }
+      }
+      // Minimal reader for STORED (uncompressed) ZIP entries, enough for the
+      // project-archive fixtures; like the Rust importer it requires
+      // .novelist/project.toml and takes the display name from it.
+      function storedZipEntries(bytes) {
+        const entries = [];
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const decoder = new TextDecoder();
+        let offset = 0;
+        while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
+          const method = view.getUint16(offset + 8, true);
+          const size = view.getUint32(offset + 18, true);
+          const nameLength = view.getUint16(offset + 26, true);
+          const extraLength = view.getUint16(offset + 28, true);
+          const nameStart = offset + 30;
+          const dataStart = nameStart + nameLength + extraLength;
+          if (method !== 0) throw new Error('mock importer only reads stored ZIP entries');
+          entries.push({
+            name: decoder.decode(bytes.subarray(nameStart, nameStart + nameLength)),
+            text: decoder.decode(bytes.subarray(dataStart, dataStart + size)),
+          });
+          offset = dataStart + size;
+        }
+        return entries;
+      }
+      function uniqueChildPath(parent, name) {
+        const dot = name.lastIndexOf('.');
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : '';
+        let candidate = parent + '/' + name;
+        let n = 2;
+        while (files.some(f => f.path === candidate) || recentProjects.some(p => p.path === candidate)) {
+          candidate = parent + '/' + stem + ' ' + n + ext;
+          n += 1;
+        }
+        return candidate;
+      }
       function aiSessionKey(project, kind, id) {
         return project + '\\0' + kind + ':' + id;
       }
@@ -582,8 +629,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'plugin:path|resolve_directory': return '/mock/tmp';
           case 'plugin:path|join': return (Array.isArray(args.paths) ? args.paths : []).join('/');
           case 'read_file': {
-            const effectivePath = conditionalWriteResolutions[args.path] ?? args.path;
-            const read = () => writtenFiles[effectivePath] ?? fileContents[effectivePath] ?? '';
+            const read = () => writtenFiles[args.path] ?? fileContents[args.path] ?? '';
             if (blockedReadPath === args.path) {
               return new Promise((resolve, reject) => blockedReadWaiters.push({
                 path: args.path,
@@ -604,43 +650,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               return new Promise(resolve => exportCssWriteWaiters.push(() => resolve(finish())));
             }
             return finish();
-          }
-          case 'write_file_if_unchanged': {
-            const effectivePath = conditionalWriteResolutions[args.path] ?? args.path;
-            const projectRoot = typeof args.projectDir === 'string'
-              ? args.projectDir.replace(/\\/+$/, '')
-              : '';
-            if (!projectRoot || (effectivePath !== projectRoot && !effectivePath.startsWith(projectRoot + '/'))) {
-              throw new Error('Conditional write target resolves outside active project');
-            }
-            const write = () => {
-              if (conditionalWriteMutation?.path === args.path) {
-                fileContents[effectivePath] = conditionalWriteMutation.content;
-                writtenFiles[effectivePath] = conditionalWriteMutation.content;
-                conditionalWriteMutation = null;
-                persistMockContents();
-              }
-              const hasWritten = Object.prototype.hasOwnProperty.call(writtenFiles, effectivePath);
-              const hasStored = Object.prototype.hasOwnProperty.call(fileContents, effectivePath);
-              const current = hasWritten
-                ? writtenFiles[effectivePath]
-                : hasStored ? fileContents[effectivePath] : null;
-              if (current !== args.expectedContent) return 'conflict';
-              writtenFiles[effectivePath] = args.content;
-              fileContents[effectivePath] = args.content;
-              persistMockContents();
-              return 'written';
-            };
-            if (blockedConditionalWritePath === args.path) {
-              return new Promise((resolve, reject) => blockedConditionalWriteWaiters.push({
-                path: args.path,
-                resolve: () => {
-                  try { resolve(write()); } catch (error) { reject(error); }
-                },
-                reject,
-              }));
-            }
-            return write();
           }
           case 'get_file_encoding': return 'utf-8';
           case 'list_directory': {
@@ -811,16 +820,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             return null;
           }
           case 'duplicate_file': return args.path.replace('.md', ' copy.md');
-        case 'detect_project': {
-          const projectDir = args.path || args.dirPath;
-          if (projectDetectBlockedProjects[projectDir]) {
-            return new Promise(resolve => projectDetectWaiters.push({
-              projectDir,
-              release: () => resolve(projectConfig),
-            }));
-          }
-          return projectConfig;
-        }
+          case 'detect_project': return projectConfig;
           case 'start_file_watcher':
             if (watcherStartErrors[args.dirPath]) {
               throw new Error(watcherStartErrors[args.dirPath]);
@@ -830,6 +830,76 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           case 'register_open_file': case 'unregister_open_file':
           case 'register_write_ignore': return null;
           case 'poll_external_changes': return [];
+          case 'get_platform_capabilities': return JSON.parse(JSON.stringify(platformCapabilities));
+          case 'get_library_path': return libraryRoot;
+          case 'list_library_projects': {
+            const inLibrary = recentProjects
+              .filter(p => p.path.startsWith(libraryRoot + '/') && !p.path.slice(libraryRoot.length + 1).includes('/'))
+              .map(p => ({ path: p.path, name: p.name, modified_at: Date.parse(p.last_opened) || null }));
+            const all = [...importedLibraryProjects.map(p => ({ ...p })), ...inLibrary];
+            return all.sort((a, b) => (b.modified_at ?? 0) - (a.modified_at ?? 0));
+          }
+          case 'stage_import_file': {
+            const safeName = String(args.name || 'import').replace(/[\\\\/]/g, '_');
+            const staged = '/mock/cache/imports/' + Date.now() + '-' + safeName;
+            const bytes = stagedBytes(String(args.base64Data || ''));
+            stagedImports[staged] = { name: safeName, bytes, text: new TextDecoder().decode(bytes) };
+            return staged;
+          }
+          case 'import_library_project': {
+            const staged = stagedImports[args.archivePath];
+            if (!staged) throw new Error('archive is not a staged import: ' + args.archivePath);
+            if (!staged.name.toLowerCase().endsWith('.zip')) throw new Error('not a project archive');
+            const entries = storedZipEntries(staged.bytes);
+            const manifest = entries.find(entry => entry.name === '.novelist/project.toml');
+            if (!manifest) throw new Error('archive is not a Novelist project');
+            const dir = uniqueChildPath(libraryRoot, staged.name.replace(/\\.zip$/i, ''));
+            const nameMatch = /name\\s*=\\s*"([^"]+)"/.exec(manifest.text);
+            const created = Date.now();
+            for (const entry of entries) {
+              if (entry.name.startsWith('.novelist/') || entry.name.endsWith('/')) continue;
+              const segments = entry.name.split('/');
+              for (let depth = 1; depth < segments.length; depth++) {
+                const folder = dir + '/' + segments.slice(0, depth).join('/');
+                if (!files.some(f => f.path === folder)) files.push({ name: segments[depth - 1], path: folder, is_dir: true, size: 0, mtime: created });
+              }
+              const target = dir + '/' + entry.name;
+              files.push({ name: segments[segments.length - 1], path: target, is_dir: false, size: entry.text.length, mtime: created });
+              fileContents[target] = entry.text;
+            }
+            persistMockFiles();
+            persistMockContents();
+            importedLibraryProjects.unshift({ path: dir, name: nameMatch ? nameMatch[1] : dir.slice(dir.lastIndexOf('/') + 1), modified_at: created });
+            return dir;
+          }
+          case 'import_library_file': {
+            const staged = stagedImports[args.stagedPath];
+            if (!staged) throw new Error('file is not a staged import: ' + args.stagedPath);
+            const target = uniqueChildPath(args.projectDir, staged.name);
+            files.push({ name: target.slice(target.lastIndexOf('/') + 1), path: target, is_dir: false, size: staged.text.length, mtime: Date.now() });
+            fileContents[target] = staged.text;
+            persistMockFiles();
+            persistMockContents();
+            return target;
+          }
+          case 'export_library_project': {
+            const name = String(args.projectDir).slice(String(args.projectDir).lastIndexOf('/') + 1);
+            return '/mock/cache/exports/' + name + '-20261028-120000.zip';
+          }
+          case 'export_library_document': {
+            const path = String(args.filePath);
+            const name = path.slice(path.lastIndexOf('/') + 1);
+            const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
+            if (args.format !== 'markdown' && args.format !== 'html') throw new Error('unsupported format: ' + args.format);
+            return '/mock/cache/exports/' + stem + '-20261028-120000.' + (args.format === 'html' ? 'html' : 'md');
+          }
+          case 'plugin:mobile-support|share_file': {
+            if (!platformCapabilities.is_mobile) throw 'not supported on this platform';
+            if (shareError) throw shareError;
+            if (!String(args.path).startsWith('/mock/cache/exports/')) throw 'path is not inside the share staging directory';
+            sharedFiles.push({ path: args.path, mimeType: args.mimeType });
+            return mockPlatform === 'ios' ? 'completed' : 'dismissed';
+          }
           case 'get_recent_projects': {
             // Mirror Rust sort: pinned first, then sort_order asc, then last_opened desc.
             const sorted = recentProjects.slice().sort((a, b) => {
@@ -1329,11 +1399,28 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             persistMockFiles(); persistMockContents();
             return path;
           }
-          case 'get_sync_config': return { enabled: false, webdav_url: '', username: '', password: '****', interval_minutes: 30, legacy_remote_acknowledged: false };
+          case 'get_sync_config': return { enabled: false, webdav_url: '', username: '', password: '****', interval_minutes: 30, legacy_remote_acknowledged: false, cloud_account: false };
           case 'save_sync_config': return null;
-          case 'sync_now': return { last_sync: null, files_uploaded: 0, files_downloaded: 0, errors: [], in_progress: false, adoptable_project_id: null };
+          case 'sync_now': return { last_sync: null, files_uploaded: 0, files_downloaded: 0, errors: [], in_progress: false, adoptable_project_id: null, conflicts: [] };
           case 'test_sync_connection': return true;
           case 'adopt_sync_identity': return null;
+          // Cloud account: stateless; the panel keeps what connect returns.
+          case 'get_cloud_account': return { connected: false, endpoint: null, host: null, username: null, connected_at: null, credential_storage: 'app_data_file' };
+          case 'connect_cloud_account': {
+            const endpoint = String(args?.endpoint ?? '');
+            let host = null;
+            try { host = new URL(endpoint).host; } catch { throw 'Invalid input: The WebDAV URL is invalid'; }
+            const account = { connected: true, endpoint, host, username: String(args?.username ?? ''), connected_at: '2026-01-01T00:00:00Z', credential_storage: 'app_data_file' };
+            return account;
+          }
+          case 'check_cloud_account': return { account: { connected: false, endpoint: null, host: null, username: null, connected_at: null, credential_storage: 'app_data_file' }, state: 'not_connected', message: null };
+          case 'disconnect_cloud_account': return { unlinked_projects: 0 };
+          case 'list_cloud_projects': return { projects: [], truncated: false, skipped: 0 };
+          case 'download_cloud_project': throw 'No cloud account is connected on this device. Connect it in Settings → Sync.';
+          case 'get_cloud_project_binding':
+          case 'unbind_cloud_project': return { linked: false, other_account: false, custom_webdav: false, enabled: false, interval_minutes: 30, last_sync: null };
+          case 'bind_cloud_project': return { linked: true, other_account: false, custom_webdav: false, enabled: true, interval_minutes: Number(args?.intervalMinutes ?? 30), last_sync: null };
+          case 'resolve_sync_conflict': return null;
           case 'reveal_in_file_manager': return null;
            case 'log_startup_phase': return null;
            case 'plugin:window|set_title':
@@ -1404,9 +1491,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             };
           }
           case 'list_ai_sessions': {
-            if (aiSessionListErrors[args.projectDir]) {
-              throw new Error(aiSessionListErrors[args.projectDir]);
-            }
             const prefix = aiSessionPrefix(args.projectDir, args.kind);
             return Object.keys(aiSessions)
               .filter(k => k.startsWith(prefix))
@@ -1425,67 +1509,30 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             return aiSessions[aiSessionKey(args.projectDir, args.kind, args.id)]?.body ?? null;
           }
           case 'write_ai_session': {
-            const write = () => {
-              if (aiSessionWriteError) throw new Error(aiSessionWriteError);
-              aiSessionWriteCount += 1;
-              aiSessions[aiSessionKey(args.projectDir, args.kind, args.id)] = { body: args.bodyJson, updatedAt: Date.now() };
-              const path = args.projectDir + '/.novelist/ai/sessions/' + args.kind + '-' + args.id + '.json';
-              fileContents[path] = args.bodyJson;
-              writtenFiles[path] = args.bodyJson;
-              return null;
-            };
-            if (aiSessionWritesBlocked) {
-              return new Promise((resolve, reject) => aiSessionWriteWaiters.push(() => {
-                try { resolve(write()); } catch (e) { reject(e); }
-              }));
-            }
-            return write();
-          }
-          case 'delete_ai_session': {
-            const remove = () => {
-              if (aiSessionWriteError) throw new Error(aiSessionWriteError);
-              delete aiSessions[aiSessionKey(args.projectDir, args.kind, args.id)];
-              return null;
-            };
-            if (aiSessionDeletesBlocked) {
-              return new Promise((resolve, reject) => aiSessionDeleteWaiters.push(() => {
-                try { resolve(remove()); } catch (e) { reject(e); }
-              }));
-            }
-            return remove();
+            aiSessions[aiSessionKey(args.projectDir, args.kind, args.id)] = { body: args.bodyJson, updatedAt: Date.now() };
+            const path = args.projectDir + '/.novelist/ai/sessions/' + args.kind + '-' + args.id + '.json';
+            fileContents[path] = args.bodyJson;
+            writtenFiles[path] = args.bodyJson;
+            return null;
           }
           case 'list_ai_prompt_assets': {
-            const loadAssets = () => {
-              if (aiPromptAssetErrors[args.projectDir]) throw new Error(aiPromptAssetErrors[args.projectDir]);
-              const root = args.projectDir + '/.novelist/ai/';
-              const allContents = { ...fileContents, ...writtenFiles };
-              const assetFor = (path, kind) => ({
-                id: path.slice(root.length),
-                kind,
-                path,
-                name: path.slice(path.lastIndexOf('/') + 1).replace(/\\.md$/, ''),
-                content: allContents[path],
-              });
-              const commands = Object.keys(allContents)
-                .filter(p => p.startsWith(root + 'commands/') && p.endsWith('.md') && !p.slice(root.length).split('/').some(part => part.startsWith('.')))
-                .map(p => assetFor(p, 'command'));
-              const skills = Object.keys(allContents)
-                .filter(p => p.startsWith(root + 'skills/') && p.endsWith('.md') && !p.slice(root.length).split('/').some(part => part.startsWith('.')))
-                .map(p => assetFor(p, 'skill'));
-              const memoryPath = root + 'memory.md';
-              return {
-                commands,
-                skills,
-                memory: allContents[memoryPath] != null ? assetFor(memoryPath, 'memory') : null,
-              };
+            const root = args.projectDir + '/.novelist/ai/';
+            const allContents = { ...fileContents, ...writtenFiles };
+            const assetFor = (path, kind) => ({
+              id: path.slice(root.length),
+              kind,
+              path,
+              name: path.slice(path.lastIndexOf('/') + 1).replace(/\\.md$/, ''),
+              content: allContents[path],
+            });
+            const skills = Object.keys(allContents)
+              .filter(p => p.startsWith(root + 'skills/') && p.endsWith('.md') && !p.slice(root.length).split('/').some(part => part.startsWith('.')))
+              .map(p => assetFor(p, 'skill'));
+            const memoryPath = root + 'memory.md';
+            return {
+              skills,
+              memory: allContents[memoryPath] != null ? assetFor(memoryPath, 'memory') : null,
             };
-            if (!aiPromptAssetBlockedProjects[args.projectDir]) return loadAssets();
-            return new Promise((resolve, reject) => aiPromptAssetWaiters.push({
-              projectDir: args.projectDir,
-              release() {
-                try { resolve(loadAssets()); } catch (error) { reject(error); }
-              },
-            }));
           }
           case 'write_ai_memory': {
             const path = args.projectDir + '/.novelist/ai/memory.md';
@@ -1495,33 +1542,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           }
           case 'ai_fetch_stream_start': return 'mock-stream-' + (++aiStreamCounter);
           case 'ai_fetch_stream_cancel': return null;
-          case 'claude_cli_detect': return claudeCliDetectResult;
-          case 'claude_cli_spawn': {
-            const sessionUuid = args.req?.session_uuid || 'mock-claude-session';
-            claudeCliSpawnUuidHistory.push(sessionUuid);
-            return sessionUuid;
-          }
-          case 'claude_cli_send': {
-            claudeCliSendCount += 1;
-            if (claudeCliSendError) throw new Error(claudeCliSendError);
-            return null;
-          }
-          case 'claude_cli_kill': {
-            claudeCliKillCount += 1;
-            if (!claudeCliKillBlocked) return null;
-            return new Promise(resolve => claudeCliKillWaiters.push(resolve));
-          }
-          case 'codex_cli_detect': return null;
-          case 'codex_cli_turn':
-            codexCliTurnCount += 1;
-            if (codexCliTurnError) throw new Error(codexCliTurnError);
-            return 'mock-codex-turn';
-           case 'codex_cli_kill':
-             codexCliKillCount += 1;
-             if (codexCliKillBlocked) {
-               return new Promise(resolve => codexCliKillWaiters.push(() => resolve(null)));
-              }
-              return null;
            case 'plugin:shell|open': return null;
            default:
              unhandledCommands.push({ command: cmd, args: JSON.parse(JSON.stringify(args || {})) });
@@ -1537,6 +1557,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get files() { return files.map(f => ({ ...f })); },
         get projectDir() { return projectDir; },
         get recentProjects() { return recentProjects.map(p => ({ ...p })); },
+        get platform() { return mockPlatform; },
+        get sharedFiles() { return sharedFiles.map(entry => ({ ...entry })); },
+        get stagedImports() { return Object.keys(stagedImports); },
+        setShareError(message) { shareError = message ?? null; },
         get snapshots() { return snapshotList.map(s => ({ ...s })); },
         setSnapshotRetention(maxCount, minIntervalMinutes) {
           snapshotMaxCount = maxCount;
@@ -1544,12 +1568,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           snapshotList = [];
           snapshotCounter = 0;
         },
-        get claudeCliSpawnUuidHistory() { return [...claudeCliSpawnUuidHistory]; },
-        get claudeCliSendCount() { return claudeCliSendCount; },
-        get claudeCliKillCount() { return claudeCliKillCount; },
-        get codexCliTurnCount() { return codexCliTurnCount; },
-        get codexCliKillCount() { return codexCliKillCount; },
-         get aiSessionWriteCount() { return aiSessionWriteCount; },
          get invokeCalls() { return invokeCalls.map(call => ({ command: call.command, args: JSON.parse(JSON.stringify(call.args)) })); },
          get unhandledCommands() { return unhandledCommands.map(call => ({ command: call.command, args: JSON.parse(JSON.stringify(call.args)) })); },
          get publishCoverState() { return JSON.parse(JSON.stringify(publishCoverState)); },
@@ -1572,12 +1590,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
               templateCount: Object.keys(mockTemplates).length,
               scaffoldedPluginCount: Math.max(0, scaffoldedPlugins.length - builtinScaffoldedPluginCount),
               eventListenerCount: Object.values(eventListeners).reduce((count, listeners) => count + listeners.length, 0),
-               pendingWaiterCount: claudeCliKillWaiters.length
-                + codexCliKillWaiters.length
-                + aiSessionWriteWaiters.length
-                + aiSessionDeleteWaiters.length
-                + blockedReadWaiters.length
-                + blockedConditionalWriteWaiters.length
+               pendingWaiterCount: blockedReadWaiters.length
                  + publishCoverLoadWaiters.length
                  + publishClipboardReadWaiters.length
                  + publishSettingsReadWaiters.length
@@ -1587,7 +1600,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
                   + publishPersistWaiters.length
                   + publishDraftWriteWaiters.length
                  + managedNameWriteWaiters.length
-                 + aiPromptAssetWaiters.length
                  + styledConversionWaiters.length,
               updaterResponseCount: updaterResponses.length,
              updaterCheckCount,
@@ -1597,19 +1609,15 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           recentProjects.length = 0;
           for (const p of list) recentProjects.push({ ...p });
         },
-        emitEvent(event, payload, targetLabel) {
-          const isAiStream = event.startsWith('claude-stream://') || event.startsWith('codex-stream://');
-          const routedPayload = isAiStream
-            ? { ...payload, target_label: targetLabel ?? mockWindowLabel }
-            : payload;
+        emitEvent(event, payload) {
           const listeners = eventListeners[event] || [];
           for (const entry of listeners) {
             const h = entry.handler;
             // listener handle is either a direct fn or a Tauri transformCallback id
             if (typeof h === 'function') {
-              h({ event, payload: routedPayload });
+              h({ event, payload });
             } else if (typeof h === 'number' && typeof window['_' + h] === 'function') {
-              window['_' + h]({ event, payload: routedPayload });
+              window['_' + h]({ event, payload });
             }
           }
         },
@@ -1661,9 +1669,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            invokeCalls.length = 0;
            unhandledCommands.length = 0;
            updaterCheckCount = 0;
-           for (const path of Object.keys(conditionalWriteResolutions)) delete conditionalWriteResolutions[path];
-           blockedConditionalWritePath = null;
-           blockedConditionalWriteWaiters.length = 0;
+           sharedFiles.length = 0;
+           shareError = null;
+           for (const key of Object.keys(stagedImports)) delete stagedImports[key];
+           importedLibraryProjects.length = 0;
          },
          resetAll() {
            this.reset();
@@ -1678,37 +1687,11 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            literaryOverview = JSON.parse(JSON.stringify(defaultLiteraryOverview));
 
            aiStreamCounter = 0;
-           claudeCliDetectResult = null;
-           claudeCliSendError = null;
-           claudeCliSpawnUuidHistory.length = 0;
-           claudeCliSendCount = 0;
-           claudeCliKillCount = 0;
-           claudeCliKillBlocked = false;
-           claudeCliKillWaiters.length = 0;
-           codexCliTurnCount = 0;
-           codexCliTurnError = null;
-           codexCliKillCount = 0;
-           codexCliKillBlocked = false;
-           codexCliKillWaiters.length = 0;
-           aiSessionWritesBlocked = false;
-           aiSessionWriteError = null;
-           aiSessionWriteWaiters.length = 0;
-           aiSessionWriteCount = 0;
-           aiSessionDeletesBlocked = false;
-            aiSessionDeleteWaiters.length = 0;
             for (const key of Object.keys(aiSessions)) delete aiSessions[key];
-            for (const key of Object.keys(aiSessionListErrors)) delete aiSessionListErrors[key];
-             for (const key of Object.keys(aiPromptAssetErrors)) delete aiPromptAssetErrors[key];
-             for (const key of Object.keys(aiPromptAssetBlockedProjects)) delete aiPromptAssetBlockedProjects[key];
-             for (const waiter of aiPromptAssetWaiters.splice(0)) waiter.release();
              for (const key of Object.keys(watcherStartErrors)) delete watcherStartErrors[key];
 
            blockedReadPath = null;
            blockedReadWaiters.length = 0;
-           blockedConditionalWritePath = null;
-           blockedConditionalWriteWaiters.length = 0;
-            conditionalWriteMutation = null;
-            for (const path of Object.keys(conditionalWriteResolutions)) delete conditionalWriteResolutions[path];
 
             for (const event of Object.keys(eventListeners)) delete eventListeners[event];
             nextEventListenerId = 1;
@@ -1781,27 +1764,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            persistPublishCoverState();
            persistUpdaterResponses();
          },
-        // AI bridge test helpers — let specs simulate streamed responses
-        // and control whether the Claude CLI is "installed".
-        setClaudeCliDetectResult(v) { claudeCliDetectResult = v; },
-        setClaudeCliSendError(message) { claudeCliSendError = message; },
-        setAiSessionWriteError(message) { aiSessionWriteError = message; },
-        setAiSessionWritesBlocked(blocked) {
-          aiSessionWritesBlocked = blocked;
-          if (!blocked) {
-            for (const resolve of aiSessionWriteWaiters.splice(0)) resolve();
-          }
-        },
-         setAiSessionDeletesBlocked(blocked) {
-          aiSessionDeletesBlocked = blocked;
-          if (!blocked) {
-            for (const resolve of aiSessionDeleteWaiters.splice(0)) resolve();
-           }
-         },
-          setAiSessionListError(projectDir, message) {
-           if (message == null) delete aiSessionListErrors[projectDir];
-           else aiSessionListErrors[projectDir] = String(message);
-         },
          setReadFileBlocked(path, blocked) {
           blockedReadPath = blocked ? path : null;
           if (!blocked) {
@@ -1822,21 +1784,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         rejectBlockedRead(message) {
           blockedReadPath = null;
           for (const waiter of blockedReadWaiters.splice(0)) waiter.reject(new Error(message));
-        },
-        scheduleConditionalWriteMutation(path, content) {
-          conditionalWriteMutation = { path, content };
-        },
-        setConditionalWriteBlocked(path, blocked) {
-          blockedConditionalWritePath = blocked ? path : null;
-          if (!blocked) {
-            const pending = blockedConditionalWriteWaiters.splice(0);
-            for (const waiter of pending) waiter.resolve();
-          }
-        },
-        setConditionalWriteResolvedTarget(path, resolvedPath, content) {
-          conditionalWriteResolutions[path] = resolvedPath;
-          fileContents[resolvedPath] = content;
-          persistMockContents();
         },
         getFileContent(path) {
           return writtenFiles[path] ?? fileContents[path] ?? null;
@@ -1980,34 +1927,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
           setPandocStatus(response) {
             pandocStatusResponse = JSON.parse(JSON.stringify(response));
           },
-          setAiPromptAssetError(projectDir, message) {
-            if (message == null) delete aiPromptAssetErrors[projectDir];
-            else aiPromptAssetErrors[projectDir] = String(message);
-          },
-          setAiPromptAssetsBlocked(projectDir, blocked) {
-            if (blocked) {
-              aiPromptAssetBlockedProjects[projectDir] = true;
-              return;
-            }
-            delete aiPromptAssetBlockedProjects[projectDir];
-            const pending = aiPromptAssetWaiters.filter(waiter => waiter.projectDir === projectDir);
-            for (let index = aiPromptAssetWaiters.length - 1; index >= 0; index -= 1) {
-              if (aiPromptAssetWaiters[index].projectDir === projectDir) aiPromptAssetWaiters.splice(index, 1);
-            }
-            for (const waiter of pending) waiter.release();
-          },
-          setProjectDetectBlocked(projectDir, blocked) {
-            if (blocked) {
-              projectDetectBlockedProjects[projectDir] = true;
-              return;
-            }
-            delete projectDetectBlockedProjects[projectDir];
-            const pending = projectDetectWaiters.filter(waiter => waiter.projectDir === projectDir);
-            for (let index = projectDetectWaiters.length - 1; index >= 0; index -= 1) {
-              if (projectDetectWaiters[index].projectDir === projectDir) projectDetectWaiters.splice(index, 1);
-            }
-            for (const waiter of pending) waiter.release();
-          },
           setWatcherStartError(projectDir, message) {
             if (message == null) delete watcherStartErrors[projectDir];
             else watcherStartErrors[projectDir] = String(message);
@@ -2041,19 +1960,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            updaterResponses = JSON.parse(JSON.stringify(responses || []));
            persistUpdaterResponses();
          },
-        setClaudeCliKillBlocked(blocked) {
-          claudeCliKillBlocked = blocked;
-          if (!blocked) {
-            for (const resolve of claudeCliKillWaiters.splice(0)) resolve(null);
-          }
-        },
-        setCodexCliKillBlocked(blocked) {
-          codexCliKillBlocked = blocked;
-          if (!blocked) {
-            for (const resolve of codexCliKillWaiters.splice(0)) resolve();
-          }
-        },
-        setCodexCliTurnError(message) { codexCliTurnError = message; },
+        // AI bridge test helpers — let specs simulate streamed AI Talk responses.
         emitAiChunk(streamId, text) {
           this.emitEvent('ai-stream://' + streamId, { kind: 'chunk', data: JSON.stringify({ choices: [{ delta: { content: text } }] }) });
         },
@@ -2062,9 +1969,6 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         },
         emitAiError(streamId, message, status) {
           this.emitEvent('ai-stream://' + streamId, { kind: 'error', message, status });
-        },
-        emitClaudeStdout(sessionId, data) {
-          this.emitEvent('claude-stream://' + sessionId, { kind: 'stdout-line', data });
         },
       };
 

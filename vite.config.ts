@@ -5,7 +5,7 @@ import { resolve } from "path";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [
     svelte(),
     tailwindcss(),
@@ -33,10 +33,14 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
-    hmr: host
-      ? { protocol: "ws", host, port: 1421 }
-      : undefined,
-    watch: { ignored: ["**/core/**"] },
+    hmr: mode === 'test'
+      ? false
+      : host
+        ? { protocol: "ws", host, port: 1421 }
+        : undefined,
+    // Tailwind watches docs/tests as well as app sources. A browser contract
+    // run must not reload its pages when another verification edits artifacts.
+    watch: mode === 'test' ? null : { ignored: ["**/core/**"] },
   },
   build: {
     // All chunks >500KB are lazy-loaded (mermaid, opencc-js, cytoscape).

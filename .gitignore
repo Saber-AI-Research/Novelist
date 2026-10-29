@@ -24,8 +24,16 @@ Thumbs.db
 # Novelist project metadata
 .novelist/workspace.json
 
-# Tauri auto-generated
-core/gen/
+# Keep generated native project sources; ignore schemas and machine/build state.
+core/gen/schemas/
+core/gen/apple/Pods/
+core/gen/apple/Podfile.lock
+core/gen/apple/*.xcarchive/
+core/gen/apple/*.ipa
+core/gen/apple/*.mobileprovision
+core/gen/apple/*.p12
+core/gen/android/**/*.jks
+core/gen/android/**/*.keystore
 core/bundled-plugins/
 
 # Research cloned repos (legacy location)

@@ -4,6 +4,14 @@ import type { Page } from '@playwright/test';
 import { test, expect, openRecentProject, type MockInvokeCall } from '../fixtures/app-fixture';
 import { MOCK_PROJECT_DIR } from '../fixtures/mock-data';
 
+// The preview is a scriptless `sandbox=""` frame. Playwright's trace DOM
+// snapshotter injects script into every frame, which WebKit blocks there and
+// reports as "Blocked script execution in 'about:srcdoc'", failing the strict
+// browser-error check on traced retries. Screenshot-only traces keep the
+// harness out of the frame, so a blocked-script error can only come from the
+// preview document itself.
+test.use({ trace: { mode: 'on-first-retry', snapshots: false } });
+
 const CANONICAL_MARKDOWN = readFileSync(
   new URL('../../fixtures/styled-copy/canonical.md', import.meta.url),
   'utf8',

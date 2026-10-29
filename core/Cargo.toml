@@ -9,6 +9,13 @@ edition = "2021"
 name = "novelist_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+# The app and its in-repo native plugin share one lockfile and target dir;
+# plain `cargo test` / `clippy` / `fmt --all` in core/ cover both.
+[workspace]
+members = ["plugins/tauri-plugin-mobile-support"]
+default-members = [".", "plugins/tauri-plugin-mobile-support"]
+resolver = "2"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -17,12 +24,15 @@ tauri-build = { version = "2", features = [] }
 # must stay enabled explicitly: tauri-specta <= rc.24 enabled them
 # transitively, rc.25 stopped — without `wry` the build loses
 # `tauri::Wry`/windowing entirely.
-tauri = { version = "2", features = ["protocol-asset", "devtools"] }
+# `devtools` (WebView inspector in release builds) is desktop-only, added in the
+# target table below. Mobile release builds stay non-inspectable; debug builds
+# keep remote inspection via `debug_assertions`.
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
-tauri-plugin-single-instance = "2"
+# Native share sheet + credential vault (iOS/Android); desktop reports
+# `Unsupported`. Registered on every platform.
+tauri-plugin-mobile-support = { path = "plugins/tauri-plugin-mobile-support" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -33,7 +43,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # TODO: upgrade to stable when tauri-specta 2.0.0 is released
 tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
 specta = { version = "=2.0.0-rc.25", features = ["function", "derive", "tokio"] }
-notify = { version = "7", features = ["macos_fsevent"] }
 blake3 = "1"
 pulldown-cmark = "0.13"
 ammonia = "4"
@@ -48,7 +57,10 @@ base64 = "0.22"
 cap-std = "4"
 cap-fs-ext = "4"
 once_cell = "1"
-reqwest = { version = "0.12", features = ["rustls-tls", "stream", "multipart", "json"] }
+# `default-tls` (native-tls; OpenSSL on Android) is added for every target but
+# Android in the table below, so desktop and iOS keep the OS trust store while
+# Android uses rustls with bundled webpki roots.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "json", "charset", "http2", "system-proxy"] }
 futures-util = "0.3"
 url = "2"
 hmac = "0.12"
@@ -56,12 +68,27 @@ sha1 = "0.10"
 sha2 = "0.10"
 urlencoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-arboard = { version = "3", default-features = false, features = ["image-data"] }
-png = "0.17"
 specta-typescript = { version = "0.0.12", optional = true }
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 quick-xml = "0.38"
+
+# Desktop-only: self-update, process restart, single-instance forwarding,
+# native clipboard (and the PNG encoding of clipboard images), the OS
+# file-watcher backend and the release-build WebView inspector have no
+# iOS/Android build or no mobile use — see
+# docs/exec-plans/active/2026-10-28-mobile-platform.md.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
+notify = { version = "7", features = ["macos_fsevent"] }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+png = "0.17"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 
 # macOS-only: needed to poke the NSWindow at setup time to disable the
 # titlebar separator hairline (macOS 11+ draws a 1px line under the overlay

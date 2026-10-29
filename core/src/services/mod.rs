@@ -1,9 +1,14 @@
 pub(crate) mod atomic_file;
+pub mod bundled_resources;
+#[cfg(desktop)]
 pub mod cli;
+#[cfg(feature = "sync")]
+pub mod cloud;
 pub mod file_routing;
 pub mod file_watcher;
 pub mod image_host;
 pub mod pandoc;
+pub mod platform;
 pub mod plugin_host;
 pub mod portable;
 pub(crate) mod project_files;

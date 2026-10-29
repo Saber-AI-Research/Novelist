@@ -623,6 +623,9 @@ fn redact_json_value(s: &str, key: &str) -> String {
 /// matters: Apple Silicon Homebrew first, then Intel Homebrew, then
 /// system, then platform-typical Windows/Linux locations.
 pub fn common_paths() -> Vec<PathBuf> {
+    // No probe locations exist on iOS/Android (Pandoc commands are rejected
+    // there before discovery), so nothing is pushed on those targets.
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut v = Vec::with_capacity(8);
     #[cfg(target_os = "macos")]
     {

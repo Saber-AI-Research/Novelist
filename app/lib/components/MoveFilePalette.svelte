@@ -4,26 +4,32 @@
   import { moveItemAfterSidecarFlush } from '$lib/services/rename-coordinator';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
-  import { pathDirname } from '$lib/utils/path';
+  import { pathBasename, pathDirname, pathIsWithin } from '$lib/utils/path';
   import { t } from '$lib/i18n';
   import { isImeComposing } from '$lib/utils/ime';
 
   /**
    * Move-file palette. Opens via Cmd+M. Lists every directory in the project
-   * (including the root) and calls `moveItem` on the active tab's file.
+   * (including the root) and calls `moveItem` on the active tab's file — or,
+   * when `sourcePath` is given (sidebar "Move to…", see `move-file-palette.ts`),
+   * on that file or folder.
    *
    * Selection rendering mirrors CommandPalette so muscle memory carries over.
    */
   interface Props {
     onClose: () => void;
+    /** File or folder to move; defaults to the active tab's file. */
+    sourcePath?: string;
   }
-  let { onClose }: Props = $props();
+  let { onClose, sourcePath }: Props = $props();
 
   let query = $state('');
   let selectedIndex = $state(0);
   let inputEl: HTMLInputElement;
 
   const activeTab = $derived(tabsStore.activeTab);
+  const subjectPath = $derived(sourcePath ?? activeTab?.filePath ?? null);
+  const subjectName = $derived(sourcePath ? pathBasename(sourcePath) : activeTab?.fileName ?? '');
 
   /** Walk projectStore.files into a flat list of directory entries (+ root). */
   function collectDirs(): Array<{ path: string; label: string }> {
@@ -55,9 +61,12 @@
   /** Filter on substring match of the relative path (case-insensitive). */
   const results = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    const tabParent = activeTab?.filePath ? pathDirname(activeTab.filePath) : null;
-    // Drop the file's current parent so "move to same folder" isn't offered.
-    const filtered = allDirs.filter(d => d.path !== tabParent);
+    const currentParent = subjectPath ? pathDirname(subjectPath) : null;
+    // Drop the entry's current parent so "move to same folder" isn't offered,
+    // and (for a folder) the folder itself and everything beneath it.
+    const filtered = allDirs.filter(d =>
+      d.path !== currentParent && !(sourcePath && pathIsWithin(d.path, sourcePath))
+    );
     if (!q) return filtered;
     return filtered.filter(d => d.label.toLowerCase().includes(q));
   });
@@ -74,8 +83,8 @@
   }
 
   async function confirm(targetDir: string) {
-    if (!activeTab?.filePath) { onClose(); return; }
-    const srcPath = activeTab.filePath;
+    const srcPath = subjectPath;
+    if (!srcPath) { onClose(); return; }
     const result = await moveItemAfterSidecarFlush(
       projectStore.dirPath,
       srcPath,
@@ -83,13 +92,20 @@
     );
     if (result.status === 'ok') {
       const newPath = result.data.new_path;
-      await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: false });
+      // A sidebar entry may be a folder: re-point every open tab beneath it.
+      if (sourcePath) await tabsStore.retargetOpenPathTree(srcPath, newPath, { broadcast: false });
+      else await tabsStore.retargetOpenPath(srcPath, newPath, { broadcast: false });
       // Refresh both affected folders so the tree catches up immediately.
       const oldParent = pathDirname(srcPath);
       await projectStore.refreshFolder(oldParent).catch(() => {});
       await projectStore.refreshFolder(targetDir).catch(() => {});
     } else {
       console.error('[MovePalette] moveItem failed:', result.error);
+      if (sourcePath) {
+        window.dispatchEvent(new CustomEvent('novelist-operation-error', {
+          detail: { message: t('touch.moveFailed', { name: subjectName, error: result.error }) },
+        }));
+      }
     }
     onClose();
   }
@@ -108,8 +124,8 @@
   <div class="palette-container" onclick={(e) => e.stopPropagation()}>
     <div class="palette-header">
       <span class="palette-title">{t('movePalette.title')}</span>
-      {#if activeTab}
-        <span class="palette-subject">{activeTab.fileName}</span>
+      {#if subjectPath}
+        <span class="palette-subject">{subjectName}</span>
       {/if}
     </div>
     <input
@@ -120,7 +136,7 @@
       class="palette-input"
       data-testid="move-palette-input"
     />
-    {#if !activeTab}
+    {#if !subjectPath}
       <div class="palette-empty">{t('movePalette.noActiveTab')}</div>
     {:else if results.length === 0}
       <div class="palette-empty">{t('movePalette.noMatches')}</div>
@@ -243,5 +259,46 @@
     color: var(--novelist-text-secondary, #888);
     font-size: 14px;
     text-align: center;
+  }
+
+  /* Mobile layouts: lay the backdrop over the visual viewport so the palette
+     stays above the on-screen keyboard. */
+  :global(html[data-layout='phone']) .palette-backdrop,
+  :global(html[data-layout='tablet']) .palette-backdrop {
+    bottom: auto;
+    top: var(--novelist-vv-top, 0px);
+    height: var(--novelist-vv-height, 100vh);
+  }
+
+  /* Phone: top sheet, so the input never sits behind the on-screen keyboard. */
+  :global(html[data-layout='phone']) .palette-backdrop {
+    align-items: flex-start;
+    padding-top: 0;
+  }
+  :global(html[data-layout='phone']) .palette-container {
+    width: 100%;
+    max-height: calc(var(--novelist-vv-height, 100vh) - 56px);
+    border-top: none;
+    border-radius: 0 0 14px 14px;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  }
+  :global(html[data-layout='phone']) .palette-item,
+  :global(html[data-layout='phone']) .palette-subject {
+    font-size: 16px;
+  }
+
+  :global(html[data-layout='tablet']) .palette-container {
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(420px, calc(var(--novelist-vv-height, 100vh) - 96px));
+  }
+
+  @media (pointer: coarse) {
+    .palette-item {
+      min-height: 44px;
+    }
+    /* ≥16px keeps iOS from zooming the page when the input gains focus. */
+    .palette-input {
+      font-size: 16px;
+    }
   }
 </style>

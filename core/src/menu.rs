@@ -33,9 +33,11 @@
 
 use serde::Deserialize;
 use specta::Type;
+#[cfg(desktop)]
 use tauri::menu::{
     AboutMetadataBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
 };
+#[cfg(desktop)]
 use tauri::{AppHandle, Runtime};
 
 /// All human-readable labels used in the menu. The frontend builds
@@ -43,6 +45,8 @@ use tauri::{AppHandle, Runtime};
 /// be present — fall back to the English string on the frontend if a
 /// translation is missing.
 #[derive(Debug, Clone, Deserialize, Type)]
+// iOS/Android have no native menu: `refresh_menu` rejects the payload there.
+#[cfg_attr(mobile, allow(dead_code))]
 pub struct MenuLabels {
     // Menu bar titles
     pub file_menu: String,
@@ -105,6 +109,7 @@ pub struct MenuLabels {
 impl MenuLabels {
     /// English fallback used to build the menu at startup, before the
     /// frontend has loaded its locale setting.
+    #[cfg(desktop)]
     pub fn fallback() -> Self {
         Self {
             file_menu: "File".into(),
@@ -165,11 +170,13 @@ impl MenuLabels {
 /// label; path is the absolute directory path used as the menu item ID
 /// suffix.
 #[derive(Debug, Clone, Deserialize, Type)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub struct RecentEntry {
     pub name: String,
     pub path: String,
 }
 
+#[cfg(desktop)]
 fn item_with_accel<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -183,6 +190,7 @@ fn item_with_accel<R: Runtime>(
     builder.build(app)
 }
 
+#[cfg(desktop)]
 fn custom<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -191,6 +199,7 @@ fn custom<R: Runtime>(
     item_with_accel(app, id, label, None)
 }
 
+#[cfg(desktop)]
 fn non_macos_accel(accelerator: &'static str) -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         None
@@ -202,6 +211,7 @@ fn non_macos_accel(accelerator: &'static str) -> Option<&'static str> {
 /// Build the full application menu. Called at startup with the English
 /// fallback and re-called via the `refresh_menu` IPC whenever the
 /// locale or recent-projects list changes.
+#[cfg(desktop)]
 pub fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     labels: &MenuLabels,

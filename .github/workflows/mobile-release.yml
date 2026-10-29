@@ -1,0 +1,474 @@
+name: Mobile Release
+
+# Signed mobile builds for an immutable release tag:
+#   - Android: universal APK signed with the stable release keystore, verified
+#     with apksigner, then attached to the GitHub release of the tag.
+#   - iOS: App Store Connect export uploaded to TestFlight.
+#
+# Two channels, one publisher per release:
+#   - stable vX.Y.Z: the Release workflow creates the (draft) release and
+#     latest.json; this workflow runs after it succeeds (or manually) and only
+#     attaches the APK to that existing release.
+#   - beta vX.Y.Z-beta.N: Release ignores prerelease tags; this workflow runs
+#     on the tag push (or manually) and creates or reuses a draft prerelease
+#     holding only mobile assets. It never writes latest.json.
+# Secrets live in the `mobile-release` environment; see
+# docs/design-docs/mobile-deployment.md.
+
+on:
+  push:
+    tags:
+      - 'v*-beta.*'
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build: vX.Y.Z (stable) or vX.Y.Z-beta.N (mobile beta)'
+        required: true
+        type: string
+      build_number:
+        description: 'Mobile build number override (default: MOBILE_BUILD_NUMBER_BASE + run number); must exceed every build already uploaded or installed'
+        required: false
+        type: string
+        default: ''
+      platforms:
+        description: 'Platforms to publish'
+        required: true
+        type: choice
+        options: [all, android, ios]
+        default: all
+      attach_apk:
+        description: 'Attach the signed APK to the GitHub release (stable: must exist; beta: created as a draft prerelease if missing)'
+        required: true
+        type: boolean
+        default: true
+      upload_testflight:
+        description: 'Upload the signed IPA to App Store Connect (TestFlight)'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-release-${{ inputs.tag || github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.93.1
+  XCODE_VERSION: '26.6'
+
+jobs:
+  resolve:
+    name: Resolve tag, version and build number
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
+      marketing_version: ${{ steps.resolve.outputs.marketing_version }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      android: ${{ steps.resolve.outputs.android }}
+      ios: ${{ steps.resolve.outputs.ios }}
+      attach_apk: ${{ steps.resolve.outputs.attach_apk }}
+      upload_testflight: ${{ steps.resolve.outputs.upload_testflight }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.tag || github.event.workflow_run.head_branch || github.ref_name }}
+          persist-credentials: false
+
+      # scripts/app-version.mjs reads core/Cargo.toml with `cargo metadata`.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - id: resolve
+        name: Verify tag, version and build number
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag || github.event.workflow_run.head_branch || github.ref_name }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+          BUILD_NUMBER_BASE: ${{ vars.MOBILE_BUILD_NUMBER_BASE }}
+          RUN_NUMBER: ${{ github.run_number }}
+          PLATFORMS: ${{ inputs.platforms || 'all' }}
+          ATTACH_APK: ${{ github.event_name != 'workflow_dispatch' || inputs.attach_apk }}
+          UPLOAD_TESTFLIGHT: ${{ github.event_name != 'workflow_dispatch' || inputs.upload_testflight }}
+        run: |
+          set -euo pipefail
+          number='(0|[1-9][0-9]*)'
+          if [[ "$TAG" =~ ^v${number}\.${number}\.${number}$ ]]; then
+            channel=stable
+          elif [[ "$TAG" =~ ^v${number}\.${number}\.${number}-beta\.[1-9][0-9]*$ ]]; then
+            channel=beta
+          else
+            echo "::error::'$TAG' is neither a stable (vX.Y.Z) nor a beta (vX.Y.Z-beta.N) tag"
+            exit 1
+          fi
+          # The iOS marketing version (CFBundleShortVersionString) must be three
+          # plain integers, so the beta suffix only lives in the tag and,
+          # optionally, the app version.
+          marketing="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          case "$EVENT:$channel" in
+            workflow_run:stable | push:beta | workflow_dispatch:*) ;;
+            *) echo "::error::$EVENT does not publish $channel tags"; exit 1 ;;
+          esac
+
+          sha="$(git rev-parse HEAD)"
+          if [ "$sha" != "$(git rev-parse "refs/tags/$TAG^{commit}")" ]; then
+            echo "::error::checkout does not match tag $TAG"
+            exit 1
+          fi
+          if [ "$EVENT" != workflow_dispatch ] && [ "$sha" != "$EVENT_SHA" ]; then
+            echo "::error::$TAG points at $sha, but the triggering event was for $EVENT_SHA (tag moved?)"
+            exit 1
+          fi
+
+          # core/Cargo.toml is the only app version source (scripts/app-version.mjs).
+          app_version="$(node scripts/app-version.mjs)"
+          if [ "$channel" = stable ] && [ "$app_version" != "$marketing" ]; then
+            echo "::error::stable tag $TAG needs app version $marketing in core/Cargo.toml, the commit has $app_version"
+            exit 1
+          fi
+          if [ "$channel" = beta ] && [ "$app_version" != "${TAG#v}" ] && [ "$app_version" != "$marketing" ]; then
+            echo "::error::beta tag $TAG needs app version ${TAG#v} or $marketing in core/Cargo.toml, the commit has $app_version"
+            exit 1
+          fi
+
+          if [ -n "$INPUT_BUILD_NUMBER" ]; then
+            candidate="$INPUT_BUILD_NUMBER"
+          else
+            base="${BUILD_NUMBER_BASE:-0}"
+            if [[ ! "$base" =~ ^(0|[1-9][0-9]{0,9})$ ]]; then
+              echo "::error::repository variable MOBILE_BUILD_NUMBER_BASE must be a non-negative integer"
+              exit 1
+            fi
+            candidate=$((base + RUN_NUMBER))
+          fi
+          build_number="$(node scripts/mobile.mjs build-number "$candidate")"
+          case "$PLATFORMS" in
+            all) android=true; ios=true ;;
+            android) android=true; ios=false ;;
+            ios) android=false; ios=true ;;
+            *) echo "::error::unknown platforms value $PLATFORMS"; exit 1 ;;
+          esac
+          {
+            echo "tag=$TAG"
+            echo "sha=$sha"
+            echo "channel=$channel"
+            echo "app_version=$app_version"
+            echo "marketing_version=$marketing"
+            echo "build_number=$build_number"
+            echo "android=$android"
+            echo "ios=$ios"
+            echo "attach_apk=$ATTACH_APK"
+            echo "upload_testflight=$UPLOAD_TESTFLIGHT"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Mobile $channel release $TAG"
+            echo "- commit: \`$sha\`"
+            echo "- app version $app_version (iOS marketing version $marketing)"
+            echo "- build number (Android versionCode, iOS CFBundleVersion): **$build_number**"
+            echo "- Android: $android (attach APK: $ATTACH_APK)"
+            echo "- iOS: $ios (TestFlight upload: $UPLOAD_TESTFLIGHT)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android:
+    name: Android signed APK
+    needs: resolve
+    if: needs.resolve.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    environment: mobile-release
+    timeout-minutes: 120
+    steps:
+      - name: Require release credentials
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          missing=()
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_SIGNING_CERT_SHA256; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::not configured in the mobile-release environment: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Install libclang (rquickjs bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Use JDK 17
+        run: echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+
+      - name: Pin Android SDK and NDK
+        run: node scripts/mobile.mjs android ci-sdk
+
+      - name: Write release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$RUNNER_TEMP/novelist-android-signing"
+          mkdir -p "$dir"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$dir/release.keystore"
+          echo "ANDROID_KEYSTORE_PATH=$dir/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Build, sign and verify the APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          MOBILE_BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+        run: node scripts/mobile.mjs android publish
+
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/novelist-android-signing"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: novelist-android-release
+          path: |
+            core/target/mobile-release/*_android-universal.apk
+            core/target/mobile-release/*_android-universal.apk.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+  ios:
+    name: iOS TestFlight build
+    needs: resolve
+    if: needs.resolve.outputs.ios == 'true'
+    runs-on: macos-26
+    environment: mobile-release
+    timeout-minutes: 120
+    steps:
+      - name: Require release credentials
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+          APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_DEVELOPMENT_TEAM }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          ASC_APP_APPLE_ID: ${{ vars.ASC_APP_APPLE_ID }}
+          UPLOAD_TESTFLIGHT: ${{ needs.resolve.outputs.upload_testflight }}
+        run: |
+          required=(IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD IOS_MOBILE_PROVISION APPLE_DEVELOPMENT_TEAM)
+          if [ "$UPLOAD_TESTFLIGHT" = true ]; then
+            required+=(ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_PRIVATE_KEY ASC_APP_APPLE_ID)
+          fi
+          missing=()
+          for name in "${required[@]}"; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::not configured in the mobile-release environment: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Record signing state
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/novelist-signing-state"
+          mkdir -p "$state"
+          ls -1 "$HOME/Library/Keychains" > "$state/keychains" 2>/dev/null || true
+          ls -1 "$HOME/Library/MobileDevice/Provisioning Profiles" > "$state/profiles" 2>/dev/null || true
+          security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//' > "$state/search-list"
+
+      - name: Build, sign and verify the IPA
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+          APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_DEVELOPMENT_TEAM }}
+          MOBILE_BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+        run: node scripts/mobile.mjs ios publish
+
+      - name: Upload to App Store Connect (TestFlight)
+        if: needs.resolve.outputs.upload_testflight == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          ASC_APP_APPLE_ID: ${{ vars.ASC_APP_APPLE_ID }}
+          MOBILE_BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+        run: node scripts/mobile.mjs ios upload
+
+      # Backstop for a killed or cancelled job: the script cleans up on its
+      # own exit paths, this step removes anything still left.
+      - name: Remove signing material
+        if: always()
+        run: |
+          state="$RUNNER_TEMP/novelist-signing-state"
+          for file in "$HOME"/Library/Keychains/*.keychain-db; do
+            [ -e "$file" ] || continue
+            grep -qxF "$(basename "$file")" "$state/keychains" 2>/dev/null && continue
+            security delete-keychain "$file" 2>/dev/null || rm -f "$file"
+          done
+          for file in "$HOME/Library/MobileDevice/Provisioning Profiles"/*; do
+            [ -e "$file" ] || continue
+            grep -qxF "$(basename "$file")" "$state/profiles" 2>/dev/null && continue
+            rm -f "$file"
+          done
+          if [ -s "$state/search-list" ]; then
+            keychains=()
+            while IFS= read -r keychain; do
+              [ -e "$keychain" ] && keychains+=("$keychain")
+            done < "$state/search-list"
+            [ "${#keychains[@]}" -gt 0 ] && security list-keychains -d user -s "${keychains[@]}"
+          fi
+          rm -rf "$RUNNER_TEMP"/novelist-asc-key-* "$RUNNER_TEMP"/novelist-ios-signing-* "$RUNNER_TEMP"/novelist-ipa-* core/target/mobile-release "$state"
+
+  attach-apk:
+    name: Attach APK to the GitHub release
+    needs: [resolve, android]
+    if: needs.resolve.outputs.attach_apk == 'true' && needs.android.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: novelist-android-release
+          path: apk
+
+      - name: Upload APK and checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+          BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+          UPLOAD_TESTFLIGHT: ${{ needs.resolve.outputs.upload_testflight }}
+          IOS: ${{ needs.resolve.outputs.ios }}
+          REPO: ${{ github.repository }}
+        working-directory: apk
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(*_android-universal.apk *_android-universal.apk.sha256)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "::error::expected one APK and its .sha256, found: ${files[*]:-none}"
+            exit 1
+          fi
+          sha256sum -c ./*_android-universal.apk.sha256
+
+          # The tag must still point at the commit that was built.
+          if [ "$(gh api "repos/$REPO/commits/$TAG" --jq .sha)" != "$SHA" ]; then
+            echo "::error::$TAG no longer points at the built commit $SHA"
+            exit 1
+          fi
+
+          if ! release="$(gh release view "$TAG" --repo "$REPO" --json isPrerelease,assets)"; then
+            if [ "$CHANNEL" != beta ]; then
+              # Stable releases (and latest.json) belong to the Release workflow.
+              echo "::error::no GitHub release exists for $TAG; run the Release workflow first or dispatch with attach_apk=false"
+              exit 1
+            fi
+            if [ "$IOS" = true ] && [ "$UPLOAD_TESTFLIGHT" = true ]; then
+              ios_line="- iOS: build $BUILD_NUMBER is uploaded to TestFlight by the same workflow run; it reaches testers after App Store Connect processing (and TestFlight App Review for external testers)."
+            else
+              ios_line="- iOS: not part of this run."
+            fi
+            {
+              echo "Mobile beta $TAG: Novelist $APP_VERSION, build $BUILD_NUMBER."
+              echo
+              echo "- Android: the signed universal APK below (Android 8.0+, arm64-v8a and x86_64). Check it against its .sha256, then install it over an earlier Novelist release APK; data is kept."
+              echo "$ios_line"
+              echo
+              echo "No desktop builds and no updater manifest: desktop users stay on the latest stable release."
+              echo "Install, upgrade and data-safety notes: https://github.com/$REPO/blob/$SHA/docs/design-docs/mobile-deployment.md"
+            } > "$RUNNER_TEMP/notes.md"
+            # --verify-tag: never create a tag; the release stays a draft
+            # prerelease until a maintainer publishes it.
+            gh release create "$TAG" --repo "$REPO" --verify-tag --draft --prerelease --latest=false \
+              --title "Novelist $TAG (mobile beta)" --notes-file "$RUNNER_TEMP/notes.md"
+            release="$(gh release view "$TAG" --repo "$REPO" --json isPrerelease,assets)"
+            echo "Created draft prerelease $TAG" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          expected_prerelease=false
+          [ "$CHANNEL" = beta ] && expected_prerelease=true
+          if [ "$(jq -r .isPrerelease <<< "$release")" != "$expected_prerelease" ]; then
+            echo "::error::the $TAG release has prerelease=$(jq -r .isPrerelease <<< "$release"); a $CHANNEL tag needs prerelease=$expected_prerelease"
+            exit 1
+          fi
+          assets="$(jq -r '.assets[].name' <<< "$release")"
+          for file in "${files[@]}"; do
+            if grep -qxF "$file" <<< "$assets"; then
+              echo "::error::$file is already attached to $TAG; publish with a new build number"
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+          echo "Attached ${files[*]} to $TAG" >> "$GITHUB_STEP_SUMMARY"

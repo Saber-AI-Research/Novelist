@@ -16,8 +16,14 @@
   let miniSvgEl: SVGSVGElement | undefined = $state();
   let mm: Markmap | null = null;
   let miniMm: Markmap | null = null;
-  let miniMapVisible = $state(true);
+  // A 200×140 minimap covers a third of a phone screen: start it hidden there
+  // (the toggle still shows it).
+  let miniMapVisible = $state(
+    !(typeof matchMedia === 'function' && matchMedia('(max-width: 600px)').matches),
+  );
   let expandLevel = $state<number | null>(null); // null = expand all
+  /** Pointer type of the last press on the map; mouse keeps markmap's own clicks. */
+  let mapPointerType = 'mouse';
   // Manuscript HTML must stay text: markmap-view renders node content via innerHTML.
   const transformer = new Transformer();
   transformer.md.set({ html: false });
@@ -26,14 +32,16 @@
     if (!svgEl || !mm) return;
     const { root } = transformer.transform(text || '# ');
     applyFoldLevel(root as MindmapNode, expandLevel);
-    mm.setData(root);
-    mm.fit();
+    // setData lays nodes out asynchronously; fitting before it settles uses
+    // stale bounds and leaves the map zoomed in off-screen (worst on phones).
+    const map = mm;
+    void map.setData(root).then(() => { if (mm === map) return map.fit(); });
     // Mirror to minimap — always fully expanded for overview.
     if (miniMm) {
       const { root: miniRoot } = transformer.transform(text || '# ');
       applyFoldLevel(miniRoot as MindmapNode, null);
-      miniMm.setData(miniRoot);
-      miniMm.fit();
+      const mini = miniMm;
+      void mini.setData(miniRoot).then(() => { if (miniMm === mini) return mini.fit(); });
     }
   }
 
@@ -47,10 +55,38 @@
     render(content);
   });
 
+  // Rotating a phone or tablet changes the frame's aspect completely; refit so
+  // the map is not left off-screen. Other resizes keep the user's pan/zoom.
+  onMount(() => {
+    if (typeof matchMedia !== 'function') return;
+    const orientation = matchMedia('(orientation: portrait)');
+    const refit = () => requestAnimationFrame(() => mm?.fit());
+    orientation.addEventListener('change', refit);
+    return () => orientation.removeEventListener('change', refit);
+  });
+
   onDestroy(() => {
     try { mm?.destroy(); } catch {}
     try { miniMm?.destroy(); } catch {}
+    // Pending setData → fit continuations check these and stop.
+    mm = null;
+    miniMm = null;
   });
+
+  /**
+   * Markmap folds a branch only from its ~6px circle, too small for a finger.
+   * A touch or pen tap on a node's label folds it too; links inside labels
+   * and the circle itself keep their own behaviour.
+   */
+  function onMapClick(e: MouseEvent) {
+    if (mapPointerType === 'mouse' || !mm) return;
+    const target = e.target as Element | null;
+    if (!target || target.closest('a, circle')) return;
+    const node = target.closest('.markmap-node') as (Element & { __data__?: unknown }) | null;
+    const datum = node?.__data__ as { children?: unknown[] } | undefined;
+    if (!datum?.children?.length) return;
+    void mm.toggleNode(datum as Parameters<Markmap['toggleNode']>[0]);
+  }
 
   $effect(() => { render(content); });
 
@@ -116,12 +152,20 @@
           aria-label={t('mindmap.miniMap')}
           data-testid="mindmap-minimap-toggle"
         ><IconMap size={14} /></button>
-        <span class="sep"></span>
-        <button type="button" class="btn" onclick={onClose} title={t('mindmap.close')} aria-label={t('mindmap.close')} data-testid="mindmap-close"><IconClose size={14} /></button>
       </div>
+      <!-- Outside .actions so it stays at the top-right when the actions wrap
+           on a phone. -->
+      <span class="sep close-sep"></span>
+      <button type="button" class="btn close-btn" onclick={onClose} title={t('mindmap.close')} aria-label={t('mindmap.close')} data-testid="mindmap-close"><IconClose size={14} /></button>
     </div>
     <div class="content">
-      <svg bind:this={svgEl}></svg>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <svg
+        bind:this={svgEl}
+        onpointerdown={(e) => { mapPointerType = e.pointerType; }}
+        onclick={onMapClick}
+      ></svg>
       <div class="minimap" class:hidden={!miniMapVisible} aria-label={t('mindmap.miniMap')}>
         <svg bind:this={miniSvgEl}></svg>
       </div>
@@ -139,7 +183,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    /* Keep the toolbar and close button clear of notches/home indicators. */
+    padding:
+      max(24px, env(safe-area-inset-top))
+      max(24px, env(safe-area-inset-right))
+      max(24px, env(safe-area-inset-bottom))
+      max(24px, env(safe-area-inset-left));
+    overscroll-behavior: contain;
   }
   .frame {
     width: 100%;
@@ -154,20 +204,28 @@
   }
   .header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 4px;
     padding: 8px 14px;
     border-bottom: 1px solid var(--novelist-border);
     background: var(--novelist-bg-secondary);
   }
   .title {
+    margin-right: auto;
     font-size: 0.8rem;
     font-weight: 600;
     color: var(--novelist-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  .actions { display: flex; gap: 4px; align-items: center; }
+  .actions {
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+    align-items: center;
+  }
   .level-group {
     display: flex;
     background: var(--novelist-bg-tertiary, color-mix(in srgb, var(--novelist-text) 8%, transparent));
@@ -221,6 +279,8 @@
     width: 100%;
     height: 100%;
     color: var(--novelist-text);
+    /* Gesture surface: markmap's d3-zoom owns one-finger pan and pinch. */
+    touch-action: none;
   }
   .minimap {
     position: absolute;
@@ -251,5 +311,28 @@
   }
   :global(.overlay .markmap-foreign) {
     color: var(--novelist-text);
+  }
+  @media (hover: none), (pointer: coarse) {
+    .btn, .level-btn {
+      min-width: 44px;
+      height: 44px;
+      touch-action: manipulation;
+    }
+  }
+  @media (max-width: 600px) {
+    .overlay {
+      padding:
+        max(8px, env(safe-area-inset-top))
+        max(8px, env(safe-area-inset-right))
+        max(8px, env(safe-area-inset-bottom))
+        max(8px, env(safe-area-inset-left));
+    }
+    .header { padding: 6px 8px; }
+    .title, .close-sep { display: none; }
+    .actions { flex: 1; }
+    /* Wrapped actions grow downwards; close stays in the first row. */
+    .close-btn { align-self: flex-start; }
+    .content { padding: 4px; }
+    .minimap { right: 8px; bottom: 8px; width: 120px; height: 84px; }
   }
 </style>

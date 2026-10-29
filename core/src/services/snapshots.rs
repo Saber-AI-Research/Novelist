@@ -125,11 +125,13 @@ pub struct SnapshotMeta {
     pub total_bytes: u64,
 }
 
-/// Returns `<novelist_home>/snapshots/{blake3_hash_of_project_dir}/`,
+/// Returns `<novelist_home>/snapshots/{blake3_hash_of_project_storage_key}/`,
 /// where `novelist_home` is `~/.novelist/` in standard mode or
-/// `<exe_dir>/data/` in portable mode.
+/// `<exe_dir>/data/` in portable mode. The storage key is the project path on
+/// desktop and the library-relative path on mobile.
 pub fn snapshots_dir(project_dir: &str) -> PathBuf {
-    let hash = blake3::hash(project_dir.as_bytes()).to_hex();
+    let key = crate::services::portable::project_storage_key(project_dir);
+    let hash = blake3::hash(key.as_bytes()).to_hex();
     data_root().join("snapshots").join(hash.to_string())
 }
 
@@ -1708,6 +1710,7 @@ mod tests {
                 password: "not-a-credential".into(),
                 interval_minutes: 30,
                 legacy_remote_acknowledged: false,
+                cloud_account: false,
             },
         )
         .unwrap();

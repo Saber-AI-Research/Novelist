@@ -40,6 +40,9 @@
   .ai-talk-wrapper {
     width: 100%;
     height: 100%;
+    /* Fill a mobile sheet of any size; never force a minimum. */
+    min-width: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--novelist-bg);

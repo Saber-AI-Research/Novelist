@@ -18,7 +18,7 @@ type RegisterCall = {
   handler: (...args: unknown[]) => unknown;
 };
 
-const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys } = vi.hoisted(() => {
+const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys } = vi.hoisted(() => {
   const register = vi.fn();
   const shortcuts = new Map<string, string>();
   const uiCalls: string[] = [];
@@ -33,8 +33,6 @@ const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, a
     openPanel: vi.fn((id: string) => { extensionState.activePanelId = id; }),
   };
   const aiTalkCreate = vi.fn();
-  const aiAgentCreate = vi.fn();
-  const requestAiAgentNewSession = vi.fn();
   const applyBlockTransform = vi.fn();
   const deleteCurrentParagraph = vi.fn();
   const fmt = {
@@ -43,7 +41,7 @@ const { register, shortcuts, uiCalls, projectState, tabsState, extensionState, a
     toggleLinePrefix: vi.fn(),
   };
   const translatedKeys: string[] = [];
-  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, aiAgentCreate, requestAiAgentNewSession, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys };
+  return { register, shortcuts, uiCalls, projectState, tabsState, extensionState, aiTalkCreate, applyBlockTransform, deleteCurrentParagraph, fmt, translatedKeys };
 });
 
 vi.mock('$lib/stores/commands.svelte', () => ({
@@ -83,14 +81,6 @@ vi.mock('$lib/stores/extensions.svelte', () => ({
 
 vi.mock('$lib/components/ai-talk/sessions.svelte', () => ({
   aiTalkSessions: { requestNewSession: aiTalkCreate },
-}));
-
-vi.mock('$lib/components/ai-agent/sessions.svelte', () => ({
-  aiAgentSessions: { create: aiAgentCreate },
-}));
-
-vi.mock('$lib/components/ai-agent/new-session-requests', () => ({
-  requestAiAgentNewSession,
 }));
 
 vi.mock('$lib/editor/formatting', () => fmt);
@@ -136,6 +126,7 @@ function ctx(over: Partial<AppCommandContext> = {}): AppCommandContext {
     handleOpenDirectory: noop,
     handleOpenContainingFolder: noop,
     handleCloseTab: noop,
+    handleImportFileIntoProject: noop,
     handleGoToLine: noop,
     saveCurrentFileAsTemplate: noop,
     togglePalette: noop,
@@ -171,8 +162,6 @@ beforeEach(() => {
   extensionState.togglePanel.mockClear();
   extensionState.openPanel.mockClear();
   aiTalkCreate.mockClear();
-  aiAgentCreate.mockClear();
-  requestAiAgentNewSession.mockClear();
   applyBlockTransform.mockClear();
   deleteCurrentParagraph.mockClear();
   fmt.toggleWrap.mockClear();
@@ -233,7 +222,7 @@ describe('[contract] registerAppCommands — registration shape', () => {
       'toggle-sidebar', 'toggle-outline', 'toggle-zen', 'command-palette',
       'new-file', 'new-project', 'open-directory', 'close-tab',
       'rename-file', 'delete-current-file', 'open-settings', 'go-to-line', 'toggle-mindmap',
-      'toggle-ai-talk', 'toggle-ai-agent', 'ai-talk-new-session', 'ai-agent-new-session',
+      'toggle-ai-talk', 'ai-talk-new-session',
       'editor-bold', 'editor-italic', 'editor-link', 'editor-heading', 'editor-delete-paragraph',
       'chinese-s2t', 'chinese-t2s', 'chinese-pinyin',
       'copy-rich-text', 'copy-plain-text',
@@ -248,6 +237,34 @@ describe('[contract] registerAppCommands — registration shape', () => {
     registerAppCommands(ctx());
     const r = registered().find((x) => x.id === 'toggle-sidebar')!;
     expect(r.shortcut).toBe('Mod-1');
+  });
+
+  it('[contract] gates desktop-only commands on native capabilities', async () => {
+    const { platform } = await import('$lib/stores/platform.svelte');
+    registerAppCommands(ctx());
+    const availability = (id: string) => {
+      const call = register.mock.calls.map((c) => c[0] as RegisterCall & { available?: () => boolean })
+        .find((c) => c.id === id)!;
+      return call.available?.() ?? true;
+    };
+    const gated = ['new-window', 'toggle-split', 'open-file', 'open-directory', 'open-containing-folder',
+      'toggle-devtools', 'check-for-updates', 'install-cli-shim'];
+    for (const id of gated) expect(availability(id), id).toBe(true);
+    expect(availability('import-file-into-project')).toBe(false);
+
+    platform.setCapabilities({
+      os: 'ios', is_mobile: true, native_menu: false, multi_window: false, pick_directory: false,
+      external_processes: false, self_update: false, cli_shim: false, file_watcher: false,
+      plugin_install: false, export_formats: [],
+    });
+    for (const id of gated) expect(availability(id), id).toBe(false);
+    projectState.dirPath = '/library/Novel';
+    expect(availability('import-file-into-project')).toBe(true);
+    projectState.dirPath = null;
+    // Editing commands stay available on every platform.
+    for (const id of ['editor-bold', 'editor-undo', 'editor-redo', 'editor-cjk-quotes', 'editor-block-quote']) {
+      expect(availability(id), id).toBe(true);
+    }
   });
 });
 
@@ -319,39 +336,18 @@ describe('[contract] destructive file command wiring', () => {
 });
 
 describe('[contract] AI panel commands', () => {
-  it('toggle-ai-talk and toggle-ai-agent flip the active panel', () => {
+  it('toggle-ai-talk flips the active panel', () => {
     registerAppCommands(ctx());
     handlerFor('toggle-ai-talk')();
-    handlerFor('toggle-ai-agent')();
-    expect(extensionState.togglePanel).toHaveBeenNthCalledWith(1, 'ai-talk');
-    expect(extensionState.togglePanel).toHaveBeenNthCalledWith(2, 'ai-agent');
+    expect(extensionState.togglePanel).toHaveBeenCalledWith('ai-talk');
   });
 
   it('ai-talk-new-session opens the panel first if it is not already active', () => {
-    extensionState.activePanelId = 'ai-agent';
+    extensionState.activePanelId = 'mindmap';
     registerAppCommands(ctx());
     handlerFor('ai-talk-new-session')();
     expect(extensionState.openPanel).toHaveBeenCalledWith('ai-talk');
     expect(aiTalkCreate).toHaveBeenCalled();
-  });
-
-  it('ai-agent-new-session skips openPanel when already on ai-agent', () => {
-    extensionState.activePanelId = 'ai-agent';
-    registerAppCommands(ctx());
-    handlerFor('ai-agent-new-session')();
-    expect(extensionState.openPanel).not.toHaveBeenCalled();
-    expect(requestAiAgentNewSession).toHaveBeenCalledWith(null);
-  });
-
-  it('ai-agent-new-session never mutates the session store directly', () => {
-    projectState.dirPath = '/destination';
-    registerAppCommands(ctx());
-
-    handlerFor('ai-agent-new-session')();
-
-    expect(extensionState.openPanel).toHaveBeenCalledWith('ai-agent');
-    expect(aiAgentCreate).not.toHaveBeenCalled();
-    expect(requestAiAgentNewSession).toHaveBeenCalledWith('/destination');
   });
 
   it('ai-talk-save-chat fires the DOM event for the active panel to catch', () => {

@@ -33,6 +33,8 @@ pub struct CliShimStatus {
     pub source_path: String,
 }
 
+const CLI_SHIM_FEATURE: &str = "Command-line shim";
+
 fn install_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -75,6 +77,7 @@ fn resolve_source(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn cli_shim_status(app: tauri::AppHandle) -> Result<CliShimStatus, AppError> {
+    crate::services::platform::require_desktop(CLI_SHIM_FEATURE)?;
     let install = install_path();
     let source = resolve_source(&app)?;
     let installed = install.exists() || install.symlink_metadata().is_ok();
@@ -114,6 +117,7 @@ pub async fn cli_shim_status(app: tauri::AppHandle) -> Result<CliShimStatus, App
 #[tauri::command]
 #[specta::specta]
 pub async fn install_cli_shim(app: tauri::AppHandle) -> Result<CliShimStatus, AppError> {
+    crate::services::platform::require_desktop(CLI_SHIM_FEATURE)?;
     let install = install_path();
     let source = resolve_source(&app)?;
 

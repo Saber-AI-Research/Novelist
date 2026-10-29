@@ -574,6 +574,35 @@ Regression coverage: `tests/e2e/specs/editor-context-menu.spec.ts`
 behavior, Cut actually mutating the doc, zoom-aware Block Type submenu
 geometry, and non-editor chrome not opening the editor menu).
 
+### Mobile (iOS / Android)
+
+On mobile (`platform.isMobile`) App.svelte does not intercept `contextmenu`
+at all: long-press selection handles and the system text callout (copy,
+paste, look up, dictation) stay native, and the custom editor menu above is
+never shown. Block types, rich/plain copy and the rest stay reachable
+through the command palette and the touch format bar below. The image
+widget menu still opens on Android long-press (Android fires
+`contextmenu`; iOS does not); there it omits "Reveal in file manager"
+(unsupported on mobile) and activates items on `pointerdown` so touch, pen
+and mouse behave alike. Guarded by
+`tests/integration/editor/image-rendering.test.ts`
+(`never offers Reveal in file manager on mobile`).
+
+### Touch format bar
+
+`app/lib/components/FormatToolbar.svelte` renders in the touch shell
+(mobile, or desktop windows narrower than 768px): on phones while the
+editor has focus, on tablets whenever an editor is open. Every button runs
+a registered command id through `commandRegistry.execute()` — undo/redo
+(`editor-undo`, `editor-redo`, lazily loading `@codemirror/commands`),
+heading, bold, italic, quote and list block transforms, `「」`
+(`editor-cjk-quotes`), strikethrough, inline code and link — so the bar,
+the palette and external-keyboard shortcuts share one handler. The bar
+cancels `pointerdown`/`mousedown` so the editor keeps focus, caret and the
+on-screen keyboard; if a WebView still moves focus, the handler restores it.
+Block transforms keep their IME refusal; inline wraps dispatched while an
+Android keyboard is mid-composition still need real-device verification.
+
 ## Editor formatting helpers
 
 Pure functions of `EditorView` in `app/lib/editor/formatting.ts`:

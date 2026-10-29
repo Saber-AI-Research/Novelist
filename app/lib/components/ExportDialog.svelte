@@ -5,7 +5,10 @@
   import { projectStore } from '$lib/stores/project.svelte';
   import { tabsStore } from '$lib/stores/tabs.svelte';
   import { collectExportFiles } from '$lib/utils/export-files';
+  import { isScratchFile } from '$lib/utils/scratch';
   import { uiStore } from '$lib/stores/ui.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { shareFile } from '$lib/services/share';
   import { EXPORT_CSS_STAGE_ERROR, stageThemeCssForExport } from '$lib/services/export-css';
   import { formatCleanupWarning, formatExportError } from '$lib/utils/export-errors';
   import { t } from '$lib/i18n';
@@ -36,7 +39,30 @@
     { value: 'epub', label: 'EPUB' },
   ];
 
+  /**
+   * Mobile has no pandoc (no external processes): the current document is
+   * exported as Markdown/HTML, or the project as a .zip, into the share
+   * staging dir and handed to the native share sheet.
+   */
+  const shareExport = platform.isMobile;
+  type ShareFormat = 'markdown' | 'html';
+  type ExportPathResult = { status: 'ok'; data: string } | { status: 'error'; error: string };
+  const shareFormats: { value: ShareFormat; label: string }[] = [
+    { value: 'markdown', label: 'Markdown' },
+    { value: 'html', label: 'HTML' },
+  ];
+  let documentFormat = $state<ShareFormat>('markdown');
+  let shareStatus = $state<'idle' | 'preparing' | 'sharing' | 'error'>('idle');
+  let shareError = $state('');
+  let shareBusy = $derived(shareStatus === 'preparing' || shareStatus === 'sharing');
+  let shareableDocument = $derived.by(() => {
+    const tab = tabsStore.activeTab;
+    if (!tab?.filePath || isScratchFile(tab.filePath) || !/\.(?:md|markdown)$/i.test(tab.filePath)) return null;
+    return tab;
+  });
+
   onMount(async () => {
+    if (shareExport) return;
     const result = await commands.checkPandoc();
     if (result.status === 'ok') {
       pandocAvailable = result.data.available;
@@ -44,6 +70,61 @@
       pandocResolvedPath = result.data.resolved_path || '';
     }
   });
+
+  function errorText(cause: unknown): string {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+
+  function failShare(text: string) {
+    shareStatus = 'error';
+    shareError = text;
+  }
+
+  /** Save edits, export into the share staging dir, then open the share sheet. */
+  async function runShareExport(exportFile: () => Promise<ExportPathResult>) {
+    if (shareBusy) return;
+    shareStatus = 'preparing';
+    shareError = '';
+    let exported: ExportPathResult;
+    try {
+      if (!await tabsStore.saveAllDirty()) {
+        failShare(t('export.saveFailed'));
+        return;
+      }
+      exported = await exportFile();
+    } catch (cause) {
+      failShare(t('export.exportFailed', { error: errorText(cause) }));
+      return;
+    }
+    if (exported.status === 'error') {
+      failShare(t('export.exportFailed', { error: exported.error }));
+      return;
+    }
+    shareStatus = 'sharing';
+    try {
+      // Completed / cancelled / dismissed are all neutral: the sheet closed, nothing to report.
+      await shareFile(exported.data);
+    } catch (cause) {
+      failShare(t('export.shareFailed', { error: errorText(cause) }));
+      return;
+    }
+    shareStatus = 'idle';
+  }
+
+  function shareDocument() {
+    void runShareExport(async () => {
+      // Read the path after saving: an H1 rename on save can move the file.
+      const filePath = tabsStore.activeTab?.filePath;
+      if (!filePath) return { status: 'error', error: t('export.noActiveFile') };
+      return commands.exportLibraryDocument(filePath, documentFormat);
+    });
+  }
+
+  function shareProjectZip() {
+    const projectDir = projectStore.dirPath;
+    if (!projectDir) return;
+    void runShareExport(() => commands.exportLibraryProject(projectDir));
+  }
 
   async function doExport() {
     if (busy) return;
@@ -189,6 +270,8 @@
   }
 
   function closeOrCancel() {
+    // The share export has no cancel: keep the dialog until the sheet settles.
+    if (shareBusy) return;
     if (status === 'exporting') {
       void cancelExport();
       return;
@@ -214,7 +297,7 @@
 
 <!-- Overlay -->
 <div
-  class="fixed inset-0 z-50 flex items-center justify-center"
+  class="export-overlay fixed inset-0 z-50 flex items-center justify-center"
   style="background: rgba(0, 0, 0, 0.5);"
   role="dialog"
   aria-modal="true"
@@ -223,9 +306,8 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="rounded-lg shadow-xl p-6 w-full mx-4"
+    class="export-card rounded-lg shadow-xl p-6 w-full mx-4"
     style="
-      max-width: 420px;
       background: var(--novelist-bg);
       color: var(--novelist-text);
       border: 1px solid var(--novelist-border);
@@ -233,8 +315,99 @@
     onclick={(e) => e.stopPropagation()}
   >
     <h2 id="export-dialog-title" class="text-base font-semibold mb-4">
-      {t('export.title')}
+      {t(shareExport ? 'export.shareTitle' : 'export.title')}
     </h2>
+
+    {#if shareExport}
+      {#if shareableDocument}
+        <div class="mb-5" data-testid="export-share-document-section">
+          <p class="block text-sm mb-2" style="color: var(--novelist-text-secondary);">
+            {t('export.currentDocument')}
+          </p>
+          <p class="share-file-name text-sm mb-2">{shareableDocument.fileName}</p>
+          <div class="flex gap-2 flex-wrap mb-3">
+            {#each shareFormats as f}
+              <button
+                class="px-3 py-1 rounded text-sm cursor-pointer"
+                style="
+                  border: 1px solid {documentFormat === f.value ? 'var(--novelist-accent)' : 'var(--novelist-border)'};
+                  background: {documentFormat === f.value ? 'color-mix(in srgb, var(--novelist-accent) 20%, transparent)' : 'transparent'};
+                  color: {documentFormat === f.value ? 'var(--novelist-accent)' : 'var(--novelist-text)'};
+                  opacity: {shareBusy ? '0.5' : '1'};
+                "
+                data-testid="export-document-format-{f.value}"
+                aria-pressed={documentFormat === f.value}
+                disabled={shareBusy}
+                onclick={() => { documentFormat = f.value; }}
+              >
+                {f.label}
+              </button>
+            {/each}
+          </div>
+          <button
+            class="share-action-btn px-4 py-2 text-sm rounded cursor-pointer"
+            style="background: var(--novelist-accent); color: #fff; opacity: {shareBusy ? '0.5' : '1'};"
+            data-testid="export-share-document"
+            disabled={shareBusy}
+            onclick={shareDocument}
+          >
+            {t('export.shareDocument')}
+          </button>
+        </div>
+      {/if}
+
+      {#if projectStore.dirPath}
+        <div class="mb-5">
+          <p class="block text-sm mb-2" style="color: var(--novelist-text-secondary);">
+            {t('export.wholeProject')}
+          </p>
+          <button
+            class="share-action-btn px-4 py-2 text-sm rounded cursor-pointer"
+            style="background: var(--novelist-accent); color: #fff; opacity: {shareBusy ? '0.5' : '1'};"
+            data-testid="export-share-project-zip"
+            disabled={shareBusy}
+            onclick={shareProjectZip}
+          >
+            {t('export.shareProjectZip')}
+          </button>
+        </div>
+      {/if}
+
+      {#if !shareableDocument && !projectStore.dirPath}
+        <p class="text-sm mb-4" style="color: var(--novelist-text-secondary);">{t('export.nothingToShare')}</p>
+      {/if}
+
+      {#if shareBusy}
+        <div class="mb-4" data-testid="export-share-progress">
+          <p class="text-sm mb-2" style="color: var(--novelist-text-secondary);">
+            {shareStatus === 'sharing' ? t('export.sharing') : t('export.preparingShare')}
+          </p>
+          <div class="export-progress-track">
+            <div class="export-progress-bar"></div>
+          </div>
+        </div>
+      {:else if shareStatus === 'error'}
+        <p data-testid="export-status-error" role="alert" class="text-sm mb-4 whitespace-pre-wrap" style="color: #f87171;">
+          {shareError}
+        </p>
+      {/if}
+
+      <div class="flex gap-3 justify-end">
+        <button
+          class="px-4 py-2 text-sm rounded cursor-pointer hover:opacity-80"
+          style="
+            background: var(--novelist-bg-secondary);
+            color: var(--novelist-text);
+            border: 1px solid var(--novelist-border);
+            opacity: {shareBusy ? '0.5' : '1'};
+          "
+          disabled={shareBusy}
+          onclick={closeOrCancel}
+        >
+          {t('export.close')}
+        </button>
+      </div>
+    {:else}
 
     <!-- Pandoc status -->
     <div
@@ -349,10 +522,52 @@
         {status === 'exporting' ? t('export.exportingButton') : t('export.export')}
       </button>
     </div>
+    {/if}
   </div>
 </div>
 
 <style>
+  .export-card {
+    max-width: 420px;
+  }
+
+  .share-file-name {
+    color: var(--novelist-text);
+    overflow-wrap: anywhere;
+  }
+
+  .share-action-btn {
+    width: 100%;
+  }
+  .share-action-btn:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Mobile: the overlay tracks the visual viewport; phones get a bottom sheet. */
+  :global(html[data-mobile='true']) .export-overlay {
+    top: var(--novelist-vv-top, 0px);
+    bottom: auto;
+    height: var(--novelist-vv-height, 100dvh);
+  }
+  :global(html[data-mobile='true']) .export-card {
+    max-height: calc(100% - 32px);
+    overflow-y: auto;
+  }
+  :global(html[data-mobile='true']) .export-card button {
+    min-height: 44px;
+  }
+  :global(html[data-layout='phone']) .export-overlay {
+    align-items: flex-end;
+  }
+  :global(html[data-layout='phone']) .export-card {
+    max-width: none;
+    max-height: 100%;
+    margin: 0;
+    overflow-y: auto;
+    border-radius: 12px 12px 0 0;
+    padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+  }
+
   .export-progress-track {
     width: 100%;
     height: 4px;

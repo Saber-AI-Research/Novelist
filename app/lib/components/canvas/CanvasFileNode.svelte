@@ -2,6 +2,9 @@
   import { Handle, Position, NodeResizer } from '@xyflow/svelte';
   import { onMount } from 'svelte';
   import { commands } from '$lib/ipc/commands';
+  import { projectStore } from '$lib/stores/project.svelte';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { canReadCanvasFile } from './file-ref';
 
   interface Props {
     data: {
@@ -28,6 +31,13 @@
   async function loadPreview() {
     loading = true;
     error = false;
+    // Links outside the project (on mobile) or unresolved refs show as
+    // unavailable without ever being read.
+    if (!canReadCanvasFile(data.filePath, projectStore.dirPath ?? null, platform.isMobile)) {
+      error = true;
+      loading = false;
+      return;
+    }
     try {
       const r = await commands.readFile(data.filePath);
       if (r.status === 'ok') {

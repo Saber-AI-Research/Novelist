@@ -41,6 +41,23 @@ the acceptance pixel checks. See
 [`docs/design-docs/testing.md`](../docs/design-docs/testing.md) for the current
 mock/native boundary and Task 24 status.
 
+### Mobile coverage boundary
+
+- Shared Rust library, cloud reconciliation, conflict safety, ZIP confinement,
+  and relocation-stable persistence are covered by workspace tests. The local
+  mobile-support crate is a workspace member, so its pure boundary tests run
+  with the normal Rust gate.
+- `pnpm mobile:android:check` checks arm64 and x86_64 sequentially;
+  `pnpm mobile:ios:check` requires full Xcode and checks device and simulator
+  targets. Host-only Rust tests cannot establish mobile conditional compilation.
+- The `iphone`, `ipad`, `ipad-landscape`, and `android-phone` browser projects
+  exercise responsive UI and state transitions against mock IPC. They cannot
+  establish Keychain/Keystore access, native share sheets, OS keyboard behavior,
+  suspension deadlines, or an iOS simulator/device build.
+- Record real-device persistence, credential, sharing, and network smoke evidence
+  separately. A missing SDK or device is a blocker, not a coverage waiver. No
+  thresholds or exclusions are changed by the mobile work.
+
 ## How to Add a Waiver
 
 1. Open a PR that edits both:

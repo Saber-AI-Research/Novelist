@@ -139,6 +139,34 @@ test.describe('Sidebar view context menu', () => {
     await expect(app.getByTestId('sidebar-input')).toBeVisible();
   });
 
+  test('double-click rename keeps focus when the file opened by its first click mounts late', async ({ app, mockState }) => {
+    await seedAndEnterProject(app);
+    const chapterPath = `${MOCK_PROJECT_DIR}/Chapter 1.md`;
+    // The first click of a double-click opens the file. Hold that read so the
+    // editor mounts only after the rename input exists, as a slow disk or the
+    // lazily loaded editor chunk does on a real machine.
+    await mockState.setReadFileBlocked(chapterPath, true);
+    try {
+      await app.getByTestId('sidebar-file-Chapter 1.md').dblclick();
+      const input = app.getByTestId('sidebar-input');
+      await expect(input).toBeFocused();
+
+      await mockState.setReadFileBlocked(chapterPath, false);
+      await expect(app.locator('.cm-editor')).toBeVisible();
+      // The editor auto-focuses one frame after mounting; let that frame pass.
+      await app.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }));
+      await expect(input).toBeFocused();
+
+      await app.keyboard.type('Prologue');
+      await app.keyboard.press('Enter');
+      await expect(app.getByTestId('sidebar-file-Prologue.md')).toBeVisible();
+    } finally {
+      await mockState.setReadFileBlocked(chapterPath, false);
+    }
+  });
+
   test('double-clicking a folder row enters rename mode; single-click toggles (v0.2.4)', async ({ app }) => {
     await seedAndEnterProject(app);
 

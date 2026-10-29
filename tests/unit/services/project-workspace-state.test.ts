@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { platform } from '$lib/stores/platform.svelte';
 import {
   loadProjectWorkspaceState,
   removeProjectWorkspacePath,
@@ -68,5 +69,35 @@ describe('[contract] project workspace state', () => {
 
     expect(pruned.expandedPaths).toEqual(['保留']);
     expect(pruned.lastOpenPath).toBeNull();
+  });
+});
+
+describe('[regression] mobile workspace state survives app-container relocation', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    platform.setCapabilities({
+      os: 'ios', is_mobile: true, native_menu: false, multi_window: false, pick_directory: false,
+      external_processes: false, self_update: false, cli_shim: false, file_watcher: false,
+      plugin_install: false, export_formats: [],
+    });
+  });
+
+  it('keys library projects relative to the library root', () => {
+    platform.libraryRoot = '/var/mobile/Containers/Data/Application/AAAA/Documents/Projects';
+    saveProjectWorkspaceState(`${platform.libraryRoot}/长篇小说`, {
+      version: 1,
+      expandedPaths: ['第一卷'],
+      lastOpenPath: '第一卷/第一章.md',
+    });
+    expect(localStorage.length).toBe(1);
+    expect(localStorage.key(0)).toBe(`novelist:project-workspace:v1:library:${encodeURIComponent('长篇小说')}`);
+
+    // An app update moves the container; the same project keeps its state.
+    platform.libraryRoot = '/var/mobile/Containers/Data/Application/BBBB/Documents/Projects';
+    const restored = loadProjectWorkspaceState(`${platform.libraryRoot}/长篇小说`);
+    expect(restored.expandedPaths).toEqual(['第一卷']);
+    expect(resolveProjectWorkspacePath(`${platform.libraryRoot}/长篇小说`, restored.lastOpenPath!))
+      .toBe(`${platform.libraryRoot}/长篇小说/第一卷/第一章.md`);
+    platform.libraryRoot = null;
   });
 });

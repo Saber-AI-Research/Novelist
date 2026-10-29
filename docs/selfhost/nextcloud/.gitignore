@@ -1,0 +1,4 @@
+# Operator-local state: never commit.
+.env
+secrets/
+backups/

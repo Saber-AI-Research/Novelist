@@ -33,6 +33,13 @@ const MAX_PENDING_EXPORT_CANCELS: usize = 256;
 const MAX_STAGED_EXPORT_CSS: usize = 256;
 const PENDING_EXPORT_CANCEL_TTL: Duration = Duration::from_secs(300);
 
+/// Formats `export_project` accepts. Every one is produced by Pandoc, so the
+/// platform capability table reports none of them where Pandoc cannot run.
+pub const EXPORT_FORMATS: [&str; 4] = ["html", "pdf", "docx", "epub"];
+
+/// Feature name for [`AppError::Unsupported`] on platforms without Pandoc.
+const PANDOC_FEATURE: &str = "Pandoc export";
+
 struct StagedExportCss {
     path: PathBuf,
     header: Vec<u8>,
@@ -88,6 +95,7 @@ pub struct ExportProjectResult {
 #[tauri::command]
 #[specta::specta]
 pub async fn check_pandoc() -> Result<PandocStatus, AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     let g = crate::commands::settings::read_global_settings().await;
     let resolved = pandoc::resolve_pandoc(g.pandoc_path.as_deref()).await;
     Ok(PandocStatus {
@@ -103,6 +111,7 @@ pub async fn check_pandoc() -> Result<PandocStatus, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_pandoc_path(path: Option<String>) -> Result<(), AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     crate::commands::settings::update_global_settings(move |current| {
         current.pandoc_path = match path {
             Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
@@ -116,6 +125,7 @@ pub async fn set_pandoc_path(path: Option<String>) -> Result<(), AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn stage_export_css(request_id: String, css: String) -> Result<String, AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     let request_id = validate_export_request_id(&request_id)?.to_string();
     if css.len() > MAX_EXPORT_CSS_BYTES {
         return Err(AppError::InvalidInput(
@@ -142,6 +152,7 @@ pub async fn stage_export_css(request_id: String, css: String) -> Result<String,
 #[tauri::command]
 #[specta::specta]
 pub async fn discard_staged_export_css(request_id: String) -> Result<(), AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     let request_id = validate_export_request_id(&request_id)?;
     let expected = std::env::temp_dir().join(format!("novelist-export-theme-{request_id}.html"));
     let Some(staged) = take_staged_export_css(request_id, &expected)? else {
@@ -342,6 +353,7 @@ pub async fn export_project(
     encoding_state: tauri::State<'_, EncodingState>,
     export_state: tauri::State<'_, ExportState>,
 ) -> Result<ExportProjectResult, AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     let discovery_format = format.clone();
     run_export_project(
         ExportProjectRequest {
@@ -527,6 +539,7 @@ pub async fn cancel_export_project(
     request_id: String,
     export_state: tauri::State<'_, ExportState>,
 ) -> Result<bool, AppError> {
+    crate::services::platform::require_external_processes(PANDOC_FEATURE)?;
     cancel_export_request(&export_state, &request_id)
 }
 
@@ -736,12 +749,11 @@ async fn export_project_with_pandoc_inner(
     options: ExportRunOptions<'_>,
     cleanup_failure_hook: Option<&CleanupFailureHook<'_>>,
 ) -> Result<ExportProjectResult, AppError> {
-    let allowed_formats = ["html", "pdf", "docx", "epub"];
-    if !allowed_formats.contains(&format.as_str()) {
+    if !EXPORT_FORMATS.contains(&format.as_str()) {
         cleanup_preflight_css(&css_temp_paths, "unsupported export format").await;
         return Err(AppError::InvalidInput(format!(
             "Unsupported export format: {}. Allowed: {:?}",
-            format, allowed_formats
+            format, EXPORT_FORMATS
         )));
     }
     if let Err(error) = validate_output_not_input(&input_files, &output_path) {

@@ -209,6 +209,22 @@ describe('image context menu', () => {
     expect(remote).not.toContain('Upload to host');
   });
 
+  it('[regression] never offers Reveal in file manager on mobile', async () => {
+    const { platform } = await import('$lib/stores/platform.svelte');
+    platform.setCapabilities({
+      os: 'android', is_mobile: true, native_menu: false, multi_window: false, pick_directory: false,
+      external_processes: false, self_update: false, cli_shim: false, file_watcher: false,
+      plugin_install: true, export_formats: ['markdown', 'html'],
+    });
+    mount('![local](img/a.png)\nend', [wysiwygImageDocumentDir('/project')]);
+
+    const labels = itemLabels(openMenu(1));
+    for (const reveal of ['Reveal in Finder', 'Show in Explorer', 'Show in File Manager']) {
+      expect(labels).not.toContain(reveal);
+    }
+    expect(labels).toEqual(expect.arrayContaining(['Copy Image Path', 'Upload to host', 'Edit Caption', 'Delete Image']));
+  });
+
   it('positions the menu in layout coordinates at non-100% zoom', () => {
     document.documentElement.style.transform = 'scale(1.5)';
     try {
@@ -228,7 +244,7 @@ describe('image context menu', () => {
 
     const item = Array.from(openMenu(1).querySelectorAll<HTMLElement>('.cm-image-context-menu-item'))
       .find((el) => el.textContent === 'Upload to host')!;
-    item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    item.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(uploadImage).toHaveBeenCalledWith('img/a.png', { baseDir: '/project' }));
 
     view!.dispatch({ changes: { from: 0, insert: '第一章\n\n' } });

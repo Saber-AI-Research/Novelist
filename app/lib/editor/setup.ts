@@ -273,7 +273,7 @@ export const scrollStabilizer: Extension = [
 const novelistTheme = EditorView.theme({
   '&': {
     height: '100%',
-    fontSize: 'var(--novelist-editor-font-size)',
+    fontSize: 'calc(var(--novelist-editor-font-size) * var(--novelist-touch-text-scale, 1))',
     backgroundColor: 'var(--novelist-editor-bg)',
     color: 'var(--novelist-text)',
   },

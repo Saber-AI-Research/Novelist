@@ -16,9 +16,7 @@ import { commands } from '$lib/ipc/commands';
 import { projectStore } from '$lib/stores/project.svelte';
 import {
   attachmentToContextItem,
-  buildPromptFromAttachments,
   createAttachmentFromContext,
-  displayTextFromInput,
   searchAttachmentCandidates,
   type AiContextAttachment,
 } from '$lib/components/ai-shared/attachments';
@@ -55,59 +53,25 @@ describe('[contract] AI shared context parsing', () => {
       rest: 'make it sharper',
     });
     expect(parseSlashCommand('/nope test')).toBeNull();
+    expect(parseSlashCommand('/plan outline the next scene')).toBeNull();
+    expect(parseSlashCommand('/act now')).toBeNull();
   });
 
   it('maps slash commands to built-in writing instructions', () => {
     const cmd = parseSlashCommand('/summarize @current');
     expect(commandInstruction(cmd)).toContain('Summarize');
-    expect(commandInstruction(parseSlashCommand('/plan next'))).toBeNull();
+    expect(commandInstruction(parseSlashCommand('/compact next'))).toBeNull();
   });
 
-  it('parses a CJK project command and resolves its loaded instruction', () => {
-    const projectCommand = {
-      id: 'commands/甲项目命令.md',
-      kind: 'command',
-      path: '/项目甲/.novelist/ai/commands/甲项目命令.md',
-      name: '甲项目命令',
-      content: '只使用项目甲的命令指令。',
-    };
+  it('normalizes built-in command names to their canonical id', () => {
+    const parsed = parseSlashCommand('/Compact keep the outline');
 
-    const parsed = parseSlashCommand('/甲项目命令 收紧第二章节奏', [projectCommand]);
-
-    expect(parsed).toEqual({
-      id: '甲项目命令',
-      raw: '/甲项目命令',
-      rest: '收紧第二章节奏',
-      asset: projectCommand,
-    });
-    expect(commandInstruction(parsed)).toBe('只使用项目甲的命令指令。');
-  });
-
-  it('keeps built-in control commands ahead of colliding project commands', () => {
-    const collidingCommand = {
-      id: 'commands/Plan.md',
-      kind: 'command',
-      path: '/项目甲/.novelist/ai/commands/Plan.md',
-      name: 'Plan',
-      content: 'This project command must not replace the built-in control.',
-    };
-
-    const parsed = parseSlashCommand('/Plan outline the next scene', [collidingCommand]);
-
-    expect(parsed).toEqual({ id: 'plan', raw: '/plan', rest: 'outline the next scene' });
+    expect(parsed).toEqual({ id: 'compact', raw: '/compact', rest: 'keep the outline' });
     expect(commandInstruction(parsed)).toBeNull();
   });
 
-  it('rejects project command names containing invisible format characters', () => {
-    const deceptiveCommand = {
-      id: 'commands/plan-hidden.md',
-      kind: 'command',
-      path: '/项目甲/.novelist/ai/commands/plan-hidden.md',
-      name: 'plan\u200d',
-      content: 'This deceptive command must not execute.',
-    };
-
-    expect(parseSlashCommand('/plan\u200d outline the next scene', [deceptiveCommand])).toBeNull();
+  it('rejects built-in names containing invisible format characters', () => {
+    expect(parseSlashCommand('/compact\u200d keep the outline')).toBeNull();
   });
 
   it('resolves skill tokens against available prompt assets', () => {
@@ -121,7 +85,7 @@ describe('[contract] AI shared context parsing', () => {
     expect(skillAssetsForTokens(parseSkillTokens('$plot-doctor $missing'), assets)).toEqual([assets[0]]);
   });
 
-  it('keeps shared resolution tolerant while strict Agent resolution rejects a typed read failure', async () => {
+  it('skips a mentioned file whose read fails instead of throwing', async () => {
     const previousFiles = projectStore.files;
     projectStore.files = [{
       name: '第一章.md',
@@ -140,11 +104,7 @@ describe('[contract] AI shared context parsing', () => {
 
     try {
       await expect(resolveMentionContexts('@file:第一章 请继续')).resolves.toEqual([]);
-      await expect(resolveMentionContexts(
-        '@file:第一章 请继续',
-        { rejectFileReadError: true },
-      )).rejects.toThrow('读取失败');
-      expect(read).toHaveBeenCalledTimes(2);
+      expect(read).toHaveBeenCalledTimes(1);
     } finally {
       read.mockRestore();
       projectStore.files = previousFiles;
@@ -209,17 +169,6 @@ describe('[contract] AI context attachments', () => {
     expect(searchAttachmentCandidates(base, 'memory').map((x) => x.id)).toEqual(['memory']);
   });
 
-  it('builds outbound prompt without replacing visible text', () => {
-    const packed = buildPromptFromAttachments('summarize this', base, 2000);
-    expect(packed.visibleText).toBe('summarize this');
-    expect(packed.outboundText).toContain('## Context 1: Chapter 1.md');
-    expect(packed.outboundText).toContain('## User request\nsummarize this');
-  });
-
-  it('strips mention and skill tokens only for display text when requested', () => {
-    expect(displayTextFromInput('@current $plot-doctor summarize this')).toBe('summarize this');
-  });
-
   it('round-trips legacy context items through attachments', () => {
     const attachment = createAttachmentFromContext({
       id: 'selection',
@@ -237,17 +186,26 @@ describe('[contract] AI context attachments', () => {
     });
   });
 
-  it('preserves project commands as command attachments', () => {
-    const attachment = createAttachmentFromContext({
-      id: 'command:commands/甲项目命令.md',
+  it('maps manual-note asset items to skill and memory attachments', () => {
+    const skill = createAttachmentFromContext({
+      id: 'skill:skills/plot-doctor/SKILL.md',
       kind: 'manual-note',
-      label: 'Command: 甲项目命令',
-      path: '/项目甲/.novelist/ai/commands/甲项目命令.md',
-      content: '只使用项目甲的命令指令。',
+      label: 'Skill: plot-doctor',
+      path: '/项目甲/.novelist/ai/skills/plot-doctor/SKILL.md',
+      content: '检查情节因果。',
+    });
+    const memory = createAttachmentFromContext({
+      id: 'memory',
+      kind: 'manual-note',
+      label: 'Project memory',
+      path: '/项目甲/.novelist/ai/memory.md',
+      content: '语气笔记',
     });
 
-    expect(attachment.kind).toBe('command');
-    expect(attachment.source).toBe('ai-assets');
+    expect(skill.kind).toBe('skill');
+    expect(skill.source).toBe('ai-assets');
+    expect(memory.kind).toBe('memory');
+    expect(memory.source).toBe('ai-assets');
   });
 
   it('ranks label prefix matches before path-only matches', () => {

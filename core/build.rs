@@ -90,8 +90,68 @@ fn prepare_bundled_templates() {
     }
 }
 
+/// Android keeps bundle resources inside the APK, where `std::fs` cannot read
+/// them, so the app embeds `bundled-plugins/` and `bundled-templates/` and
+/// extracts them at startup (`services::bundled_resources`). Other targets read
+/// the bundle's resource directory and get no generated table.
+fn embed_bundled_resources_for_android() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
+        return;
+    }
+    let crate_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let mut files = Vec::new();
+    for root in ["bundled-plugins", "bundled-templates"] {
+        collect_files(&crate_dir, &crate_dir.join(root), &mut files);
+    }
+    files.sort();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut table = String::new();
+    for relative in &files {
+        let absolute = crate_dir.join(relative);
+        let bytes = std::fs::read(&absolute).expect("read bundled resource");
+        std::hash::Hash::hash(relative, &mut hasher);
+        std::hash::Hash::hash(&bytes, &mut hasher);
+        table.push_str(&format!(
+            "    ({relative:?}, include_bytes!({:?})),\n",
+            absolute.to_string_lossy()
+        ));
+    }
+    let fingerprint = std::hash::Hasher::finish(&hasher);
+    let source = format!(
+        "const FINGERPRINT: &str = \"{fingerprint:016x}-{}\";\nstatic FILES: &[(&str, &[u8])] = &[\n{table}];\n",
+        files.len()
+    );
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    std::fs::write(out.join("bundled_resources.rs"), source)
+        .expect("write embedded bundled resources table");
+}
+
+/// Resource-relative paths (forward slashes) of every file under `dir`.
+fn collect_files(crate_dir: &Path, dir: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name() == ".DS_Store" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(crate_dir, &path, files);
+        } else if let Ok(relative) = path.strip_prefix(crate_dir) {
+            let components: Vec<_> = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            files.push(components.join("/"));
+        }
+    }
+}
+
 fn main() {
     prepare_bundled_plugins();
     prepare_bundled_templates();
+    embed_bundled_resources_for_android();
     tauri_build::build()
 }

@@ -428,24 +428,12 @@
         <div>{text('originalReferences')}</div>
       </div>
       {#each file.segments as segment, index (segment.id)}
+        <!-- Source comes first in the DOM: narrow layouts stack it above the
+             translation box (so the original stays visible while the soft
+             keyboard is up); wide layouts place it in the right column. -->
         <section class="segment-row">
-          <div class="translation-cell">
-            <label for={`translation-${segment.id}`}>
-              <span>{text('segment')} {index + 1}</span>
-              <span class="segment-id">{segment.id}</span>
-            </label>
-            <textarea
-              id={`translation-${segment.id}`}
-              data-testid={`book-translation-translation-${segment.id}`}
-              rows="4"
-              value={segment.translation}
-              aria-label={`${text('segment')} ${index + 1}`}
-              oninput={(event) => handleTranslationInput(event, segment.id)}
-              oncompositionstart={() => { composing = true; }}
-              oncompositionend={(event) => handleCompositionEnd(event, segment.id)}
-            ></textarea>
-          </div>
           <div class="source-cell">
+            <div class="source-label" aria-hidden="true">{text('original')}</div>
             <div class="source-text" data-testid={`book-translation-source-${segment.id}`}>{segment.source}</div>
             <div class="references" aria-label={text('originalReferences')}>
               {#each (['google', 'llm'] as TranslationReferenceProvider[]) as provider}
@@ -488,6 +476,22 @@
                 {/if}
               {/each}
             </div>
+          </div>
+          <div class="translation-cell">
+            <label for={`translation-${segment.id}`}>
+              <span>{text('segment')} {index + 1}</span>
+              <span class="segment-id">{segment.id}</span>
+            </label>
+            <textarea
+              id={`translation-${segment.id}`}
+              data-testid={`book-translation-translation-${segment.id}`}
+              rows="4"
+              value={segment.translation}
+              aria-label={`${text('segment')} ${index + 1}`}
+              oninput={(event) => handleTranslationInput(event, segment.id)}
+              oncompositionstart={() => { composing = true; }}
+              oncompositionend={(event) => handleCompositionEnd(event, segment.id)}
+            ></textarea>
           </div>
         </section>
       {/each}
@@ -544,13 +548,17 @@
   header {
     min-height: 62px;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 18px;
+    gap: 8px 18px;
     padding: 10px 18px;
     border-bottom: 1px solid var(--novelist-border, #e6e6e6);
   }
   .chapter-heading {
+    /* A 180px basis keeps chapter navigation on the title row (long titles
+       truncate); only very narrow frames wrap it below. */
+    flex: 1 1 180px;
     min-width: 0;
     display: flex;
     align-items: center;
@@ -659,6 +667,22 @@
   }
   .translation-cell, .source-cell {
     min-width: 0;
+  }
+  /* Wide layouts: translation left, original right (DOM order is source
+     first so narrow layouts can stack it on top). */
+  .translation-cell {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .source-cell {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .source-label {
+    display: none;
+    margin-bottom: 7px;
+    color: var(--novelist-text-secondary, #777);
+    font-size: .67rem;
   }
   .translation-cell label {
     display: flex;
@@ -798,10 +822,53 @@
     border-radius: 5px;
     cursor: pointer;
   }
-  @media (max-width: 680px) {
+  @media (hover: none), (pointer: coarse) {
+    .nav-button {
+      width: 44px;
+      height: 44px;
+    }
+    .workspace {
+      overscroll-behavior: contain;
+    }
+    textarea {
+      /* iOS zooms the page when focusing a field under 16px. */
+      font-size: max(16px, var(--novelist-editor-font-size, .94rem));
+    }
+    .reference-row {
+      align-items: center;
+    }
+    .reference-button {
+      min-width: 44px;
+      min-height: 44px;
+      padding: 0 12px;
+      font-size: .75rem;
+      touch-action: manipulation;
+    }
+    .error-state button {
+      min-height: 44px;
+      padding: 0 16px;
+    }
+    footer {
+      min-height: 32px;
+    }
+  }
+  /* Narrow frames (phones, iPad Slide Over/split): stack each segment with the
+     original above its translation box; both stay on screen per segment. */
+  @media (max-width: 719px) {
     header { padding: 8px 10px; }
+    .chapter-nav { margin-left: auto; }
     .workspace { padding-left: 10px; padding-right: 10px; }
-    .column-headings, .segment-row { gap: 10px; }
+    .column-headings { display: none; }
+    .segment-row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 10px;
+      padding: 14px 0 18px;
+    }
+    .translation-cell, .source-cell {
+      grid-column: auto;
+      grid-row: auto;
+    }
+    .source-label { display: block; }
     .language-pair { display: none; }
     .reference-label { width: 62px; }
     .reference-error { margin-left: 69px; }

@@ -6,6 +6,9 @@ Informs the batches in `docs/exec-plans/completed/2026-04-22-coverage-campaign.m
 Source files audited: **129** (under `app/lib/**/*.{ts,svelte.ts,svelte}`).
 Test files present: **42** (under `tests/unit/**` + `tests/integration/**`).
 
+Rows for modules of the agent-harness panel, removed on 2026-10-28, have been
+dropped; the counts in this audit still describe the original 2026-04-22 run.
+
 ## Baseline before campaign
 
 Fresh numbers from this run (included in `/tmp/cov-run.txt`):
@@ -64,10 +67,7 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 | app/lib/components/ai-talk/presets.svelte.ts | 86.84 % | tests/unit/components/ai-talk-prompt-presets.test.ts |
 | app/lib/components/ai-talk/sessions.svelte.ts | 80.24 % | tests/unit/components/ai-talk-sessions.test.ts |
 | app/lib/components/ai-talk/settings.svelte.ts | 100 % | tests/unit/components/ai-talk-settings-store.test.ts |
-| app/lib/components/ai-agent/settings.svelte.ts | 100 % | tests/unit/components/ai-agent-settings-store.test.ts |
 | app/lib/composables/app-shortcuts.svelte.ts | 79.48 % | tests/unit/composables/app-shortcuts.test.ts (in progress on user branch) |
-
-> `ai-agent/host.ts` hits 66.66 % via `tests/unit/components/ai-agent-host.test.ts`; treating as **partial** below.
 
 ### Partial (< 70 % lines, has a test file that imports the module)
 
@@ -82,7 +82,6 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 | app/lib/editor/math.ts | 64.62 % | tests/integration/editor/wysiwyg-runtime, math-runtime | Lines 242-253, 263-289 — render-only paths |
 | app/lib/editor/wysiwyg.ts | 42.32 % | tests/integration/editor/wysiwyg-runtime, image-rendering, table-runtime | Large decoration class, many branches uncovered |
 | app/lib/editor/setup.ts | 40.62 % | tests/integration/editor/* | Lines 95, 567, 591-631 — extension assembly, mostly integration |
-| app/lib/components/ai-agent/host.ts | 66.66 % | tests/unit/components/ai-agent-host.test.ts | Lines 18-62, 133, 144-148 — spawn/stream lifecycle branches |
 | app/lib/utils/wordcount.ts | 62.85 % | tests/unit/utils/wordcount.test.ts | Lines 42-44, 63-76 — emoji/surrogate + boundary paths |
 
 ### Precision-testable (no test, pure logic)
@@ -107,7 +106,6 @@ Waive breakdown: 56 `.svelte` UI components + 6 auto-generated/barrel/data + 1 T
 | app/lib/stores/templates.svelte.ts | IPC CRUD mirror over `template_files` commands | `vi.mock('$lib/ipc/commands')` |
 | app/lib/stores/ui.svelte.ts | Rune state + localStorage side-effects | stub `localStorage`; drive setters |
 | app/lib/components/ai-talk/host.ts | Thin IPC + event-listener wrapper for the AI Talk panel | `vi.mock('$lib/ipc/commands')`, mock `@tauri-apps/api/event` |
-| app/lib/components/ai-agent/sessions.svelte.ts | Multi-session store, `localStorage` persistence, `killClaudeSession` side-effect | Stub `localStorage`, `vi.mock('./host')` |
 | app/lib/composables/close-tab.svelte.ts | Factory + guard flag | `vi.mock('@tauri-apps/api/window')`, stub `tabsStore`/`projectStore` |
 | app/lib/composables/editor-context-menu.svelte.ts | Snapshot-selection logic around cut/copy | Stub `EditorView` minimally, mock `navigator.clipboard` |
 | app/lib/composables/window-title.svelte.ts | `$effect` that sets Tauri window title | Mock `getCurrentWindow`, wrap in `$effect.root` harness |
@@ -129,7 +127,7 @@ Covered by Playwright e2e; no Svelte-component unit tests in scope.
 |---|---|---|
 | app/lib/components/**/*.svelte (all 56 `.svelte` files) | UI | e2e covers these; no Svelte-component unit tests in this campaign. |
 
-The 56 files break down as: 31 top-level `components/*.svelte` (panels, dialogs, palettes, editors, sidebar, etc.), 3 `components/ai-agent/*.svelte`, 3 `components/ai-talk/*.svelte`, 1 `components/ai-shared/SessionTabs.svelte`, 5 `components/canvas/*.svelte`, 1 `components/kanban/KanbanImpl.svelte`, and 13 `components/icons/Icon*.svelte` atoms.
+The 56 files break down as: 31 top-level `components/*.svelte` (panels, dialogs, palettes, editors, sidebar, etc.), 3 agent-harness panel components (since removed), 3 `components/ai-talk/*.svelte`, 1 `components/ai-shared/SessionTabs.svelte`, 5 `components/canvas/*.svelte`, 1 `components/kanban/KanbanImpl.svelte`, and 13 `components/icons/Icon*.svelte` atoms.
 
 After Batch-2 waivers land, `coverage.include` is narrowed to `app/lib/**/*.ts`, which removes all 56 from the denominator without needing per-file `exclude` entries.
 
@@ -177,7 +175,7 @@ After Batch-2 waivers land, `coverage.include` is narrowed to `app/lib/**/*.ts`,
 | D — composables | `composables/app-events.svelte.ts`, `composables/app-lifecycle.svelte.ts`, `composables/close-tab.svelte.ts`, `composables/editor-context-menu.svelte.ts`, `composables/window-title.svelte.ts` | `$effect.root` harness + `vi.mock` of Tauri API; `app-shortcuts` already covered by user's in-progress work — do not touch |
 | E — services | `services/new-file.ts` | Mock IPC + stub stores |
 | F — app/lib root | `app-commands.ts`, `conflict-handlers.ts`, `i18n/index.svelte.ts` | `event-handlers.ts` does not exist — the coverage row labelled `...t-handlers.ts` is `conflict-handlers.ts` |
-| G — partial improvements | `editor/markdown-extensions.ts`, `editor/math.ts`, `editor/formatting.ts` (bump to 90+), `editor/wysiwyg.ts` (extract helpers), `editor/mermaid.ts` (parse cache only), `editor/setup.ts` (bump what can be bumped), `components/ai-agent/host.ts` (raise) | Focus on extractable pure helpers; skip anything needing `EditorView` mount (defer to tests/integration/) |
+| G — partial improvements | `editor/markdown-extensions.ts`, `editor/math.ts`, `editor/formatting.ts` (bump to 90+), `editor/wysiwyg.ts` (extract helpers), `editor/mermaid.ts` (parse cache only), `editor/setup.ts` (bump what can be bumped) | Focus on extractable pure helpers; skip anything needing `EditorView` mount (defer to tests/integration/) |
 
 ## Unclassifiable / escalate
 

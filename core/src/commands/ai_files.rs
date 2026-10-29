@@ -7,7 +7,7 @@
 use crate::error::AppError;
 use crate::services::sidecar::{
     atomic_write_bytes_confined, open_confined_metadata_dir, read_bytes_confined,
-    remove_file_confined, ConfinedMetadataDir,
+    ConfinedMetadataDir,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -24,14 +24,12 @@ use tokio::sync::Mutex as AsyncMutex;
 #[serde(rename_all = "kebab-case")]
 pub enum AiSessionKind {
     Talk,
-    Agent,
 }
 
 impl AiSessionKind {
     fn prefix(self) -> &'static str {
         match self {
             Self::Talk => "talk",
-            Self::Agent => "agent",
         }
     }
 }
@@ -58,7 +56,6 @@ pub struct AiPromptAsset {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AiPromptAssets {
-    pub commands: Vec<AiPromptAsset>,
     pub skills: Vec<AiPromptAsset>,
     pub memory: Option<AiPromptAsset>,
 }
@@ -93,7 +90,7 @@ const MEMORY_FILE: &str = "memory.md";
 const MAX_AI_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// `<project>/.novelist/ai`, opened without following symlinks and confined to
-/// the canonical project root, so writes and deletes can never land outside.
+/// the canonical project root, so writes can never land outside.
 fn open_ai_dir(project_dir: &str, create: bool) -> Result<Option<ConfinedMetadataDir>, AppError> {
     let project = validate_project_dir(project_dir)?;
     open_confined_metadata_dir(&project, AI_SUBDIR, create)
@@ -668,20 +665,6 @@ pub async fn write_ai_session(
     atomic_write_bytes_confined(&storage, &name, body_json.as_bytes()).await
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn delete_ai_session(
-    project_dir: String,
-    kind: AiSessionKind,
-    id: String,
-) -> Result<(), AppError> {
-    let name = session_file_name(kind, &id)?;
-    let Some(storage) = open_sessions_dir(&project_dir, false)? else {
-        return Ok(());
-    };
-    remove_file_confined(&storage, &name).await
-}
-
 fn read_asset_file(path: &Path, root: &Path, kind: &str) -> Option<AiPromptAsset> {
     if !path.is_file() || path.file_name()?.to_str()?.starts_with('.') {
         return None;
@@ -734,7 +717,6 @@ fn collect_markdown_files(dir: &Path, root: &Path, kind: &str) -> Vec<AiPromptAs
 pub async fn list_ai_prompt_assets(project_dir: String) -> Result<AiPromptAssets, AppError> {
     let Some(ai) = open_ai_dir(&project_dir, false)? else {
         return Ok(AiPromptAssets {
-            commands: Vec::new(),
             skills: Vec::new(),
             memory: None,
         });
@@ -751,19 +733,12 @@ pub async fn list_ai_prompt_assets(project_dir: String) -> Result<AiPromptAssets
             content,
         });
     let root = ai.absolute;
-    let (commands, skills) = tokio::task::spawn_blocking(move || {
-        (
-            collect_markdown_files(&root.join("commands"), &root, "command"),
-            collect_markdown_files(&root.join("skills"), &root, "skill"),
-        )
+    let skills = tokio::task::spawn_blocking(move || {
+        collect_markdown_files(&root.join("skills"), &root, "skill")
     })
     .await
     .map_err(|error| AppError::Custom(format!("AI prompt listing failed: {error}")))?;
-    Ok(AiPromptAssets {
-        commands,
-        skills,
-        memory,
-    })
+    Ok(AiPromptAssets { skills, memory })
 }
 
 #[tauri::command]
@@ -1113,39 +1088,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_read_list_delete_session_roundtrip() {
+    async fn write_read_list_session_roundtrip() {
         let dir = tempdir().unwrap();
         let root = dir.path().to_string_lossy().to_string();
         write_ai_session(
             root.clone(),
-            AiSessionKind::Agent,
+            AiSessionKind::Talk,
             "abc_123".into(),
             "{\"x\":\"第一章\"}".into(),
         )
         .await
         .unwrap();
-        let list = list_ai_sessions(root.clone(), AiSessionKind::Agent)
+        let list = list_ai_sessions(root.clone(), AiSessionKind::Talk)
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "abc_123");
-        let body = read_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into())
+        let body = read_ai_session(root, AiSessionKind::Talk, "abc_123".into())
             .await
             .unwrap();
         assert_eq!(body.as_deref(), Some("{\"x\":\"第一章\"}"));
         let sessions = dir.path().join(".novelist/ai/sessions");
+        assert!(sessions.join("talk-abc_123.json").is_file());
         assert!(fs::read_dir(&sessions).unwrap().all(|entry| !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
             .contains("novelist-tmp")));
-        delete_ai_session(root.clone(), AiSessionKind::Agent, "abc_123".into())
-            .await
-            .unwrap();
-        let body = read_ai_session(root, AiSessionKind::Agent, "abc_123".into())
-            .await
-            .unwrap();
-        assert!(body.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1174,7 +1143,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn symlinked_ai_folders_cannot_redirect_writes_or_deletes() {
+    async fn symlinked_ai_folders_cannot_redirect_writes() {
         let dir = tempdir().unwrap();
         let project = dir.path().join("project");
         let outside = dir.path().join("outside");
@@ -1188,15 +1157,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(write, AppError::PathNotAllowed(_)), "{write:?}");
-        let memory = write_ai_memory(root.clone(), "secret".into())
-            .await
-            .unwrap_err();
+        let memory = write_ai_memory(root, "secret".into()).await.unwrap_err();
         assert!(matches!(memory, AppError::PathNotAllowed(_)), "{memory:?}");
-        let delete = delete_ai_session(root, AiSessionKind::Talk, "victim".into())
-            .await
-            .unwrap_err();
-        assert!(matches!(delete, AppError::PathNotAllowed(_)), "{delete:?}");
-        assert!(outside.join("sessions/talk-victim.json").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("sessions/talk-victim.json")).unwrap(),
+            "{}"
+        );
         assert!(!outside.join("memory.md").exists());
         assert!(!outside.join("sessions/talk-x.json").exists());
 
@@ -1208,39 +1174,38 @@ mod tests {
             project.join(".novelist/ai/sessions"),
         )
         .unwrap();
-        let error = delete_ai_session(
+        let error = write_ai_session(
             project.to_string_lossy().to_string(),
             AiSessionKind::Talk,
             "victim".into(),
+            "{\"overwritten\":true}".into(),
         )
         .await
         .unwrap_err();
         assert!(matches!(error, AppError::PathNotAllowed(_)), "{error:?}");
-        assert!(outside.join("sessions/talk-victim.json").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("sessions/talk-victim.json")).unwrap(),
+            "{}"
+        );
     }
 
     #[tokio::test]
     async fn prompt_assets_skip_hidden_and_unsupported() {
         let dir = tempdir().unwrap();
         let root = dir.path().join(".novelist").join("ai");
-        fs::create_dir_all(root.join("commands")).unwrap();
-        fs::create_dir_all(root.join("skills").join("line-editor")).unwrap();
-        fs::write(root.join("commands").join("rewrite.md"), "rewrite").unwrap();
-        fs::write(root.join("commands").join(".hidden.md"), "hidden").unwrap();
-        fs::write(root.join("commands").join("notes.txt"), "ignored").unwrap();
-        fs::write(
-            root.join("skills").join("line-editor").join("SKILL.md"),
-            "skill",
-        )
-        .unwrap();
+        let skills = root.join("skills");
+        fs::create_dir_all(skills.join("line-editor")).unwrap();
+        fs::write(skills.join("line-editor").join("SKILL.md"), "skill").unwrap();
+        fs::write(skills.join(".hidden.md"), "hidden").unwrap();
+        fs::write(skills.join("notes.txt"), "ignored").unwrap();
         fs::write(root.join("memory.md"), "memory").unwrap();
 
         let assets = list_ai_prompt_assets(dir.path().to_string_lossy().to_string())
             .await
             .unwrap();
-        assert_eq!(assets.commands.len(), 1);
-        assert_eq!(assets.commands[0].name, "rewrite");
         assert_eq!(assets.skills.len(), 1);
+        assert_eq!(assets.skills[0].name, "SKILL");
+        assert_eq!(assets.skills[0].id, "skills/line-editor/SKILL.md");
         assert_eq!(assets.memory.as_ref().unwrap().content, "memory");
     }
 

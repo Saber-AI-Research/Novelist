@@ -7,6 +7,9 @@
   import TemplateDialog from '$lib/components/TemplateDialog.svelte';
   import { templateDialogPrefill, type TemplateDialogPrefill } from '$lib/components/template-dialog';
   import { IconArrowInsert, IconDocument } from './icons';
+  import { platform } from '$lib/stores/platform.svelte';
+  import { longPress } from '$lib/actions/long-press';
+  import { clampToViewport } from '$lib/actions/clamp-to-viewport';
 
   interface Props {
     /**
@@ -72,7 +75,7 @@
     return 1;
   }
 
-  function menuPosition(e: MouseEvent, s: TemplateFileSummary): { x: number; y: number } {
+  function menuPosition(e: { clientX: number; clientY: number }, s: TemplateFileSummary): { x: number; y: number } {
     const margin = 8;
     const width = 180;
     const height = estimatedMenuHeight(s);
@@ -218,6 +221,7 @@
             onclick={(e) => { if (e.button === 0) onRowClick(s); }}
             onkeydown={(e) => { if (e.key === 'Enter') onRowClick(s); }}
             oncontextmenu={(e) => showCtxMenu(e, s)}
+            use:longPress={{ onLongPress: (e) => { ctxMenu = { ...menuPosition(e, s), summary: s }; } }}
           >
             <span class="template-mode" aria-hidden="true">
               {#if s.mode === 'insert'}
@@ -254,6 +258,7 @@
               onclick={(e) => { if (e.button === 0) onRowClick(s); }}
               onkeydown={(e) => { if (e.key === 'Enter') onRowClick(s); }}
               oncontextmenu={(e) => showCtxMenu(e, s)}
+              use:longPress={{ onLongPress: (e) => { ctxMenu = { ...menuPosition(e, s), summary: s }; } }}
             >
               <span class="template-mode" aria-hidden="true">
               {#if s.mode === 'insert'}
@@ -283,6 +288,7 @@
     role="menu"
     tabindex="-1"
     data-testid="template-ctx-menu"
+    use:clampToViewport={{ enabled: platform.touchShell, x: ctxMenu.x, y: ctxMenu.y }}
     style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
@@ -392,5 +398,16 @@
     height: 1px;
     background: var(--novelist-border-subtle, var(--novelist-border));
     margin: 4px 0;
+  }
+  @media (pointer: coarse) {
+    .template-row {
+      min-height: 44px;
+      -webkit-touch-callout: none;
+    }
+    .tmpl-ctx-item {
+      display: flex;
+      align-items: center;
+      min-height: 44px;
+    }
   }
 </style>
