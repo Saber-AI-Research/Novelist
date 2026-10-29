@@ -846,6 +846,7 @@ export const en: TranslationMap = {
 
   // --- Settings · AI Talk ---
   'settings.aiTalk.providerProfile': 'Provider:',
+  'settings.aiTalk.conversationSettings': 'Conversation defaults',
   'settings.aiTalk.baseUrl': 'Base URL',
   'settings.aiTalk.apiKey': 'API Key',
   'settings.aiTalk.model': 'Model',
@@ -858,6 +859,13 @@ export const en: TranslationMap = {
   'settings.aiTalk.profileAdd': '+ Add profile',
   'settings.aiTalk.profileName': 'Profile name',
   'settings.aiTalk.profileDelete': 'Delete profile',
+
+  'settings.aiTalk.profileCustom': 'Custom connection',
+  'settings.aiTalk.profileDuplicate': 'Duplicate',
+  'settings.aiTalk.profileDeleteConfirm': 'Delete “{name}” and its saved API key from this device? Chats are kept.',
+  'settings.aiTalk.noProfiles': 'No connections. Add a provider to start chatting.',
+  'settings.aiTalk.keyShow': 'Show',
+  'settings.aiTalk.keyHide': 'Hide',
 
   // --- Settings · AI Talk · Prompt presets ---
   'settings.aiTalk.presets.title': 'Prompt presets',

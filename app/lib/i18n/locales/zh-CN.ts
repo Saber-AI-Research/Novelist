@@ -846,6 +846,7 @@ export const zhCN: TranslationMap = {
 
   // --- Settings · AI Talk ---
   'settings.aiTalk.providerProfile': '服务商：',
+  'settings.aiTalk.conversationSettings': '通用对话设置',
   'settings.aiTalk.baseUrl': '接口地址',
   'settings.aiTalk.apiKey': 'API 密钥',
   'settings.aiTalk.model': '模型',
@@ -858,6 +859,13 @@ export const zhCN: TranslationMap = {
   'settings.aiTalk.profileAdd': '+ 新建配置',
   'settings.aiTalk.profileName': '配置名称',
   'settings.aiTalk.profileDelete': '删除配置',
+
+  'settings.aiTalk.profileCustom': '自定义连接',
+  'settings.aiTalk.profileDuplicate': '复制配置',
+  'settings.aiTalk.profileDeleteConfirm': '删除「{name}」及本机保存的 API 密钥？聊天记录会保留。',
+  'settings.aiTalk.noProfiles': '暂无连接配置，请添加服务商后开始对话。',
+  'settings.aiTalk.keyShow': '显示',
+  'settings.aiTalk.keyHide': '隐藏',
 
   // --- Settings · AI Talk · Prompt presets ---
   'settings.aiTalk.presets.title': '提示词预设',

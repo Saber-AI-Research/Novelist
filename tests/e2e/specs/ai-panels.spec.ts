@@ -295,7 +295,7 @@ test.describe('Settings → Plugin settings nav', () => {
     await app.getByTestId('settings-section-plugin:ai-talk').click();
     await app.getByTestId('ai-talk-profile-anthropic').click();
 
-    const baseUrlInput = app.locator('input[type="text"]').first();
+    const baseUrlInput = app.getByTestId('ai-talk-base-url');
     await expect(baseUrlInput).toHaveValue('https://api.anthropic.com/v1');
   });
 });
