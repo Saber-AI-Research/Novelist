@@ -1,7 +1,8 @@
 # Coverage Audit — 2026-04-22
 
 Generated from `pnpm test:coverage` + manual source-file classification.
-Informs the batches in `docs/exec-plans/completed/2026-04-22-coverage-campaign.md`.
+The completed campaign draft has been removed; current testing policy is in
+[`docs/design-docs/testing.md`](../docs/design-docs/testing.md).
 
 Source files audited: **129** (under `app/lib/**/*.{ts,svelte.ts,svelte}`).
 Test files present: **42** (under `tests/unit/**` + `tests/integration/**`).

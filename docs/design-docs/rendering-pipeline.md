@@ -125,7 +125,7 @@ Theme Layer:
   EditorView.lineWrapping
 
 Zen Mode (optional):
-  typewriterPlugin + paragraphFocusPlugin
+  typewriterPlugin + lineFocusPlugin
 ```
 
 ## 7. WYSIWYG Decoration Pipeline (wysiwyg.ts)

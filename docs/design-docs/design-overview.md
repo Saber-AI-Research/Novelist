@@ -2,7 +2,7 @@
 
 > **Version**: 0.1.0 (MVP)
 > **Date**: 2026-04-07
-> **Status**: Draft
+> **Status**: Architecture reference with historical MVP scope. Current platform/feature status lives in [ARCHITECTURE.md](../../ARCHITECTURE.md) and [feature boundaries](feature-boundaries.md); original post-MVP checklists and source-layout sketches below are not active implementation plans.
 
 ## 1. Product Positioning
 

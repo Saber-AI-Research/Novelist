@@ -30,8 +30,9 @@ pub async fn connect_cloud_account(
     endpoint: String,
     username: String,
     password: String,
+    remote_directory: Option<String>,
 ) -> Result<CloudAccountSummary, AppError> {
-    cloud::connect(&endpoint, &username, password).await
+    cloud::connect(&endpoint, &username, password, remote_directory.as_deref().unwrap_or(crate::services::webdav::DEFAULT_REMOTE_DIRECTORY)).await
 }
 
 /// Forgets the account on this device; no local or remote file is deleted.

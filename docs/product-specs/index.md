@@ -1,6 +1,6 @@
 # Product Specs Index
 
-Last updated: 2026-07-20
+Last updated: 2026-11-03
 
 Product specs describe intended user behavior. They are separate from
 implementation plans so the product story remains readable after the code
@@ -22,9 +22,11 @@ ships.
 | Styled Copy | Implemented | See [2026-07-20-styled-copy.md](2026-07-20-styled-copy.md). Sanitized WeChat / Zhihu rich clipboard output. |
 | Rename and filename macros | Shipped (v0.2.4) | See [2026-05-07-v0.2.4-rename-and-macros.md](2026-05-07-v0.2.4-rename-and-macros.md). `{title}` H1 sync, date/time macros, double-click rename. |
 | New-user onboarding | Draft | See [new-user-onboarding.md](new-user-onboarding.md). |
+| Optional account and configuration sync | Implemented locally; release acceptance pending; not deployed | Login stays optional, including on new devices. See [2026-11-03-optional-account-and-config-sync.md](2026-11-03-optional-account-and-config-sync.md). |
 
 ## Specs
 
+- [Optional account and cross-device configuration sync](2026-11-03-optional-account-and-config-sync.md)
 - [New-user onboarding](new-user-onboarding.md)
 - [Competitive analysis](competitive-analysis.md)
 - [Image hosting (v0.2.4)](2026-05-06-image-host.md)

@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an optional self-hosted Nextcloud configuration, and a WebDAV conformance
   checker. Production signing and TestFlight distribution require maintainer
   credentials; these changes do not publish a release.
+- Optional Novelist accounts and selected configuration sync through the separate
+  `novelist-backend/` project. Local writing and independent WebDAV remain usable
+  without it. Login does not upload projects or implicitly enable configuration sync.
+- Independent recovery-key encryption, explicit ordinary/credential selection,
+  reviewed first sync, revision-checked three-way merges, deletion tombstones,
+  encrypted local backups and interrupted-restore recovery. Account tokens,
+  recovery keys and restored credentials use platform secure storage.
+- Account settings for signed-in devices, session revocation, offline sign-out,
+  selective retention of restored WebDAV connections and password-confirmed
+  account deletion. Deployment host, domain and release process remain deferred.
+- Optional WebDAV application directory, defaulting to `Novelist` for new
+  configurations. Users can choose a custom relative directory or use the
+  supplied endpoint folder directly; legacy connections retain their paths.
+  Directory changes pause project sync and preserve existing remote data.
+- Versioned configuration exports retain the chosen directory across devices:
+  portable strings use V2 and encrypted account documents use schema 2, with
+  legacy reads preserving the endpoint-folder layout.
 
 ### Removed
 
@@ -44,8 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `delete_ai_session`). AI Talk and Book Translation reference translation
   are unchanged; existing `.novelist/ai/sessions/agent-*.json` files are left
   untouched and ignored.
+- Superseded implementation drafts for completed editor, plugin, settings,
+  publishing and WebDAV work; current contracts remain in architecture and
+  product documentation. Local verification artifacts are excluded from Git.
 
 ### Fixed
+
+- Account restores wait for AI credential hydration and discard obsolete vault
+  reads. Encrypted WebDAV rollback records retain prior passwords, including
+  an explicit absence, without changing credential synchronization consent.
+- Editing WebDAV connection fields invalidates previous connection-test
+  results and prevents pending requests from restoring a stale success.
+- Incorrect account-deletion passwords no longer expire valid device sessions.
 
 - Literary commentary opens a comment from the 中括号 key in every
   punctuation mode: `[…]` and `［…］` now delimit comments alongside

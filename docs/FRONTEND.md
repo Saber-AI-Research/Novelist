@@ -1,6 +1,6 @@
 # Frontend
 
-Last updated: 2026-04-25
+Last updated: 2026-11-03
 
 The frontend is a Svelte 5 app that hosts CodeMirror 6 and talks to Rust
 through generated Tauri IPC bindings.
@@ -18,6 +18,15 @@ through generated Tauri IPC bindings.
 | `app/lib/utils/` | Pure helpers and small platform utilities. |
 | `app/lib/app-commands.ts` | Sole command registry site. |
 | `app/lib/ipc/commands.ts` | Generated IPC bindings; do not edit manually. |
+
+## Icons
+
+Shared decorative SVG components live in `app/lib/components/icons/` and are
+re-exported from its `index.ts`. They accept `size` (14px by default) and `class`,
+use a 16×16 viewBox, `currentColor` strokes and `aria-hidden="true"`; the adjacent
+label or control supplies the accessible name. Built-in AI prompt presets use
+components, while user-authored preset icons may remain strings. Keep that
+distinction when persisting or rendering presets.
 
 ## Development Gate
 

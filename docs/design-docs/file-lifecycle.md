@@ -1,5 +1,15 @@
 # File Lifecycle
 
+## Project creation and locale
+
+`NewProjectDialog.svelte` passes the current UI locale to
+`create_project_from_template`. Built-in project names/descriptions use frontend
+i18n keys; Rust `services/template_scaffold.rs` chooses the created filenames,
+seed text and outline order. Tags beginning with `zh` select Chinese scaffolds;
+other locales fall back to English. Changing the UI locale never renames files
+in an existing project. The blank scaffold creates project metadata without a
+seed manuscript; other built-in scaffolds provide their own initial files.
+
 ## Sidebar selection and destructive actions
 
 The sidebar tree is an ARIA multi-select tree. An unmodified row click selects

@@ -1,6 +1,6 @@
 # Novelist Docs
 
-Last updated: 2026-05-27
+Last updated: 2026-11-03
 
 Start here when deciding where information belongs.
 

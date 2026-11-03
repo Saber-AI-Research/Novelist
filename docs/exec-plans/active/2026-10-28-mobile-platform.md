@@ -2,6 +2,8 @@
 
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 > 状态：适配实现与 Android 真机验证已落地，iOS 原生验证转到用户批准的专用分支/草稿 PR 与 GitHub Xcode CI；不合并、不发布。Android 发布密钥已按用户选择在本机受限目录新建；Apple 发布身份与 TestFlight 审核仍需真实账号材料。
+>
+> 2026-11-03 状态复核：本计划保留未完成的发行/平台验收；当前发布判断以[发布准备](2026-11-03-release-readiness.md)为准。下文 `1.0.0` / `1.1.0-beta.N` 版本映射是原计划，不是已批准版本或已发布状态。日常开发按[Web-only 流程](../../development.md#commands)执行，原生构建与设备验收留到发行准备。
 
 **Goal:** 在同一仓库、同一 Tauri v2 应用内交付 iOS 与 Android 版本；桌面端行为与数据布局保持不变。
 

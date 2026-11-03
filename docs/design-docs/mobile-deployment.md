@@ -43,9 +43,14 @@ Mobile builds never write `latest.json`.
 | Where stored | GitHub environment `mobile-release`, the maintainers' password manager, offline backups | On the device only: iOS Keychain (`ThisDeviceOnly`, never synced), Android Keystore-encrypted app-private storage (`allowBackup=false`) |
 | Never | in the repo, in app builds, in logs | in the repo, in CI, in project files, in sync data |
 
-There is no Novelist account service: Novelist does not run a login server and
-never sees writers' credentials. A writer's sync access is revoked on their
-WebDAV server (see the Nextcloud runbook), not by Novelist.
+The optional Novelist account/configuration service is implemented in the separate
+`novelist-backend/` project; no production account service is configured or deployed
+by this iteration. It stores account identity, device sessions and configuration
+ciphertext, not project files or configuration decryption keys. See the
+[product specification](../product-specs/2026-11-03-optional-account-and-config-sync.md)
+and [backend boundary](../../../novelist-backend/docs/optional-account-and-config-sync.md).
+WebDAV access remains independent and is revoked at the WebDAV provider. Account
+session revocation cannot revoke WebDAV app passwords or erase offline copies.
 
 ## Toolchain and commands
 
@@ -170,6 +175,14 @@ files, and manually. No secrets.
   captures screenshots/logs, and removes only its own devices. The
   `novelist-ios-simulator-smoke` artifact is retained for 7 days, including
   failure diagnostics when possible. A skipped/failed smoke is not acceptance.
+
+For local optional-account validation, start the independent backend on loopback
+and run `NOVELIST_ACCOUNT_SMOKE_URL=http://127.0.0.1:<port> node scripts/mobile-ios-smoke.mjs --out <new evidence directory>`.
+With Node 24, this adds a real native account flow on each simulator: register,
+upload encrypted configuration, retain account/recovery/restored-credential state
+across relaunch, check for plaintext secrets in the app container, delete the
+account and clear local account material. Without that environment variable the
+existing smoke requires no account service or backend source.
 
 ### Mobile Release (`.github/workflows/mobile-release.yml`)
 

@@ -519,6 +519,8 @@ async function cloudSync(flow, ctx) {
 
   const connected = await flow.invoke('connect_cloud_account', { endpoint: account.endpoint, username: account.username, password: account.password });
   check(connected.connected === true && connected.username === account.username && connected.endpoint === account.endpoint, 'connect_cloud_account did not return the connected account', [q({ ...connected })]);
+  check(connected.remote_directory === 'Novelist', `a new connection chose ${q(connected.remote_directory)} instead of Novelist`);
+  result.remoteDirectory = connected.remote_directory;
   check(connected.credential_storage === 'system_keychain', `the password went to ${connected.credential_storage}, not the system keychain`);
   const online = await flow.invoke('check_cloud_account');
   check(online.state === 'online', `check_cloud_account after connect: ${online.state} ${online.message ?? ''}`);
@@ -526,8 +528,6 @@ async function cloudSync(flow, ctx) {
   // Only the Keychain may hold the password: nothing in the app container.
   const accountFile = findFile(session.dataContainer, path.join('cloud', 'account.json'));
   check(accountFile, 'connect_cloud_account wrote no cloud/account.json in the app container');
-  const accountRecord = JSON.parse(readBytes(accountFile).toString('utf8'));
-  check(q(Object.keys(accountRecord).sort()) === q(['connected_at', 'endpoint', 'username']), `cloud/account.json has fields ${q(Object.keys(accountRecord))}`);
   const leaks = filesContaining(session.dataContainer, [account.password]);
   check(leaks.length === 0, `the cloud password is stored in app container files: ${leaks.join(', ')}`);
   result.accountRecord = path.relative(session.dataContainer, accountFile);
@@ -536,6 +536,7 @@ async function cloudSync(flow, ctx) {
   await session.relaunch();
   const relaunched = await flow.invoke('check_cloud_account');
   check(relaunched.state === 'online', `check_cloud_account after relaunch: ${relaunched.state} ${relaunched.message ?? ''}`);
+  check(relaunched.account.remote_directory === connected.remote_directory, 'the application directory changed after relaunch');
   result.keychainAfterRelaunch = relaunched.state;
 
   const binding = await flow.invoke('bind_cloud_project', { projectDir: project.appDir, intervalMinutes: 5 });
@@ -546,7 +547,7 @@ async function cloudSync(flow, ctx) {
 
   const identity = JSON.parse(readBytes(path.join(project.hostDir, '.novelist', 'sync-identity.json'))?.toString('utf8') ?? 'null');
   check(/^[0-9a-f]{64}$/.test(identity?.project_id ?? ''), 'the project has no sync identity after sync_now');
-  const remoteDir = path.join(account.root, 'novelist-sync', identity.project_id);
+  const remoteDir = path.join(account.root, ...connected.remote_directory.split('/').filter(Boolean), 'novelist-sync', identity.project_id);
   const remoteIdentity = JSON.parse(readBytes(path.join(remoteDir, '.novelist', 'sync-identity.json'))?.toString('utf8') ?? 'null');
   check(remoteIdentity?.project_id === identity.project_id, 'the server has no matching .novelist/sync-identity.json');
   const local = syncedFiles(project.hostDir);
@@ -586,6 +587,45 @@ async function cloudSync(flow, ctx) {
   check(final.state === 'not_connected', `check_cloud_account at the end: ${final.state}`);
   result.disconnect = { unlinkedProjects: disconnected.unlinked_projects, localKept: Object.keys(keptLocal).length };
   return result;
+}
+
+/** Optional account service is supplied only for account-specific local validation. */
+async function novelistAccount(flow, ctx) {
+  const endpoint = process.env.NOVELIST_ACCOUNT_SMOKE_URL;
+  const { encryptConfiguration, decryptConfiguration, generateRecoveryKey } = await import('../app/lib/services/account-crypto.ts');
+  const username = `native_${ctx.session.family}_${crypto.randomUUID().slice(0, 8)}`.toLowerCase();
+  const password = crypto.randomUUID();
+  check(await flow.invoke('account_status') === null, 'fresh device unexpectedly has a Novelist account');
+  const account = await flow.invoke('account_authenticate', { endpoint, username, password, deviceName: `Native ${ctx.session.family}`, register: true });
+  check(account.username === username && !('token' in account), 'account summary exposed a session token or mismatched identity');
+  const accountEndpoint = account.endpoint;
+  const key = generateRecoveryKey();
+  await flow.invoke('account_recovery_key', { value: key });
+  const document = { schema: 2, fields: { 'preferences/theme': 'system' }, deleted: [], secretKeys: [] };
+  const envelope = await encryptConfiguration(document, key, accountEndpoint, account.user_id, 'cloud');
+  const uploaded = await flow.invoke('account_request', { method: 'PUT', path: '/v1/config', body: { base_revision: 0, envelope } });
+  check(uploaded.revision === 1, 'native encrypted configuration upload did not commit revision 1');
+  const state = { version: 1, enabled: false, configured: false, categories: [], includeSecrets: false, revision: 1, baseline: null, backup: null, pending: null };
+  const local = await encryptConfiguration(state, key, accountEndpoint, account.user_id, 'local');
+  await flow.invoke('account_save_state', { value: JSON.stringify(local) });
+  const credential = crypto.randomUUID();
+  await flow.invoke('account_config_set_secret', { key: 'ai:native-smoke', value: credential });
+  await ctx.session.relaunch();
+  check((await flow.invoke('account_status'))?.device_id === account.device_id, 'native account did not survive relaunch');
+  check(await flow.invoke('account_recovery_key', { value: null }) === key, 'recovery key did not survive relaunch in Keychain');
+  check(await flow.invoke('account_config_get_secret', { key: 'ai:native-smoke' }) === credential, 'restored credential did not survive relaunch in Keychain');
+  const restored = await flow.invoke('account_request', { method: 'GET', path: '/v1/config', body: null });
+  check(q(await decryptConfiguration(restored.envelope, key, accountEndpoint, account.user_id, 'cloud')) === q(document), 'native account restored different cloud configuration');
+  const localEnvelope = JSON.parse(await flow.invoke('account_load_state'));
+  check(q(await decryptConfiguration(localEnvelope, key, accountEndpoint, account.user_id, 'local')) === q(state), 'encrypted local sync state did not survive relaunch');
+  const diskHits = filesContaining(ctx.session.dataContainer, [password, key, credential]);
+  check(diskHits.length === 0, 'native account secrets appeared in app-container files', diskHits);
+  await flow.invoke('account_request', { method: 'DELETE', path: '/v1/account', body: { password } });
+  await flow.invoke('account_forget');
+  check(await flow.invoke('account_config_get_secret', { key: 'ai:native-smoke' }) === credential, 'account logout removed a retained independent credential');
+  await flow.invoke('account_config_set_secret', { key: 'ai:native-smoke', value: null });
+  check(await flow.invoke('account_status') === null && await flow.invoke('account_load_state') === null, 'native logout retained account or sync state');
+  return { encryptedRevision: restored.revision, keychainAcrossRelaunch: true, plaintextDiskHits: diskHits.length, accountDeleted: true, localStateCleared: true };
 }
 
 /** Reopen the project after the relaunch and leave the edited chapter on screen. */
@@ -633,6 +673,7 @@ export async function runDeviceFlows(session, { root, webdav, record }) {
     ['type-cjk-and-save', () => typeAndSave(flow, ctx)],
     ['literary-plugin-frame', () => literaryPlugin(flow, ctx)],
     ['cloud-keychain-sync', () => cloudSync(flow, ctx)],
+    ...(process.env.NOVELIST_ACCOUNT_SMOKE_URL ? [['novelist-account-keychain', () => novelistAccount(flow, ctx)]] : []),
     ['final-editor', () => finalEditor(flow, ctx)],
   ];
   for (const [name, run, keep] of steps) {

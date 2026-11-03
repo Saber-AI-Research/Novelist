@@ -5,12 +5,12 @@
 //!
 //! - `<data_root>/cloud/account.json` holds the endpoint and user name, never
 //!   a secret.
-//! - The password lives in the platform vault: iOS Keychain / Android Keystore
-//!   through `tauri-plugin-mobile-support` on mobile (no plaintext fallback),
-//!   an owner-only (0600) app-data file on desktop. It is stored together with
-//!   the endpoint and user name it was entered for and released only for
-//!   exactly that pair, so it can never be sent to another host.
-//! - Nothing here returns the password over IPC.
+//! - Manually entered passwords use iOS Keychain / Android Keystore on mobile
+//!   and the existing owner-only app-data file on desktop. Account-restored
+//!   credentials always use the OS credential store on every platform.
+//!   Credentials are bound to their exact endpoint and user name.
+//! - Status IPC never returns a password. Explicit configuration capture may
+//!   return it only for the encrypted account backup/synchronization flow.
 //!
 //! Projects opt in with `SyncConfig.cloud_account`; the three-way
 //! reconciliation in `services::sync` remains the only sync algorithm.
@@ -83,8 +83,14 @@ static COMMIT_REACHED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 #[serde(deny_unknown_fields)]
 struct AccountProfile {
     endpoint: String,
+    #[serde(default)]
+    remote_directory: String,
     username: String,
     connected_at: String,
+    #[serde(default)]
+    restored: bool,
+    #[serde(default)]
+    secure_credential: bool,
 }
 
 /// Vault record. Deliberately neither `Debug` nor `Clone`.
@@ -118,6 +124,8 @@ pub struct CloudAccountSummary {
     pub connected: bool,
     /// WebDAV folder URL; validated to carry no credentials.
     pub endpoint: Option<String>,
+    /// Relative application folder; empty means the endpoint folder itself.
+    pub remote_directory: Option<String>,
     pub host: Option<String>,
     pub username: Option<String>,
     pub connected_at: Option<String>,
@@ -290,7 +298,20 @@ fn vault_error(_: tauri_plugin_mobile_support::Error) -> AppError {
     AppError::Custom("The system keychain could not store or read the cloud password".into())
 }
 
+
+fn configuration_secret_slot(endpoint: &str, username: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(endpoint.as_bytes());
+    hash.update(&[0]);
+    hash.update(username.as_bytes());
+    format!("webdav:{}", hash.finalize().to_hex())
+}
 async fn vault_read() -> Result<Option<String>, AppError> {
+    if let Some(profile) = read_profile()? {
+        if profile.secure_credential {
+            return crate::services::account::config_vault_read(&configuration_secret_slot(&profile.endpoint, &profile.username)).await;
+        }
+    }
     #[cfg(mobile)]
     {
         use tauri_plugin_mobile_support::MobileSupportExt;
@@ -328,6 +349,15 @@ async fn vault_write(record: &str) -> Result<(), AppError> {
 }
 
 async fn vault_delete() -> Result<(), AppError> {
+    if let Some(profile) = read_profile()? {
+        if profile.secure_credential {
+            return crate::services::account::config_vault_write(&configuration_secret_slot(&profile.endpoint, &profile.username), None).await;
+        }
+    }
+    manual_vault_delete().await
+}
+
+async fn manual_vault_delete() -> Result<(), AppError> {
     #[cfg(mobile)]
     {
         use tauri_plugin_mobile_support::MobileSupportExt;
@@ -343,14 +373,10 @@ async fn vault_delete() -> Result<(), AppError> {
     }
 }
 
-/// The stored password, released only while it was entered for exactly this
-/// account's endpoint and user name.
-async fn stored_password(profile: &AccountProfile) -> Result<WebDavAuth, AppError> {
-    let raw = vault_read().await?.ok_or_else(|| {
-        AppError::Custom(
-            "This device has no stored cloud password. Connect the account again.".into(),
-        )
-    })?;
+/// A credential is absent after a connection was restored without secrets.
+/// Any stored password is released only for its exact endpoint and user name.
+async fn stored_credential(profile: &AccountProfile) -> Result<Option<WebDavAuth>, AppError> {
+    let Some(raw) = vault_read().await? else { return Ok(None); };
     let credential: StoredCredential =
         serde_json::from_str(&raw).map_err(|_| unreadable_credential())?;
     if credential.endpoint != profile.endpoint || credential.username != profile.username {
@@ -358,9 +384,17 @@ async fn stored_password(profile: &AccountProfile) -> Result<WebDavAuth, AppErro
             "The stored cloud password belongs to another server or user and was not sent. Connect the account again.".into(),
         ));
     }
-    Ok(WebDavAuth {
+    Ok(Some(WebDavAuth {
         username: credential.username,
         password: credential.password,
+    }))
+}
+
+async fn stored_password(profile: &AccountProfile) -> Result<WebDavAuth, AppError> {
+    stored_credential(profile).await?.ok_or_else(|| {
+        AppError::Custom(
+            "This device has no stored cloud password. Connect the account again.".into(),
+        )
     })
 }
 
@@ -375,12 +409,21 @@ pub(crate) struct AccountLease {
     _use: tokio::sync::RwLockReadGuard<'static, ()>,
     changes: tokio::sync::watch::Receiver<u64>,
     endpoint: String,
+    remote_directory: String,
     auth: WebDavAuth,
 }
 
 impl AccountLease {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub(crate) fn remote_directory(&self) -> &str {
+        &self.remote_directory
+    }
+
+    fn application_url(&self) -> Result<String, AppError> {
+        webdav::application_url(&self.endpoint, &self.remote_directory)
     }
 
     pub(crate) fn auth(&self) -> &WebDavAuth {
@@ -419,12 +462,12 @@ pub(crate) fn account_changed() -> AppError {
 /// endpoint and user name: the account a project was linked to. Never call
 /// this while holding another lease; a waiting account change would block
 /// the second one forever.
-pub(crate) async fn lease_account(linked: Option<(&str, &str)>) -> Result<AccountLease, AppError> {
+pub(crate) async fn lease_account(linked: Option<(&str, &str, &str)>) -> Result<AccountLease, AppError> {
     let guard = ACCOUNT_USE.read().await;
     let changes = ACCOUNT_CHANGES.subscribe();
     let profile = read_profile()?.ok_or_else(not_connected)?;
-    if let Some((endpoint, username)) = linked {
-        if profile.endpoint != endpoint || profile.username != username {
+    if let Some((endpoint, username, directory)) = linked {
+        if profile.endpoint != endpoint || profile.username != username || profile.remote_directory != directory {
             return Err(AppError::Custom(format!(
                 "This project is linked to the cloud account {username} on {}, but this device is connected to another account. Link the project to the current account to sync it.",
                 host_of(endpoint).unwrap_or_default()
@@ -436,6 +479,7 @@ pub(crate) async fn lease_account(linked: Option<(&str, &str)>) -> Result<Accoun
         _use: guard,
         changes,
         endpoint: profile.endpoint,
+        remote_directory: profile.remote_directory,
         auth,
     })
 }
@@ -468,15 +512,6 @@ fn host_of(endpoint: &str) -> Option<String> {
     })
 }
 
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
-}
-
 /// An https WebDAV folder URL without embedded credentials, query or fragment.
 /// Plain http is accepted only for a server on this device (development).
 /// Errors never echo the input, which may contain a pasted password.
@@ -490,19 +525,12 @@ pub(crate) fn validate_endpoint(input: &str) -> Result<String, AppError> {
             "Enter the WebDAV folder URL from your provider".into(),
         ));
     }
-    let url = webdav::remote_url(endpoint, "").map_err(|_| {
+    webdav::remote_url(endpoint, "").map_err(|_| {
         AppError::InvalidInput(
-            "The WebDAV URL is invalid. It must not contain a user name, password, '?' query or '#' fragment".into(),
+            "Use an https:// WebDAV URL without a user name, password, '?' query or '#' fragment. Plain http is accepted only for a server on this device".into(),
         )
     })?;
-    match url.scheme() {
-        "https" => Ok(endpoint.to_owned()),
-        "http" if is_loopback(&url) => Ok(endpoint.to_owned()),
-        _ => Err(AppError::InvalidInput(
-            "Use an https:// WebDAV URL. Plain http is accepted only for a server on this device"
-                .into(),
-        )),
-    }
+    Ok(endpoint.to_owned())
 }
 
 fn validate_username(input: &str) -> Result<String, AppError> {
@@ -557,7 +585,7 @@ async fn probe(client: &Client, endpoint: &str, auth: &WebDavAuth) -> Result<(),
     let url = webdav::remote_url(endpoint, "")
         .map_err(|error| ProbeError::Rejected(error.to_string()))?;
     let response = client
-        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
+        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
         .timeout(webdav::REQUEST_TIMEOUT)
         .basic_auth(&auth.username, Some(&auth.password))
         .header("Depth", "0")
@@ -598,22 +626,25 @@ async fn probe(client: &Client, endpoint: &str, auth: &WebDavAuth) -> Result<(),
         .map_err(|error| ProbeError::Unreachable(error.to_string()))?;
     let entries = webdav::parse_listing(&xml)
         .map_err(|_| ProbeError::Rejected("The server's WebDAV answer is invalid".into()))?;
-    if !entries.iter().any(|entry| entry.is_collection) {
-        return Err(ProbeError::Rejected(
-            "This URL is a file, not a WebDAV folder".into(),
-        ));
+    for entry in entries {
+        let relative = webdav::relative_href(&url, &entry.href)
+            .map_err(|_| ProbeError::Rejected("The server's WebDAV answer escaped the requested folder".into()))?;
+        if relative.is_empty() && entry.is_collection {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err(ProbeError::Rejected("This URL is a file, not a WebDAV folder".into()))
 }
 
 fn summary(profile: Option<&AccountProfile>) -> CloudAccountSummary {
     CloudAccountSummary {
         connected: profile.is_some(),
         endpoint: profile.map(|profile| profile.endpoint.clone()),
+        remote_directory: profile.map(|profile| profile.remote_directory.clone()),
         host: profile.and_then(|profile| host_of(&profile.endpoint)),
         username: profile.map(|profile| profile.username.clone()),
         connected_at: profile.map(|profile| profile.connected_at.clone()),
-        credential_storage: CREDENTIAL_STORAGE,
+        credential_storage: if profile.is_some_and(|profile| profile.secure_credential) { CredentialStorage::SystemKeychain } else { CREDENTIAL_STORAGE },
     }
 }
 
@@ -642,7 +673,7 @@ pub async fn check_account() -> Result<CloudAccountStatus, AppError> {
     let account = get_account()?;
     let probed = lease
         .guard(async {
-            Ok::<_, AppError>(probe(&sync::webdav_client()?, lease.endpoint(), lease.auth()).await)
+            Ok::<_, AppError>(probe(&sync::webdav_client()?, &lease.application_url()?, lease.auth()).await)
         })
         .await?;
     let (state, message) = match probed {
@@ -668,15 +699,19 @@ pub async fn connect(
     endpoint: &str,
     username: &str,
     password: String,
+    remote_directory: &str,
 ) -> Result<CloudAccountSummary, AppError> {
     let endpoint = validate_endpoint(endpoint)?;
     let username = validate_username(username)?;
+    let remote_directory = webdav::normalize_remote_directory(remote_directory)?.to_owned();
     validate_password(&password)?;
     let _guard = ACCOUNT_LOCK.lock().await;
     // Only the new credentials are used here; work on the current account
     // continues until the server has accepted them.
     let auth = WebDavAuth { username, password };
-    probe(&sync::webdav_client()?, &endpoint, &auth).await?;
+    let client = sync::webdav_client()?;
+    probe(&client, &endpoint, &auth).await?;
+    webdav::ensure_collections(&client, &endpoint, &remote_directory, &auth).await?;
     let _exclusive = exclusive_account().await;
     let WebDavAuth { username, password } = auth;
     let credential = StoredCredential {
@@ -688,11 +723,14 @@ pub async fn connect(
     drop(credential);
     // Before the account counts as connected, no per-project plaintext copy
     // of its password may remain (on mobile: none at all).
-    sync::adopt_inline_credentials(&endpoint, &username, cfg!(mobile))?;
+    sync::adopt_inline_credentials(&endpoint, &username, &remote_directory, cfg!(mobile))?;
     let profile = AccountProfile {
         endpoint,
+        remote_directory,
         username,
         connected_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        restored: false,
+        secure_credential: false,
     };
     write_record(
         &cloud_dir().join(ACCOUNT_FILE),
@@ -714,12 +752,105 @@ pub async fn disconnect() -> Result<CloudDisconnect, AppError> {
     })
 }
 
+/// A local-only configuration snapshot. Passwords are returned only for an
+/// explicit encrypted configuration capture, never in account status.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudConfiguration {
+    pub endpoint: String,
+    #[serde(default)]
+    pub remote_directory: String,
+    pub username: String,
+    pub password: Option<String>,
+    pub connected_at: String,
+    pub restored: bool,
+    pub secure_credential: bool,
+}
+
+pub async fn capture_configuration(include_secrets: bool) -> Result<Option<CloudConfiguration>, AppError> {
+    let _guard = ACCOUNT_LOCK.lock().await;
+    let Some(profile) = read_profile()? else { return Ok(None); };
+    let password = if include_secrets { stored_credential(&profile).await?.map(|auth| auth.password) } else { None };
+    Ok(Some(CloudConfiguration {
+        endpoint: profile.endpoint, username: profile.username, password,
+        remote_directory: profile.remote_directory,
+        connected_at: profile.connected_at, restored: profile.restored,
+        secure_credential: profile.secure_credential,
+    }))
+}
+
+/// Restore only the global connection. No probe, project linking, download or
+/// remote write occurs here; existing project identities and baselines stay.
+/// Preserve an omitted password only for the exact current connection; an
+/// ordinary recovery snapshot restores a missing credential as missing.
+pub async fn restore_configuration(mut configuration: Option<CloudConfiguration>, preserve_password: bool) -> Result<(), AppError> {
+    if let Some(config) = configuration.as_mut() {
+        config.endpoint = validate_endpoint(&config.endpoint)?;
+        config.username = validate_username(&config.username)?;
+        let directory = webdav::normalize_remote_directory(&config.remote_directory)?;
+        if directory != config.remote_directory {
+            config.remote_directory = directory.to_owned();
+        }
+        if let Some(password) = config.password.as_deref() { validate_password(password)?; }
+        if config.connected_at.len() > 128 { return Err(AppError::InvalidInput("Invalid WebDAV configuration timestamp".into())); }
+    }
+    let _guard = ACCOUNT_LOCK.lock().await;
+    let _exclusive = exclusive_account().await;
+    let Some(config) = configuration else {
+        vault_delete().await?;
+        return remove_record(&cloud_dir().join(ACCOUNT_FILE));
+    };
+    let previous = read_profile()?;
+    let same_manual = previous.as_ref().is_some_and(|profile| !profile.restored && profile.endpoint == config.endpoint && profile.username == config.username && profile.remote_directory == config.remote_directory);
+    let mut secure = config.secure_credential;
+    if let Some(password) = config.password {
+        // A rollback of a preexisting manual connection uses its original
+        // credential file. Every newly restored credential goes to the OS.
+        let credential = StoredCredential { endpoint: config.endpoint.clone(), username: config.username.clone(), password };
+        let record = serde_json::to_string(&credential)?;
+        if config.restored || config.secure_credential {
+            crate::services::account::config_vault_write(&configuration_secret_slot(&config.endpoint, &config.username), Some(&record)).await?;
+            secure = true;
+        } else {
+            vault_write(&record).await?;
+            secure = false;
+        }
+    } else {
+        let matching = previous.as_ref().filter(|profile| profile.endpoint == config.endpoint && profile.username == config.username && profile.remote_directory == config.remote_directory);
+        if let Some(previous) = matching.filter(|_| preserve_password) {
+            secure = previous.secure_credential;
+        } else if config.restored || secure {
+            crate::services::account::config_vault_write(&configuration_secret_slot(&config.endpoint, &config.username), None).await?;
+            secure = true;
+        } else {
+            manual_vault_delete().await?;
+        }
+    }
+    let profile = AccountProfile {
+        endpoint: config.endpoint, username: config.username, connected_at: config.connected_at,
+        remote_directory: config.remote_directory,
+        restored: config.restored && !same_manual, secure_credential: secure,
+    };
+    write_record(&cloud_dir().join(ACCOUNT_FILE), &serde_json::to_vec_pretty(&profile)?)
+}
+
+pub async fn remove_restored_configuration() -> Result<(), AppError> {
+    let _guard = ACCOUNT_LOCK.lock().await;
+    let _exclusive = exclusive_account().await;
+    let Some(profile) = read_profile()? else { return Ok(()); };
+    if !profile.restored { return Ok(()); }
+    sync::pause_cloud_projects(&profile.endpoint, &profile.username, &profile.remote_directory)?;
+    crate::services::account::config_vault_write(&configuration_secret_slot(&profile.endpoint, &profile.username), None).await?;
+    remove_record(&cloud_dir().join(ACCOUNT_FILE))
+}
+
 // ── projects ─────────────────────────────────────────────────────────────────
 
-fn linked_config(endpoint: &str, username: &str, interval_minutes: u32) -> SyncConfig {
+fn linked_config(endpoint: &str, username: &str, remote_directory: &str, interval_minutes: u32) -> SyncConfig {
     SyncConfig {
         enabled: true,
         webdav_url: endpoint.to_owned(),
+        remote_directory: remote_directory.to_owned(),
         username: username.to_owned(),
         password: String::new(),
         interval_minutes,
@@ -734,7 +865,7 @@ fn binding_of(
     profile: Option<&AccountProfile>,
 ) -> Result<CloudProjectBinding, AppError> {
     let same_account = profile.is_some_and(|profile| {
-        profile.endpoint == config.webdav_url && profile.username == config.username
+        profile.endpoint == config.webdav_url && profile.username == config.username && profile.remote_directory == config.remote_directory
     });
     Ok(CloudProjectBinding {
         linked: config.cloud_account && same_account,
@@ -770,9 +901,13 @@ pub async fn bind_project(
     // Connect and disconnect, the only vault writers, hold the same lock.
     stored_password(&profile).await?;
     let mut config = sync::read_sync_config(project_dir)?;
-    let linked = linked_config(&profile.endpoint, &profile.username, interval_minutes);
+    let linked = linked_config(&profile.endpoint, &profile.username, &profile.remote_directory, interval_minutes);
+    if config.webdav_url != linked.webdav_url || config.username != linked.username || config.remote_directory != linked.remote_directory {
+        config.legacy_remote_acknowledged = false;
+    }
     config.enabled = linked.enabled;
     config.webdav_url = linked.webdav_url;
+    config.remote_directory = linked.remote_directory;
     config.username = linked.username;
     config.password = linked.password;
     config.interval_minutes = linked.interval_minutes;
@@ -919,7 +1054,7 @@ async fn remote_project(
 
 /// Projects in `parent` (one level, no symlinks, no hidden staging folders)
 /// by sync identity.
-fn local_copies(parent: Option<&Path>) -> HashMap<String, PathBuf> {
+fn local_copies(parent: Option<&Path>, lease: &AccountLease) -> HashMap<String, PathBuf> {
     let mut copies = HashMap::new();
     let Some(entries) = parent.and_then(|parent| std::fs::read_dir(parent).ok()) else {
         return copies;
@@ -931,6 +1066,12 @@ fn local_copies(parent: Option<&Path>) -> HashMap<String, PathBuf> {
             continue;
         }
         let path = entry.path();
+        let same_root = path.to_str().and_then(|path| sync::read_sync_config(path).ok()).is_some_and(|config| {
+            config.webdav_url == lease.endpoint() && config.username == lease.auth().username && config.remote_directory == lease.remote_directory()
+        });
+        if !same_root {
+            continue;
+        }
         if let Ok(Some(project_id)) = sync::local_project_id(&path) {
             copies.entry(project_id).or_insert(path);
         }
@@ -956,11 +1097,12 @@ async fn list_with(
     local_parent: Option<&Path>,
 ) -> Result<CloudProjectList, AppError> {
     let client = sync::webdav_client()?;
-    let (endpoint, auth) = (lease.endpoint(), lease.auth());
+    let application_url = lease.application_url()?;
+    let (endpoint, auth) = (application_url.as_str(), lease.auth());
     let mut ids = remote_project_ids(&client, endpoint, auth).await?;
     let truncated = ids.len() > MAX_CLOUD_PROJECTS;
     ids.truncate(MAX_CLOUD_PROJECTS);
-    let local = local_copies(local_parent);
+    let local = local_copies(local_parent, lease);
     // `None`: the folder has no valid identity card naming its ID.
     let details: Vec<Result<Option<CloudProject>, AppError>> = stream::iter(ids)
         .map(|project_id| {
@@ -1027,19 +1169,20 @@ pub async fn download_project(project_id: &str, parent: &Path) -> Result<CloudDo
     if !parent.is_dir() {
         return Err(AppError::NotADirectory(path_string(&parent)?));
     }
-    if let Some(existing) = local_copies(Some(&parent)).remove(project_id) {
+    let lease = lease_account(None).await?;
+    if let Some(existing) = local_copies(Some(&parent), &lease).remove(project_id) {
         return Ok(CloudDownload {
             project_dir: public_project_dir(&existing)?,
             already_present: true,
             status: None,
         });
     }
-    let lease = lease_account(None).await?;
     let client = sync::webdav_client()?;
+    let application_url = lease.application_url()?;
     let name = lease
         .guard(remote_project(
             &client,
-            lease.endpoint(),
+            &application_url,
             lease.auth(),
             project_id,
         ))
@@ -1062,6 +1205,7 @@ pub async fn download_project(project_id: &str, parent: &Path) -> Result<CloudDo
             &linked_config(
                 lease.endpoint(),
                 &lease.auth().username,
+                lease.remote_directory(),
                 DEFAULT_INTERVAL_MINUTES,
             ),
         )?;
@@ -1173,7 +1317,7 @@ mod tests {
         }
 
         async fn connect(&self) -> CloudAccountSummary {
-            connect(&self.server.url, USER, PASSWORD.into())
+            connect(&self.server.url, USER, PASSWORD.into(), "")
                 .await
                 .unwrap()
         }
@@ -1251,6 +1395,109 @@ mod tests {
 
     #[tokio::test]
     #[serial(sync_data_dir)]
+    async fn application_roots_isolate_discovery_downloads_and_sync_baselines() {
+        let cloud = Cloud::new();
+        let legacy_id = "e".repeat(64);
+        cloud.remote_write(&format!("novelist-sync/{legacy_id}/.novelist/sync-identity.json"), format!(r#"{{"schema_version":1,"project_id":"{legacy_id}"}}"#).as_bytes());
+        cloud.remote_write(&format!("novelist-sync/{legacy_id}/chapter.md"), b"legacy");
+        let connected = crate::commands::cloud::connect_cloud_account(cloud.server.url.clone(), USER.into(), PASSWORD.into(), None).await.unwrap();
+        assert_eq!(connected.remote_directory.as_deref(), Some("Novelist"));
+        let project = cloud.project("desktop/Novel");
+        write(&project, "chapter.md", "base");
+        bind_project(&project, 30).await.unwrap();
+        clean_sync(&project).await;
+        let id = project_id_of(&project);
+        let default_file = format!("Novelist/novelist-sync/{id}/chapter.md");
+        assert_eq!(cloud.remote_file(&default_file), b"base");
+        let listed = list_projects(None).await.unwrap();
+        assert_eq!(listed.projects.len(), 1);
+        assert_eq!(listed.projects[0].project_id, id);
+        let library = cloud.dir("library");
+        let first = download_project(&id, &library).await.unwrap();
+
+        let directory = "作品/小说 Archive";
+        connect(&cloud.server.url, USER, PASSWORD.into(), directory).await.unwrap();
+        assert!(project_binding(&project).unwrap().other_account);
+        assert!(sync::perform_sync(&project).await.is_err());
+        assert!(list_projects(Some(&library)).await.unwrap().projects.is_empty());
+        let base = format!("{directory}/novelist-sync/{id}");
+        cloud.remote_write(&format!("{base}/.novelist/sync-identity.json"), &std::fs::read(Path::new(&project).join(sync::LOCAL_IDENTITY_PATH)).unwrap());
+        cloud.remote_write(&format!("{base}/chapter.md"), b"base");
+        let listed = list_projects(Some(&library)).await.unwrap();
+        assert_eq!(listed.projects[0].local_project_dir, None);
+        std::fs::remove_file(Path::new(&project).join("chapter.md")).unwrap();
+        bind_project(&project, 30).await.unwrap();
+        let synced = clean_sync(&project).await;
+        assert_eq!(synced.files_downloaded, 1, "a baseline from Novelist would delete the custom-root file");
+        assert_eq!(read(&project, "chapter.md"), "base");
+        let second = download_project(&id, &library).await.unwrap();
+        assert!(!second.already_present);
+        assert_ne!(first.project_dir, second.project_dir);
+        assert_eq!(sync::read_sync_config(&second.project_dir).unwrap().remote_directory, directory);
+        assert_eq!(cloud.remote_file(&default_file), b"base");
+        assert_eq!(cloud.remote_file(&format!("novelist-sync/{legacy_id}/chapter.md")), b"legacy");
+        connect(&cloud.server.url, USER, PASSWORD.into(), "").await.unwrap();
+        let legacy = list_projects(None).await.unwrap();
+        assert_eq!(legacy.projects.len(), 1);
+        assert_eq!(legacy.projects[0].project_id, legacy_id);
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn application_directory_creation_failure_never_replaces_the_account() {
+        let cloud = Cloud::new();
+        cloud.connect().await;
+        let before = std::fs::read(cloud_dir().join(ACCOUNT_FILE)).unwrap();
+        let blocked = cloud.remote("Novelist");
+        cloud.server.state.lock().unwrap().canned.insert(("MKCOL".into(), blocked.clone()), (403, Vec::new()));
+        assert!(crate::commands::cloud::connect_cloud_account(cloud.server.url.clone(), USER.into(), PASSWORD.into(), None).await.is_err());
+        assert_eq!(std::fs::read(cloud_dir().join(ACCOUNT_FILE)).unwrap(), before);
+        cloud.server.state.lock().unwrap().canned.clear();
+        cloud.remote_write("Novelist", b"a file occupies this name");
+        assert!(connect(&cloud.server.url, USER, PASSWORD.into(), "Novelist").await.is_err());
+        assert_eq!(cloud.remote_file("Novelist"), b"a file occupies this name");
+        assert_eq!(std::fs::read(cloud_dir().join(ACCOUNT_FILE)).unwrap(), before);
+        let nested = cloud.remote("Archives/Denied");
+        cloud.server.state.lock().unwrap().canned.insert(("MKCOL".into(), nested), (403, Vec::new()));
+        assert!(connect(&cloud.server.url, USER, PASSWORD.into(), "Archives/Denied").await.is_err());
+        assert_eq!(std::fs::read(cloud_dir().join(ACCOUNT_FILE)).unwrap(), before);
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn restore_retains_directory_without_remote_actions_or_cross_root_adoption() {
+        let cloud = Cloud::new();
+        let old: AccountProfile = serde_json::from_value(serde_json::json!({"endpoint":cloud.server.url,"username":USER,"connected_at":"old"})).unwrap();
+        assert_eq!(old.remote_directory, "");
+        let old_configuration: CloudConfiguration = serde_json::from_value(serde_json::json!({"endpoint":cloud.server.url,"username":USER,"password":null,"connected_at":"old","restored":false,"secure_credential":false})).unwrap();
+        assert_eq!(old_configuration.remote_directory, "");
+        let legacy = cloud.project("Legacy");
+        let modern = cloud.project("Modern");
+        let mut config = linked_config(&cloud.server.url, USER, "", 30);
+        config.cloud_account = false;
+        config.password = PASSWORD.into();
+        sync::save_sync_config_to_disk(&legacy, &config).unwrap();
+        config.remote_directory = "Novelist".into();
+        sync::save_sync_config_to_disk(&modern, &config).unwrap();
+        connect(&cloud.server.url, USER, PASSWORD.into(), "Novelist").await.unwrap();
+        assert!(!sync::read_sync_config(&legacy).unwrap().cloud_account);
+        assert!(sync::read_sync_config(&modern).unwrap().cloud_account);
+        let captured = capture_configuration(false).await.unwrap().unwrap();
+        assert_eq!(captured.remote_directory, "Novelist");
+        let count = cloud.server.state.lock().unwrap().requests.len();
+        restore_configuration(Some(CloudConfiguration { endpoint: cloud.server.url.clone(), remote_directory: "  Archives/小说  ".into(), username: USER.into(), password: None, connected_at: "restored".into(), restored: true, secure_credential: false }), false).await.unwrap();
+        assert_eq!(get_account().unwrap().remote_directory.as_deref(), Some("Archives/小说"));
+        assert_eq!(cloud.server.state.lock().unwrap().requests.len(), count);
+        assert!(!cloud.server.state.lock().unwrap().collections.contains(&cloud.remote("Archives")));
+        let restored = cloud.project("Restored");
+        sync::save_sync_config_to_disk(&restored, &linked_config(&cloud.server.url, USER, "Archives/小说", 30)).unwrap();
+        assert_eq!(sync::pause_cloud_projects(&cloud.server.url, USER, "Archives/小说").unwrap(), 1);
+        assert!(sync::read_sync_config(&modern).unwrap().enabled);
+        assert!(!sync::read_sync_config(&restored).unwrap().enabled);
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
     async fn connect_validates_before_storing_and_never_exposes_the_password() {
         let cloud = Cloud::new();
         let authority = cloud.server.url.strip_prefix("http://").unwrap();
@@ -1261,22 +1508,22 @@ mod tests {
             format!("http://example.com/{PASSWORD}"),
             format!("ftp://example.com/{PASSWORD}"),
         ] {
-            let error = connect(&endpoint, USER, PASSWORD.into())
+            let error = connect(&endpoint, USER, PASSWORD.into(), "")
                 .await
                 .unwrap_err()
                 .to_string();
             assert!(!error.contains(PASSWORD), "{error}");
         }
-        assert!(connect(&cloud.server.url, "bad:user", PASSWORD.into())
+        assert!(connect(&cloud.server.url, "bad:user", PASSWORD.into(), "")
             .await
             .is_err());
-        assert!(connect(&cloud.server.url, USER, String::new())
+        assert!(connect(&cloud.server.url, USER, String::new(), "")
             .await
             .is_err());
         assert!(cloud.server.state.lock().unwrap().requests.is_empty());
 
         // A wrong password, a redirect and a non-WebDAV answer store nothing.
-        let error = connect(&cloud.server.url, USER, "wrong".into())
+        let error = connect(&cloud.server.url, USER, "wrong".into(), "")
             .await
             .unwrap_err()
             .to_string();
@@ -1294,7 +1541,7 @@ mod tests {
                 .unwrap()
                 .canned
                 .insert(("PROPFIND".into(), root.clone()), (code, body));
-            let error = connect(&cloud.server.url, USER, PASSWORD.into())
+            let error = connect(&cloud.server.url, USER, PASSWORD.into(), "")
                 .await
                 .unwrap_err()
                 .to_string();
@@ -1343,7 +1590,7 @@ mod tests {
         let other = DavServer::start();
         cloud.connect().await;
         assert_eq!(
-            lease_account(Some((&cloud.server.url, USER)))
+            lease_account(Some((&cloud.server.url, USER, "")))
                 .await
                 .unwrap()
                 .auth()
@@ -1354,7 +1601,7 @@ mod tests {
             (other.url.as_str(), USER),
             (cloud.server.url.as_str(), "someone"),
         ] {
-            let error = lease_account(Some((endpoint, user)))
+            let error = lease_account(Some((endpoint, user, "")))
                 .await
                 .err()
                 .unwrap()
@@ -1386,7 +1633,7 @@ mod tests {
             &serde_json::to_vec(&profile).unwrap(),
         )
         .unwrap();
-        let error = lease_account(Some((&other.url, USER)))
+        let error = lease_account(Some((&other.url, USER, "")))
             .await
             .err()
             .unwrap()
@@ -1405,6 +1652,7 @@ mod tests {
         let inline = |url: &str, password: &str| SyncConfig {
             enabled: true,
             webdav_url: url.to_owned(),
+            remote_directory: String::new(),
             username: USER.into(),
             password: password.into(),
             interval_minutes: 30,
@@ -1849,7 +2097,7 @@ mod tests {
         })
         .await;
 
-        let account = connect(&replacement.url, "other", "other-password".into())
+        let account = connect(&replacement.url, "other", "other-password".into(), "")
             .await
             .unwrap();
         assert_eq!(account.endpoint.as_deref(), Some(replacement.url.as_str()));

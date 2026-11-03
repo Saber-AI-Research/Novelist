@@ -309,6 +309,11 @@ class ShortcutsStore {
     saveOverrides({});
   }
 
+  replaceFromAccount(overrides: Record<string, string>): void {
+    saveOverrides(overrides);
+    this.overrides = { ...overrides };
+  }
+
   get defaults(): Record<string, string> {
     return defaultShortcuts;
   }

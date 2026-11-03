@@ -11,6 +11,7 @@ const MASKED_PASSWORD: &str = "****";
 pub struct SyncConfigMasked {
     pub enabled: bool,
     pub webdav_url: String,
+    pub remote_directory: String,
     pub username: String,
     pub password: String,
     pub interval_minutes: u32,
@@ -25,6 +26,7 @@ impl From<SyncConfig> for SyncConfigMasked {
         Self {
             enabled: c.enabled,
             webdav_url: c.webdav_url,
+            remote_directory: c.remote_directory,
             username: c.username,
             // An empty field must look empty, not like a stored password.
             password: if c.password.is_empty() {
@@ -46,6 +48,19 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| AppError::Custom(format!("sync config worker: {error}")))?
+}
+
+fn pause_changed_directory(project_dir: &str, config: &mut SyncConfig) -> Result<(), AppError> {
+    let directory = webdav::normalize_remote_directory(&config.remote_directory)?;
+    if directory != config.remote_directory {
+        config.remote_directory = directory.to_owned();
+    }
+    let previous = sync::read_sync_config(project_dir)?;
+    if !previous.webdav_url.is_empty() && previous.remote_directory != config.remote_directory {
+        config.enabled = false;
+        config.legacy_remote_acknowledged = false;
+    }
+    Ok(())
 }
 
 /// Replace the form's masked password with the stored one, but only for the
@@ -94,6 +109,7 @@ pub async fn import_sync_config(
     mut config: SyncConfig,
 ) -> Result<(), AppError> {
     blocking(move || {
+        pause_changed_directory(&project_dir, &mut config)?;
         #[cfg(mobile)]
         if !config.password.is_empty() {
             return Err(AppError::InvalidInput(
@@ -112,6 +128,13 @@ pub async fn import_sync_config(
 #[specta::specta]
 pub async fn save_sync_config(project_dir: String, mut config: SyncConfig) -> Result<(), AppError> {
     blocking(move || {
+        pause_changed_directory(&project_dir, &mut config)?;
+        #[cfg(mobile)]
+        if !config.password.is_empty() {
+            return Err(AppError::InvalidInput(
+                "Passwords are kept only in this device's keychain: connect a cloud account in Settings → Sync instead".into(),
+            ));
+        }
         config.password = if config.cloud_account {
             // Linked projects never store a password of their own.
             String::new()
@@ -161,13 +184,15 @@ pub async fn test_sync_connection(
     webdav_url: String,
     username: String,
     password: String,
+    remote_directory: Option<String>,
 ) -> Result<bool, AppError> {
+    let remote_directory = webdav::normalize_remote_directory(remote_directory.as_deref().unwrap_or(webdav::DEFAULT_REMOTE_DIRECTORY))?;
     let (dir, url, user) = (project_dir.clone(), webdav_url.clone(), username.clone());
     let stored = blocking(move || sync::read_sync_config(&dir)).await?;
     // A linked project tests with the account credential, never a typed one,
     // holding the account lease while it is in use.
     let (auth, _lease) =
-        if stored.cloud_account && stored.webdav_url == url && stored.username == user {
+        if stored.cloud_account && stored.webdav_url == url && stored.username == user && stored.remote_directory == remote_directory {
             sync::project_auth(&stored, None).await?
         } else {
             let password =
@@ -177,7 +202,11 @@ pub async fn test_sync_connection(
         };
     // Never follows redirects, so the password stays with this host.
     let client = sync::webdav_client()?;
-    webdav::test_connection(&client, &webdav_url, &auth).await
+    if !webdav::test_connection(&client, &webdav_url, &auth).await? {
+        return Ok(false);
+    }
+    webdav::ensure_collections(&client, &webdav_url, &remote_directory, &auth).await?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -192,6 +221,7 @@ mod tests {
         let config = SyncConfig {
             enabled: true,
             webdav_url: "https://dav.example.com".to_string(),
+            remote_directory: String::new(),
             username: "user".to_string(),
             password: "secret_password_123".to_string(),
             interval_minutes: 15,
@@ -250,6 +280,7 @@ mod tests {
         SyncConfig {
             enabled: true,
             webdav_url: url.to_string(),
+            remote_directory: String::new(),
             username: "writer".to_string(),
             password: "stored-secret".to_string(),
             interval_minutes: 30,
@@ -281,7 +312,8 @@ mod tests {
             project.clone(),
             old_server.url.clone(),
             "writer".into(),
-            "****".into()
+            "****".into(),
+            Some(String::new()),
         )
         .await
         .unwrap());
@@ -293,6 +325,7 @@ mod tests {
             new_server.url.clone(),
             "writer".into(),
             "****".into(),
+            Some(String::new()),
         )
         .await
         .unwrap();
@@ -302,6 +335,7 @@ mod tests {
             old_server.url.clone(),
             "other".into(),
             "****".into(),
+            Some(String::new()),
         )
         .await
         .unwrap();
@@ -313,10 +347,40 @@ mod tests {
             new_server.url.clone(),
             "writer".into(),
             "typed".into(),
+            Some(String::new()),
         )
         .await
         .unwrap();
         assert_eq!(sent_password(&new_server), "writer:typed");
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn directory_connection_test_defaults_and_directory_changes_pause_sync() {
+        let data = SyncData::new();
+        let project = data.project();
+        let server = DavServer::start();
+        assert!(test_sync_connection(project.clone(), server.url.clone(), "writer".into(), "password".into(), None).await.unwrap());
+        let root = webdav::remote_url(&server.url, "Novelist").unwrap();
+        assert!(server.state.lock().unwrap().collections.contains(root.path()));
+        let count = server.state.lock().unwrap().requests.len();
+        assert!(test_sync_connection(project.clone(), server.url.clone(), "writer".into(), "password".into(), Some("../escape".into())).await.is_err());
+        assert_eq!(server.state.lock().unwrap().requests.len(), count);
+        sync::save_sync_config_to_disk(&project, &stored(&server.url)).unwrap();
+        let mut next = stored(&server.url);
+        next.remote_directory = "Novelist".into();
+        next.legacy_remote_acknowledged = true;
+        save_sync_config(project.clone(), next.clone()).await.unwrap();
+        assert!(!sync::read_sync_config(&project).unwrap().enabled);
+        assert!(!sync::read_sync_config(&project).unwrap().legacy_remote_acknowledged);
+        save_sync_config(project.clone(), next).await.unwrap();
+        assert!(sync::read_sync_config(&project).unwrap().enabled);
+        let mut imported = stored(&server.url);
+        imported.remote_directory = "  Archives/小说  ".into();
+        import_sync_config(project.clone(), imported).await.unwrap();
+        let saved = sync::read_sync_config(&project).unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.remote_directory, "Archives/小说");
     }
 
     #[tokio::test]

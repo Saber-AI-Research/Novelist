@@ -1,6 +1,16 @@
 # Plugin Marketplace & Registry Design
 
 > Design document for Novelist plugin ecosystem: in-app marketplace, plugin registry repository, and project homepage.
+>
+> **Status, 2026-11-03:** proposal retained for unfinished in-app marketplace
+> work. Current App code lists, enables, reloads and scaffolds local plugins;
+> it has no registry fetch/install/uninstall commands, Browse tab or
+> `novelist://install-plugin/` handler. The command signatures and URI below
+> are proposed interfaces, not working installation instructions. Registry and
+> homepage bootstrap sections are historical; their owning repositories define
+> the current implementation. Runtime and author contracts live in
+> [plugin-system.md](plugin-system.md) and
+> [Creating Plugins](../references/creating-plugins.md).
 
 ---
 

@@ -35,6 +35,29 @@ fn strong_etag(value: &str) -> Option<String> {
     (!value.is_empty() && !value.starts_with("W/")).then(|| value.to_owned())
 }
 
+pub(crate) const DEFAULT_REMOTE_DIRECTORY: &str = "Novelist";
+
+/// An unencoded relative application folder; empty preserves the endpoint root.
+pub(crate) fn normalize_remote_directory(value: &str) -> Result<&str, AppError> {
+    let value = value.trim();
+    if value.len() > 512
+        || value.contains(['%', '?', '#'])
+        || value.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic())
+                && scheme.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+        })
+    {
+        return Err(invalid_path());
+    }
+    validate_remote_path(value)?;
+    Ok(value)
+}
+
+pub(crate) fn application_url(endpoint: &str, directory: &str) -> Result<String, AppError> {
+    let directory = normalize_remote_directory(directory)?;
+    Ok(remote_url(endpoint, directory)?.into())
+}
+
 fn invalid_path() -> AppError {
     AppError::InvalidInput("Invalid or unsafe WebDAV path".into())
 }
@@ -103,6 +126,12 @@ fn raw_url_path(value: &str) -> Result<&str, AppError> {
 pub(crate) fn remote_url(base_url: &str, remote_path: &str) -> Result<Url, AppError> {
     let mut url = Url::parse(base_url).map_err(|_| invalid_path())?;
     if !matches!(url.scheme(), "http" | "https")
+        || (url.scheme() == "http" && match url.host() {
+            Some(url::Host::Ipv4(address)) => !address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => !address.is_loopback(),
+            Some(url::Host::Domain(domain)) => !domain.eq_ignore_ascii_case("localhost"),
+            None => true,
+        })
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -415,11 +444,35 @@ pub async fn create_collection(
         .send()
         .await
         .map_err(|error| request_error("MKCOL", error))?;
-    if !response.status().is_success() && response.status().as_u16() != 405 {
-        return Err(AppError::Custom(format!(
-            "WebDAV MKCOL returned {}",
-            response.status()
-        )));
+    if response.status().is_success() {
+        return Ok(());
+    }
+    if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        let collection = remote_url(base_url, remote_path)?;
+        if test_connection(client, collection.as_str(), auth).await? {
+            return Ok(());
+        }
+        return Err(AppError::Custom("The WebDAV path already exists but is not a collection".into()));
+    }
+    Err(AppError::Custom(format!(
+        "WebDAV MKCOL returned {}",
+        response.status()
+    )))
+}
+
+/// Create each parent before its child, checking existing resources are folders.
+pub(crate) async fn ensure_collections(
+    client: &Client,
+    endpoint: &str,
+    directory: &str,
+    auth: &WebDavAuth,
+) -> Result<(), AppError> {
+    validate_remote_path(directory)?;
+    for (index, _) in directory.match_indices('/') {
+        create_collection(client, endpoint, &directory[..index], auth).await?;
+    }
+    if !directory.is_empty() {
+        create_collection(client, endpoint, directory, auth).await?;
     }
     Ok(())
 }
@@ -483,7 +536,20 @@ pub async fn test_connection(
         .header("Content-Type", "application/xml")
         .body(r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#)
         .send().await.map_err(|error| request_error("connection test", error))?;
-    Ok(response.status().is_success())
+    // A login page or a generic HTTP endpoint can return 200. Only a valid
+    // Multi-Status describing a collection proves this is a WebDAV folder.
+    if response.status() != reqwest::StatusCode::MULTI_STATUS {
+        return Ok(false);
+    }
+    let xml = read_body_bounded(response, 1 << 20, "connection test").await?;
+    let entries = parse_listing(&xml)?;
+    let collection = remote_url(base_url, "")?;
+    for entry in entries {
+        if relative_href(&collection, &entry.href)?.is_empty() && entry.is_collection {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Parse XML structurally: namespace prefixes and escaped href text are not fixed.
@@ -771,7 +837,7 @@ pub(crate) mod test_server {
         let path = request.path.trim_end_matches('/');
         match request.method.as_str() {
             "MKCOL" => {
-                if state.collections.contains(path) {
+                if state.collections.contains(path) || state.files.contains_key(path) {
                     return (405, Vec::new(), None);
                 }
                 let parent = path.rsplit_once('/').unwrap().0;
@@ -820,7 +886,7 @@ pub(crate) mod test_server {
                 (204, Vec::new(), None)
             }
             "PROPFIND" => {
-                if !state.collections.contains(path) {
+                if !state.collections.contains(path) && !state.files.contains_key(path) {
                     return (404, Vec::new(), None);
                 }
                 let prefix = format!("{path}/");
@@ -838,7 +904,7 @@ pub(crate) mod test_server {
                         .unwrap_or_default();
                     xml.push_str(&format!("<x:response><x:href>{href}</x:href><x:propstat><x:prop>{etag}<x:resourcetype>{}</x:resourcetype></x:prop><x:status>HTTP/1.1 200 OK</x:status></x:propstat></x:response>", if collection { "<x:collection/>" } else { "" }));
                 };
-                entry(&prefix, None);
+                entry(&prefix, state.files.get(path).map(|bytes| etag(bytes)));
                 if request.headers.get("depth").map(String::as_str) != Some("0") {
                     for directory in &state.collections {
                         if directory
@@ -869,6 +935,33 @@ pub(crate) mod test_server {
 mod tests {
     use super::test_server::DavServer;
     use super::*;
+
+    #[test]
+    fn application_directory_validation_preserves_logical_names() {
+        assert_eq!(normalize_remote_directory("  作品/小说 Archive  ").unwrap(), "作品/小说 Archive");
+        assert_eq!(normalize_remote_directory(" ").unwrap(), "");
+        assert_eq!(normalize_remote_directory(&"a".repeat(512)).unwrap().len(), 512);
+        for invalid in ["/Novelist", "Novelist/", "a//b", ".", "..", "a/../b", "a\\b", "%2e%2e", "a%2Fb", "a?b", "a#b", "https://example.com", "a\u{7f}b", &"作".repeat(171)] {
+            assert!(normalize_remote_directory(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_application_collections_are_created_idempotently_and_reject_files() {
+        let server = DavServer::start();
+        let client = Client::new();
+        let auth = WebDavAuth { username: "writer".into(), password: "password".into() };
+        for _ in 0..2 {
+            ensure_collections(&client, &server.url, "作品/小说 Archive", &auth).await.unwrap();
+        }
+        let endpoint = application_url(&server.url, "作品/小说 Archive").unwrap();
+        assert!(test_connection(&client, &endpoint, &auth).await.unwrap());
+        put_bytes(&client, &endpoint, "chapter.md", b"content".to_vec(), &auth, PutCondition::Absent).await.unwrap();
+        assert!(create_collection(&client, &endpoint, "chapter.md", &auth).await.is_err());
+        let blocked = remote_url(&endpoint, "blocked").unwrap().path().to_owned();
+        server.state.lock().unwrap().canned.insert(("MKCOL".into(), blocked), (403, Vec::new()));
+        assert!(create_collection(&client, &endpoint, "blocked", &auth).await.is_err());
+    }
 
     #[tokio::test]
     async fn every_method_encodes_nested_cjk_reserved_characters_once() {
@@ -977,6 +1070,33 @@ mod tests {
         assert!(parse_propfind_response("<html>login</html>").is_err());
         assert!(parse_propfind_response("<d:multistatus xmlns:d=\"DAV:\"><d:response>").is_err());
         assert!(parse_propfind_response("<multistatus><response><href>/file.md</href><status>HTTP/1.1 403 Forbidden</status></response></multistatus>").is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_test_rejects_pages_invalid_xml_and_non_collections() {
+        let server = DavServer::start();
+        let client = Client::new();
+        let auth = WebDavAuth {
+            username: "test".into(),
+            password: "not-a-credential".into(),
+        };
+        let key = ("PROPFIND".into(), "/dav/base%20path".into());
+        for (code, body) in [
+            (200, "<html>Login</html>"),
+            (204, ""),
+            (401, ""),
+            (403, ""),
+            (404, ""),
+            (207, "<html>Login</html>"),
+            (207, "<d:multistatus xmlns:d=\"DAV:\"><d:response>"),
+            (207, "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/file.md</d:href><d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"),
+            (207, "<d:multistatus xmlns:d=\"DAV:\"/>"),
+        ] {
+            server.state.lock().unwrap().canned.insert(key.clone(), (code, body.as_bytes().to_vec()));
+            assert!(!matches!(test_connection(&client, &server.url, &auth).await, Ok(true)), "HTTP {code}: {body}");
+        }
+        server.state.lock().unwrap().canned.remove(&key);
+        assert!(test_connection(&client, &server.url, &auth).await.unwrap());
     }
 
     #[tokio::test]

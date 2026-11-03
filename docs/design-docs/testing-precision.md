@@ -1,12 +1,12 @@
 # Testing Precision & Describe-Tag Convention
 
-Background: 2026-04 we shipped a selection-highlight bug that painted
-whole lines instead of the character-range. Root cause: the builder
-emitted `Decoration.line` for every line a selection touched. No unit
-test asserted the builder's output shape — tests covered downstream
-behavior, not the builder's contract. See the spec at
-`docs/exec-plans/completed/2026-04-21-test-hierarchy-and-coverage-design.md`
-for the full incident write-up.
+Background: on 2026-04-21, `unifiedLineSelectionPlugin` painted whole-line
+backgrounds for partial selections even though `view.state.selection` was
+correct. The existing `selection-geometry.spec.ts` asserted left-edge alignment
+across heading lines, so it missed the character-range error in the derived
+decoration. A test of the surrounding structure did not prove the rendered
+selection matched the source state. The current selection invariants live in
+[editor.md](editor.md#unified-selection-background).
 
 To prevent this class of regression we (a) hierarchized tests into
 `tests/unit/**` and `tests/integration/**`, and (b) tag every

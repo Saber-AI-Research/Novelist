@@ -1,3 +1,5 @@
+pub mod account;
+pub mod account_config;
 pub(crate) mod atomic_file;
 pub mod bundled_resources;
 #[cfg(desktop)]

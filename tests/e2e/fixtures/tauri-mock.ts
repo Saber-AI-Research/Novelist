@@ -57,6 +57,33 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
       } catch {}
       let projectDir = ${JSON.stringify(config.projectDir)};
       let projectConfig = ${JSON.stringify(config.projectConfig)};
+      const MOCK_SYNC_CONFIGS_KEY = '__novelist_mock_sync_configs__';
+      const MOCK_WEBDAV_KEY = '__novelist_mock_webdav__';
+      let syncConfigs = readJsonKey(MOCK_SYNC_CONFIGS_KEY, {});
+      let webdavConfiguration = readJsonKey(MOCK_WEBDAV_KEY, null);
+      function defaultSyncConfig() {
+        return { enabled: false, webdav_url: '', remote_directory: 'Novelist', username: '', password: '', interval_minutes: 30, legacy_remote_acknowledged: false, cloud_account: false };
+      }
+      function readSyncConfig(project) {
+        const saved = syncConfigs[project];
+        return saved ? { ...saved, remote_directory: saved.remote_directory ?? '' } : defaultSyncConfig();
+      }
+      function persistSyncConfigs() {
+        localStorage.setItem(MOCK_SYNC_CONFIGS_KEY, JSON.stringify(syncConfigs));
+      }
+      function persistWebdav() {
+        if (webdavConfiguration) localStorage.setItem(MOCK_WEBDAV_KEY, JSON.stringify(webdavConfiguration));
+        else localStorage.removeItem(MOCK_WEBDAV_KEY);
+      }
+      function cloudSummary() {
+        if (!webdavConfiguration) return { connected: false, endpoint: null, remote_directory: null, host: null, username: null, connected_at: null, credential_storage: 'app_data_file' };
+        return { connected: true, endpoint: webdavConfiguration.endpoint, remote_directory: webdavConfiguration.remote_directory ?? '', host: new URL(webdavConfiguration.endpoint).host, username: webdavConfiguration.username, connected_at: webdavConfiguration.connected_at, credential_storage: 'app_data_file' };
+      }
+      function projectBinding(project) {
+        const config = readSyncConfig(project);
+        const same = webdavConfiguration && config.webdav_url === webdavConfiguration.endpoint && config.username === webdavConfiguration.username && config.remote_directory === (webdavConfiguration.remote_directory ?? '');
+        return { linked: Boolean(config.cloud_account && same), other_account: Boolean(config.cloud_account && !same), custom_webdav: !config.cloud_account && Boolean(config.webdav_url), enabled: config.enabled, interval_minutes: config.interval_minutes, last_sync: null };
+      }
       const defaultLiteraryOverview = {
         schemaVersion: 3,
         sourcePath: '/mock/books/demo.txt',
@@ -1399,27 +1426,93 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
             persistMockFiles(); persistMockContents();
             return path;
           }
-          case 'get_sync_config': return { enabled: false, webdav_url: '', username: '', password: '****', interval_minutes: 30, legacy_remote_acknowledged: false, cloud_account: false };
-          case 'save_sync_config': return null;
+          case 'get_sync_config': {
+            const config = readSyncConfig(String(args?.projectDir));
+            return { ...config, password: config.password ? '****' : '' };
+          }
+          case 'save_sync_config': {
+            const project = String(args?.projectDir);
+            const incoming = JSON.parse(JSON.stringify(args.config));
+            if (incoming.password === '****') incoming.password = readSyncConfig(project).password;
+            syncConfigs[project] = incoming;
+            persistSyncConfigs();
+            return null;
+          }
+          case 'export_sync_config': return readSyncConfig(String(args?.projectDir));
+          case 'import_sync_config': {
+            syncConfigs[String(args?.projectDir)] = { ...args.config, remote_directory: args.config.remote_directory ?? '' };
+            persistSyncConfigs();
+            return null;
+          }
           case 'sync_now': return { last_sync: null, files_uploaded: 0, files_downloaded: 0, errors: [], in_progress: false, adoptable_project_id: null, conflicts: [] };
           case 'test_sync_connection': return true;
           case 'adopt_sync_identity': return null;
-          // Cloud account: stateless; the panel keeps what connect returns.
-          case 'get_cloud_account': return { connected: false, endpoint: null, host: null, username: null, connected_at: null, credential_storage: 'app_data_file' };
+          // Optional Novelist account startup must stay quiet when signed out.
+          case 'account_status':
+          case 'account_load_state':
+          case 'account_config_journal':
+          case 'account_config_get_secret': return null;
+          case 'account_config_webdav': return webdavConfiguration ? { ...webdavConfiguration, remote_directory: webdavConfiguration.remote_directory ?? '', password: args?.includeSecrets ? webdavConfiguration.password : null } : null;
+          case 'account_forget': return null;
+          case 'account_config_set_secret': return null;
+          case 'account_config_restore_webdav': {
+            const current = webdavConfiguration;
+            const incoming = args?.configuration ? { ...args.configuration, remote_directory: args.configuration.remote_directory ?? '' } : null;
+            const same = current && incoming && current.endpoint === incoming.endpoint && current.username === incoming.username && current.remote_directory === incoming.remote_directory;
+            webdavConfiguration = incoming && args?.preservePassword && same ? { ...incoming, password: current.password } : incoming;
+            persistWebdav();
+            return null;
+          }
+          case 'account_config_remove_restored_webdav': {
+            if (webdavConfiguration?.restored) {
+              webdavConfiguration = null;
+              persistWebdav();
+            }
+            return null;
+          }
+          case 'account_recovery_key':
+          case 'account_save_state':
+          case 'account_authenticate':
+          case 'account_request': throw 'session_expired';
+          case 'get_cloud_account': return cloudSummary();
           case 'connect_cloud_account': {
             const endpoint = String(args?.endpoint ?? '');
-            let host = null;
-            try { host = new URL(endpoint).host; } catch { throw 'Invalid input: The WebDAV URL is invalid'; }
-            const account = { connected: true, endpoint, host, username: String(args?.username ?? ''), connected_at: '2026-01-01T00:00:00Z', credential_storage: 'app_data_file' };
-            return account;
+            try { new URL(endpoint); } catch { throw 'Invalid input: The WebDAV URL is invalid'; }
+            webdavConfiguration = { endpoint, remote_directory: args?.remoteDirectory ?? 'Novelist', username: String(args?.username ?? ''), password: String(args?.password ?? ''), connected_at: '2026-01-01T00:00:00Z', restored: false, secure_credential: false };
+            persistWebdav();
+            return cloudSummary();
           }
-          case 'check_cloud_account': return { account: { connected: false, endpoint: null, host: null, username: null, connected_at: null, credential_storage: 'app_data_file' }, state: 'not_connected', message: null };
-          case 'disconnect_cloud_account': return { unlinked_projects: 0 };
+          case 'check_cloud_account': return { account: cloudSummary(), state: webdavConfiguration ? 'online' : 'not_connected', message: null };
+          case 'disconnect_cloud_account': {
+            let unlinked = 0;
+            for (const project of Object.keys(syncConfigs)) {
+              if (projectBinding(project).linked) {
+                syncConfigs[project] = { ...syncConfigs[project], enabled: false, cloud_account: false };
+                unlinked += 1;
+              }
+            }
+            persistSyncConfigs();
+            webdavConfiguration = null;
+            persistWebdav();
+            return { unlinked_projects: unlinked };
+          }
           case 'list_cloud_projects': return { projects: [], truncated: false, skipped: 0 };
           case 'download_cloud_project': throw 'No cloud account is connected on this device. Connect it in Settings → Sync.';
-          case 'get_cloud_project_binding':
-          case 'unbind_cloud_project': return { linked: false, other_account: false, custom_webdav: false, enabled: false, interval_minutes: 30, last_sync: null };
-          case 'bind_cloud_project': return { linked: true, other_account: false, custom_webdav: false, enabled: true, interval_minutes: Number(args?.intervalMinutes ?? 30), last_sync: null };
+          case 'get_cloud_project_binding': return projectBinding(String(args?.projectDir));
+          case 'unbind_cloud_project': {
+            const project = String(args?.projectDir);
+            const config = readSyncConfig(project);
+            if (config.cloud_account) syncConfigs[project] = { ...config, cloud_account: false, enabled: false, password: '' };
+            persistSyncConfigs();
+            return projectBinding(project);
+          }
+          case 'bind_cloud_project': {
+            if (!webdavConfiguration) throw 'No cloud account is connected on this device.';
+            const project = String(args?.projectDir);
+            syncConfigs[project] = { ...readSyncConfig(project), enabled: true, webdav_url: webdavConfiguration.endpoint, remote_directory: webdavConfiguration.remote_directory ?? '', username: webdavConfiguration.username, password: '', cloud_account: true, interval_minutes: Number(args?.intervalMinutes ?? 30) };
+            persistSyncConfigs();
+            return projectBinding(project);
+          }
           case 'resolve_sync_conflict': return null;
           case 'reveal_in_file_manager': return null;
            case 'log_startup_phase': return null;
@@ -1455,7 +1548,7 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            case 'get_effective_settings':
             return resolveMockEffective(args.dirPath ?? null);
           case 'get_global_settings':
-            return readMockGlobal();
+            return { ...readMockGlobal(), snapshot: { max_count: snapshotMaxCount, min_interval_minutes: snapshotMinIntervalMinutes } };
           case 'write_global_settings': {
             const current = readMockGlobal();
             if (args.view != null) current.view = args.view;
@@ -1558,6 +1651,11 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
         get projectDir() { return projectDir; },
         get recentProjects() { return recentProjects.map(p => ({ ...p })); },
         get platform() { return mockPlatform; },
+        get syncConfigs() { return JSON.parse(JSON.stringify(syncConfigs)); },
+        setSyncConfig(project, value) {
+          syncConfigs[project] = JSON.parse(JSON.stringify(value));
+          persistSyncConfigs();
+        },
         get sharedFiles() { return sharedFiles.map(entry => ({ ...entry })); },
         get stagedImports() { return Object.keys(stagedImports); },
         setShareError(message) { shareError = message ?? null; },
@@ -1685,6 +1783,10 @@ export function buildTauriMockScript(config: TauriMockConfig): string {
            projectDir = ${JSON.stringify(config.projectDir)};
            projectConfig = ${JSON.stringify(config.projectConfig)};
            literaryOverview = JSON.parse(JSON.stringify(defaultLiteraryOverview));
+           syncConfigs = {};
+           webdavConfiguration = null;
+           localStorage.removeItem(MOCK_SYNC_CONFIGS_KEY);
+           localStorage.removeItem(MOCK_WEBDAV_KEY);
 
            aiStreamCounter = 0;
             for (const key of Object.keys(aiSessions)) delete aiSessions[key];

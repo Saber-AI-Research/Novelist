@@ -120,6 +120,13 @@ class PromptPresetStore {
   userPresets = $state<PromptPreset[]>(loadUserPresets());
   hiddenBuiltins = $state<string[]>(loadHiddenBuiltins());
 
+  replaceFromAccount(presets: PromptPreset[], hidden: string[]): void {
+    localStorage.setItem(USER_PRESETS_KEY, JSON.stringify(presets));
+    localStorage.setItem(HIDDEN_BUILTINS_KEY, JSON.stringify(hidden));
+    this.userPresets = presets.map((preset) => ({ ...preset, builtin: false }));
+    this.hiddenBuiltins = [...hidden];
+  }
+
   /** All visible presets (builtin + user, with hidden builtins filtered out). */
   get all(): PromptPreset[] {
     const hidden = new Set(this.hiddenBuiltins);

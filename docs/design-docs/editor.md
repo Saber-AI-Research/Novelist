@@ -4,6 +4,15 @@ Novelist's editor is CodeMirror 6 with extensive custom decoration and
 interaction work. These invariants have been stabilized through real
 regressions — preserve them when touching anything under `app/lib/editor/`.
 
+## Zen line focus
+
+`app/lib/editor/zen.ts` provides `typewriterPlugin` and `lineFocusPlugin`.
+Typewriter scrolling centers the caret after selection/document changes and
+cancels its pending animation frame on destruction. Line focus dims visible
+logical lines other than the caret's current line. Its decorations are built
+synchronously during updates; moving within the same logical line skips a
+rebuild, while document or viewport changes rebuild the visible range.
+
 ## Large file handling — four tiers
 
 Four modes, picked by file size and line count:

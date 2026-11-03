@@ -1706,6 +1706,7 @@ mod tests {
             &crate::services::sync::SyncConfig {
                 enabled: true,
                 webdav_url: server.url.clone(),
+                remote_directory: String::new(),
                 username: "test".into(),
                 password: "not-a-credential".into(),
                 interval_minutes: 30,

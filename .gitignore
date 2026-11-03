@@ -42,6 +42,7 @@ research/notesnook/
 
 # Local workspace files
 .sisyphus/
+.omo/
 
 # Local machine info (Windows test machine credentials, IPs, MACs — never commit)
 .local/

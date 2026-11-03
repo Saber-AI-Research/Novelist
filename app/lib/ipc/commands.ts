@@ -503,7 +503,7 @@ export const commands = {
 	getSyncConfig: (projectDir: string) => typedError<SyncConfigMasked, string>(__TAURI_INVOKE("get_sync_config", { projectDir })),
 	saveSyncConfig: (projectDir: string, config: SyncConfig) => typedError<null, string>(__TAURI_INVOKE("save_sync_config", { projectDir, config })),
 	syncNow: (projectDir: string) => typedError<SyncStatus, string>(__TAURI_INVOKE("sync_now", { projectDir })),
-	testSyncConnection: (projectDir: string, webdavUrl: string, username: string, password: string) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { projectDir, webdavUrl, username, password })),
+	testSyncConnection: (projectDir: string, webdavUrl: string, username: string, password: string, remoteDirectory: string | null) => typedError<boolean, string>(__TAURI_INVOKE("test_sync_connection", { projectDir, webdavUrl, username, password, remoteDirectory })),
 	/**
 	 *  Join the namespace another device created when it migrated this project's
 	 *  legacy WebDAV folder (`SyncStatus.adoptable_project_id`).
@@ -518,7 +518,7 @@ export const commands = {
 	/**  Re-test the stored credential against the server. */
 	checkCloudAccount: () => typedError<CloudAccountStatus, string>(__TAURI_INVOKE("check_cloud_account")),
 	/**  Validates the URL and authenticates before anything is stored. */
-	connectCloudAccount: (endpoint: string, username: string, password: string) => typedError<CloudAccountSummary, string>(__TAURI_INVOKE("connect_cloud_account", { endpoint, username, password })),
+	connectCloudAccount: (endpoint: string, username: string, password: string, remoteDirectory: string | null) => typedError<CloudAccountSummary, string>(__TAURI_INVOKE("connect_cloud_account", { endpoint, username, password, remoteDirectory })),
 	/**  Forgets the account on this device; no local or remote file is deleted. */
 	disconnectCloudAccount: () => typedError<CloudDisconnect, string>(__TAURI_INVOKE("disconnect_cloud_account")),
 	listCloudProjects: () => typedError<CloudProjectList, string>(__TAURI_INVOKE("list_cloud_projects")),
@@ -693,6 +693,8 @@ export type CloudAccountSummary = {
 	connected: boolean,
 	/**  WebDAV folder URL; validated to carry no credentials. */
 	endpoint: string | null,
+	/**  Relative application folder; empty means the endpoint folder itself. */
+	remote_directory: string | null,
 	host: string | null,
 	username: string | null,
 	connected_at: string | null,
@@ -2221,6 +2223,8 @@ export type StyledCopyImage = {
 export type SyncConfig = {
 	enabled: boolean,
 	webdav_url: string,
+	/**  Relative application folder; old records without it use the endpoint root. */
+	remote_directory?: string,
 	username: string,
 	password: string,
 	interval_minutes: number,
@@ -2237,6 +2241,7 @@ export type SyncConfig = {
 export type SyncConfigMasked = {
 	enabled: boolean,
 	webdav_url: string,
+	remote_directory: string,
 	username: string,
 	password: string,
 	interval_minutes: number,

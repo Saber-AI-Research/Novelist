@@ -1,12 +1,15 @@
 import type { AiTalkSettings } from '$lib/components/ai-talk/settings.svelte';
+import { normalizeWebdavDirectory } from './webdav-directory';
 
-export const CONFIG_TRANSFER_PREFIX = 'NOVELIST-CONFIG-V1:GZIP:';
+export const CONFIG_TRANSFER_PREFIX = 'NOVELIST-CONFIG-V2:GZIP:';
+const LEGACY_TRANSFER_PREFIX = 'NOVELIST-CONFIG-V1:GZIP:';
 const MAX_TRANSFER_LENGTH = 512_000;
 const MAX_DECODED_BYTES = 384_000;
 
 export type TransferSyncConfig = {
   enabled: boolean;
   webdav_url: string;
+  remote_directory: string;
   username: string;
   password: string;
   interval_minutes: number;
@@ -15,7 +18,7 @@ export type TransferSyncConfig = {
 };
 
 export type ConfigTransferPayload = {
-  version: 1;
+  version: 2;
   exportedAt: string;
   aiTalk: AiTalkSettings;
   sync: TransferSyncConfig;
@@ -65,10 +68,20 @@ export async function encodeConfigTransfer(payload: ConfigTransferPayload): Prom
 
 export async function decodeConfigTransfer(raw: string): Promise<ConfigTransferPayload> {
   const value = raw.trim();
-  if (!value.startsWith(CONFIG_TRANSFER_PREFIX)) throw new Error('这不是 Novelist 配置字符串');
+  const legacy = value.startsWith(LEGACY_TRANSFER_PREFIX);
+  const prefix = legacy ? LEGACY_TRANSFER_PREFIX : CONFIG_TRANSFER_PREFIX;
+  if (!value.startsWith(prefix)) throw new Error('这不是 Novelist 配置字符串');
   try {
-    const compressed = base64ToBytes(value.slice(CONFIG_TRANSFER_PREFIX.length));
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(await gunzip(compressed)));
+    const compressed = base64ToBytes(value.slice(prefix.length));
+    let parsed: unknown = JSON.parse(new TextDecoder().decode(await gunzip(compressed)));
+    if (legacy) {
+      if (!parsed || typeof parsed !== 'object' || !('version' in parsed) || parsed.version !== 1
+        || !('exportedAt' in parsed) || typeof parsed.exportedAt !== 'string'
+        || !('aiTalk' in parsed) || !isAiTalkSettings(parsed.aiTalk)
+        || !('sync' in parsed) || !parsed.sync || typeof parsed.sync !== 'object'
+        || ('remote_directory' in parsed.sync && parsed.sync.remote_directory !== '')) throw new Error('配置内容无效或版本不受支持');
+      parsed = { version: 2, exportedAt: parsed.exportedAt, aiTalk: parsed.aiTalk, sync: { ...parsed.sync, remote_directory: '' } };
+    }
     if (!isConfigTransferPayload(parsed)) throw new Error('配置内容无效或版本不受支持');
     return parsed;
   } catch (error) {
@@ -79,7 +92,7 @@ export async function decodeConfigTransfer(raw: string): Promise<ConfigTransferP
 
 function isConfigTransferPayload(value: unknown): value is ConfigTransferPayload {
   if (!value || typeof value !== 'object' || !('version' in value) || !('exportedAt' in value)) return false;
-  return value.version === 1 && typeof value.exportedAt === 'string'
+  return value.version === 2 && typeof value.exportedAt === 'string'
     && 'aiTalk' in value && isAiTalkSettings(value.aiTalk)
     && 'sync' in value && isTransferSyncConfig(value.sync);
 }
@@ -108,7 +121,8 @@ export function isAiTalkSettings(value: unknown): value is AiTalkSettings {
 }
 
 export function isTransferSyncConfig(value: unknown): value is TransferSyncConfig {
-  if (!value || typeof value !== 'object') return false;
+  if (!value || typeof value !== 'object' || !('remote_directory' in value) || typeof value.remote_directory !== 'string') return false;
+  try { if (normalizeWebdavDirectory(value.remote_directory) !== value.remote_directory) return false; } catch { return false; }
   return 'enabled' in value && typeof value.enabled === 'boolean'
     && 'webdav_url' in value && typeof value.webdav_url === 'string'
     && 'username' in value && typeof value.username === 'string'

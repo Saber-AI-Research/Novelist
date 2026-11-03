@@ -1,7 +1,7 @@
 # New-User Onboarding
 
 Status: draft
-Last updated: 2026-04-25
+Last updated: 2026-11-03
 
 ## Goal
 
@@ -20,8 +20,18 @@ or open a project without reading documentation.
 5. Export, templates, mindmap, and settings remain discoverable but do not
    interrupt writing.
 
+New devices must support this whole flow without registration, login or a
+network connection. Signed-out use is a permanent, fully supported mode.
+Optional login can later restore selected configuration and WebDAV connection
+information without replacing local projects. See
+[optional account and configuration sync](2026-11-03-optional-account-and-config-sync.md).
+
 ## Acceptance Criteria
 
+- A fresh installation can create/import, edit, save, reopen and export a
+  local project while signed out and offline, with no blocking login screen.
+- Manual WebDAV setup does not require a Novelist account; connecting to a
+  remote server naturally requires network access.
 - New project creation is possible without touching the filesystem manually.
 - The default project includes at least one editable Markdown file.
 - The first file can be saved, closed, reopened, and exported.

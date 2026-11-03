@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { uiStore } from '$lib/stores/ui.svelte';
   import { builtinThemes, loadCustomThemes, addCustomTheme, removeCustomTheme } from '$lib/themes';
   import { commands, type SyncConfigMasked } from '$lib/ipc/commands';
   import { aiTalkSettings } from '$lib/components/ai-talk/settings.svelte';
   import { decodeConfigTransfer, encodeConfigTransfer, isTransferSyncConfig } from '$lib/services/config-transfer';
+  import { DEFAULT_WEBDAV_DIRECTORY, normalizeWebdavDirectory, webdavDirectoryUrl } from '$lib/services/webdav-directory';
   import { shortcutsStore, editorCommandIds, formatShortcut, buildShortcutString, matchesShortcutQuery } from '$lib/stores/shortcuts.svelte';
   import { projectStore, type FileNode } from '$lib/stores/project.svelte';
   import { settingsStore } from '$lib/stores/settings.svelte';
@@ -22,6 +23,7 @@
   import SettingsPublishPanel from './SettingsPublishPanel.svelte';
   import SettingsSwitch from './SettingsSwitch.svelte';
   import CloudAccountPanel from '$lib/components/CloudAccountPanel.svelte';
+  import AccountPanel from '$lib/components/AccountPanel.svelte';
   import MacroHint from './MacroHint.svelte';
   import PortableModeBanner from '$lib/components/PortableModeBanner.svelte';
   import { isImeComposing } from '$lib/utils/ime';
@@ -565,6 +567,7 @@
     return {
       enabled: false,
       webdav_url: '',
+      remote_directory: DEFAULT_WEBDAV_DIRECTORY,
       username: '',
       password: '',
       interval_minutes: 30,
@@ -573,11 +576,36 @@
     };
   }
   let syncConfig = $state<SyncConfigMasked>(emptySyncConfig());
+  let syncDirectoryInput = $state(DEFAULT_WEBDAV_DIRECTORY);
+  let syncUseEndpointFolder = $state(false);
+  let syncConfigError = $state<string | null>(null);
+  let syncDirectoryNotice = $state<string | null>(null);
+  const syncDirectorySelection = $derived(syncUseEndpointFolder ? '' : syncDirectoryInput.trim() || null);
+  const syncFolderPreview = $derived(syncDirectorySelection === null ? null : webdavDirectoryUrl(syncConfig.webdav_url, syncDirectorySelection));
+
+  function directoryMode(directory: string | null): string {
+    return t(directory === '' ? 'webdav.directory.modeEndpoint' : directory === DEFAULT_WEBDAV_DIRECTORY ? 'webdav.directory.modeDefault' : 'webdav.directory.modeCustom');
+  }
+
+  function validatedSyncDirectory(): string | null {
+    try {
+      if (!syncUseEndpointFolder && !syncDirectoryInput.trim()) throw new Error('empty_directory');
+      return normalizeWebdavDirectory(syncUseEndpointFolder ? '' : syncDirectoryInput);
+    } catch {
+      syncConfigError = t('webdav.directory.invalid');
+      return null;
+    }
+  }
   /** Project whose config is in `syncConfig`; edits only ever save there. */
   let syncLoadedFor = $state<string | null>(null);
   let syncLoaded = $derived(syncLoadedFor !== null && syncLoadedFor === projectStore.dirPath);
   let syncLoadingFor: string | null = null;
   let syncTestResult = $state<'idle' | 'testing' | 'success' | 'fail'>('idle');
+  let syncTestGeneration = 0;
+  function invalidateSyncTest() {
+    syncTestGeneration++;
+    syncTestResult = 'idle';
+  }
   let syncInProgress = $state(false);
   let lastSyncTime = $state<string | null>(null);
   let syncErrors = $state<string[]>([]);
@@ -587,37 +615,68 @@
   async function loadSyncConfig(projectDir: string) {
     syncLoadingFor = projectDir;
     syncLoadedFor = null;
-    syncTestResult = 'idle';
+    invalidateSyncTest();
     lastSyncTime = null;
     syncErrors = [];
+    syncConfigError = null;
+    syncDirectoryNotice = null;
     adoptableProjectId = null;
     let config = emptySyncConfig();
     try {
       const loaded = await invoke('get_sync_config', { projectDir }) as SyncConfigMasked;
-      config = { ...loaded, legacy_remote_acknowledged: loaded.legacy_remote_acknowledged ?? false };
-    } catch (e) {
-      console.error('Failed to load sync config:', e);
+      config = { ...loaded, remote_directory: loaded.remote_directory ?? '', legacy_remote_acknowledged: loaded.legacy_remote_acknowledged ?? false };
+    } catch {
+      if (syncLoadingFor === projectDir) {
+        syncConfigError = t('settings.sync.loadFailed');
+        syncLoadingFor = null;
+      }
+      return;
     }
     // A newer switch owns the form now.
     if (syncLoadingFor !== projectDir) return;
     syncLoadingFor = null;
     syncConfig = config;
+    syncDirectoryInput = config.remote_directory || DEFAULT_WEBDAV_DIRECTORY;
+    syncUseEndpointFolder = config.remote_directory === '';
     syncLoadedFor = projectDir;
   }
 
-  async function saveSyncConfig() {
+  async function saveSyncConfig(): Promise<boolean> {
     const projectDir = syncLoadedFor;
-    if (!projectDir) return;
+    if (!projectDir) return false;
+    const directory = validatedSyncDirectory();
+    if (directory === null) return false;
+    const directoryChanged = directory !== syncConfig.remote_directory;
+    const config = {
+      ...syncConfig,
+      remote_directory: directory,
+      enabled: directoryChanged ? false : syncConfig.enabled,
+      legacy_remote_acknowledged: directoryChanged ? false : syncConfig.legacy_remote_acknowledged,
+    };
+    syncConfigError = null;
     try {
-      await invoke('save_sync_config', { projectDir, config: syncConfig });
-    } catch (e) {
-      console.error('Failed to save sync config:', e);
+      await invoke('save_sync_config', { projectDir, config });
+      if (syncLoadedFor === projectDir) {
+        syncConfig.remote_directory = directory;
+        syncConfig.enabled = config.enabled;
+        syncConfig.legacy_remote_acknowledged = config.legacy_remote_acknowledged;
+        if (directoryChanged) syncDirectoryNotice = t('webdav.directory.changed');
+      }
+      window.dispatchEvent(new CustomEvent('novelist-sync-config-changed', { detail: { projectDir, source: 'settings' } }));
+      return true;
+    } catch {
+      if (syncLoadedFor === projectDir) syncConfigError = t('settings.sync.saveFailed');
+      return false;
     }
   }
 
   async function testConnection() {
     const projectDir = syncLoadedFor;
     if (!projectDir) return;
+    const directory = validatedSyncDirectory();
+    if (directory === null) return;
+    syncConfigError = null;
+    const generation = ++syncTestGeneration;
     syncTestResult = 'testing';
     try {
       // The backend swaps the masked password for the stored one.
@@ -626,16 +685,19 @@
         webdavUrl: syncConfig.webdav_url,
         username: syncConfig.username,
         password: syncConfig.password,
+        remoteDirectory: directory,
       }) as boolean;
-      if (syncLoadedFor === projectDir) syncTestResult = ok ? 'success' : 'fail';
+      if (syncLoadedFor === projectDir && generation === syncTestGeneration) syncTestResult = ok ? 'success' : 'fail';
     } catch (e) {
-      if (syncLoadedFor === projectDir) syncTestResult = 'fail';
+      if (syncLoadedFor === projectDir && generation === syncTestGeneration) syncTestResult = 'fail';
     }
   }
 
   async function syncNow() {
     const projectDir = projectStore.dirPath;
     if (!projectDir) return;
+    if (!await saveSyncConfig()) return;
+    if (syncLoadedFor !== projectDir || projectStore.dirPath !== projectDir) return;
     syncInProgress = true;
     syncErrors = [];
     adoptableProjectId = null;
@@ -676,9 +738,14 @@
     }
   }
 
-  function setSyncEnabled(checked: boolean) {
+  async function setSyncEnabled(checked: boolean) {
+    const projectDir = syncLoadedFor;
+    const previous = syncConfig.enabled;
     syncConfig.enabled = checked;
-    void saveSyncConfig();
+    const saved = await saveSyncConfig();
+    if (syncLoadedFor !== projectDir) return;
+    if (!saved) syncConfig.enabled = previous;
+    else if (checked && syncConfig.enabled) syncDirectoryNotice = null;
   }
 
   let configTransferStatus = $state<'idle' | 'copying' | 'pasting' | 'success' | 'error'>('idle');
@@ -693,7 +760,7 @@
       const exportedSync: unknown = await invoke('export_sync_config', { projectDir });
       if (!isTransferSyncConfig(exportedSync)) throw new Error('同步配置格式无效');
       const payload = await encodeConfigTransfer({
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
         aiTalk: aiTalkSettings.value,
         sync: exportedSync,
@@ -798,6 +865,23 @@
     if (activeSection !== 'sync' || !projectDir) return;
     if (untrack(() => syncLoadedFor) === projectDir || syncLoadingFor === projectDir) return;
     void loadSyncConfig(projectDir);
+  });
+
+  onMount(() => {
+    const refresh = () => {
+      const projectDir = projectStore.dirPath;
+      if (projectDir) void loadSyncConfig(projectDir);
+    };
+    const refreshProject = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectDir?: string; source?: string }>).detail;
+      if (detail?.projectDir === projectStore.dirPath && detail.source !== 'settings') refresh();
+    };
+    window.addEventListener('novelist-webdav-connection-changed', refresh);
+    window.addEventListener('novelist-sync-config-changed', refreshProject);
+    return () => {
+      window.removeEventListener('novelist-webdav-connection-changed', refresh);
+      window.removeEventListener('novelist-sync-config-changed', refreshProject);
+    };
   });
 </script>
 
@@ -1665,6 +1749,10 @@
       {:else if activeSection === 'publish'}
         <SettingsPublishPanel />
       {:else if activeSection === 'sync'}
+        <div class="mb-5 pb-5" data-testid="settings-sync-account" style="border-bottom: 1px solid var(--novelist-border);">
+          <AccountPanel />
+        </div>
+
         <div class="mb-5 pb-5" data-testid="settings-sync-cloud" style="border-bottom: 1px solid var(--novelist-border);">
           <CloudAccountPanel projectDir={projectStore.dirPath} {onOpenProject} />
         </div>
@@ -1674,7 +1762,11 @@
         {#if !projectStore.dirPath}
           <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.sync.openProject')}</p>
         {:else if !syncLoaded}
-          <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>
+          {#if syncConfigError}
+            <p class="text-xs" role="alert" data-testid="sync-config-error" style="color: #ef4444;">{syncConfigError}</p>
+          {:else}
+            <p class="text-sm" style="color: var(--novelist-text-secondary);">{t('settings.plugins.loading')}</p>
+          {/if}
         {:else}
           <div class="flex items-center justify-between mb-3">
             <label for="sync-enabled" class="text-sm">{t('settings.sync.enabled')}</label>
@@ -1699,10 +1791,52 @@
               placeholder="https://dav.example.com"
               value={syncConfig.webdav_url}
               readonly={syncConfig.cloud_account}
-              oninput={(e) => { syncConfig.webdav_url = (e.target as HTMLInputElement).value; }}
+              oninput={(e) => { syncConfig.webdav_url = (e.target as HTMLInputElement).value; invalidateSyncTest(); }}
               onblur={saveSyncConfig}
             />
           </div>
+          <div class="mb-3">
+            <label for="sync-remote-directory" class="text-sm block mb-1">{t('webdav.directory.label')}</label>
+            <input
+              id="sync-remote-directory"
+              type="text"
+              autocapitalize="off"
+              autocomplete="off"
+              spellcheck="false"
+              class="w-full text-sm px-2 py-1 rounded"
+              style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
+              bind:value={syncDirectoryInput}
+              oninput={invalidateSyncTest}
+              disabled={syncConfig.cloud_account || syncUseEndpointFolder}
+              onblur={saveSyncConfig}
+              data-testid="sync-remote-directory"
+            />
+            <p class="text-xs mt-1" style="color: var(--novelist-text-secondary);">{t('webdav.directory.hint')}</p>
+            <label class="text-xs flex items-center gap-2 mt-2">
+              <input
+                type="checkbox"
+                checked={syncUseEndpointFolder}
+                disabled={syncConfig.cloud_account}
+                onchange={(event) => { syncUseEndpointFolder = event.currentTarget.checked; invalidateSyncTest(); void saveSyncConfig(); }}
+                data-testid="sync-use-endpoint-folder"
+              />
+              <span>{t('webdav.directory.useEndpoint')}</span>
+            </label>
+            <p class="text-xs mt-2" data-testid="sync-directory-mode" style="color: var(--novelist-text-secondary);">{directoryMode(syncDirectorySelection)}</p>
+            {#if syncFolderPreview}
+              <p class="text-xs mt-1 break-all" data-testid="sync-directory-preview" style="color: var(--novelist-text-secondary);">
+                {t('webdav.directory.finalFolder')} <code>{syncFolderPreview}</code>
+              </p>
+            {/if}
+            <p class="text-xs mt-1" style="color: var(--novelist-text-secondary);">{t('webdav.directory.saveHint')}</p>
+          </div>
+
+          {#if syncConfigError}
+            <p class="text-xs mb-3" role="alert" data-testid="sync-config-error" style="color: #ef4444;">{syncConfigError}</p>
+          {/if}
+          {#if syncDirectoryNotice}
+            <p class="text-xs mb-3" role="status" data-testid="sync-directory-notice" style="color: var(--novelist-text-secondary);">{syncDirectoryNotice}</p>
+          {/if}
 
           <div class="mb-3">
             <label for="sync-username" class="text-sm block mb-1">{t('settings.sync.username')}</label>
@@ -1713,7 +1847,7 @@
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               value={syncConfig.username}
               readonly={syncConfig.cloud_account}
-              oninput={(e) => { syncConfig.username = (e.target as HTMLInputElement).value; }}
+              oninput={(e) => { syncConfig.username = (e.target as HTMLInputElement).value; invalidateSyncTest(); }}
               onblur={saveSyncConfig}
             />
           </div>
@@ -1727,7 +1861,7 @@
               style="background: var(--novelist-bg-secondary); color: var(--novelist-text); border: 1px solid var(--novelist-border);"
               value={syncConfig.password}
               readonly={syncConfig.cloud_account}
-              oninput={(e) => { syncConfig.password = (e.target as HTMLInputElement).value; }}
+              oninput={(e) => { syncConfig.password = (e.target as HTMLInputElement).value; invalidateSyncTest(); }}
               onblur={saveSyncConfig}
             />
           </div>
@@ -1824,7 +1958,10 @@
           {/if}
 
           <div class="mt-3 text-xs" style="color: var(--novelist-text-secondary);">
-            {t('settings.sync.syncPath')} <code style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{"<webdav-url>/novelist-sync/<project-id>/"}</code>
+            {t('settings.sync.syncPath')}
+            {#if syncFolderPreview}
+              <code class="break-all" data-testid="sync-final-path" style="background: var(--novelist-code-bg); padding: 1px 4px; border-radius: 3px;">{syncFolderPreview}novelist-sync/&lt;project-id&gt;/</code>
+            {/if}
           </div>
         {/if}
 

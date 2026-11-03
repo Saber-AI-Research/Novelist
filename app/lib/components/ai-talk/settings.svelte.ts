@@ -1,9 +1,18 @@
-/**
- * Persistent settings for the AI Talk panel. Stored in the host's localStorage
- * under a namespaced key so it doesn't collide with editor state.
- */
+/** AI settings stay local; account-restored credentials live in the OS vault. */
+import { getConfigurationSecret, setConfigurationSecret } from '$lib/services/account-config-native';
 
 const KEY = 'novelist:ai-talk:settings:v1';
+const VAULT_PROFILES_KEY = 'novelist:ai-talk:vault-profiles:v1';
+const VAULT_URLS_KEY = 'novelist:ai-talk:vault-urls:v1';
+
+function loadIds(key: string): Set<string> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []);
+  } catch { return new Set(); }
+}
+
+export type AiTalkCredentialStorage = { profiles: string[]; urls: string[] };
 
 export type AiTalkSettings = {
   activeProfileId: string;
@@ -91,18 +100,94 @@ function load(): AiTalkSettings {
   }
 }
 
-function persist(value: AiTalkSettings) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(value));
-  } catch {
-    /* quota exceeded or storage disabled — silently ignore */
-  }
+function persist(value: AiTalkSettings, vaultProfiles: Set<string>, vaultUrls: Set<string>, strict = false) {
+  const profiles = value.profiles.map((profile) => ({
+    ...profile,
+    apiKey: vaultProfiles.has(profile.id) ? '' : profile.apiKey,
+    baseUrl: vaultUrls.has(profile.id) ? '' : profile.baseUrl,
+  }));
+  const safe = hydrateActiveProfile({ ...value, profiles });
+  const save = () => {
+    localStorage.setItem(VAULT_PROFILES_KEY, JSON.stringify([...vaultProfiles]));
+    localStorage.setItem(VAULT_URLS_KEY, JSON.stringify([...vaultUrls]));
+    localStorage.setItem(KEY, JSON.stringify(safe));
+  };
+  if (strict) save();
+  else { try { save(); } catch { /* Local storage can be unavailable. */ } }
 }
 
 class AiTalkSettingsStore {
   value = $state<AiTalkSettings>(load());
+  private vaultProfiles = loadIds(VAULT_PROFILES_KEY);
+  private vaultUrls = loadIds(VAULT_URLS_KEY);
+  private loadedSecrets = new Set<string>();
+  private editedSecrets = new Set<string>();
+  private secretWrites: Promise<void> = Promise.resolve();
+  private secretLoad: Promise<void> | null = null;
+  private secretLoadGeneration = 0;
+  credentialError: string | null = null;
+
+  constructor() {
+    void this.ensureSecrets().catch(() => undefined);
+  }
+
+  ensureSecrets(): Promise<void> {
+    if (this.secretLoad) return this.secretLoad;
+    const generation = this.secretLoadGeneration;
+    this.secretLoad = (async () => {
+      for (const [ids, prefix, field] of [[this.vaultProfiles, 'ai:', 'apiKey'], [this.vaultUrls, 'ai-url:', 'baseUrl']] as const) {
+        for (const id of ids) {
+          const slot = `${prefix}${id}`;
+          const value = await getConfigurationSecret(slot);
+          if (generation !== this.secretLoadGeneration) return;
+          this.loadedSecrets.add(slot);
+          if (this.editedSecrets.has(slot)) continue;
+          this.value = hydrateActiveProfile({ ...this.value, profiles: this.value.profiles.map((profile) => profile.id === id ? { ...profile, [field]: value ?? '' } : profile) });
+        }
+      }
+    })().catch(() => {
+      if (generation !== this.secretLoadGeneration) return;
+      this.credentialError = 'secure_storage_unavailable';
+      this.secretLoad = null;
+      throw new Error('secure_storage_unavailable');
+    });
+    return this.secretLoad;
+  }
+
+  async flushSecretWrites(): Promise<void> { await this.secretWrites; }
+
+  private save() {
+    persist(this.value, this.vaultProfiles, this.vaultUrls);
+    for (const profile of this.value.profiles) {
+      for (const [ids, prefix, field] of [[this.vaultProfiles, 'ai:', 'apiKey'], [this.vaultUrls, 'ai-url:', 'baseUrl']] as const) {
+        const slot = `${prefix}${profile.id}`;
+        if (!ids.has(profile.id) || (!this.loadedSecrets.has(slot) && !this.editedSecrets.has(slot))) continue;
+        const value = profile[field];
+        this.secretWrites = this.secretWrites.then(() => setConfigurationSecret(slot, value || null)).catch(() => { this.credentialError = 'secure_storage_unavailable'; });
+      }
+    }
+  }
+
+  accountStorageState(): AiTalkCredentialStorage {
+    return { profiles: [...this.vaultProfiles], urls: [...this.vaultUrls] };
+  }
+
+  /** Vault writes are staged by the account transaction before publishing. */
+  replaceFromAccount(value: AiTalkSettings, storage: AiTalkCredentialStorage): void {
+    const profiles = new Set(storage.profiles);
+    const urls = new Set(storage.urls);
+    persist(value, profiles, urls, true);
+    this.secretLoadGeneration++;
+    this.vaultProfiles = profiles;
+    this.vaultUrls = urls;
+    this.loadedSecrets = new Set([...profiles].map((id) => `ai:${id}`).concat([...urls].map((id) => `ai-url:${id}`)));
+    this.secretLoad = Promise.resolve();
+    this.value = hydrateActiveProfile(value);
+  }
 
   update(patch: Partial<AiTalkSettings>) {
+    if (patch.apiKey !== undefined) this.editedSecrets.add(`ai:${patch.activeProfileId ?? this.value.activeProfileId}`);
+    if (patch.baseUrl !== undefined) this.editedSecrets.add(`ai-url:${patch.activeProfileId ?? this.value.activeProfileId}`);
     const next = { ...this.value, ...patch };
     const activeProfileId = patch.activeProfileId ?? next.activeProfileId;
     let profiles = next.profiles;
@@ -127,7 +212,7 @@ class AiTalkSettingsStore {
       );
     }
     this.value = hydrateActiveProfile({ ...next, activeProfileId, profiles });
-    persist(this.value);
+    this.save();
   }
 
   /**
@@ -152,12 +237,14 @@ class AiTalkSettingsStore {
       temperature: v.temperature,
       custom: true,
     };
+    if (this.vaultProfiles.has(v.activeProfileId)) { this.vaultProfiles.add(id); this.loadedSecrets.add(`ai:${id}`); }
+    if (this.vaultUrls.has(v.activeProfileId)) { this.vaultUrls.add(id); this.loadedSecrets.add(`ai-url:${id}`); }
     this.value = hydrateActiveProfile({
       ...v,
       activeProfileId: id,
       profiles: [...v.profiles, profile],
     });
-    persist(this.value);
+    this.save();
     return id;
   }
 
@@ -168,7 +255,7 @@ class AiTalkSettingsStore {
       ...this.value,
       profiles: this.value.profiles.map((p) => (p.id === id ? { ...p, label: cleaned } : p)),
     };
-    persist(this.value);
+    this.save();
   }
 
   /** Add a clean connection; restoring a template never restores its old key. */
@@ -194,12 +281,16 @@ class AiTalkSettingsStore {
     const activeProfileId =
       this.value.activeProfileId === id ? profiles[0]?.id ?? '' : this.value.activeProfileId;
     this.value = hydrateActiveProfile({ ...this.value, activeProfileId, profiles });
-    persist(this.value);
+    for (const [ids, prefix] of [[this.vaultProfiles, 'ai:'], [this.vaultUrls, 'ai-url:']] as const) {
+      if (!ids.delete(id)) continue;
+      this.secretWrites = this.secretWrites.then(() => setConfigurationSecret(`${prefix}${id}`, null)).catch(() => { this.credentialError = 'secure_storage_unavailable'; });
+    }
+    this.save();
   }
 
   reset() {
     this.value = freshDefaults();
-    persist(this.value);
+    this.save();
   }
 }
 

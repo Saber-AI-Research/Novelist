@@ -12,6 +12,7 @@
   } from '$lib/ipc/commands';
   import { platform } from '$lib/stores/platform.svelte';
   import { nonConflictErrors, syncedCleanly } from '$lib/services/cloud-sync-status';
+  import { DEFAULT_WEBDAV_DIRECTORY, normalizeWebdavDirectory, webdavDirectoryUrl } from '$lib/services/webdav-directory';
   import { t } from '$lib/i18n';
 
   interface Props {
@@ -32,6 +33,8 @@
   let endpoint = $state('');
   let username = $state('');
   let password = $state('');
+  let remoteDirectory = $state(DEFAULT_WEBDAV_DIRECTORY);
+  let useEndpointFolder = $state(false);
   let connecting = $state(false);
   let accountError = $state<string | null>(null);
   let confirmingDisconnect = $state(false);
@@ -58,6 +61,12 @@
   let downloading = $state<string | null>(null);
 
   const connected = $derived(account?.connected === true);
+  const selectedDirectory = $derived(useEndpointFolder ? '' : remoteDirectory.trim() || null);
+  const selectedFolder = $derived(selectedDirectory === null ? null : webdavDirectoryUrl(endpoint, selectedDirectory));
+
+  function directoryMode(directory: string | null): string {
+    return t(directory === '' ? 'webdav.directory.modeEndpoint' : directory === DEFAULT_WEBDAV_DIRECTORY ? 'webdav.directory.modeDefault' : 'webdav.directory.modeCustom');
+  }
 
   /** Problems other than the per-file conflicts listed separately. */
   const otherErrors = $derived(nonConflictErrors(syncStatus));
@@ -78,7 +87,17 @@
   }
 
   onMount(() => {
+    const refresh = () => {
+      connection = null;
+      accountError = null;
+      projects = [];
+      listed = false;
+      void loadAccount();
+      if (projectDir) void loadBinding(projectDir);
+    };
     void loadAccount();
+    window.addEventListener('novelist-webdav-connection-changed', refresh);
+    return () => window.removeEventListener('novelist-webdav-connection-changed', refresh);
   });
 
   async function loadAccount() {
@@ -110,10 +129,18 @@
   async function connect(event: SubmitEvent) {
     event.preventDefault();
     if (connecting) return;
-    connecting = true;
     accountError = null;
+    let directory: string;
+    try {
+      if (!useEndpointFolder && !remoteDirectory.trim()) throw new Error('empty_directory');
+      directory = normalizeWebdavDirectory(useEndpointFolder ? '' : remoteDirectory);
+    } catch {
+      accountError = t('webdav.directory.invalid');
+      return;
+    }
+    connecting = true;
     notice = null;
-    const result = await commands.connectCloudAccount(endpoint, username, password);
+    const result = await commands.connectCloudAccount(endpoint, username, password, directory);
     connecting = false;
     if (result.status === 'error') {
       accountError = result.error;
@@ -139,7 +166,7 @@
       return;
     }
     notice = t('cloud.account.disconnected', { count: result.data.unlinked_projects });
-    account = { ...(account as CloudAccountSummary), connected: false, endpoint: null, host: null, username: null, connected_at: null };
+    account = { ...(account as CloudAccountSummary), connected: false, endpoint: null, remote_directory: null, host: null, username: null, connected_at: null };
     connection = null;
     projects = [];
     listed = false;
@@ -325,6 +352,29 @@
         <span class="text-xs hint">{t('cloud.account.endpointHint')}</span>
       </label>
       <label class="field">
+        <span class="text-sm">{t('webdav.directory.label')}</span>
+        <input
+          type="text"
+          autocapitalize="off"
+          autocomplete="off"
+          spellcheck="false"
+          disabled={useEndpointFolder}
+          bind:value={remoteDirectory}
+          data-testid="cloud-remote-directory"
+        />
+        <span class="text-xs hint">{t('webdav.directory.hint')}</span>
+      </label>
+      <label class="text-xs flex items-center gap-2">
+        <input type="checkbox" bind:checked={useEndpointFolder} data-testid="cloud-use-endpoint-folder" />
+        <span>{t('webdav.directory.useEndpoint')}</span>
+      </label>
+      <div class="text-xs hint" data-testid="cloud-directory-preview">
+        <span>{directoryMode(selectedDirectory)}</span>
+        {#if selectedFolder}
+          <div>{t('webdav.directory.finalFolder')} <code class="path">{selectedFolder}</code></div>
+        {/if}
+      </div>
+      <label class="field">
         <span class="text-sm">{t('cloud.account.username')}</span>
         <input
           type="text"
@@ -358,7 +408,10 @@
           <div class="text-sm font-medium truncate" data-testid="cloud-account-identity">
             {t('cloud.account.identity', { user: account.username ?? '', host: account.host ?? '' })}
           </div>
-          <div class="text-xs hint truncate" title={account.endpoint ?? ''}>{account.endpoint}</div>
+          <div class="text-xs hint path" data-testid="cloud-account-folder">
+            <div>{directoryMode(account.remote_directory ?? '')}</div>
+            <div>{t('webdav.directory.finalFolder')} <code>{webdavDirectoryUrl(account.endpoint ?? '', account.remote_directory ?? '') ?? ''}</code></div>
+          </div>
         </div>
         <span
           class="badge"
@@ -414,6 +467,11 @@
           <p class="text-xs mb-2 error">{t('cloud.project.otherAccount')}</p>
         {:else if binding.custom_webdav && !binding.linked}
           <p class="text-xs mb-2 hint">{t('cloud.project.customWebdav')}</p>
+        {/if}
+        {#if binding.linked && !binding.other_account}
+          <p class="text-xs mb-2 hint path" data-testid="cloud-project-sync-path">
+            {t('webdav.directory.syncPath')} <code>{webdavDirectoryUrl(account?.endpoint ?? '', account?.remote_directory ?? '') ?? ''}novelist-sync/&lt;project-id&gt;/</code>
+          </p>
         {/if}
         <div class="actions">
           {#if binding.linked && binding.enabled}

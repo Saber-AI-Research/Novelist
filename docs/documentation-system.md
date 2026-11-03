@@ -1,6 +1,6 @@
 # Documentation System
 
-Last updated: 2026-05-27
+Last updated: 2026-11-03
 
 This page defines how Novelist keeps documentation useful after features ship.
 The goal is simple: every notable change should leave one durable trace, and
@@ -57,6 +57,13 @@ execute it. Once a release contains the work:
   useful for future audits.
 - Delete the plan when it only repeats a product spec or design doc.
 - Link the completed plan from the release note if it explains release context.
+- An old unchecked checklist is not evidence that a feature is unfinished.
+  Compare it with implementation and the current durable contract before
+  retaining it as active work.
+- Before deleting a superseded draft, move any unique lasting contract or
+  incident explanation into its durable home and repair incoming references.
+  Preserve genuinely unfinished requirements and release/platform evidence.
+  Keep machine-local evidence paths visibly separate from portable docs links.
 
 
 
@@ -70,3 +77,12 @@ bands:
 - Moved the shipped v0.2.4 execution plans out of `active/`.
 - Updated docs indexes so image hosting, publishing, and rename macros are
   represented as shipped product specs instead of active drafts.
+
+On 2026-11-03, superseded completed implementation/design drafts and the April
+maintainability-refactor plan were removed. The selection incident, icon
+conventions, project-scaffold locale rules and Zen line-focus behavior now live
+in their current design/convention pages. The template-file format record is
+retained because it still carries a distinct contract. Active release, mobile
+and account acceptance plans remain; the memory plan now lists only follow-up
+work. Product/account indexes distinguish local implementation from release
+acceptance and production deployment.

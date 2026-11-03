@@ -1,5 +1,18 @@
 # P3 Long-term Technical Plans
 
+Status reconciled: 2026-11-03. This is a set of deferred proposals, not an
+implementation checklist. Snapshots, outline drag-reordering, writing statistics
+and WebDAV sync already exist in `SnapshotPanel.svelte`, `Outline.svelte`,
+`StatsPanel.svelte` and their Rust services. Current snapshot retention defaults
+to 100; the old 50-snapshot recommendation and Rope viewport-edit path below
+are superseded by [settings](settings.md#snapshot-retention-snapshot),
+[editor file-size tiers](editor.md#large-file-handling--four-tiers) and
+[file lifecycle](file-lifecycle.md#webdav-synchronization).
+
+Retain this proposal for snapshot diff/compression ideas, weekly goals and
+session-history UI, and the conditional CRDT/real-time-collaboration discussion.
+Those ideas are not current API or storage contracts and have no release date.
+
 ## 1. Version Snapshots (版本快照)
 
 **Goal:** Let writers create named snapshots of their work without requiring Git knowledge.

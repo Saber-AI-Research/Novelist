@@ -1,7 +1,7 @@
 # Template Files Panel — Design
 
 **Date:** 2026-04-20
-**Status:** Approved (in-conversation)
+**Status:** Implemented; retained for its template file-format and execution contract. The rollout checklist is historical. Current code lives in `core/src/commands/template_files.rs`, `app/lib/services/new-file.ts` and `app/lib/utils/template-tokens.ts`.
 **Scope:** Add a per-project, insertable "templates" feature with a new right-side panel, bundled defaults, and a command-palette entry to save the current file as a template.
 
 ## 1. Goals & non-goals

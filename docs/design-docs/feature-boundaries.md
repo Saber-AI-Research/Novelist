@@ -57,6 +57,7 @@ are **not demotable to optional extras**.
 | `app/lib/components/ai-talk/` | HTTP AI chat, shared by desktop and mobile; the separate CLI agent harness was removed with user approval |
 | `plugins/literary-commentary/`, `plugins/book-translation/` | Literary commentary and book translation document editors, including touch layouts |
 | `app/lib/components/CloudAccountPanel.svelte` | Optional per-device WebDAV account, project download/linking, and conflict resolution; local writing never requires login |
+| `app/lib/components/AccountPanel.svelte` + `app/lib/services/account-sync.ts` | Optional Novelist account and encrypted configuration sync; independent of local writing and WebDAV project sync |
 
 ## Platform availability
 

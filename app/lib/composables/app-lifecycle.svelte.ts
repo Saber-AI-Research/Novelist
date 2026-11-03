@@ -101,6 +101,11 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
     void configureSyncTimer(dirPath);
   }
   window.addEventListener('novelist-sync-config-changed', handleSyncConfigChanged);
+  function handleWebdavConnectionChanged() {
+    const dirPath = projectStore.dirPath;
+    if (dirPath) void configureSyncTimer(dirPath);
+  }
+  window.addEventListener('novelist-webdav-connection-changed', handleWebdavConnectionChanged);
   // Edits made offline reach the remote as soon as the device reconnects.
   function handleOnline() { syncIfEnabled(projectStore.dirPath); }
   window.addEventListener('online', handleOnline);
@@ -274,6 +279,7 @@ export function useAppLifecycle(ctx: AppLifecycleContext): () => void {
     window.removeEventListener('beforeunload', handleBeforeUnload);
     window.removeEventListener('novelist-file-saved', handleFileSaved);
     window.removeEventListener('novelist-sync-config-changed', handleSyncConfigChanged);
+    window.removeEventListener('novelist-webdav-connection-changed', handleWebdavConnectionChanged);
     window.removeEventListener('online', handleOnline);
     clearTimeout(syncRealtimeTimer);
     syncRealtimeTimer = undefined;

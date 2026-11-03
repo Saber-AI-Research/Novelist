@@ -19,6 +19,9 @@ use std::time::SystemTime;
 pub struct SyncConfig {
     pub enabled: bool,
     pub webdav_url: String,
+    /// Relative application folder; old records without it use the endpoint root.
+    #[serde(default)]
+    pub remote_directory: String,
     pub username: String,
     pub password: String,
     pub interval_minutes: u32,
@@ -37,6 +40,7 @@ impl Default for SyncConfig {
         Self {
             enabled: false,
             webdav_url: String::new(),
+            remote_directory: webdav::DEFAULT_REMOTE_DIRECTORY.into(),
             username: String::new(),
             password: String::new(),
             interval_minutes: 30,
@@ -285,12 +289,25 @@ pub fn read_sync_config(project_dir: &str) -> Result<SyncConfig, AppError> {
         return Ok(SyncConfig::default());
     }
     let data = std::fs::read_to_string(&path)?;
-    let config: SyncConfig = serde_json::from_str(&data)?;
+    let mut config: SyncConfig = serde_json::from_str(&data)?;
+    let directory = webdav::normalize_remote_directory(&config.remote_directory)?;
+    if directory != config.remote_directory {
+        config.remote_directory = directory.to_owned();
+    }
     Ok(config)
 }
 
 /// Save sync config to disk
 pub fn save_sync_config_to_disk(project_dir: &str, config: &SyncConfig) -> Result<(), AppError> {
+    let directory = webdav::normalize_remote_directory(&config.remote_directory)?;
+    let mut normalized;
+    let config = if directory != config.remote_directory {
+        normalized = config.clone();
+        normalized.remote_directory = directory.to_owned();
+        &normalized
+    } else {
+        config
+    };
     if !config.webdav_url.is_empty() {
         webdav::remote_url(&config.webdav_url, "")?;
     }
@@ -407,6 +424,18 @@ pub(crate) fn unlink_cloud_projects() -> Result<u32, AppError> {
     })
 }
 
+/// Pause only this connection's projects. Keep the cloud link, identities,
+/// baseline hashes and files so reconnecting continues the same history.
+pub(crate) fn pause_cloud_projects(endpoint: &str, username: &str, remote_directory: &str) -> Result<u32, AppError> {
+    rewrite_sync_configs(|config| {
+        if !config.cloud_account || config.webdav_url != endpoint || config.username != username || config.remote_directory != remote_directory || !config.enabled {
+            return false;
+        }
+        config.enabled = false;
+        true
+    })
+}
+
 /// Move per-project WebDAV passwords out of plaintext configs when an account
 /// connects. Projects using exactly that endpoint and user become linked to
 /// it (the baseline binding, which covers URL, user and project ID, is
@@ -416,13 +445,14 @@ pub(crate) fn unlink_cloud_projects() -> Result<u32, AppError> {
 pub(crate) fn adopt_inline_credentials(
     endpoint: &str,
     username: &str,
+    remote_directory: &str,
     strip_others: bool,
 ) -> Result<u32, AppError> {
     rewrite_sync_configs(|config| {
         if config.cloud_account {
             return false;
         }
-        if config.webdav_url == endpoint && config.username == username {
+        if config.webdav_url == endpoint && config.username == username && config.remote_directory == remote_directory {
             config.cloud_account = true;
             config.password.clear();
             return true;
@@ -1113,14 +1143,14 @@ pub(crate) async fn project_auth(
         return Ok((auth, None));
     }
     if let Some(lease) = held {
-        if lease.endpoint() != config.webdav_url || lease.auth().username != config.username {
+        if lease.endpoint() != config.webdav_url || lease.auth().username != config.username || lease.remote_directory() != config.remote_directory {
             return Err(AppError::Custom(
                 "This project is linked to another cloud account".into(),
             ));
         }
         return Ok((lease.auth().clone(), None));
     }
-    let lease = cloud::lease_account(Some((&config.webdav_url, &config.username))).await?;
+    let lease = cloud::lease_account(Some((&config.webdav_url, &config.username, &config.remote_directory))).await?;
     Ok((lease.auth().clone(), Some(lease)))
 }
 
@@ -1128,7 +1158,7 @@ async fn webdav_session(
     config: &SyncConfig,
     held: Option<&cloud::AccountLease>,
 ) -> Result<(Client, WebDavAuth, Option<cloud::AccountLease>), AppError> {
-    webdav::remote_url(&config.webdav_url, "")?;
+    webdav::application_url(&config.webdav_url, &config.remote_directory)?;
     let client = webdav_client()?;
     let (auth, lease) = project_auth(config, held).await?;
     Ok((client, auth, lease))
@@ -1136,8 +1166,8 @@ async fn webdav_session(
 
 /// Baselines are meaningful only for one project identity on one account.
 fn remote_binding(config: &SyncConfig, project_id: &str) -> Result<String, AppError> {
-    let remote_url =
-        webdav::remote_url(&config.webdav_url, &format!("{REMOTE_ROOT}/{project_id}"))?;
+    let endpoint = webdav::application_url(&config.webdav_url, &config.remote_directory)?;
+    let remote_url = webdav::remote_url(&endpoint, &format!("{REMOTE_ROOT}/{project_id}"))?;
     Ok(hash(&serde_json::to_vec(&(
         remote_url.as_str(),
         &config.username,
@@ -1166,7 +1196,7 @@ pub(crate) async fn perform_sync_with(
 ) -> Result<SyncStatus, AppError> {
     let project = std::fs::canonicalize(project_dir)?;
     let _guard = sync_guard(&project).await?;
-    let config = read_sync_config(project_dir)?;
+    let mut config = read_sync_config(project_dir)?;
     let mut state = read_sync_state(project_dir)?;
     let mut status = SyncStatus {
         last_sync: state.last_sync_iso.clone(),
@@ -1188,6 +1218,12 @@ pub(crate) async fn perform_sync_with(
     let root = Dir::open_ambient_dir(&project, ambient_authority())?;
     let (identity, identity_bytes) = project_identity(&root)?;
     let identity_hash = hash(&identity_bytes);
+    let binding = remote_binding(&config, &identity.project_id)?;
+    if let Err(error) = webdav::ensure_collections(&client, &config.webdav_url, &config.remote_directory, &auth).await {
+        status.errors.push(format!("Application directory: {error}"));
+        return Ok(status);
+    }
+    config.webdav_url = webdav::application_url(&config.webdav_url, &config.remote_directory)?;
     let remote_base = format!("novelist-sync/{}", identity.project_id);
     let (local_files, skipped) = collect_local_files(&root)?;
     status.errors.extend(
@@ -1219,7 +1255,6 @@ pub(crate) async fn perform_sync_with(
             return Ok(status);
         }
     }
-    let binding = remote_binding(&config, &identity.project_id)?;
     if state.remote_binding.as_deref() != Some(&binding) {
         state.common_hashes.clear();
         state.remote_etags.clear();
@@ -1353,8 +1388,9 @@ pub(crate) async fn perform_sync_with(
 pub async fn adopt_legacy_identity(project_dir: &str, project_id: &str) -> Result<(), AppError> {
     let project = std::fs::canonicalize(project_dir)?;
     let _guard = sync_guard(&project).await?;
-    let config = read_sync_config(project_dir)?;
+    let mut config = read_sync_config(project_dir)?;
     let (client, auth, _lease) = webdav_session(&config, None).await?;
+    config.webdav_url = webdav::application_url(&config.webdav_url, &config.remote_directory)?;
     let project_name = project_name(&project)?;
     let root = Dir::open_ambient_dir(&project, ambient_authority())?;
     if let Some((local, _)) = read_local_identity(&root)? {
@@ -1489,7 +1525,7 @@ pub async fn resolve_conflict(
     }
     let project = std::fs::canonicalize(project_dir)?;
     let _guard = sync_guard(&project).await?;
-    let config = read_sync_config(project_dir)?;
+    let mut config = read_sync_config(project_dir)?;
     if !config.enabled {
         return Err(AppError::Custom("Sync is not enabled".into()));
     }
@@ -1498,6 +1534,8 @@ pub async fn resolve_conflict(
     let (identity, identity_bytes) = read_local_identity(&root)?
         .ok_or_else(|| AppError::Custom("This project has never been synced".into()))?;
     let identity_hash = hash(&identity_bytes);
+    let binding = remote_binding(&config, &identity.project_id)?;
+    config.webdav_url = webdav::application_url(&config.webdav_url, &config.remote_directory)?;
     let remote_base = format!("{REMOTE_ROOT}/{}", identity.project_id);
     if remote_identity(&client, &config, &remote_base, &auth)
         .await?
@@ -1509,7 +1547,7 @@ pub async fn resolve_conflict(
         ));
     }
     let mut state = read_sync_state(project_dir)?;
-    if state.remote_binding != Some(remote_binding(&config, &identity.project_id)?) {
+    if state.remote_binding != Some(binding) {
         return Err(AppError::Custom(
             "Sync this project with the current account before resolving conflicts".into(),
         ));
@@ -1696,6 +1734,7 @@ mod tests {
             let config = SyncConfig {
                 enabled: true,
                 webdav_url: server.url.clone(),
+                remote_directory: String::new(),
                 username: "test".into(),
                 password: "not-a-credential".into(),
                 interval_minutes: 30,
@@ -1773,6 +1812,71 @@ mod tests {
                 .files
                 .remove(&self.remote_path(LOCAL_IDENTITY_PATH));
         }
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn inline_sync_creates_nested_application_roots_and_stops_on_creation_failure() {
+        let fixture = SyncFixture::new();
+        let mut config = read_sync_config(&fixture.project).unwrap();
+        config.remote_directory = "作品/小说 Archive".into();
+        save_sync_config_to_disk(&fixture.project, &config).unwrap();
+        fixture.local_write("chapter.md", b"chapter");
+        assert_eq!(clean_sync(&fixture.project).await.files_uploaded, 1);
+        let file = webdav::remote_url(&fixture.server.url, &format!("{}/{}/chapter.md", config.remote_directory, fixture.remote_base)).unwrap();
+        assert_eq!(fixture.server.state.lock().unwrap().files[file.path()], b"chapter");
+        config.remote_directory = "Denied/Nested".into();
+        save_sync_config_to_disk(&fixture.project, &config).unwrap();
+        let denied = webdav::remote_url(&fixture.server.url, "Denied/Nested").unwrap();
+        let before = fixture.server.state.lock().unwrap().files.clone();
+        fixture.server.state.lock().unwrap().canned.insert(("MKCOL".into(), denied.path().into()), (403, Vec::new()));
+        let status = perform_sync(&fixture.project).await.unwrap();
+        assert!(status.errors.iter().any(|error| error.starts_with("Application directory:")));
+        assert_eq!(fixture.server.state.lock().unwrap().files, before);
+    }
+
+    #[test]
+    fn new_sync_defaults_and_legacy_deserialization_keep_distinct_roots() {
+        assert_eq!(SyncConfig::default().remote_directory, "Novelist");
+        let legacy: SyncConfig = serde_json::from_value(serde_json::json!({"enabled":true,"webdav_url":"https://example.com/dav","username":"writer","password":"password","interval_minutes":30})).unwrap();
+        assert_eq!(legacy.remote_directory, "");
+        let mut custom = legacy.clone();
+        custom.remote_directory = "Novelist".into();
+        let id = "a".repeat(64);
+        assert_ne!(remote_binding(&legacy, &id).unwrap(), remote_binding(&custom, &id).unwrap());
+    }
+
+    #[tokio::test]
+    #[serial(sync_data_dir)]
+    async fn nested_root_legacy_claims_and_adoption_never_use_endpoint_records() {
+        let fixture = SyncFixture::new();
+        let name = Path::new(&fixture.project).file_name().unwrap().to_str().unwrap();
+        let directory = "Archives/小说";
+        let mut config = read_sync_config(&fixture.project).unwrap();
+        config.remote_directory = directory.into();
+        save_sync_config_to_disk(&fixture.project, &config).unwrap();
+        fixture.remote_write_at(&format!("{directory}/novelist/{name}"), "chapter.md", b"selected legacy");
+        let other_id = "f".repeat(64);
+        fixture.remote_write_at(LEGACY_CLAIMS_DIR, &format!("{name}.json"), format!(r#"{{"schema_version":1,"project_id":"{other_id}"}}"#).as_bytes());
+        fixture.local_write("chapter.md", b"selected legacy");
+        let blocked = perform_sync(&fixture.project).await.unwrap();
+        assert!(blocked.errors.iter().any(|error| error.contains("Legacy WebDAV data")));
+        acknowledge_legacy(&fixture.project);
+        clean_sync(&fixture.project).await;
+        let id = local_project_id(Path::new(&fixture.project)).unwrap().unwrap();
+        let selected_claim = webdav::remote_url(&fixture.server.url, &format!("{directory}/{LEGACY_CLAIMS_DIR}/{name}.json")).unwrap();
+        assert_eq!(parse_project_id(&fixture.server.state.lock().unwrap().files[selected_claim.path()]).unwrap(), id);
+        let parent = tempfile::tempdir().unwrap();
+        let clone = fixture.configure_project(&parent.path().join(name));
+        let blocked = perform_sync(&clone).await.unwrap();
+        assert_eq!(blocked.adoptable_project_id.as_deref(), Some(id.as_str()));
+        adopt_legacy_identity(&clone, &id).await.unwrap();
+        clean_sync(&clone).await;
+        assert_eq!(std::fs::read(Path::new(&clone).join("chapter.md")).unwrap(), b"selected legacy");
+        let outside_claim = webdav::remote_url(&fixture.server.url, &format!("{LEGACY_CLAIMS_DIR}/{name}.json")).unwrap();
+        let state = fixture.server.state.lock().unwrap();
+        assert_eq!(parse_project_id(&state.files[outside_claim.path()]).unwrap(), other_id);
+        assert!(!state.requests.iter().any(|request| request.path == outside_claim.path()));
     }
 
     #[tokio::test]

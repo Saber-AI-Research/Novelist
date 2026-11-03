@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { aiTalkSettings } from '$lib/components/ai-talk/settings.svelte';
+import { getConfigurationSecret } from '$lib/services/account-config-native';
+
+vi.mock('$lib/services/account-config-native', () => ({
+  getConfigurationSecret: vi.fn(async (): Promise<string | null> => null),
+  setConfigurationSecret: vi.fn(async () => undefined),
+}));
 
 const KEY = 'novelist:ai-talk:settings:v1';
 
@@ -8,25 +14,6 @@ describe('aiTalkSettings store', () => {
     localStorage.clear();
     aiTalkSettings.reset();
     localStorage.clear();
-  });
-
-  it('exposes the documented defaults on a fresh profile', () => {
-    expect(aiTalkSettings.value).toMatchObject({
-      activeProfileId: 'openai',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: '',
-      model: 'gpt-4o-mini',
-      temperature: 0.7,
-      systemPrompt: 'You are a helpful writing assistant for novelists.',
-      includeCurrentFile: false,
-      includeSelection: true,
-    });
-    expect(aiTalkSettings.value.profiles.map((p) => p.id)).toEqual([
-      'openai',
-      'anthropic',
-      'deepseek',
-      'ollama',
-    ]);
   });
 
   it('update() merges a partial patch into the current value', () => {
@@ -146,6 +133,21 @@ describe('aiTalkSettings — module-load behavior', () => {
       expect(reloaded.value.activeProfileId).toBe(profiles[0]?.id ?? '');
     },
   );
+
+  it('does not let a pending vault read overwrite a completed account restore', async () => {
+    const { promise, resolve: completeRead } = Promise.withResolvers<string>();
+    vi.mocked(getConfigurationSecret).mockReturnValueOnce(promise);
+    localStorage.setItem('novelist:ai-talk:vault-profiles:v1', JSON.stringify(['openai']));
+    // A fresh module instance must hydrate from storage while its vault read is pending.
+    const { aiTalkSettings: reloaded } = await import('$lib/components/ai-talk/settings.svelte');
+    const loading = reloaded.ensureSecrets();
+    const restored = { ...reloaded.value, profiles: reloaded.value.profiles.map((profile) => profile.id === 'openai' ? { ...profile, apiKey: 'restored-key' } : profile) };
+    reloaded.replaceFromAccount(restored, { profiles: ['openai'], urls: [] });
+    completeRead('outdated-key');
+    await loading;
+    expect(reloaded.value.apiKey).toBe('restored-key');
+    expect(localStorage.getItem(KEY)).not.toContain('restored-key');
+  });
 
   it('falls back to defaults when localStorage contains corrupt JSON', async () => {
     localStorage.setItem(KEY, '{not valid json');

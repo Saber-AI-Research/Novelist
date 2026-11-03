@@ -194,6 +194,8 @@ class UiStore {
     applyTheme(this.currentTheme);
   }
 
+  get editorDefaults(): EditorSettings { return { ...defaultSettings }; }
+
   updateEditorSettings(partial: Partial<EditorSettings>) {
     this.editorSettings = { ...this.editorSettings, ...partial };
     this.applyEditorSettings();

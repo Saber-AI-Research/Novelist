@@ -17,6 +17,17 @@ pub use services::sidecar;
 
 use std::sync::Mutex;
 
+use commands::account::{
+    account_authenticate, account_forget, account_load_state, account_recovery_key,
+    account_request, account_save_state, account_status,
+};
+use commands::account_config::{
+    account_config_get_secret, account_config_journal, account_config_set_secret,
+};
+#[cfg(feature = "sync")]
+use commands::account_config::{
+    account_config_remove_restored_webdav, account_config_restore_webdav, account_config_webdav,
+};
 use commands::ai_bridge::{ai_fetch_stream_cancel, ai_fetch_stream_start, AiBridgeState};
 use commands::ai_files::{
     list_ai_prompt_assets, list_ai_sessions, read_ai_session, save_ai_chat, write_ai_memory,
@@ -502,6 +513,26 @@ macro_rules! app_commands {
     };
 }
 
+// Opaque account JSON has a handwritten frontend bridge and must stay outside
+// Specta's type collector. Both handlers are installed on every platform.
+macro_rules! account_commands {
+    ($($extra:ident),* $(,)?) => {
+        tauri::generate_handler![
+            account_status,
+            account_authenticate,
+            account_request,
+            account_forget,
+            account_recovery_key,
+            account_load_state,
+            account_save_state,
+            account_config_get_secret,
+            account_config_set_secret,
+            account_config_journal,
+            $($extra,)*
+        ]
+    };
+}
+
 fn specta_builder() -> Builder<tauri::Wry> {
     // `dangerously_cast_bigints_to_number()` keeps u64/usize fields exported
     // as `number` (file sizes, epoch-ms timestamps — all far
@@ -635,6 +666,35 @@ pub fn run() {
     #[cfg(not(all(target_os = "macos", feature = "e2e-testing")))]
     let invoke_handler = builder.invoke_handler();
 
+    #[cfg(feature = "sync")]
+    let account_handler: Box<tauri::ipc::InvokeHandler<tauri::Wry>> = Box::new(account_commands![
+        account_config_webdav,
+        account_config_restore_webdav,
+        account_config_remove_restored_webdav,
+    ]);
+    #[cfg(not(feature = "sync"))]
+    let account_handler: Box<tauri::ipc::InvokeHandler<tauri::Wry>> = Box::new(account_commands![]);
+    let core_handler = invoke_handler;
+    let invoke_handler = move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+        match invoke.message.command() {
+            "account_status"
+            | "account_authenticate"
+            | "account_request"
+            | "account_forget"
+            | "account_recovery_key"
+            | "account_load_state"
+            | "account_save_state"
+            | "account_config_get_secret"
+            | "account_config_set_secret"
+            | "account_config_journal" => account_handler(invoke),
+            #[cfg(feature = "sync")]
+            "account_config_webdav"
+            | "account_config_restore_webdav"
+            | "account_config_remove_restored_webdav" => account_handler(invoke),
+            _ => core_handler(invoke),
+        }
+    };
+
     let mut app_builder = tauri::Builder::default();
 
     // Desktop shell: single-instance forwarding, the native menu bar, process
@@ -762,6 +822,8 @@ pub fn run() {
             // known once the app exists; nothing may read it before this.
             #[cfg(mobile)]
             crate::services::portable::init_mobile(app.handle())?;
+            #[cfg(mobile)]
+            crate::services::account::install_native_vault(app.handle());
             // Cloud credentials live in the platform keychain/keystore through
             // the mobile-support plugin (initialized before this hook).
             #[cfg(all(mobile, feature = "sync"))]

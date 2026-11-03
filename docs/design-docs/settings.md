@@ -193,13 +193,128 @@ no-op moves, and on selection calls `commands.moveItem(srcPath, targetDir)`.
 Success path: `tabsStore.updatePath` rewires the open tab to the new
 path and both source + destination folders are refreshed.
 
+## Novelist account and WebDAV
+
+Settings → Sync presents three independent scopes: `AccountPanel.svelte`
+manages optional Novelist account configuration sync, `CloudAccountPanel.svelte`
+manages the shared WebDAV connection and project downloads, and the existing
+project WebDAV form manages the open project's file sync. The account panel is
+available with no project open; local writing never requires signing in.
+
+`App.svelte` dynamically imports the account engine after first paint, calls
+`accountSync.start()` once, and disposes its timer/listener on unmount. No
+account request is awaited by local startup, settings writes, or document saves.
+Account errors remain in the panel and use localized messages.
+
+Account login and configuration unlock are separate actions. New recovery keys
+can be generated without signing in, require a saved-key acknowledgement before
+use, and are cleared after unlock or panel destruction. Existing keys and all
+password inputs are masked. Categories start unchecked, credentials are
+excluded by default, and changing scope invalidates the displayed review.
+Preview does not apply or upload configuration. Every merge conflict requires
+an explicit local/cloud choice; whole-scope replacement actions explain
+deletions and the local encrypted backup. Enabling sync requires a successful
+reviewed commit; changing an enabled scope starts by pausing sync.
+
+Device revocation, account sign-out, and permanent deletion explain their
+different effects. Sign-out keeps restored WebDAV connections by default;
+opting out pauses only restored connections and removes restored credentials.
+Local writing, manual WebDAV configuration, project files, drafts, and sync
+baselines remain. Account deletion needs a password and acknowledgement and
+does not promise erasure of independent WebDAV files, server backups, or copies
+already held by other devices.
+
+`services/account-config.ts` captures only explicitly selected global categories:
+editor/appearance/language and global defaults, command bindings, AI profiles and
+prompt presets, and the current shared WebDAV connection. Project overlays,
+new-file directory pointers, Pandoc paths, window coordinates and project sync
+baselines are excluded. Stable per-field keys use encoded profile/prompt IDs;
+`.../present` records entity existence, so deleting a profile does not seed its
+provider template again. Secret-only orphan records remain inactive.
+
+API keys, WebDAV passwords, URLs carrying user information/query/fragment data,
+and unknown AI fields are secret fields. Capturing without credentials omits
+their values while retaining their field names for deletion handling. Restoring
+without credentials preserves matching local credentials. Unsupported fields
+are retained without activation; desktop-only command bindings survive a mobile
+restore without becoming active there. Unknown fields use independent OS-vault
+slots, with an 8 KiB limit per value; oversized unsupported values reject the
+whole restore instead of being discarded.
+
+Every restore validates the selected input before mutation and writes an
+authenticated, encrypted recovery journal before changing settings or secrets.
+Its device key lives in the OS credential store. Failure rolls back all affected
+stores; incomplete rollback keeps the journal for startup recovery, independently
+of the account server or current login. The account engine separately encrypts
+its user-visible backup with the recovery key. Restoring the shared WebDAV
+connection never probes the server or links/downloads projects. Removing an
+account-restored connection pauses only projects matching that connection and
+keeps their cloud links, identities, files and baseline state.
+
+The WebDAV undo snapshot captures the current password even when the incoming
+restore excludes credentials: replacing or removing a connection must still be
+reversible. That password is held only in memory and the encrypted journal,
+never copied to localStorage or an unencrypted undo file. Rollback restores the
+previous connection, password and credential-storage policy together.
+The native restore bridge takes an explicit `preservePassword` intent. A forward
+restore that excludes credentials passes `true` so a matching existing password
+is kept; a restore that includes credentials and every rollback pass `false`.
+With `false`, the supplied password or `null` is exact state, so rolling back a
+connection that previously had no password cannot retain a newly applied one.
+
+### Optional WebDAV application directory
+
+New shared connections and new project sync configurations default to the
+`Novelist` directory beneath the supplied WebDAV URL. Users may enter another
+relative directory (including nested Unicode names), or explicitly select
+“Use the WebDAV endpoint folder directly”. The settings surface previews the
+resolved application folder before connecting or saving.
+
+Project files remain under `<application-folder>/novelist-sync/<project-id>/`;
+snapshots use `<application-folder>/novelist-snapshots/`. Native connection/test
+and write paths create required collections with authenticated MKCOL. Directory
+creation or native-platform behavior is verified at release preparation, not in
+the daily Web-only development loop.
+
+Persisted records missing `remote_directory` retain the endpoint folder (`''`);
+they do not acquire `Novelist` or migrate remote files. Directory is part of
+project/account binding and baseline identity. Changing an existing manual
+project's directory pauses sync and clears the prior legacy-directory
+acknowledgement; the user must explicitly enable the new destination.
+
+Account configuration captures the directory as ordinary connection metadata.
+New encrypted documents use schema 2 (schema 1 remains readable), and portable
+configuration strings use V2. V1 strings import with the legacy endpoint-folder
+choice. Older clients reject new versioned exports rather than silently losing
+the directory choice and writing to another namespace.
+
+
+
 ## AI Talk connection profiles
 
-AI Talk uses the device-local `novelist:ai-talk:settings:v1` storage key,
-independently of the global/project settings overlay. A saved `profiles` array
-is authoritative, including `[]`; provider templates are seeded only for fresh
+AI Talk uses the device-local `novelist:ai-talk:settings:v1` storage key for its
+ordinary settings, independently of the global/project settings overlay. A saved
+`profiles` array is authoritative, including `[]`; provider templates are seeded only for fresh
 installations and legacy records without a profile list. Do not merge missing
 built-in profiles back on load: absence records a deliberate deletion.
+
+Account-restored API keys and credential-bearing provider URLs are stored in the
+OS credential store and redacted from localStorage, including the flattened
+active-profile fields. Profile metadata records which fields need secure
+hydration. Subsequent direct settings edits preserve this storage policy, as does
+duplicating a protected connection. If secure storage is unavailable, local
+ordinary edits still persist and credential edits remain usable in memory;
+`credentialError` records the failure and plaintext fallback is never used for
+those protected fields. Preexisting manually configured credentials retain their
+independent storage behavior.
+
+`aiTalkSettings.ensureSecrets()` exposes the in-flight vault hydration promise.
+Configuration capture with credentials and AI configuration restore await it;
+restore also waits for queued secret writes before taking its undo snapshot.
+A failed vault read rejects the operation rather than treating an unhydrated
+empty field as a deleted key. Ordinary edits do not write vault fields whose
+values have not loaded, explicit credential edits win over late reads, and an
+account replacement invalidates reads from the previous hydration generation.
 
 All connections can be renamed, duplicated and deleted. Deletion uses an inline
 confirmation that also works in mobile WebViews. Removing the active connection

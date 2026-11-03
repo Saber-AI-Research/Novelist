@@ -1082,6 +1082,8 @@
     // closure optional-chains so unmounting before first-paint is safe.
     let unlistenAppEvents: (() => void) | null = null;
     let unlistenMenu: (() => void) | null = null;
+    let stopAccountSync: (() => void) | null = null;
+    let appMounted = true;
 
     startupMark('frontend.app.onMount.end');
     // Wait one frame so "first-paint" reflects the actual paint after mount.
@@ -1097,6 +1099,14 @@
     scheduleFirstFrame(() => {
       startupMark('frontend.app.first-paint');
       runStartupTask('startupReport', () => startupReport());
+
+      // Account sync is optional and starts after paint, independently of
+      // local settings, writing, project loading, and the startup task queue.
+      void import('$lib/services/account-sync').then(({ accountSync }) => {
+        if (appMounted) stopAccountSync = accountSync.start();
+      }).catch(() => {
+        // The account panel reports account errors without blocking the app.
+      });
 
       // Load recent projects for Cmd+Number switching.
       runStartupTask('refreshRecentProjects', () => refreshRecentProjects());
@@ -1153,6 +1163,8 @@
     });
 
     return () => {
+      appMounted = false;
+      stopAccountSync?.();
       unlistenAppEvents?.();
       unlistenLifecycle();
       unlistenMenu?.();

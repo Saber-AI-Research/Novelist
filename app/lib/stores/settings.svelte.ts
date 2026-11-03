@@ -131,6 +131,15 @@ class SettingsStore {
     this.effective = prepared.effective;
   }
 
+  /** Refresh the active overlay after global defaults change, without migration. */
+  async refreshGlobalDefaults(): Promise<void> {
+    const generation = this.loadGeneration;
+    const dirPath = this.dirPath;
+    const result = await commands.getEffectiveSettings(dirPath);
+    if (result.status !== 'ok') throw new Error('settings_refresh_failed');
+    if (this.isCurrentScope(generation, dirPath)) this.effective = normalizeEffectiveSettings(result.data);
+  }
+
   /**
    * If the project file has no `[view]` / `[new_file]` section yet but the old
    * localStorage keys exist, copy them into project.toml and delete the keys.

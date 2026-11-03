@@ -54,6 +54,8 @@ walkdir = "2"
 chardetng = "1"
 encoding_rs = "0.8"
 base64 = "0.22"
+aes-gcm = "0.10"
+getrandom = "0.2"
 cap-std = "4"
 cap-fs-ext = "4"
 once_cell = "1"
@@ -86,6 +88,8 @@ tauri-plugin-single-instance = "2"
 notify = { version = "7", features = ["macos_fsevent"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 png = "0.17"
+# Explicit platform backends: keyring has no secure default implementation.
+keyring = { version = "3.6.3", default-features = false }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
@@ -96,6 +100,7 @@ reqwest = { version = "0.12", default-features = false, features = ["default-tls
 # selector directly.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSBitmapImageRep", "NSEvent", "NSGraphicsContext", "NSImageRep", "NSResponder", "NSView", "NSWindow", "objc2-core-graphics"] }
@@ -105,8 +110,12 @@ objc2-foundation = { version = "0.3", optional = true, features = ["NSData", "NS
 objc2-web-kit = { version = "0.3", optional = true, features = ["WKPDFConfiguration", "WKWebView", "block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 [target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 cap-primitives = "4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 # `objc` 0.2's `sel!` / `msg_send!` macros expand with `#[cfg(cargo-clippy)]`
 # and the unmaintained crate never registered that cfg. Newer rustc flags it

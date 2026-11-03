@@ -1,19 +1,21 @@
 # Plans
 
-Last updated: 2026-05-27
+Last updated: 2026-11-03
 
 ## Active Plan Surface
 
-- Memory and huge-file optimization remains in
-  [exec-plans/active/2026-04-12-memory-optimization.md](exec-plans/active/2026-04-12-memory-optimization.md).
+- Release readiness, optional-account platform acceptance, mobile review and
+  memory follow-up are listed in [exec-plans/index.md](exec-plans/index.md).
 - Broader maintenance items are tracked in
   [exec-plans/tech-debt-tracker.md](exec-plans/tech-debt-tracker.md).
 
 ## Completed Plan Archive
 
-Completed implementation drafts are archived in
-[exec-plans/completed/](exec-plans/completed/). Keep lasting decisions in product
-specs or design docs and link those documents from release notes.
+Keep a completed plan only while it contains useful evidence or a contract not
+yet covered by durable docs. The retained records are listed in
+[exec-plans/index.md](exec-plans/index.md). Delete superseded implementation
+drafts and repair incoming links; release notes should link to current product
+specs or design docs.
 
 Use those files as historical evidence only. For new work, start with:
 

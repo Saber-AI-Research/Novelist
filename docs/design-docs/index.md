@@ -1,6 +1,6 @@
 # Design Docs Index
 
-Last updated: 2026-10-28
+Last updated: 2026-11-03
 
 This directory holds the durable design record for Novelist. Historical
 implementation plans live in `docs/exec-plans/`; this directory is for the
@@ -30,11 +30,10 @@ decisions that still guide future work.
 | Huge-file scroll stabilizer | [scroll-stabilizer-bug.md](scroll-stabilizer-bug.md) |
 | Mobile builds, signing, TestFlight/APK distribution, accounts and support | [mobile-deployment.md](mobile-deployment.md) |
 
-## Historical But Still Useful
+## Retained Proposals
 
 | Topic | File |
 |---|---|
-| 2026-04-20 refactor plan | [refactor-plan-2026-04-20.md](refactor-plan-2026-04-20.md) |
-| UI design notes | [ui-design.md](ui-design.md) |
-| Plugin marketplace concept | [plugin-marketplace-design.md](plugin-marketplace-design.md) |
-| Long-term technical plans | [P3-technical-plans.md](P3-technical-plans.md) |
+| Deferred UI proposals; original baseline is historical | [ui-design.md](ui-design.md) |
+| Unfinished in-app marketplace proposal | [plugin-marketplace-design.md](plugin-marketplace-design.md) |
+| Deferred technical ideas; implemented portions are marked | [P3-technical-plans.md](P3-technical-plans.md) |

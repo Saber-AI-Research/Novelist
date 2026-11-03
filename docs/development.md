@@ -13,6 +13,12 @@
 
 ## Commands
 
+Daily feature development is **Web-only**: use `pnpm dev`, `pnpm check`, `pnpm test`
+and focused browser E2E scenarios. Keep native commands below available for
+release preparation; do not build or test iOS/Android, launch simulators, install
+on devices or exercise native secure storage during routine iterations. Native
+platform acceptance is a separate release gate, not implied by browser success.
+
 ```bash
 pnpm install          # Install frontend deps
 pnpm tauri dev        # Start dev server + Tauri window
@@ -30,6 +36,8 @@ pnpm verify:ci        # Local CI mirror
 ```
 
 ### Mobile (iOS / Android)
+
+Release preparation only; these commands are not part of the daily development loop.
 
 ```bash
 pnpm mobile:android:doctor    # validate ANDROID_HOME, NDK, JDK 17, libclang, Rust targets

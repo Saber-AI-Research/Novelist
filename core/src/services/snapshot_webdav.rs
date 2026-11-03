@@ -1,8 +1,8 @@
 //! WebDAV backup helpers for snapshots.
 //!
 //! Remote path scheme:
-//!   desktop: `{webdav_url}/novelist-snapshots/{slug}-{hash8}/` (absolute path)
-//!   mobile:  `{webdav_url}/novelist-snapshots/project-{sync project id}/`
+//!   desktop: `{webdav_url}/{remote_directory}/novelist-snapshots/{slug}-{hash8}/`
+//!   mobile:  `{webdav_url}/{remote_directory}/novelist-snapshots/project-{sync project id}/`
 //!       project.json          ← identity card, written once on first upload
 //!       snap-{ts}/
 //!           metadata.json
@@ -133,6 +133,8 @@ const MAX_IDENTITY_BYTES: usize = 16 * 1024;
 struct WebDavCtx {
     client: Client,
     base_url: String,
+    endpoint: String,
+    remote_directory: String,
     auth: WebDavAuth,
     /// Held while a cloud-account password is in use; an account change
     /// stops the mirroring (see `run`).
@@ -164,7 +166,9 @@ async fn get_webdav_ctx(project_dir: &str) -> Option<WebDavCtx> {
     };
     Some(WebDavCtx {
         client: webdav_client().ok()?,
-        base_url: cfg.webdav_url,
+        base_url: webdav::application_url(&cfg.webdav_url, &cfg.remote_directory).ok()?,
+        endpoint: cfg.webdav_url,
+        remote_directory: cfg.remote_directory,
         auth,
         lease,
     })
@@ -179,6 +183,7 @@ async fn verify_or_create_identity(
     project_dir: &str,
 ) -> Result<(), AppError> {
     let project_remote = &namespace.dir;
+    webdav::ensure_collections(&ctx.client, &ctx.endpoint, &ctx.remote_directory, &ctx.auth).await?;
     create_collection(&ctx.client, &ctx.base_url, "novelist-snapshots", &ctx.auth).await?;
     create_collection(&ctx.client, &ctx.base_url, project_remote, &ctx.auth).await?;
     let identity_path = format!("{project_remote}/project.json");
@@ -506,6 +511,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshots_use_the_selected_default_nested_or_endpoint_root() {
+        use crate::services::webdav::test_server::DavServer;
+        let server = DavServer::start();
+        let snapshot = tempfile::tempdir().unwrap();
+        std::fs::create_dir(snapshot.path().join("files")).unwrap();
+        std::fs::write(snapshot.path().join("files/chapter.md"), b"chapter").unwrap();
+        let meta = SnapshotMeta { id: "snap-1".into(), name: "saved".into(), timestamp: 1, file_count: 1, total_bytes: 7 };
+        std::fs::write(snapshot.path().join("metadata.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let root = Dir::open_ambient_dir(snapshot.path(), ambient_authority()).unwrap();
+        let project = "/projects/Novel";
+        for directory in [webdav::DEFAULT_REMOTE_DIRECTORY, "作品/小说 Archive", ""] {
+            let ctx = WebDavCtx {
+                client: webdav_client().unwrap(),
+                base_url: webdav::application_url(&server.url, directory).unwrap(),
+                endpoint: server.url.clone(), remote_directory: directory.into(),
+                auth: WebDavAuth { username: "writer".into(), password: "password".into() }, lease: None,
+            };
+            upload_snapshot(&ctx, project, &meta, &root).await.unwrap();
+            let remote = remote_snap_dir(project, &meta.id);
+            let file = webdav::remote_url(&ctx.base_url, &format!("{remote}/files/chapter.md")).unwrap();
+            assert_eq!(server.state.lock().unwrap().files[file.path()], b"chapter");
+            let marker = webdav::remote_url(&ctx.base_url, &format!("{remote}/metadata.json")).unwrap();
+            assert!(server.state.lock().unwrap().files.contains_key(marker.path()));
+        }
+        let custom_base = webdav::application_url(&server.url, "作品/小说 Archive").unwrap();
+        delete_remote(&webdav_client().unwrap(), &custom_base, &remote_snap_dir(project, &meta.id), &WebDavAuth { username: "writer".into(), password: "password".into() }).await.unwrap();
+        for directory in [webdav::DEFAULT_REMOTE_DIRECTORY, ""] {
+            let base = webdav::application_url(&server.url, directory).unwrap();
+            let marker = webdav::remote_url(&base, &format!("{}/metadata.json", remote_snap_dir(project, &meta.id))).unwrap();
+            assert!(server.state.lock().unwrap().files.contains_key(marker.path()));
+        }
+    }
+
+    #[tokio::test]
     async fn failed_upload_and_retry_never_publish_completion_metadata() {
         use crate::services::webdav::test_server::DavServer;
         let server = DavServer::start();
@@ -534,6 +573,8 @@ mod tests {
         let ctx = WebDavCtx {
             client: Client::new(),
             base_url: server.url.clone(),
+            endpoint: server.url.clone(),
+            remote_directory: String::new(),
             auth: WebDavAuth {
                 username: "test".into(),
                 password: "not-a-credential".into(),
@@ -635,6 +676,8 @@ mod tests {
         let ctx = WebDavCtx {
             client: Client::new(),
             base_url: server.url.clone(),
+            endpoint: server.url.clone(),
+            remote_directory: String::new(),
             auth: WebDavAuth {
                 username: "test".into(),
                 password: "not-a-credential".into(),
@@ -674,6 +717,8 @@ mod tests {
         let ctx = WebDavCtx {
             client: Client::new(),
             base_url: server.url.clone(),
+            endpoint: server.url.clone(),
+            remote_directory: String::new(),
             auth: WebDavAuth {
                 username: "test".into(),
                 password: "not-a-credential".into(),
@@ -718,6 +763,8 @@ mod tests {
         let ctx = WebDavCtx {
             client: Client::new(),
             base_url: server.url.clone(),
+            endpoint: server.url.clone(),
+            remote_directory: String::new(),
             auth: WebDavAuth {
                 username: "test".into(),
                 password: "not-a-credential".into(),

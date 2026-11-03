@@ -16,19 +16,22 @@ import readline from 'node:readline';
 const USAGE = `Novelist WebDAV conformance smoke test
 
 Usage:
-  node scripts/mobile-webdav-conformance.mjs --url <collection URL> [--keep]
+  node scripts/mobile-webdav-conformance.mjs --url <collection URL> [--directory <relative path>] [--keep]
 
   --url    The WebDAV folder URL a user enters in Novelist, for Nextcloud
            https://<host>/remote.php/dav/files/<login>/ (or a subfolder).
            http:// is only accepted for loopback hosts, like the app.
+  --directory  Application folder (default: Novelist). Pass '' to use the
+               endpoint folder directly, or a relative nested folder.
   --keep   Leave the test collection on the server for inspection.
 
 Credentials (never on the command line):
   NOVELIST_WEBDAV_USER       login name (prompted when unset)
   NOVELIST_WEBDAV_PASSWORD   app password (prompted, hidden, when unset)
 
-The test creates novelist-conformance-<time>-<random>/ below the URL and
-deletes it afterwards. Exit status 0 means every required check passed.
+The test creates novelist-conformance-<time>-<random>/ inside the application
+folder and deletes only that test collection afterwards. Application folders
+are created as needed and retained. Exit status 0 means every check passed.
 `;
 
 class Failure extends Error {}
@@ -42,6 +45,10 @@ function parseArgs(argv) {
     else if (arg === '--keep') options.keep = true;
     else if (arg === '--url') options.url = argv[++i];
     else if (arg.startsWith('--url=')) options.url = arg.slice('--url='.length);
+    else if (arg === '--directory') {
+      if (argv[i + 1] === undefined) throw new Failure('--directory requires a value (use an empty string for the endpoint folder)');
+      options.directory = argv[++i];
+    } else if (arg.startsWith('--directory=')) options.directory = arg.slice('--directory='.length);
     else throw new Failure(`unknown argument ${JSON.stringify(arg)} (credentials are read from the environment or a prompt)`);
   }
   return options;
@@ -49,6 +56,8 @@ function parseArgs(argv) {
 
 function validateBaseUrl(raw) {
   if (!raw) throw new Failure('--url is required');
+  raw = raw.trim();
+  if (Buffer.byteLength(raw, 'utf8') > 2048 || /[\\\p{Cc}]/u.test(raw)) throw new Failure('--url contains an unsafe character or exceeds 2048 UTF-8 bytes');
   let url;
   try {
     url = new URL(raw);
@@ -57,11 +66,36 @@ function validateBaseUrl(raw) {
   }
   if (url.username || url.password) throw new Failure('--url must not contain credentials');
   if (url.search || url.hash || raw.includes('#') || raw.includes('?')) throw new Failure('--url must not contain a query or fragment');
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  const loopback = ['localhost', '[::1]'].includes(url.hostname) || /^127\.\d+\.\d+\.\d+$/u.test(url.hostname);
   if (url.protocol === 'http:' && !loopback) throw new Failure('http:// is only allowed for loopback hosts; Novelist refuses cleartext WebDAV elsewhere');
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Failure('--url must be http(s)');
+  if (!raw.includes('://')) throw new Failure('--url must include an explicit http(s):// origin');
+  // Validate before URL normalization can erase dot segments or decode escapes.
+  const authorityAndPath = raw.slice(raw.indexOf('://') + 3);
+  const slash = authorityAndPath.indexOf('/');
+  const rawPath = slash < 0 ? '' : authorityAndPath.slice(slash + 1).replace(/\/$/u, '');
+  if (rawPath !== '') {
+    try {
+      if (rawPath.split('/').some((part) => {
+        const decoded = decodeURIComponent(part);
+        return decoded === '' || decoded === '.' || decoded === '..' || /[/\\\p{Cc}]/u.test(decoded);
+      })) throw new Error('unsafe path');
+    } catch {
+      throw new Failure('--url contains an unsafe or invalid encoded path');
+    }
+  }
   if (!url.pathname.endsWith('/')) url.pathname += '/';
   return url;
+}
+
+function validateDirectory(raw) {
+  const value = raw.trim();
+  if (Buffer.byteLength(value, 'utf8') > 512 || /[%?#\\\x00-\x1f\x7f-\x9f]/u.test(value)
+      || /^[a-z][a-z0-9+.-]*:/iu.test(value)
+      || (value !== '' && value.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))) {
+    throw new Failure('--directory must be a safe relative folder path, at most 512 UTF-8 bytes');
+  }
+  return value === '' ? [] : value.split('/');
 }
 
 async function ask(question, { hidden }) {
@@ -291,11 +325,25 @@ async function main() {
     return 0;
   }
   const base = validateBaseUrl(options.url);
+  const directory = validateDirectory(options.directory ?? 'Novelist');
   const user = process.env.NOVELIST_WEBDAV_USER?.trim() || (await ask('WebDAV login: ', { hidden: false })).trim();
   const password = process.env.NOVELIST_WEBDAV_PASSWORD || (await ask('App password (hidden): ', { hidden: true }));
   if (!user || !password) throw new Failure('login and password are required');
-  console.log(`Testing ${base.origin}${base.pathname} as the configured login\n`);
-  await conformance(makeClient(base, user, password), options.keep);
+  const request = makeClient(base, user, password);
+  for (let depth = 1; depth <= directory.length; depth += 1) {
+    const prefix = directory.slice(0, depth);
+    const created = await request('MKCOL', prefix, { collection: true });
+    if (created.status >= 200 && created.status < 300) continue;
+    if (created.status !== 405) throw new Failure(`application directory MKCOL returned ${created.status}`);
+    const probe = await request('PROPFIND', prefix, { headers: { Depth: '0', 'Content-Type': 'application/xml' }, body: PROPFIND_BODY, collection: true });
+    const expected = collectionUrl(base, prefix).pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    if (probe.status !== 207 || !parseMultistatus(probe.text).some((entry) => entry.collection && JSON.stringify(entry.segments) === JSON.stringify(expected))) {
+      throw new Failure('the application directory exists but is not an accessible WebDAV collection');
+    }
+  }
+  const application = collectionUrl(base, directory, { collection: true });
+  console.log(`Testing ${application.origin}${application.pathname} as the configured login\n`);
+  await conformance((method, segments, options) => request(method, [...directory, ...segments], options), options.keep);
   const failed = results.filter((result) => result.level === 'fail').length;
   const warned = results.filter((result) => result.level === 'warn').length;
   console.log(`\n${results.length - failed - warned} passed, ${warned} warnings, ${failed} failed`);
