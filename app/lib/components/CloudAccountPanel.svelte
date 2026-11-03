@@ -12,7 +12,13 @@
   } from '$lib/ipc/commands';
   import { platform } from '$lib/stores/platform.svelte';
   import { nonConflictErrors, syncedCleanly } from '$lib/services/cloud-sync-status';
-  import { DEFAULT_WEBDAV_DIRECTORY, normalizeWebdavDirectory, webdavDirectoryUrl } from '$lib/services/webdav-directory';
+  import {
+    DEFAULT_WEBDAV_DIRECTORY,
+    normalizeWebdavDirectory,
+    rememberWebdavDirectory,
+    rememberedWebdavDirectory,
+    webdavDirectoryUrl,
+  } from '$lib/services/webdav-directory';
   import { t } from '$lib/i18n';
 
   interface Props {
@@ -61,6 +67,32 @@
   let downloading = $state<string | null>(null);
 
   const connected = $derived(account?.connected === true);
+
+  // Reconnecting must keep the folder this account used before; projects
+  // linked to it are matched by endpoint, user and folder.
+  let directoryTouched = false;
+  let directoryAutofilled = false;
+  $effect(() => {
+    if (connected || directoryTouched) return;
+    const remembered = rememberedWebdavDirectory(endpoint, username);
+    if (remembered === null) {
+      // Typed a different account after an autofill: back to the default.
+      if (!directoryAutofilled) return;
+      directoryAutofilled = false;
+      useEndpointFolder = false;
+      remoteDirectory = DEFAULT_WEBDAV_DIRECTORY;
+      return;
+    }
+    directoryAutofilled = true;
+    useEndpointFolder = remembered === '';
+    remoteDirectory = remembered === '' ? DEFAULT_WEBDAV_DIRECTORY : remembered;
+  });
+
+  function rememberAccount(summary: CloudAccountSummary) {
+    if (summary.connected && summary.endpoint && summary.username && summary.remote_directory !== null) {
+      rememberWebdavDirectory(summary.endpoint, summary.username, summary.remote_directory);
+    }
+  }
   const selectedDirectory = $derived(useEndpointFolder ? '' : remoteDirectory.trim() || null);
   const selectedFolder = $derived(selectedDirectory === null ? null : webdavDirectoryUrl(endpoint, selectedDirectory));
 
@@ -107,6 +139,7 @@
       return;
     }
     account = result.data;
+    rememberAccount(result.data);
     if (result.data.connected) {
       void checkConnection();
       void loadProjects();
@@ -149,6 +182,8 @@
     // The password now lives only in the device vault.
     password = '';
     account = result.data;
+    rememberAccount(result.data);
+    directoryTouched = false;
     connection = { account: result.data, state: 'online', message: null };
     if (projectDir) await loadBinding(projectDir);
     await loadProjects();
@@ -166,6 +201,14 @@
       return;
     }
     notice = t('cloud.account.disconnected', { count: result.data.unlinked_projects });
+    // Prefill the form with the account just disconnected, folder included.
+    if (account?.endpoint) endpoint = account.endpoint;
+    if (account?.username) username = account.username;
+    if (account?.remote_directory != null) {
+      useEndpointFolder = account.remote_directory === '';
+      remoteDirectory = account.remote_directory || DEFAULT_WEBDAV_DIRECTORY;
+    }
+    directoryTouched = false;
     account = { ...(account as CloudAccountSummary), connected: false, endpoint: null, remote_directory: null, host: null, username: null, connected_at: null };
     connection = null;
     projects = [];
@@ -360,12 +403,13 @@
           spellcheck="false"
           disabled={useEndpointFolder}
           bind:value={remoteDirectory}
+          oninput={() => (directoryTouched = true)}
           data-testid="cloud-remote-directory"
         />
         <span class="text-xs hint">{t('webdav.directory.hint')}</span>
       </label>
       <label class="text-xs flex items-center gap-2">
-        <input type="checkbox" bind:checked={useEndpointFolder} data-testid="cloud-use-endpoint-folder" />
+        <input type="checkbox" bind:checked={useEndpointFolder} onchange={() => (directoryTouched = true)} data-testid="cloud-use-endpoint-folder" />
         <span>{t('webdav.directory.useEndpoint')}</span>
       </label>
       <div class="text-xs hint" data-testid="cloud-directory-preview">

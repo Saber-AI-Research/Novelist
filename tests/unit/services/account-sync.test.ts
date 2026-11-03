@@ -200,6 +200,43 @@ describe('optional account configuration sync', () => {
     expect(b.counters().applies).toBe(0);
   });
 
+  it('idle background syncs do not rewrite the encrypted local state', async () => {
+    const remote: Remote = { revision: 0, envelope: null, writes: 0, offline: false };
+    const a = device(remote, { 'preferences/theme': 'one' }); await connect(a, generateRecoveryKey(), ['preferences']);
+    await a.sync.sync();
+    const before = a.persisted();
+    await a.sync.sync(); await a.sync.sync();
+    // Each write re-encrypts with a fresh nonce, so an unchanged string means no write.
+    expect(a.persisted()).toBe(before);
+    expect(remote.writes).toBe(1);
+  });
+
+  it('recovers when settings change while the cloud write is in flight', async () => {
+    const remote: Remote = { revision: 0, envelope: null, writes: 0, offline: false };
+    const key = generateRecoveryKey();
+    const a = device(remote, { 'preferences/theme': 'one' }); await connect(a, key, ['preferences']);
+    const request = a.transport.request;
+    a.transport.request = async (method, path, body) => {
+      const result = await request(method, path, body);
+      if (method === 'PUT') a.edit('preferences/theme', 'three');
+      return result;
+    };
+    a.edit('preferences/theme', 'two');
+    await a.sync.sync();
+    expect(remote.writes).toBe(2);
+    // The edit made during the write survives locally and is still pending.
+    expect(a.fields()['preferences/theme']).toBe('three');
+    expect(a.sync.view.state).toBe('pending');
+    a.transport.request = request;
+    // Nothing blocks the next sync, and the newer edit reaches the cloud without a conflict.
+    await a.sync.sync();
+    expect(a.sync.view.state).toBe('ready');
+    expect(remote.writes).toBe(3);
+    const b = device(remote, {}); await b.sync.login('http://localhost:8787', 'alice', 'password', 'phone', false);
+    await b.sync.unlock(key); await b.sync.preview(['preferences'], false); await b.sync.commit('cloud');
+    expect(b.fields()['preferences/theme']).toBe('three');
+  });
+
   it('upgrades legacy encrypted documents while retaining an explicitly chosen directory', async () => {
     const key = generateRecoveryKey();
     const fields = { 'webdav/connection/present': true, 'webdav/connection/endpoint': 'https://dav.example.test/', 'webdav/connection/username': 'writer', 'webdav/connection/remote_directory': '写作/小说' };

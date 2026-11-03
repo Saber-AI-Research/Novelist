@@ -260,7 +260,12 @@ export class AccountSync {
     if (!prepared) throw new Error('preview_required');
     if (mode === 'merge' && prepared.preview.conflicts.some((key) => choices[key] !== 'local' && choices[key] !== 'cloud')) throw new Error('conflicts_unresolved');
     const current = await this.adapter.captureConfiguration(prepared.categories, prepared.includeSecrets);
-    if (!equal(current, prepared.local)) throw new Error('configuration_changed');
+    if (!equal(current, prepared.local)) {
+      // The preview no longer describes local settings; a new one is needed.
+      this.prepared = null;
+      this.update({ preview: null });
+      throw new Error('configuration_changed');
+    }
     const merged: Document = { schema: 2, fields: { ...prepared.remote.fields }, deleted: [...prepared.remote.deleted], secretKeys: [...new Set([...prepared.remote.secretKeys, ...prepared.local.secretKeys])] };
     const deleted = new Set(merged.deleted);
     for (const row of prepared.preview.rows) {
@@ -286,22 +291,30 @@ export class AccountSync {
     this.stored.pending = prepared.local;
     await this.persist();
     const committed = readCloud(await this.transport.request('PUT', '/v1/config', { base_revision: prepared.cloud.revision, envelope }));
-    // If editing continued while the request ran, keep the baseline for the next merge.
+    // The cloud accepted this revision. If editing continued while the request
+    // ran, keep those newer local values (they are pushed on the next sync)
+    // and apply the merged cloud values everywhere else.
     const latest = await this.adapter.captureConfiguration(prepared.categories, prepared.includeSecrets);
-    if (!equal(latest, prepared.local)) throw new Error('configuration_changed');
     const selected: Fields = {};
     const secrets = new Set(merged.secretKeys);
     for (const [key, value] of Object.entries(merged.fields)) if (prepared.categories.some((category) => key.startsWith(`${category}/`)) && (prepared.includeSecrets || !secrets.has(key))) selected[key] = value;
+    let editedDuringWrite = false;
+    for (const key of new Set([...Object.keys(latest.fields), ...Object.keys(prepared.local.fields)])) {
+      if (OWN(latest.fields, key) === OWN(prepared.local.fields, key) && equal(latest.fields[key], prepared.local.fields[key])) continue;
+      editedDuringWrite = true;
+      if (OWN(latest.fields, key)) selected[key] = latest.fields[key];
+      else delete selected[key];
+    }
     await this.adapter.applyConfiguration(selected, prepared.categories, prepared.includeSecrets);
     this.stored.baseline = merged;
     this.stored.revision = committed.revision;
     this.stored.categories = prepared.categories;
     this.stored.includeSecrets = prepared.includeSecrets;
     this.stored.configured = true;
-    this.stored.pending = null;
+    this.stored.pending = editedDuringWrite ? latest : null;
     this.prepared = null;
     await this.persist();
-    this.update({ state: this.stored.enabled ? 'ready' : 'disabled', preview: null });
+    this.update({ state: editedDuringWrite ? 'pending' : this.stored.enabled ? 'ready' : 'disabled', preview: null });
   }
 
   async commit(mode: 'merge' | 'local' | 'cloud', choices: Record<string, Choice> = {}): Promise<void> {
@@ -326,19 +339,37 @@ export class AccountSync {
     await this.operation(async () => {
       const { categories, includeSecrets } = this.stored;
       const local = await this.adapter.captureConfiguration(categories, includeSecrets);
-      this.stored.pending = local;
-      await this.persist();
-      this.update({ state: 'pending' });
+      // Record pending local edits before talking to the cloud, but only touch
+      // disk when they differ from what is already recorded (idle runs write nothing).
+      const baseline = this.stored.baseline;
+      const localUnchanged = !!baseline && configurationPreview(local, baseline, baseline, categories, includeSecrets, this.adapter.fieldLabel).rows.every((row) => row.kind === 'same');
+      if (!equal(this.stored.pending, localUnchanged ? null : local)) {
+        this.stored.pending = local;
+        await this.persist();
+        this.update({ state: 'pending' });
+      }
       const cloud = readCloud(await this.transport.request('GET', '/v1/config'));
       const remote = await this.decodeRemote(cloud);
       const preview = configurationPreview(local, remote, this.stored.baseline, categories, includeSecrets, this.adapter.fieldLabel);
       if (preview.rows.every((row) => row.kind === 'same')) {
-        this.stored.baseline = remote; this.stored.revision = cloud.revision; this.stored.pending = null;
-        await this.persist(); this.update({ state: 'ready' }); return;
+        if (this.stored.revision !== cloud.revision || this.stored.pending !== null || !equal(this.stored.baseline, remote)) {
+          this.stored.baseline = remote; this.stored.revision = cloud.revision; this.stored.pending = null;
+          await this.persist();
+        }
+        this.update({ state: 'ready' }); return;
       }
       this.prepared = { cloud, remote, local, categories, includeSecrets, preview };
       this.update({ state: 'preview', preview });
-      if (!preview.conflicts.length) await this.applyPrepared('merge', {});
+      if (!preview.conflicts.length) {
+        try { await this.applyPrepared('merge', {}); }
+        catch (error) {
+          // A failed background merge must not leave a stale preview that
+          // blocks every later sync; the next run prepares a fresh one.
+          this.prepared = null;
+          this.update({ preview: null });
+          throw error;
+        }
+      }
     });
   }
 

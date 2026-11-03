@@ -129,6 +129,35 @@ test.describe('[contract] Optional WebDAV application directory', () => {
     expect((await mockState.getInvokeCalls()).filter((call) => call.command === 'test_sync_connection').at(-1)?.args.remoteDirectory).toBe('');
   });
 
+  test('reconnecting keeps the folder the account used instead of switching to the default', async ({ app }) => {
+    await openSyncSettings(app);
+    await fillConnection(app);
+    await app.getByTestId('cloud-use-endpoint-folder').check();
+    await app.getByTestId('cloud-connect').click();
+    await expect(app.getByTestId('cloud-account-folder')).toContainText('endpoint folder (legacy layout)');
+
+    // Disconnecting prefills the form with the same account and folder.
+    await app.getByTestId('cloud-disconnect').click();
+    await app.getByTestId('cloud-disconnect-confirm').click();
+    await expect(app.getByTestId('cloud-endpoint')).toHaveValue(ENDPOINT);
+    await expect(app.getByTestId('cloud-username')).toHaveValue('writer');
+    await expect(app.getByTestId('cloud-use-endpoint-folder')).toBeChecked();
+
+    // After a restart, typing the same account restores its folder too.
+    await app.reload();
+    await app.waitForSelector('#app > *');
+    await openSyncSettings(app);
+    await expect(app.getByTestId('cloud-use-endpoint-folder')).not.toBeChecked();
+    await fillConnection(app);
+    await expect(app.getByTestId('cloud-use-endpoint-folder')).toBeChecked();
+    await expect(app.getByTestId('cloud-directory-preview')).toContainText('endpoint folder (legacy layout)');
+
+    // A different user on the same server starts from the default again.
+    await app.getByTestId('cloud-username').fill('someone-else');
+    await expect(app.getByTestId('cloud-use-endpoint-folder')).not.toBeChecked();
+    await expect(app.getByTestId('cloud-remote-directory')).toHaveValue('Novelist');
+  });
+
   test('keeps legacy roots when saving or connecting, and pauses sync on a deliberate directory change', async ({ app, mockState }) => {
     await app.evaluate((project) => {
       const state: unknown = Reflect.get(window, '__TAURI_MOCK_STATE__');
