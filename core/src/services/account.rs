@@ -447,28 +447,52 @@ pub async fn authenticate(
         None,
     )
     .await?;
-    let authenticated: Authentication =
-        serde_json::from_value(value).map_err(|_| error("account_response_invalid"))?;
-    let summary = AccountSummary {
-        endpoint,
-        user_id: authenticated.user_id,
-        username: authenticated.username,
-        device_id: authenticated.device_id,
-        expires_at: authenticated.expires_at,
+    // From here on the server has created a session and a device. Any local
+    // rejection of its answer must log that session out again, best effort.
+    let issued_token = value
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|token| {
+            !token.is_empty()
+                && token.len() <= 1024
+                && token.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .map(str::to_owned);
+    let validated = (|| {
+        let authenticated: Authentication =
+            serde_json::from_value(value).map_err(|_| error("account_response_invalid"))?;
+        let summary = AccountSummary {
+            endpoint: endpoint.clone(),
+            user_id: authenticated.user_id,
+            username: authenticated.username,
+            device_id: authenticated.device_id,
+            expires_at: authenticated.expires_at,
+        };
+        validate_summary(&summary)?;
+        if authenticated.token.len() < 32
+            || authenticated.token.len() > 1024
+            || !authenticated
+                .token
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(error("account_response_invalid"));
+        }
+        Ok((summary, authenticated.token))
+    })();
+    let (summary, token) = match validated {
+        Ok(validated) => validated,
+        Err(err) => {
+            if let Some(token) = issued_token {
+                let _ =
+                    send_request(&endpoint, Method::POST, "/v1/logout", None, Some(&token)).await;
+            }
+            return Err(err);
+        }
     };
-    validate_summary(&summary)?;
-    if authenticated.token.len() < 32
-        || authenticated.token.len() > 1024
-        || !authenticated
-            .token
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic())
-    {
-        return Err(error("account_response_invalid"));
-    }
     let stored = StoredSession {
         scope: session_scope(&summary),
-        token: authenticated.token,
+        token,
     };
     let secret = serde_json::to_string(&stored).map_err(|_| error("account_record_invalid"))?;
     let result = match vault_write(VAULT_SERVICE, SESSION_SLOT, Some(&secret)).await {

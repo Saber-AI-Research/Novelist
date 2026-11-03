@@ -128,16 +128,21 @@ fn raw_url_path(value: &str) -> Result<&str, AppError> {
         .unwrap_or("/"))
 }
 
+/// True when an http(s) URL points at a server on this device.
+pub(crate) fn is_loopback_url(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// Scheme policy (https-only for cloud accounts) is the caller's job: manual
+/// per-project WebDAV may legitimately use plain http on a LAN.
 pub(crate) fn remote_url(base_url: &str, remote_path: &str) -> Result<Url, AppError> {
     let mut url = Url::parse(base_url).map_err(|_| invalid_path())?;
     if !matches!(url.scheme(), "http" | "https")
-        || (url.scheme() == "http"
-            && match url.host() {
-                Some(url::Host::Ipv4(address)) => !address.is_loopback(),
-                Some(url::Host::Ipv6(address)) => !address.is_loopback(),
-                Some(url::Host::Domain(domain)) => !domain.eq_ignore_ascii_case("localhost"),
-                None => true,
-            })
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -468,6 +473,17 @@ pub async fn create_collection(
     )))
 }
 
+/// How long a confirmed application folder is trusted before MKCOL runs again.
+/// Long enough that timer and save-triggered syncs skip it; short enough that
+/// a folder deleted on the server is recreated within one session.
+const ENSURED_COLLECTION_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// (endpoint, user name, folder) → when the folder was last confirmed.
+type EnsuredCollections = std::collections::HashMap<(String, String, String), std::time::Instant>;
+
+static ENSURED_COLLECTIONS: std::sync::LazyLock<std::sync::Mutex<EnsuredCollections>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Create each parent before its child, checking existing resources are folders.
 pub(crate) async fn ensure_collections(
     client: &Client,
@@ -482,6 +498,43 @@ pub(crate) async fn ensure_collections(
     if !directory.is_empty() {
         create_collection(client, endpoint, directory, auth).await?;
     }
+    Ok(())
+}
+
+/// `ensure_collections` for routine background work (timer and save-triggered
+/// syncs, snapshot mirroring): a success is remembered per endpoint, user and
+/// folder for a while instead of repeating one MKCOL (and PROPFIND) per path
+/// level on every run. Explicit user actions use the uncached version.
+pub(crate) async fn ensure_collections_cached(
+    client: &Client,
+    endpoint: &str,
+    directory: &str,
+    auth: &WebDavAuth,
+) -> Result<(), AppError> {
+    if directory.is_empty() {
+        return validate_remote_path(directory);
+    }
+    let key = (
+        endpoint.to_owned(),
+        auth.username.clone(),
+        directory.to_owned(),
+    );
+    {
+        let ensured = ENSURED_COLLECTIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ensured
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < ENSURED_COLLECTION_TTL)
+        {
+            return Ok(());
+        }
+    }
+    ensure_collections(client, endpoint, directory, auth).await?;
+    ENSURED_COLLECTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, std::time::Instant::now());
     Ok(())
 }
 

@@ -129,6 +129,13 @@ pub async fn import_sync_config(
 pub async fn save_sync_config(project_dir: String, mut config: SyncConfig) -> Result<(), AppError> {
     blocking(move || {
         pause_changed_directory(&project_dir, &mut config)?;
+        // The mask only echoes a password saved before mobile stopped storing
+        // them. Saving drops that legacy plaintext instead of failing every
+        // later save (and "Sync now", which saves first).
+        #[cfg(mobile)]
+        if config.password == MASKED_PASSWORD {
+            config.password.clear();
+        }
         #[cfg(mobile)]
         if !config.password.is_empty() {
             return Err(AppError::InvalidInput(
@@ -212,7 +219,7 @@ pub async fn test_sync_connection(
     if !webdav::test_connection(&client, &webdav_url, &auth).await? {
         return Ok(false);
     }
-    webdav::ensure_collections(&client, &webdav_url, &remote_directory, &auth).await?;
+    webdav::ensure_collections(&client, &webdav_url, remote_directory, &auth).await?;
     Ok(true)
 }
 

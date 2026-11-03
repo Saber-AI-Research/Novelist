@@ -183,7 +183,7 @@ async fn verify_or_create_identity(
     project_dir: &str,
 ) -> Result<(), AppError> {
     let project_remote = &namespace.dir;
-    webdav::ensure_collections(&ctx.client, &ctx.endpoint, &ctx.remote_directory, &ctx.auth)
+    webdav::ensure_collections_cached(&ctx.client, &ctx.endpoint, &ctx.remote_directory, &ctx.auth)
         .await?;
     create_collection(&ctx.client, &ctx.base_url, "novelist-snapshots", &ctx.auth).await?;
     create_collection(&ctx.client, &ctx.base_url, project_remote, &ctx.auth).await?;

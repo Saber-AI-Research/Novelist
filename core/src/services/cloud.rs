@@ -364,6 +364,29 @@ async fn vault_delete() -> Result<(), AppError> {
     manual_vault_delete().await
 }
 
+/// After a new profile is written, delete the credential store the previous
+/// profile used if the new one no longer reads it, so no orphaned password
+/// (keychain entry or plaintext file) outlives its connection.
+async fn release_previous_credential(previous: Option<&AccountProfile>, current: &AccountProfile) {
+    let Some(previous) = previous else { return };
+    let result = if previous.secure_credential {
+        let old_slot = configuration_secret_slot(&previous.endpoint, &previous.username);
+        if current.secure_credential
+            && configuration_secret_slot(&current.endpoint, &current.username) == old_slot
+        {
+            return;
+        }
+        crate::services::account::config_vault_write(&old_slot, None).await
+    } else if current.secure_credential {
+        manual_vault_delete().await
+    } else {
+        return;
+    };
+    if let Err(error) = result {
+        tracing::warn!("could not remove the previous WebDAV credential: {error}");
+    }
+}
+
 async fn manual_vault_delete() -> Result<(), AppError> {
     #[cfg(mobile)]
     {
@@ -539,11 +562,15 @@ pub(crate) fn validate_endpoint(input: &str) -> Result<String, AppError> {
             "Enter the WebDAV folder URL from your provider".into(),
         ));
     }
-    webdav::remote_url(endpoint, "").map_err(|_| {
+    let invalid = || {
         AppError::InvalidInput(
             "Use an https:// WebDAV URL without a user name, password, '?' query or '#' fragment. Plain http is accepted only for a server on this device".into(),
         )
-    })?;
+    };
+    let url = webdav::remote_url(endpoint, "").map_err(|_| invalid())?;
+    if url.scheme() != "https" && !webdav::is_loopback_url(&url) {
+        return Err(invalid());
+    }
     Ok(endpoint.to_owned())
 }
 
@@ -741,6 +768,7 @@ pub async fn connect(
     probe(&client, &endpoint, &auth).await?;
     webdav::ensure_collections(&client, &endpoint, &remote_directory, &auth).await?;
     let _exclusive = exclusive_account().await;
+    let previous = read_profile()?;
     let WebDavAuth { username, password } = auth;
     let credential = StoredCredential {
         endpoint: endpoint.clone(),
@@ -764,6 +792,7 @@ pub async fn connect(
         &cloud_dir().join(ACCOUNT_FILE),
         &serde_json::to_vec_pretty(&profile)?,
     )?;
+    release_previous_credential(previous.as_ref(), &profile).await;
     Ok(summary(Some(&profile)))
 }
 
@@ -906,7 +935,9 @@ pub async fn restore_configuration(
     write_record(
         &cloud_dir().join(ACCOUNT_FILE),
         &serde_json::to_vec_pretty(&profile)?,
-    )
+    )?;
+    release_previous_credential(previous.as_ref(), &profile).await;
+    Ok(())
 }
 
 pub async fn remove_restored_configuration() -> Result<(), AppError> {
@@ -1386,6 +1417,18 @@ mod tests {
 
     const USER: &str = "writer";
     const PASSWORD: &str = "app-password-123";
+
+    #[test]
+    fn plain_http_is_rejected_for_accounts_but_not_for_manual_project_webdav() {
+        // Cloud accounts: https only, plain http just for this device.
+        assert!(validate_endpoint("http://192.168.1.20/dav").is_err());
+        assert!(validate_endpoint("http://nas.local/dav").is_err());
+        assert!(validate_endpoint("http://localhost:8080/dav").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1/dav").is_ok());
+        assert!(validate_endpoint("https://cloud.example.com/dav").is_ok());
+        // Manual per-project WebDAV on a LAN keeps working.
+        assert!(webdav::remote_url("http://192.168.1.20/dav", "novelist-sync").is_ok());
+    }
 
     /// Isolated app data, a WebDAV server that requires `USER`/`PASSWORD`,
     /// and scratch folders for projects.

@@ -1239,9 +1239,13 @@ pub(crate) async fn perform_sync_with(
     let (identity, identity_bytes) = project_identity(&root)?;
     let identity_hash = hash(&identity_bytes);
     let binding = remote_binding(&config, &identity.project_id)?;
-    if let Err(error) =
-        webdav::ensure_collections(&client, &config.webdav_url, &config.remote_directory, &auth)
-            .await
+    if let Err(error) = webdav::ensure_collections_cached(
+        &client,
+        &config.webdav_url,
+        &config.remote_directory,
+        &auth,
+    )
+    .await
     {
         status
             .errors
