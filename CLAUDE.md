@@ -55,8 +55,11 @@ pnpm test:all         # Unit + Rust tests
 
 **"Prompt as UI"**: Novelist is designed to be customized by AI coding
 assistants editing the source directly, rather than through complex
-configuration UIs. Keep the desktop app kernel lean — no HTTP API calls
-or AI model integrations in the binary.
+configuration UIs. Keep the desktop app kernel lean — no AI model
+integrations in the binary, and no HTTP API calls beyond opt-in sync:
+WebDAV project sync and the optional Novelist account service
+(`core/src/services/account.rs`, settings sync). Both stay off until
+the user configures them; don't add other network clients to the kernel.
 
 ## Module Layout (post 2026-04-20 refactor)
 
