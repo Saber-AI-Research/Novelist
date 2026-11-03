@@ -186,20 +186,27 @@ pub async fn test_sync_connection(
     password: String,
     remote_directory: Option<String>,
 ) -> Result<bool, AppError> {
-    let remote_directory = webdav::normalize_remote_directory(remote_directory.as_deref().unwrap_or(webdav::DEFAULT_REMOTE_DIRECTORY))?;
+    let remote_directory = webdav::normalize_remote_directory(
+        remote_directory
+            .as_deref()
+            .unwrap_or(webdav::DEFAULT_REMOTE_DIRECTORY),
+    )?;
     let (dir, url, user) = (project_dir.clone(), webdav_url.clone(), username.clone());
     let stored = blocking(move || sync::read_sync_config(&dir)).await?;
     // A linked project tests with the account credential, never a typed one,
     // holding the account lease while it is in use.
-    let (auth, _lease) =
-        if stored.cloud_account && stored.webdav_url == url && stored.username == user && stored.remote_directory == remote_directory {
-            sync::project_auth(&stored, None).await?
-        } else {
-            let password =
-                blocking(move || Ok(resolve_masked_password(&project_dir, &url, &user, password)))
-                    .await?;
-            (webdav::WebDavAuth { username, password }, None)
-        };
+    let (auth, _lease) = if stored.cloud_account
+        && stored.webdav_url == url
+        && stored.username == user
+        && stored.remote_directory == remote_directory
+    {
+        sync::project_auth(&stored, None).await?
+    } else {
+        let password =
+            blocking(move || Ok(resolve_masked_password(&project_dir, &url, &user, password)))
+                .await?;
+        (webdav::WebDavAuth { username, password }, None)
+    };
     // Never follows redirects, so the password stays with this host.
     let client = sync::webdav_client()?;
     if !webdav::test_connection(&client, &webdav_url, &auth).await? {
@@ -360,19 +367,46 @@ mod tests {
         let data = SyncData::new();
         let project = data.project();
         let server = DavServer::start();
-        assert!(test_sync_connection(project.clone(), server.url.clone(), "writer".into(), "password".into(), None).await.unwrap());
+        assert!(test_sync_connection(
+            project.clone(),
+            server.url.clone(),
+            "writer".into(),
+            "password".into(),
+            None
+        )
+        .await
+        .unwrap());
         let root = webdav::remote_url(&server.url, "Novelist").unwrap();
-        assert!(server.state.lock().unwrap().collections.contains(root.path()));
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .collections
+            .contains(root.path()));
         let count = server.state.lock().unwrap().requests.len();
-        assert!(test_sync_connection(project.clone(), server.url.clone(), "writer".into(), "password".into(), Some("../escape".into())).await.is_err());
+        assert!(test_sync_connection(
+            project.clone(),
+            server.url.clone(),
+            "writer".into(),
+            "password".into(),
+            Some("../escape".into())
+        )
+        .await
+        .is_err());
         assert_eq!(server.state.lock().unwrap().requests.len(), count);
         sync::save_sync_config_to_disk(&project, &stored(&server.url)).unwrap();
         let mut next = stored(&server.url);
         next.remote_directory = "Novelist".into();
         next.legacy_remote_acknowledged = true;
-        save_sync_config(project.clone(), next.clone()).await.unwrap();
+        save_sync_config(project.clone(), next.clone())
+            .await
+            .unwrap();
         assert!(!sync::read_sync_config(&project).unwrap().enabled);
-        assert!(!sync::read_sync_config(&project).unwrap().legacy_remote_acknowledged);
+        assert!(
+            !sync::read_sync_config(&project)
+                .unwrap()
+                .legacy_remote_acknowledged
+        );
         save_sync_config(project.clone(), next).await.unwrap();
         assert!(sync::read_sync_config(&project).unwrap().enabled);
         let mut imported = stored(&server.url);

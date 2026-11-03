@@ -125,8 +125,7 @@ fn normalize_endpoint(value: &str) -> Result<String, AppError> {
         Some(Host::Domain(host)) => host == "localhost",
         None => false,
     };
-    if !(url.scheme() == "https"
-        || (cfg!(debug_assertions) && url.scheme() == "http" && loopback))
+    if !(url.scheme() == "https" || (cfg!(debug_assertions) && url.scheme() == "http" && loopback))
         || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -142,7 +141,9 @@ fn normalize_endpoint(value: &str) -> Result<String, AppError> {
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn validate_summary(summary: &AccountSummary) -> Result<(), AppError> {
@@ -187,7 +188,9 @@ async fn read_summary() -> Result<Option<AccountSummary>, AppError> {
 }
 
 async fn current_summary() -> Result<AccountSummary, AppError> {
-    read_summary().await?.ok_or_else(|| error("session_expired"))
+    read_summary()
+        .await?
+        .ok_or_else(|| error("session_expired"))
 }
 
 // Mobile vault access fails closed until the platform plugin is initialized.
@@ -201,7 +204,9 @@ pub fn install_native_vault(app: &tauri::AppHandle) {
 
 #[cfg(mobile)]
 fn native_vault() -> Result<&'static tauri::AppHandle, AppError> {
-    NATIVE_VAULT.get().ok_or_else(|| error("account_secure_storage_unavailable"))
+    NATIVE_VAULT
+        .get()
+        .ok_or_else(|| error("account_secure_storage_unavailable"))
 }
 
 async fn vault_read(service: &'static str, key: &str) -> Result<Option<String>, AppError> {
@@ -231,7 +236,11 @@ async fn vault_read(service: &'static str, key: &str) -> Result<Option<String>, 
     }
 }
 
-async fn vault_write(service: &'static str, key: &str, value: Option<&str>) -> Result<(), AppError> {
+async fn vault_write(
+    service: &'static str,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), AppError> {
     if value.is_some_and(|value| value.len() > MAX_RECORD_BYTES) {
         return Err(error("account_record_too_large"));
     }
@@ -253,7 +262,8 @@ async fn vault_write(service: &'static str, key: &str, value: Option<&str>) -> R
             let entry = keyring::Entry::new(service, &key)
                 .map_err(|_| error("account_secure_storage_unavailable"))?;
             match value {
-                Some(value) => entry.set_password(&value)
+                Some(value) => entry
+                    .set_password(&value)
                     .map_err(|_| error("account_secure_storage_unavailable")),
                 None => match entry.delete_credential() {
                     Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -297,11 +307,19 @@ async fn send_request(
         if bytes.len() > MAX_HTTP_BYTES {
             return Err(error("account_request_too_large"));
         }
-        request = request.header(reqwest::header::CONTENT_TYPE, "application/json").body(bytes);
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes);
     }
-    let response = request.send().await.map_err(|_| error("account_network_unavailable"))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|_| error("account_network_unavailable"))?;
     let status = response.status();
-    if response.content_length().is_some_and(|size| size > MAX_HTTP_BYTES as u64) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_HTTP_BYTES as u64)
+    {
         return Err(error("account_response_too_large"));
     }
     let mut bytes = Vec::new();
@@ -319,14 +337,18 @@ async fn send_request(
         let invalid_password = status == StatusCode::UNAUTHORIZED
             && method == Method::DELETE
             && path == "/v1/account"
-            && serde_json::from_slice::<Value>(&bytes).ok().is_some_and(|body| {
-                body.get("error").and_then(Value::as_str) == Some("invalid_credentials")
-            });
+            && serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .is_some_and(|body| {
+                    body.get("error").and_then(Value::as_str) == Some("invalid_credentials")
+                });
         return Err(error(match status {
             StatusCode::UNAUTHORIZED if invalid_password => "account_credentials_invalid",
             StatusCode::UNAUTHORIZED if token.is_some() => "session_expired",
             StatusCode::UNAUTHORIZED => "account_credentials_invalid",
-            StatusCode::CONFLICT if method == Method::PUT && path == "/v1/config" => "revision_conflict",
+            StatusCode::CONFLICT if method == Method::PUT && path == "/v1/config" => {
+                "revision_conflict"
+            }
             StatusCode::CONFLICT => "account_username_unavailable",
             StatusCode::PAYLOAD_TOO_LARGE => "account_request_too_large",
             StatusCode::TOO_MANY_REQUESTS => "account_rate_limited",
@@ -346,7 +368,9 @@ fn allowed_request(method: &str, path: &str) -> Result<Method, AppError> {
         | ("POST", "/v1/logout")
         | ("DELETE", "/v1/account")
         | ("PUT", "/v1/config") => true,
-        ("DELETE", path) => path.strip_prefix("/v1/devices/").is_some_and(valid_identifier),
+        ("DELETE", path) => path
+            .strip_prefix("/v1/devices/")
+            .is_some_and(valid_identifier),
         _ => false,
     };
     if !allowed {
@@ -414,7 +438,11 @@ pub async fn authenticate(
     let value = send_request(
         &endpoint,
         Method::POST,
-        if register { "/v1/register" } else { "/v1/login" },
+        if register {
+            "/v1/register"
+        } else {
+            "/v1/login"
+        },
         Some(body),
         None,
     )
@@ -431,7 +459,10 @@ pub async fn authenticate(
     validate_summary(&summary)?;
     if authenticated.token.len() < 32
         || authenticated.token.len() > 1024
-        || !authenticated.token.bytes().all(|byte| byte.is_ascii_graphic())
+        || !authenticated
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
     {
         return Err(error("account_response_invalid"));
     }
@@ -450,7 +481,14 @@ pub async fn authenticate(
         // Creating the remote session succeeded: compensate even when storing
         // or deleting the local vault entry itself has failed.
         let _ = vault_write(VAULT_SERVICE, SESSION_SLOT, None).await;
-        let _ = send_request(&summary.endpoint, Method::POST, "/v1/logout", None, Some(&stored.token)).await;
+        let _ = send_request(
+            &summary.endpoint,
+            Method::POST,
+            "/v1/logout",
+            None,
+            Some(&stored.token),
+        )
+        .await;
         return Err(err);
     }
     Ok(summary)
@@ -463,9 +501,11 @@ pub async fn request(method: String, path: String, body: Option<Value>) -> Resul
     }
     let _guard = ACCOUNT_LOCK.lock().await;
     let summary = current_summary().await?;
-    let raw = vault_read(VAULT_SERVICE, SESSION_SLOT).await?
+    let raw = vault_read(VAULT_SERVICE, SESSION_SLOT)
+        .await?
         .ok_or_else(|| error("session_expired"))?;
-    let session: StoredSession = serde_json::from_str(&raw).map_err(|_| error("session_expired"))?;
+    let session: StoredSession =
+        serde_json::from_str(&raw).map_err(|_| error("session_expired"))?;
     if session.scope != session_scope(&summary) {
         return Err(error("session_expired"));
     }
@@ -503,7 +543,10 @@ pub async fn recovery_key(value: Option<String>) -> Result<Option<String>, AppEr
         if value.len() != 44 || base64_length(&value) != Some(32) {
             return Err(error("account_recovery_key_invalid"));
         }
-        let record = StoredRecoveryKey { scope: identity, value };
+        let record = StoredRecoveryKey {
+            scope: identity,
+            value,
+        };
         let secret = serde_json::to_string(&record).map_err(|_| error("account_record_invalid"))?;
         vault_write(VAULT_SERVICE, RECOVERY_SLOT, Some(&secret)).await?;
         return Ok(Some(record.value));
@@ -581,16 +624,30 @@ mod tests {
 
     #[test]
     fn account_endpoints_require_an_origin_and_production_tls() {
-        assert_eq!(normalize_endpoint("https://example.com/").unwrap(), "https://example.com");
+        assert_eq!(
+            normalize_endpoint("https://example.com/").unwrap(),
+            "https://example.com"
+        );
         for endpoint in [
-            "http://example.com", "https://user:password@example.com", "https://example.com/v1",
-            "https://example.com/?query", "https://example.com/#fragment", "file:///tmp/account",
-            " https://example.com", "https://example.com\\@other.example",
+            "http://example.com",
+            "https://user:password@example.com",
+            "https://example.com/v1",
+            "https://example.com/?query",
+            "https://example.com/#fragment",
+            "file:///tmp/account",
+            " https://example.com",
+            "https://example.com\\@other.example",
         ] {
             assert!(normalize_endpoint(endpoint).is_err());
         }
-        assert_eq!(normalize_endpoint("http://127.0.0.1:8080").is_ok(), cfg!(debug_assertions));
-        assert_eq!(normalize_endpoint("http://[::1]:8080").is_ok(), cfg!(debug_assertions));
+        assert_eq!(
+            normalize_endpoint("http://127.0.0.1:8080").is_ok(),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(
+            normalize_endpoint("http://[::1]:8080").is_ok(),
+            cfg!(debug_assertions)
+        );
     }
 
     #[test]
@@ -615,10 +672,19 @@ mod tests {
 
     #[test]
     fn account_and_device_scopes_are_unambiguous() {
-        assert_ne!(scope(&["https://one.example", "user"]), scope(&["https://two.example", "user"]));
-        assert_ne!(scope(&["https://one.example", "user"]), scope(&["https://one.example", "other"]));
+        assert_ne!(
+            scope(&["https://one.example", "user"]),
+            scope(&["https://two.example", "user"])
+        );
+        assert_ne!(
+            scope(&["https://one.example", "user"]),
+            scope(&["https://one.example", "other"])
+        );
         assert_ne!(scope(&["a", "bc"]), scope(&["ab", "c"]));
-        assert_ne!(scope(&["endpoint", "user", "one"]), scope(&["endpoint", "user", "two"]));
+        assert_ne!(
+            scope(&["endpoint", "user", "one"]),
+            scope(&["endpoint", "user", "two"])
+        );
     }
 
     /// Explicit opt-in: uses the real desktop system vault, not a mock.
@@ -640,7 +706,8 @@ mod tests {
                 return Err(error("vault_smoke_round_trip_failed"));
             }
             Ok(())
-        }.await;
+        }
+        .await;
         // Always attempt deletion, including when a write partially succeeded.
         let cleanup = vault_write(SERVICE, &key, None).await;
         result?;

@@ -183,7 +183,8 @@ async fn verify_or_create_identity(
     project_dir: &str,
 ) -> Result<(), AppError> {
     let project_remote = &namespace.dir;
-    webdav::ensure_collections(&ctx.client, &ctx.endpoint, &ctx.remote_directory, &ctx.auth).await?;
+    webdav::ensure_collections(&ctx.client, &ctx.endpoint, &ctx.remote_directory, &ctx.auth)
+        .await?;
     create_collection(&ctx.client, &ctx.base_url, "novelist-snapshots", &ctx.auth).await?;
     create_collection(&ctx.client, &ctx.base_url, project_remote, &ctx.auth).await?;
     let identity_path = format!("{project_remote}/project.json");
@@ -517,30 +518,71 @@ mod tests {
         let snapshot = tempfile::tempdir().unwrap();
         std::fs::create_dir(snapshot.path().join("files")).unwrap();
         std::fs::write(snapshot.path().join("files/chapter.md"), b"chapter").unwrap();
-        let meta = SnapshotMeta { id: "snap-1".into(), name: "saved".into(), timestamp: 1, file_count: 1, total_bytes: 7 };
-        std::fs::write(snapshot.path().join("metadata.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let meta = SnapshotMeta {
+            id: "snap-1".into(),
+            name: "saved".into(),
+            timestamp: 1,
+            file_count: 1,
+            total_bytes: 7,
+        };
+        std::fs::write(
+            snapshot.path().join("metadata.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
         let root = Dir::open_ambient_dir(snapshot.path(), ambient_authority()).unwrap();
         let project = "/projects/Novel";
         for directory in [webdav::DEFAULT_REMOTE_DIRECTORY, "作品/小说 Archive", ""] {
             let ctx = WebDavCtx {
                 client: webdav_client().unwrap(),
                 base_url: webdav::application_url(&server.url, directory).unwrap(),
-                endpoint: server.url.clone(), remote_directory: directory.into(),
-                auth: WebDavAuth { username: "writer".into(), password: "password".into() }, lease: None,
+                endpoint: server.url.clone(),
+                remote_directory: directory.into(),
+                auth: WebDavAuth {
+                    username: "writer".into(),
+                    password: "password".into(),
+                },
+                lease: None,
             };
             upload_snapshot(&ctx, project, &meta, &root).await.unwrap();
             let remote = remote_snap_dir(project, &meta.id);
-            let file = webdav::remote_url(&ctx.base_url, &format!("{remote}/files/chapter.md")).unwrap();
+            let file =
+                webdav::remote_url(&ctx.base_url, &format!("{remote}/files/chapter.md")).unwrap();
             assert_eq!(server.state.lock().unwrap().files[file.path()], b"chapter");
-            let marker = webdav::remote_url(&ctx.base_url, &format!("{remote}/metadata.json")).unwrap();
-            assert!(server.state.lock().unwrap().files.contains_key(marker.path()));
+            let marker =
+                webdav::remote_url(&ctx.base_url, &format!("{remote}/metadata.json")).unwrap();
+            assert!(server
+                .state
+                .lock()
+                .unwrap()
+                .files
+                .contains_key(marker.path()));
         }
         let custom_base = webdav::application_url(&server.url, "作品/小说 Archive").unwrap();
-        delete_remote(&webdav_client().unwrap(), &custom_base, &remote_snap_dir(project, &meta.id), &WebDavAuth { username: "writer".into(), password: "password".into() }).await.unwrap();
+        delete_remote(
+            &webdav_client().unwrap(),
+            &custom_base,
+            &remote_snap_dir(project, &meta.id),
+            &WebDavAuth {
+                username: "writer".into(),
+                password: "password".into(),
+            },
+        )
+        .await
+        .unwrap();
         for directory in [webdav::DEFAULT_REMOTE_DIRECTORY, ""] {
             let base = webdav::application_url(&server.url, directory).unwrap();
-            let marker = webdav::remote_url(&base, &format!("{}/metadata.json", remote_snap_dir(project, &meta.id))).unwrap();
-            assert!(server.state.lock().unwrap().files.contains_key(marker.path()));
+            let marker = webdav::remote_url(
+                &base,
+                &format!("{}/metadata.json", remote_snap_dir(project, &meta.id)),
+            )
+            .unwrap();
+            assert!(server
+                .state
+                .lock()
+                .unwrap()
+                .files
+                .contains_key(marker.path()));
         }
     }
 

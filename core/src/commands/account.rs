@@ -21,7 +21,11 @@ pub async fn account_authenticate(
 }
 
 #[tauri::command]
-pub async fn account_request(method: String, path: String, body: Option<Value>) -> Result<Value, AppError> {
+pub async fn account_request(
+    method: String,
+    path: String,
+    body: Option<Value>,
+) -> Result<Value, AppError> {
     account::request(method, path, body).await
 }
 

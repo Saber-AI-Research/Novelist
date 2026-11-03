@@ -426,9 +426,18 @@ pub(crate) fn unlink_cloud_projects() -> Result<u32, AppError> {
 
 /// Pause only this connection's projects. Keep the cloud link, identities,
 /// baseline hashes and files so reconnecting continues the same history.
-pub(crate) fn pause_cloud_projects(endpoint: &str, username: &str, remote_directory: &str) -> Result<u32, AppError> {
+pub(crate) fn pause_cloud_projects(
+    endpoint: &str,
+    username: &str,
+    remote_directory: &str,
+) -> Result<u32, AppError> {
     rewrite_sync_configs(|config| {
-        if !config.cloud_account || config.webdav_url != endpoint || config.username != username || config.remote_directory != remote_directory || !config.enabled {
+        if !config.cloud_account
+            || config.webdav_url != endpoint
+            || config.username != username
+            || config.remote_directory != remote_directory
+            || !config.enabled
+        {
             return false;
         }
         config.enabled = false;
@@ -452,7 +461,10 @@ pub(crate) fn adopt_inline_credentials(
         if config.cloud_account {
             return false;
         }
-        if config.webdav_url == endpoint && config.username == username && config.remote_directory == remote_directory {
+        if config.webdav_url == endpoint
+            && config.username == username
+            && config.remote_directory == remote_directory
+        {
             config.cloud_account = true;
             config.password.clear();
             return true;
@@ -1143,14 +1155,22 @@ pub(crate) async fn project_auth(
         return Ok((auth, None));
     }
     if let Some(lease) = held {
-        if lease.endpoint() != config.webdav_url || lease.auth().username != config.username || lease.remote_directory() != config.remote_directory {
+        if lease.endpoint() != config.webdav_url
+            || lease.auth().username != config.username
+            || lease.remote_directory() != config.remote_directory
+        {
             return Err(AppError::Custom(
                 "This project is linked to another cloud account".into(),
             ));
         }
         return Ok((lease.auth().clone(), None));
     }
-    let lease = cloud::lease_account(Some((&config.webdav_url, &config.username, &config.remote_directory))).await?;
+    let lease = cloud::lease_account(Some((
+        &config.webdav_url,
+        &config.username,
+        &config.remote_directory,
+    )))
+    .await?;
     Ok((lease.auth().clone(), Some(lease)))
 }
 
@@ -1219,8 +1239,13 @@ pub(crate) async fn perform_sync_with(
     let (identity, identity_bytes) = project_identity(&root)?;
     let identity_hash = hash(&identity_bytes);
     let binding = remote_binding(&config, &identity.project_id)?;
-    if let Err(error) = webdav::ensure_collections(&client, &config.webdav_url, &config.remote_directory, &auth).await {
-        status.errors.push(format!("Application directory: {error}"));
+    if let Err(error) =
+        webdav::ensure_collections(&client, &config.webdav_url, &config.remote_directory, &auth)
+            .await
+    {
+        status
+            .errors
+            .push(format!("Application directory: {error}"));
         return Ok(status);
     }
     config.webdav_url = webdav::application_url(&config.webdav_url, &config.remote_directory)?;
@@ -1823,15 +1848,34 @@ mod tests {
         save_sync_config_to_disk(&fixture.project, &config).unwrap();
         fixture.local_write("chapter.md", b"chapter");
         assert_eq!(clean_sync(&fixture.project).await.files_uploaded, 1);
-        let file = webdav::remote_url(&fixture.server.url, &format!("{}/{}/chapter.md", config.remote_directory, fixture.remote_base)).unwrap();
-        assert_eq!(fixture.server.state.lock().unwrap().files[file.path()], b"chapter");
+        let file = webdav::remote_url(
+            &fixture.server.url,
+            &format!(
+                "{}/{}/chapter.md",
+                config.remote_directory, fixture.remote_base
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.server.state.lock().unwrap().files[file.path()],
+            b"chapter"
+        );
         config.remote_directory = "Denied/Nested".into();
         save_sync_config_to_disk(&fixture.project, &config).unwrap();
         let denied = webdav::remote_url(&fixture.server.url, "Denied/Nested").unwrap();
         let before = fixture.server.state.lock().unwrap().files.clone();
-        fixture.server.state.lock().unwrap().canned.insert(("MKCOL".into(), denied.path().into()), (403, Vec::new()));
+        fixture
+            .server
+            .state
+            .lock()
+            .unwrap()
+            .canned
+            .insert(("MKCOL".into(), denied.path().into()), (403, Vec::new()));
         let status = perform_sync(&fixture.project).await.unwrap();
-        assert!(status.errors.iter().any(|error| error.starts_with("Application directory:")));
+        assert!(status
+            .errors
+            .iter()
+            .any(|error| error.starts_with("Application directory:")));
         assert_eq!(fixture.server.state.lock().unwrap().files, before);
     }
 
@@ -1843,40 +1887,81 @@ mod tests {
         let mut custom = legacy.clone();
         custom.remote_directory = "Novelist".into();
         let id = "a".repeat(64);
-        assert_ne!(remote_binding(&legacy, &id).unwrap(), remote_binding(&custom, &id).unwrap());
+        assert_ne!(
+            remote_binding(&legacy, &id).unwrap(),
+            remote_binding(&custom, &id).unwrap()
+        );
     }
 
     #[tokio::test]
     #[serial(sync_data_dir)]
     async fn nested_root_legacy_claims_and_adoption_never_use_endpoint_records() {
         let fixture = SyncFixture::new();
-        let name = Path::new(&fixture.project).file_name().unwrap().to_str().unwrap();
+        let name = Path::new(&fixture.project)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
         let directory = "Archives/小说";
         let mut config = read_sync_config(&fixture.project).unwrap();
         config.remote_directory = directory.into();
         save_sync_config_to_disk(&fixture.project, &config).unwrap();
-        fixture.remote_write_at(&format!("{directory}/novelist/{name}"), "chapter.md", b"selected legacy");
+        fixture.remote_write_at(
+            &format!("{directory}/novelist/{name}"),
+            "chapter.md",
+            b"selected legacy",
+        );
         let other_id = "f".repeat(64);
-        fixture.remote_write_at(LEGACY_CLAIMS_DIR, &format!("{name}.json"), format!(r#"{{"schema_version":1,"project_id":"{other_id}"}}"#).as_bytes());
+        fixture.remote_write_at(
+            LEGACY_CLAIMS_DIR,
+            &format!("{name}.json"),
+            format!(r#"{{"schema_version":1,"project_id":"{other_id}"}}"#).as_bytes(),
+        );
         fixture.local_write("chapter.md", b"selected legacy");
         let blocked = perform_sync(&fixture.project).await.unwrap();
-        assert!(blocked.errors.iter().any(|error| error.contains("Legacy WebDAV data")));
+        assert!(blocked
+            .errors
+            .iter()
+            .any(|error| error.contains("Legacy WebDAV data")));
         acknowledge_legacy(&fixture.project);
         clean_sync(&fixture.project).await;
-        let id = local_project_id(Path::new(&fixture.project)).unwrap().unwrap();
-        let selected_claim = webdav::remote_url(&fixture.server.url, &format!("{directory}/{LEGACY_CLAIMS_DIR}/{name}.json")).unwrap();
-        assert_eq!(parse_project_id(&fixture.server.state.lock().unwrap().files[selected_claim.path()]).unwrap(), id);
+        let id = local_project_id(Path::new(&fixture.project))
+            .unwrap()
+            .unwrap();
+        let selected_claim = webdav::remote_url(
+            &fixture.server.url,
+            &format!("{directory}/{LEGACY_CLAIMS_DIR}/{name}.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_project_id(&fixture.server.state.lock().unwrap().files[selected_claim.path()])
+                .unwrap(),
+            id
+        );
         let parent = tempfile::tempdir().unwrap();
         let clone = fixture.configure_project(&parent.path().join(name));
         let blocked = perform_sync(&clone).await.unwrap();
         assert_eq!(blocked.adoptable_project_id.as_deref(), Some(id.as_str()));
         adopt_legacy_identity(&clone, &id).await.unwrap();
         clean_sync(&clone).await;
-        assert_eq!(std::fs::read(Path::new(&clone).join("chapter.md")).unwrap(), b"selected legacy");
-        let outside_claim = webdav::remote_url(&fixture.server.url, &format!("{LEGACY_CLAIMS_DIR}/{name}.json")).unwrap();
+        assert_eq!(
+            std::fs::read(Path::new(&clone).join("chapter.md")).unwrap(),
+            b"selected legacy"
+        );
+        let outside_claim = webdav::remote_url(
+            &fixture.server.url,
+            &format!("{LEGACY_CLAIMS_DIR}/{name}.json"),
+        )
+        .unwrap();
         let state = fixture.server.state.lock().unwrap();
-        assert_eq!(parse_project_id(&state.files[outside_claim.path()]).unwrap(), other_id);
-        assert!(!state.requests.iter().any(|request| request.path == outside_claim.path()));
+        assert_eq!(
+            parse_project_id(&state.files[outside_claim.path()]).unwrap(),
+            other_id
+        );
+        assert!(!state
+            .requests
+            .iter()
+            .any(|request| request.path == outside_claim.path()));
     }
 
     #[tokio::test]

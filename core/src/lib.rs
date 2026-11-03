@@ -675,8 +675,8 @@ pub fn run() {
     #[cfg(not(feature = "sync"))]
     let account_handler: Box<tauri::ipc::InvokeHandler<tauri::Wry>> = Box::new(account_commands![]);
     let core_handler = invoke_handler;
-    let invoke_handler = move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
-        match invoke.message.command() {
+    let invoke_handler =
+        move |invoke: tauri::ipc::Invoke<tauri::Wry>| match invoke.message.command() {
             "account_status"
             | "account_authenticate"
             | "account_request"
@@ -692,8 +692,7 @@ pub fn run() {
             | "account_config_restore_webdav"
             | "account_config_remove_restored_webdav" => account_handler(invoke),
             _ => core_handler(invoke),
-        }
-    };
+        };
 
     let mut app_builder = tauri::Builder::default();
 

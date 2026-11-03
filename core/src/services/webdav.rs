@@ -43,8 +43,13 @@ pub(crate) fn normalize_remote_directory(value: &str) -> Result<&str, AppError> 
     if value.len() > 512
         || value.contains(['%', '?', '#'])
         || value.split_once(':').is_some_and(|(scheme, _)| {
-            scheme.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic())
-                && scheme.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+            scheme
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic())
+                && scheme
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
         })
     {
         return Err(invalid_path());
@@ -126,12 +131,13 @@ fn raw_url_path(value: &str) -> Result<&str, AppError> {
 pub(crate) fn remote_url(base_url: &str, remote_path: &str) -> Result<Url, AppError> {
     let mut url = Url::parse(base_url).map_err(|_| invalid_path())?;
     if !matches!(url.scheme(), "http" | "https")
-        || (url.scheme() == "http" && match url.host() {
-            Some(url::Host::Ipv4(address)) => !address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => !address.is_loopback(),
-            Some(url::Host::Domain(domain)) => !domain.eq_ignore_ascii_case("localhost"),
-            None => true,
-        })
+        || (url.scheme() == "http"
+            && match url.host() {
+                Some(url::Host::Ipv4(address)) => !address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => !address.is_loopback(),
+                Some(url::Host::Domain(domain)) => !domain.eq_ignore_ascii_case("localhost"),
+                None => true,
+            })
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -452,7 +458,9 @@ pub async fn create_collection(
         if test_connection(client, collection.as_str(), auth).await? {
             return Ok(());
         }
-        return Err(AppError::Custom("The WebDAV path already exists but is not a collection".into()));
+        return Err(AppError::Custom(
+            "The WebDAV path already exists but is not a collection".into(),
+        ));
     }
     Err(AppError::Custom(format!(
         "WebDAV MKCOL returned {}",
@@ -938,10 +946,31 @@ mod tests {
 
     #[test]
     fn application_directory_validation_preserves_logical_names() {
-        assert_eq!(normalize_remote_directory("  作品/小说 Archive  ").unwrap(), "作品/小说 Archive");
+        assert_eq!(
+            normalize_remote_directory("  作品/小说 Archive  ").unwrap(),
+            "作品/小说 Archive"
+        );
         assert_eq!(normalize_remote_directory(" ").unwrap(), "");
-        assert_eq!(normalize_remote_directory(&"a".repeat(512)).unwrap().len(), 512);
-        for invalid in ["/Novelist", "Novelist/", "a//b", ".", "..", "a/../b", "a\\b", "%2e%2e", "a%2Fb", "a?b", "a#b", "https://example.com", "a\u{7f}b", &"作".repeat(171)] {
+        assert_eq!(
+            normalize_remote_directory(&"a".repeat(512)).unwrap().len(),
+            512
+        );
+        for invalid in [
+            "/Novelist",
+            "Novelist/",
+            "a//b",
+            ".",
+            "..",
+            "a/../b",
+            "a\\b",
+            "%2e%2e",
+            "a%2Fb",
+            "a?b",
+            "a#b",
+            "https://example.com",
+            "a\u{7f}b",
+            &"作".repeat(171),
+        ] {
             assert!(normalize_remote_directory(invalid).is_err(), "{invalid:?}");
         }
     }
@@ -950,17 +979,40 @@ mod tests {
     async fn nested_application_collections_are_created_idempotently_and_reject_files() {
         let server = DavServer::start();
         let client = Client::new();
-        let auth = WebDavAuth { username: "writer".into(), password: "password".into() };
+        let auth = WebDavAuth {
+            username: "writer".into(),
+            password: "password".into(),
+        };
         for _ in 0..2 {
-            ensure_collections(&client, &server.url, "作品/小说 Archive", &auth).await.unwrap();
+            ensure_collections(&client, &server.url, "作品/小说 Archive", &auth)
+                .await
+                .unwrap();
         }
         let endpoint = application_url(&server.url, "作品/小说 Archive").unwrap();
         assert!(test_connection(&client, &endpoint, &auth).await.unwrap());
-        put_bytes(&client, &endpoint, "chapter.md", b"content".to_vec(), &auth, PutCondition::Absent).await.unwrap();
-        assert!(create_collection(&client, &endpoint, "chapter.md", &auth).await.is_err());
+        put_bytes(
+            &client,
+            &endpoint,
+            "chapter.md",
+            b"content".to_vec(),
+            &auth,
+            PutCondition::Absent,
+        )
+        .await
+        .unwrap();
+        assert!(create_collection(&client, &endpoint, "chapter.md", &auth)
+            .await
+            .is_err());
         let blocked = remote_url(&endpoint, "blocked").unwrap().path().to_owned();
-        server.state.lock().unwrap().canned.insert(("MKCOL".into(), blocked), (403, Vec::new()));
-        assert!(create_collection(&client, &endpoint, "blocked", &auth).await.is_err());
+        server
+            .state
+            .lock()
+            .unwrap()
+            .canned
+            .insert(("MKCOL".into(), blocked), (403, Vec::new()));
+        assert!(create_collection(&client, &endpoint, "blocked", &auth)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
