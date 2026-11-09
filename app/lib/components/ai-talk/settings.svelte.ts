@@ -122,6 +122,8 @@ class AiTalkSettingsStore {
   private vaultUrls = loadIds(VAULT_URLS_KEY);
   private loadedSecrets = new Set<string>();
   private editedSecrets = new Set<string>();
+  /** Last value known to be in each vault slot, so unrelated edits skip keychain writes. */
+  private storedSecrets = new Map<string, string>();
   private secretWrites: Promise<void> = Promise.resolve();
   private secretLoad: Promise<void> | null = null;
   private secretLoadGeneration = 0;
@@ -142,6 +144,7 @@ class AiTalkSettingsStore {
           if (generation !== this.secretLoadGeneration) return;
           this.loadedSecrets.add(slot);
           if (this.editedSecrets.has(slot)) continue;
+          this.storedSecrets.set(slot, value ?? '');
           this.value = hydrateActiveProfile({ ...this.value, profiles: this.value.profiles.map((profile) => profile.id === id ? { ...profile, [field]: value ?? '' } : profile) });
         }
       }
@@ -162,8 +165,14 @@ class AiTalkSettingsStore {
       for (const [ids, prefix, field] of [[this.vaultProfiles, 'ai:', 'apiKey'], [this.vaultUrls, 'ai-url:', 'baseUrl']] as const) {
         const slot = `${prefix}${profile.id}`;
         if (!ids.has(profile.id) || (!this.loadedSecrets.has(slot) && !this.editedSecrets.has(slot))) continue;
-        const value = profile[field];
-        this.secretWrites = this.secretWrites.then(() => setConfigurationSecret(slot, value || null)).catch(() => { this.credentialError = 'secure_storage_unavailable'; });
+        const value = profile[field] || '';
+        if (this.storedSecrets.get(slot) === value) continue;
+        this.storedSecrets.set(slot, value);
+        this.secretWrites = this.secretWrites.then(() => setConfigurationSecret(slot, value || null)).catch(() => {
+          // Forget the value so the next save retries this slot.
+          if (this.storedSecrets.get(slot) === value) this.storedSecrets.delete(slot);
+          this.credentialError = 'secure_storage_unavailable';
+        });
       }
     }
   }
@@ -181,6 +190,12 @@ class AiTalkSettingsStore {
     this.vaultProfiles = profiles;
     this.vaultUrls = urls;
     this.loadedSecrets = new Set([...profiles].map((id) => `ai:${id}`).concat([...urls].map((id) => `ai-url:${id}`)));
+    // The account transaction already wrote these slots.
+    this.storedSecrets = new Map();
+    for (const profile of value.profiles) {
+      if (profiles.has(profile.id)) this.storedSecrets.set(`ai:${profile.id}`, profile.apiKey || '');
+      if (urls.has(profile.id)) this.storedSecrets.set(`ai-url:${profile.id}`, profile.baseUrl || '');
+    }
     this.secretLoad = Promise.resolve();
     this.value = hydrateActiveProfile(value);
   }

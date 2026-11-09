@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { aiTalkSettings } from '$lib/components/ai-talk/settings.svelte';
-import { getConfigurationSecret } from '$lib/services/account-config-native';
+import { getConfigurationSecret, setConfigurationSecret } from '$lib/services/account-config-native';
 
 vi.mock('$lib/services/account-config-native', () => ({
   getConfigurationSecret: vi.fn(async (): Promise<string | null> => null),
@@ -147,6 +147,19 @@ describe('aiTalkSettings — module-load behavior', () => {
     await loading;
     expect(reloaded.value.apiKey).toBe('restored-key');
     expect(localStorage.getItem(KEY)).not.toContain('restored-key');
+  });
+
+  it('only writes vault slots whose value changed', async () => {
+    const restored = { ...aiTalkSettings.value, profiles: aiTalkSettings.value.profiles.map((profile) => profile.id === aiTalkSettings.value.activeProfileId ? { ...profile, apiKey: 'vault-key' } : profile) };
+    aiTalkSettings.replaceFromAccount(restored, { profiles: restored.profiles.map((profile) => profile.id), urls: [] });
+    vi.mocked(setConfigurationSecret).mockClear();
+    for (const character of 'a longer system prompt') aiTalkSettings.update({ systemPrompt: aiTalkSettings.value.systemPrompt + character });
+    await aiTalkSettings.flushSecretWrites();
+    expect(setConfigurationSecret).not.toHaveBeenCalled();
+    aiTalkSettings.update({ apiKey: 'new-key' });
+    await aiTalkSettings.flushSecretWrites();
+    expect(setConfigurationSecret).toHaveBeenCalledTimes(1);
+    expect(setConfigurationSecret).toHaveBeenCalledWith(`ai:${aiTalkSettings.value.activeProfileId}`, 'new-key');
   });
 
   it('falls back to defaults when localStorage contains corrupt JSON', async () => {

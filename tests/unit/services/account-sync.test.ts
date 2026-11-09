@@ -6,7 +6,7 @@ import { AccountSync, type ConfigAdapter, type Fields, type NativeAdapter, type 
 import { decryptConfiguration, encryptConfiguration, generateRecoveryKey, type EncryptedEnvelope } from '$lib/services/account-crypto';
 import type { AccountSummary } from '$lib/services/account-native';
 
-type Remote = { revision: number; envelope: EncryptedEnvelope | null; writes: number; offline: boolean };
+type Remote = { revision: number; envelope: EncryptedEnvelope | null; writes: number; offline: boolean; reads?: number; legacyServer?: boolean };
 type SyncDevice = {
   sync: AccountSync;
   adapter: ConfigAdapter;
@@ -42,7 +42,11 @@ function device(remote: Remote, initial: Fields = {}, secrets: string[] = []): S
     async request(method, path, body) {
       requests++;
       if (remote.offline) throw new Error('network failure including password=not-for-display');
-      if (path === '/v1/config' && method === 'GET') return { revision: remote.revision, envelope: remote.envelope };
+      if (path === '/v1/config/revision' && method === 'GET') {
+        if (remote.legacyServer) throw new Error('account_request_failed');
+        return { revision: remote.revision };
+      }
+      if (path === '/v1/config' && method === 'GET') { remote.reads = (remote.reads ?? 0) + 1; return { revision: remote.revision, envelope: remote.envelope }; }
       if (path === '/v1/config' && method === 'PUT') {
         const update = body as { base_revision: number; envelope: EncryptedEnvelope };
         if (update.base_revision !== remote.revision) throw new Error('revision_conflict');
@@ -208,6 +212,49 @@ describe('optional account configuration sync', () => {
     await a.sync.sync(); await a.sync.sync();
     // Each write re-encrypts with a fresh nonce, so an unchanged string means no write.
     expect(a.persisted()).toBe(before);
+    expect(remote.writes).toBe(1);
+  });
+
+  it('idle devices only check the revision and pulling cloud changes uploads nothing', async () => {
+    const remote: Remote = { revision: 0, envelope: null, writes: 0, offline: false };
+    const key = generateRecoveryKey();
+    const a = device(remote, { 'preferences/theme': 'one' }); await connect(a, key, ['preferences']);
+    const b = device(remote, {}); await connect(b, key, ['preferences'], 'cloud');
+    expect(remote.writes).toBe(1);
+    const reads = remote.reads ?? 0;
+    await b.sync.sync(); await b.sync.sync();
+    expect(remote.reads ?? 0).toBe(reads);
+    a.edit('preferences/theme', 'two'); await a.sync.sync();
+    expect(remote.writes).toBe(2);
+    await b.sync.sync();
+    expect(b.fields()['preferences/theme']).toBe('two');
+    expect(b.sync.view.state).toBe('ready');
+    expect(remote.writes).toBe(2);
+    expect(b.sync.view.revision).toBe(2);
+  });
+
+  it('falls back to full fetches and uploads on services without the revision check', async () => {
+    const remote: Remote = { revision: 0, envelope: null, writes: 0, offline: false, legacyServer: true };
+    const key = generateRecoveryKey();
+    const a = device(remote, { 'preferences/theme': 'one' }); await connect(a, key, ['preferences']);
+    const b = device(remote, {}); await connect(b, key, ['preferences'], 'cloud');
+    a.edit('preferences/theme', 'two'); await a.sync.sync();
+    await b.sync.sync();
+    expect(b.fields()['preferences/theme']).toBe('two');
+    expect(b.sync.view.state).toBe('ready');
+  });
+
+  it('clears a stale pending snapshot once local edits are reverted', async () => {
+    const remote: Remote = { revision: 0, envelope: null, writes: 0, offline: false };
+    const a = device(remote, { 'preferences/theme': 'one' }); await connect(a, generateRecoveryKey(), ['preferences']);
+    remote.offline = true;
+    a.edit('preferences/theme', 'two');
+    await expect(a.sync.sync()).rejects.toThrow();
+    expect(a.sync.view.state).toBe('pending');
+    a.edit('preferences/theme', 'one');
+    remote.offline = false;
+    await a.sync.sync();
+    expect(a.sync.view.state).toBe('ready');
     expect(remote.writes).toBe(1);
   });
 

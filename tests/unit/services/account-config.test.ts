@@ -47,6 +47,7 @@ import { aiTalkSettings, type AiTalkSettings } from '$lib/components/ai-talk/set
 import { promptPresets } from '$lib/components/ai-talk/presets.svelte';
 import { shortcutsStore } from '$lib/stores/shortcuts.svelte';
 import { commands } from '$lib/ipc/commands';
+import { uiStore } from '$lib/stores/ui.svelte';
 import { captureConfiguration, applyConfiguration, recoverConfiguration, removeRestoredConnections, fieldLabel, type Fields } from '$lib/services/account-config';
 import { saveRestoreJournal, clearRestoreJournal, setConfigurationSecret, restoreWebdav } from '$lib/services/account-config-native';
 
@@ -125,6 +126,20 @@ describe('[contract] account configuration adapter', () => {
     expect(captured.fields['preferences/global/new_file/template']).toBe('第{N}章-{title}');
     expect(captured.fields['preferences/editor/fontSize']).toBe(16);
     expect(JSON.stringify(captured)).not.toMatch(/device\/|default_dir|last_used_dir|pandoc|windowPosition|sidebarWidth|not-selected/);
+  });
+
+  it('keeps an unsupported synced theme only until the user picks a theme on this device', async () => {
+    uiStore.setTheme('system');
+    const base = (await captureConfiguration(['preferences'], false)).fields;
+    await applyConfiguration({ ...base, 'preferences/theme': 'custom-x', 'preferences/language': 'xx' }, ['preferences'], false);
+    expect(uiStore.themeId).toBe('system');
+    let captured = (await captureConfiguration(['preferences'], false)).fields;
+    expect(captured['preferences/theme']).toBe('custom-x');
+    expect(captured['preferences/language']).toBe('xx');
+    uiStore.setTheme('light');
+    captured = (await captureConfiguration(['preferences'], false)).fields;
+    expect(captured['preferences/theme']).toBe('light');
+    expect(captured['preferences/language']).toBe('xx');
   });
 
   it('preserves device paths while changing global defaults', async () => {

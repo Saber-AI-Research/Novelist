@@ -74,4 +74,12 @@ describe('config transfer', () => {
   it('rejects malformed encoded payloads with a stable error', async () => {
     await expect(decodeConfigTransfer('NOVELIST-CONFIG-V1:GZIP:%%%')).rejects.toThrow('配置');
   });
+
+  it('stops inflating once the decoded size limit is passed', async () => {
+    const zeros = new Uint8Array(8 * 1024 * 1024);
+    const compressed = new Uint8Array(await new Response(new Blob([zeros]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    let binary = '';
+    for (const byte of compressed) binary += String.fromCharCode(byte);
+    await expect(decodeConfigTransfer(`NOVELIST-CONFIG-V2:GZIP:${btoa(binary)}`)).rejects.toThrow('解压后的配置过大');
+  });
 });

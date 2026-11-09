@@ -54,7 +54,7 @@ export type AccountView = {
   preview: Preview | null;
   hasBackup: boolean;
 };
-type Prepared = { cloud: Cloud; remote: Document; local: Snapshot; categories: Category[]; includeSecrets: boolean; preview: Preview };
+type Prepared = { cloud: Cloud; remote: Document; legacy: boolean; local: Snapshot; categories: Category[]; includeSecrets: boolean; preview: Preview };
 const CATEGORIES: Category[] = ['preferences', 'shortcuts', 'ai', 'webdav'];
 const EMPTY_DOCUMENT = (): Document => ({ schema: 2, fields: {}, deleted: [], secretKeys: [] });
 const EMPTY_STATE = (): StoredState => ({ version: 1, enabled: false, configured: false, categories: [], includeSecrets: false, revision: 0, baseline: null, backup: null, pending: null });
@@ -194,10 +194,13 @@ export class AccountSync {
     this.update();
   }
 
-  private async decodeRemote(cloud: Cloud): Promise<Document> {
+  /** `legacy` marks a cloud document stored in an older schema that must be rewritten. */
+  private async decodeRemote(cloud: Cloud): Promise<{ remote: Document; legacy: boolean }> {
     const account = this.identity();
     if (!this.key) throw new Error('unlock_required');
-    return cloud.envelope ? readDocument(await decryptConfiguration(cloud.envelope, this.key, account.endpoint, account.user_id, 'cloud')) : EMPTY_DOCUMENT();
+    if (!cloud.envelope) return { remote: EMPTY_DOCUMENT(), legacy: false };
+    const raw = await decryptConfiguration(cloud.envelope, this.key, account.endpoint, account.user_id, 'cloud');
+    return { remote: readDocument(raw), legacy: (raw as { schema?: unknown })?.schema !== 2 };
   }
 
   async initialize(): Promise<void> {
@@ -246,11 +249,11 @@ export class AccountSync {
     await this.operation(async () => {
       if (!categories.length || !categories.every((category) => CATEGORIES.includes(category))) throw new Error('scope_required');
       const cloud = readCloud(await this.transport.request('GET', '/v1/config'));
-      const remote = await this.decodeRemote(cloud);
+      const { remote, legacy } = await this.decodeRemote(cloud);
       const local = await this.adapter.captureConfiguration(categories, includeSecrets);
       if (!validFields(local.fields)) throw new Error('unsupported_schema');
       const preview = configurationPreview(local, remote, this.stored.baseline, categories, includeSecrets, this.adapter.fieldLabel);
-      this.prepared = { cloud, remote, local, categories: [...categories], includeSecrets, preview };
+      this.prepared = { cloud, remote, legacy, local, categories: [...categories], includeSecrets, preview };
       this.update({ state: 'preview', preview });
     });
   }
@@ -285,12 +288,23 @@ export class AccountSync {
     merged.deleted = [...deleted].sort();
     const account = this.identity();
     if (!this.key) throw new Error('unlock_required');
-    const envelope = await encryptConfiguration(merged, this.key, account.endpoint, account.user_id, 'cloud');
+    // Pulling cloud changes into an otherwise unchanged device needs no upload;
+    // rewriting the same document would bump the revision on every device.
+    const sorted = (keys: string[]) => [...keys].sort();
+    let upload = prepared.legacy || !equal(merged.fields, prepared.remote.fields) || !equal(merged.deleted, sorted(prepared.remote.deleted)) || !equal(sorted(merged.secretKeys), sorted(prepared.remote.secretKeys));
+    // Without a PUT the server's compare-and-swap cannot catch a stale preview,
+    // so confirm the revision instead (servers without the check get a PUT).
+    if (!upload) {
+      const revision = await this.remoteRevision();
+      if (revision === null) upload = true;
+      else if (revision !== prepared.cloud.revision) throw new Error('revision_conflict');
+    }
+    const envelope = upload ? await encryptConfiguration(merged, this.key, account.endpoint, account.user_id, 'cloud') : null;
     // Persist a complete recoverable copy before either side is modified.
     this.stored.backup = { snapshot: await this.adapter.captureConfiguration(prepared.categories, true), categories: prepared.categories };
     this.stored.pending = prepared.local;
     await this.persist();
-    const committed = readCloud(await this.transport.request('PUT', '/v1/config', { base_revision: prepared.cloud.revision, envelope }));
+    const committed = envelope ? readCloud(await this.transport.request('PUT', '/v1/config', { base_revision: prepared.cloud.revision, envelope })) : prepared.cloud;
     // The cloud accepted this revision. If editing continued while the request
     // ran, keep those newer local values (they are pushed on the next sync)
     // and apply the merged cloud values everywhere else.
@@ -343,13 +357,19 @@ export class AccountSync {
       // disk when they differ from what is already recorded (idle runs write nothing).
       const baseline = this.stored.baseline;
       const localUnchanged = !!baseline && configurationPreview(local, baseline, baseline, categories, includeSecrets, this.adapter.fieldLabel).rows.every((row) => row.kind === 'same');
-      if (!equal(this.stored.pending, localUnchanged ? null : local)) {
-        this.stored.pending = local;
+      const pending = localUnchanged ? null : local;
+      if (!equal(this.stored.pending, pending)) {
+        this.stored.pending = pending;
         await this.persist();
-        this.update({ state: 'pending' });
+        this.update({ state: pending ? 'pending' : 'ready' });
+      }
+      // Idle devices only ask for the revision; the full document is fetched
+      // when the cloud moved on or there is something local to push.
+      if (localUnchanged && (await this.remoteRevision()) === this.stored.revision) {
+        this.update({ state: 'ready' }); return;
       }
       const cloud = readCloud(await this.transport.request('GET', '/v1/config'));
-      const remote = await this.decodeRemote(cloud);
+      const { remote, legacy } = await this.decodeRemote(cloud);
       const preview = configurationPreview(local, remote, this.stored.baseline, categories, includeSecrets, this.adapter.fieldLabel);
       if (preview.rows.every((row) => row.kind === 'same')) {
         if (this.stored.revision !== cloud.revision || this.stored.pending !== null || !equal(this.stored.baseline, remote)) {
@@ -358,7 +378,7 @@ export class AccountSync {
         }
         this.update({ state: 'ready' }); return;
       }
-      this.prepared = { cloud, remote, local, categories, includeSecrets, preview };
+      this.prepared = { cloud, remote, legacy, local, categories, includeSecrets, preview };
       this.update({ state: 'preview', preview });
       if (!preview.conflicts.length) {
         try { await this.applyPrepared('merge', {}); }
@@ -371,6 +391,14 @@ export class AccountSync {
         }
       }
     });
+  }
+
+  /** Null when the service does not offer the cheap revision check. */
+  private async remoteRevision(): Promise<number | null> {
+    try {
+      const result = await this.transport.request('GET', '/v1/config/revision') as { revision?: unknown };
+      return Number.isSafeInteger(result?.revision) && (result.revision as number) >= 0 ? result.revision as number : null;
+    } catch { return null; }
   }
 
   async restoreBackup(): Promise<void> {

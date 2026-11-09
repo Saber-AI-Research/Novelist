@@ -53,8 +53,23 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
 async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream === 'undefined') throw new Error('当前环境不支持解压配置');
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  const result = new Uint8Array(await new Response(stream).arrayBuffer());
-  if (result.length > MAX_DECODED_BYTES) throw new Error('解压后的配置过大');
+  // Count while inflating: a small gzip bomb must not be buffered in full first.
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_DECODED_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error('解压后的配置过大');
+    }
+    chunks.push(value);
+  }
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
   return result;
 }
 
