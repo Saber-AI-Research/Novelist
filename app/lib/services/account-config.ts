@@ -19,11 +19,14 @@ export type { Category, Fields, Snapshot, JsonValue };
 
 const RETAINED_KEY = 'novelist:account:retained-fields:v1';
 const RETAINED_SECRET_KEYS = 'novelist:account:retained-secret-keys:v1';
+// The local theme/language that was active when an unsupported synced value
+// was retained. Once the local value moves away from it, the user's choice wins.
+const RETAINED_FALLBACKS = 'novelist:account:retained-fallbacks:v1';
 const STORAGE_KEYS = [
   'novelist-settings', 'novelist-theme', 'novelist-locale', 'novelist-shortcuts',
   'novelist:ai-talk:settings:v1', 'novelist:ai-talk:vault-profiles:v1', 'novelist:ai-talk:vault-urls:v1',
   'novelist:ai-talk:prompt-presets:v1', 'novelist:ai-talk:hidden-builtin-presets:v1',
-  RETAINED_KEY, RETAINED_SECRET_KEYS,
+  RETAINED_KEY, RETAINED_SECRET_KEYS, RETAINED_FALLBACKS,
 ];
 const CATEGORIES: Category[] = ['preferences', 'shortcuts', 'ai', 'webdav'];
 const EDITOR_FIELDS = ['fontFamily', 'fontSize', 'lineHeight', 'maxWidth', 'autoSaveMinutes', 'indentStyle', 'highlightMatches', 'renderImages'] as const;
@@ -66,6 +69,11 @@ function readRetained(): Fields {
   const value: unknown = JSON.parse(localStorage.getItem(RETAINED_KEY) ?? '{}');
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
   return value as Fields;
+}
+function readRetainedFallbacks(): Record<string, string> {
+  const value: unknown = JSON.parse(localStorage.getItem(RETAINED_FALLBACKS) ?? '{}');
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.values(value).every((item) => string(item, 256))) invalid();
+  return value as Record<string, string>;
 }
 function readRetainedSecretKeys(): string[] {
   const value: unknown = JSON.parse(localStorage.getItem(RETAINED_SECRET_KEYS) ?? '[]');
@@ -170,8 +178,12 @@ async function capture(categories: Category[], includeSecrets: boolean): Promise
     const result = await commands.getGlobalSettings();
     if (result.status !== 'ok') throw new Error('settings_capture_failed');
     for (const field of EDITOR_FIELDS) fields[`preferences/editor/${field}`] = uiStore.editorSettings[field];
-    fields['preferences/theme'] ??= uiStore.themeId;
-    fields['preferences/language'] ??= i18n.locale;
+    const fallbacks = readRetainedFallbacks();
+    for (const [key, local] of [['preferences/theme', uiStore.themeId], ['preferences/language', i18n.locale]] as const) {
+      // A retained value stands in for the local one only while the local
+      // value is still the fallback applied with it.
+      if (!own(fields, key) || (own(fallbacks, key) && fallbacks[key] !== local)) fields[key] = local;
+    }
     for (const [section, names] of [['view', VIEW_FIELDS], ['new_file', NEW_FILE_FIELDS], ['snapshot', SNAPSHOT_FIELDS]] as const) {
       for (const field of names) { const value = (result.data[section] as Record<string, JsonValue>)[field]; if (value !== undefined && value !== null) fields[`preferences/global/${section}/${field}`] = value; }
     }
@@ -302,7 +314,9 @@ export function applyConfiguration(fields: Fields, categories: Category[], inclu
     const secretWrites: Record<string, string | null> = Object.create(null);
     const retained = readRetained();
     const retainedSecrets = new Set(readRetainedSecretKeys());
+    const fallbacks = readRetainedFallbacks();
     for (const key of Object.keys(retained)) if (selected(key, categories)) delete retained[key];
+    for (const key of Object.keys(fallbacks)) if (selected(key, categories)) delete fallbacks[key];
     if (includeSecrets) for (const key of retainedSecrets) if (selected(key, categories)) { secretWrites[await retainedSlot(key)] = null; retainedSecrets.delete(key); }
     const preserve = async (key: string, value: JsonValue, sensitive: boolean) => {
       if (sensitive) {
@@ -332,8 +346,8 @@ export function applyConfiguration(fields: Fields, categories: Category[], inclu
       const editor = { ...uiStore.editorDefaults, ...Object.fromEntries(EDITOR_FIELDS.filter((field) => own(incoming, `preferences/editor/${field}`)).map((field) => [field, incoming[`preferences/editor/${field}`]])) };
       const theme = (incoming['preferences/theme'] ?? 'system') as string;
       const language = (incoming['preferences/language'] ?? 'en') as string;
-      if (theme !== 'system' && !getThemeById(theme)) await preserve('preferences/theme', theme, false);
-      if (!['en', 'zh-CN'].includes(language)) await preserve('preferences/language', language, false);
+      if (theme !== 'system' && !getThemeById(theme)) { await preserve('preferences/theme', theme, false); fallbacks['preferences/theme'] = uiStore.themeId; }
+      if (!['en', 'zh-CN'].includes(language)) { await preserve('preferences/language', language, false); fallbacks['preferences/language'] = i18n.locale; }
       preferences = { global: { view, new_file: newFile, plugins: { enabled }, snapshot }, editor, theme: theme === 'system' || getThemeById(theme) ? theme : uiStore.themeId, language: language === 'en' || language === 'zh-CN' ? language : i18n.locale };
     }
 
@@ -416,6 +430,7 @@ export function applyConfiguration(fields: Fields, categories: Category[], inclu
       if (ai) { aiTalkSettings.replaceFromAccount(ai.value, ai.storage); promptPresets.replaceFromAccount(ai.presets, ai.hidden); }
       localStorage.setItem(RETAINED_KEY, JSON.stringify(retained));
       localStorage.setItem(RETAINED_SECRET_KEYS, JSON.stringify([...retainedSecrets]));
+      localStorage.setItem(RETAINED_FALLBACKS, JSON.stringify(fallbacks));
       await clearRestoreJournal();
       if (webdav !== undefined && typeof window !== 'undefined') window.dispatchEvent(new Event('novelist-webdav-connection-changed'));
     } catch {

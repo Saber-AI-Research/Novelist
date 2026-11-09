@@ -364,7 +364,7 @@ async fn send_request(
 
 fn allowed_request(method: &str, path: &str) -> Result<Method, AppError> {
     let allowed = match (method, path) {
-        ("GET", "/v1/me" | "/v1/devices" | "/v1/config")
+        ("GET", "/v1/me" | "/v1/devices" | "/v1/config" | "/v1/config/revision")
         | ("POST", "/v1/logout")
         | ("DELETE", "/v1/account")
         | ("PUT", "/v1/config") => true,
@@ -622,6 +622,7 @@ mod tests {
             ("GET", "/v1/me"),
             ("GET", "/v1/devices"),
             ("GET", "/v1/config"),
+            ("GET", "/v1/config/revision"),
             ("PUT", "/v1/config"),
             ("POST", "/v1/logout"),
             ("DELETE", "/v1/account"),
